@@ -169,6 +169,57 @@ pub struct RunnerOperatorSummary {
     pub next_action: String,
 }
 
+/// Bounded default inventory row for one configured runner.
+#[derive(Debug, Serialize)]
+pub struct RunnerInventorySummary {
+    pub identity: String,
+    pub kind: String,
+    pub connection_state: String,
+    pub admission_state: String,
+    pub concurrency: RunnerInventoryConcurrency,
+    pub drift: String,
+    pub next_action: String,
+    pub evidence: RunnerInventoryEvidence,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerInventoryConcurrency {
+    pub active: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerInventoryEvidence {
+    pub environment_ref: String,
+    pub environment_command: String,
+    pub full_ref: String,
+    pub full_command: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerListTruncation {
+    pub shown: usize,
+    pub omitted: usize,
+    pub evidence_ref: &'static str,
+    pub full_command: &'static str,
+}
+
+/// Runner-owned list payload. The generic CRUD output remains lossless for
+/// entity commands while the default inventory can omit configuration maps.
+#[derive(Debug, Serialize)]
+pub struct RunnerListOutput {
+    pub command: &'static str,
+    pub variant: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runner_summaries: Vec<RunnerInventorySummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<Runner>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<RunnerStatusReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<RunnerListTruncation>,
+}
+
 /// Execution paths available to this controller, kept apart from concrete
 /// runner identities and their connection lifecycle.
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -436,6 +487,7 @@ pub(super) const REDACTED_ENV_VALUE: &str = "[redacted]";
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum RunnerCommandOutput {
+    List(Box<RunnerListOutput>),
     Registry(Box<RunnerOutput>),
     Doctor(Box<serde_json::Value>),
     Preflight(Box<homeboy::runner::runners::PlacementReadiness>),

@@ -229,7 +229,7 @@ pub(crate) fn budget_remaining(
         .max_provider_executions
         .saturating_sub(usage.executions);
     (max_provider_executions > 0).then(|| {
-        AgentTaskExecutionBudget::new(
+        let mut remaining = AgentTaskExecutionBudget::new(
             max_provider_executions,
             budget
                 .max_same_provider_retries
@@ -237,7 +237,9 @@ pub(crate) fn budget_remaining(
             budget
                 .max_provider_rotations
                 .saturating_sub(usage.provider_rotations),
-        )
+        );
+        remaining.deadline_unix_ms = budget.deadline_unix_ms;
+        remaining
     })
 }
 

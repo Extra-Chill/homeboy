@@ -236,6 +236,7 @@ const PRESSURE_RETRY_AFTER_SECONDS: u64 = 60;
 #[serde(rename_all = "snake_case")]
 enum ResourceAdmissionRecoveryKind {
     Defer,
+    Retry,
     LocalOverride,
     RunnerConnection,
     RunnerAvailability,
@@ -676,11 +677,12 @@ pub(crate) fn non_interactive_preflight_error(
         None,
     );
     if let Some(recovery) = recovery {
-        if let Some(choice) = recovery
-            .choices
-            .iter()
-            .find(|choice| choice.kind == ResourceAdmissionRecoveryKind::LocalOverride)
-        {
+        if let Some(choice) = recovery.choices.iter().find(|choice| {
+            matches!(
+                choice.kind,
+                ResourceAdmissionRecoveryKind::Retry | ResourceAdmissionRecoveryKind::LocalOverride
+            )
+        }) {
             error.details["rerun_command"] = serde_json::Value::String(choice.command.clone());
         }
         error.details["recovery"] =
@@ -695,6 +697,8 @@ pub(crate) fn admission_recovery(
     lab_readiness: Option<&LabRunnerReadiness>,
 ) -> Option<ResourceAdmissionRecovery> {
     let local_override = local_override_command(args)?;
+    let retry = crate::core::engine::shell::quote_args(args);
+    let preserves_lab_request = lab_readiness.is_some();
     let mut choices = vec![
         ResourceAdmissionRecoveryChoice {
             kind: ResourceAdmissionRecoveryKind::Defer,
@@ -703,12 +707,32 @@ pub(crate) fn admission_recovery(
             requires_operator_authorization: None,
         },
         ResourceAdmissionRecoveryChoice {
+            kind: if preserves_lab_request {
+                ResourceAdmissionRecoveryKind::Retry
+            } else {
+                ResourceAdmissionRecoveryKind::LocalOverride
+            },
+            command: if preserves_lab_request {
+                retry
+            } else {
+                local_override.clone()
+            },
+            retry_after_seconds: None,
+            requires_operator_authorization: (!preserves_lab_request).then_some(true),
+        },
+    ];
+    if preserves_lab_request
+        && !lab_readiness.is_some_and(|readiness| {
+            readiness.state == crate::runner::runners::LabRunnerReadinessState::Stale
+        })
+    {
+        choices.push(ResourceAdmissionRecoveryChoice {
             kind: ResourceAdmissionRecoveryKind::LocalOverride,
             command: local_override,
             retry_after_seconds: None,
             requires_operator_authorization: Some(true),
-        },
-    ];
+        });
+    }
     // An absent inventory is intentional configuration, not a broken runner.
     // A ready inventory also cannot justify repair. Keep recovery action kinds
     // aligned with the observed state so repair is only advertised for stale
@@ -2189,7 +2213,7 @@ mod tests {
 
         assert_eq!(
             error.details["rerun_command"].as_str(),
-            Some("homeboy --placement local fuzz run")
+            Some("homeboy fuzz run")
         );
         assert!(error.details.get("resume_command").is_none());
         assert!(error
@@ -2226,13 +2250,16 @@ mod tests {
         assert_eq!(value["run_created"], false);
         assert_eq!(value["choices"][0]["kind"], "defer");
         assert_eq!(value["choices"][0]["retry_after_seconds"], 60);
-        assert_eq!(value["choices"][1]["kind"], "local_override");
+        assert_eq!(value["choices"][1]["kind"], "retry");
         assert_eq!(
             value["choices"][1]["command"],
-            "homeboy --placement local agent-task cook --prompt 'fix resource admission'"
+            "homeboy agent-task cook --prompt 'fix resource admission'"
         );
-        assert_eq!(value["choices"][1]["requires_operator_authorization"], true);
-        assert_eq!(value["choices"].as_array().expect("choices").len(), 2);
+        assert!(value["choices"][1]
+            .get("requires_operator_authorization")
+            .is_none());
+        assert_eq!(value["choices"][2]["kind"], "local_override");
+        assert_eq!(value["choices"].as_array().expect("choices").len(), 3);
 
         let warning = evaluate_with_runner_hint(
             lab_supported_hot("agent-task cook/run-plan/retry --run"),
@@ -2245,7 +2272,7 @@ mod tests {
         assert_eq!(error.details["run_created"], false);
         assert_eq!(
             error.details["rerun_command"],
-            "homeboy --placement local agent-task cook --prompt 'fix resource admission'"
+            "homeboy agent-task cook --prompt 'fix resource admission'"
         );
         assert!(error.details.get("resume_command").is_none());
         assert_eq!(
@@ -2286,11 +2313,18 @@ mod tests {
         .expect("argv produces recovery");
 
         let value = serde_json::to_value(recovery).expect("recovery serializes");
+        assert_eq!(value["choices"][1]["kind"], "retry");
+        assert_eq!(value["choices"][1]["command"], "homeboy audit");
         assert_eq!(value["choices"][2]["kind"], "runner_recovery");
         assert_eq!(
             value["choices"][2]["command"],
             "homeboy runner refresh homeboy-lab"
         );
+        assert!(value["choices"]
+            .as_array()
+            .expect("choices")
+            .iter()
+            .all(|choice| choice["kind"] != "local_override"));
     }
 
     #[test]
@@ -2324,7 +2358,7 @@ mod tests {
         .expect("argv produces recovery");
 
         let value = serde_json::to_value(recovery).expect("recovery serializes");
-        assert_eq!(value["choices"].as_array().expect("choices").len(), 2);
+        assert_eq!(value["choices"].as_array().expect("choices").len(), 3);
     }
 
     #[test]
@@ -2359,7 +2393,8 @@ mod tests {
         assert!(error.message.contains("homeboy runner connect homeboy-lab"));
         assert!(error
             .message
-            .contains("explicit, authorized `--placement local` override"));
+            .contains("retry the unchanged request after Lab admission recovers"));
+        assert!(!error.message.contains("--placement local"));
     }
 
     #[test]

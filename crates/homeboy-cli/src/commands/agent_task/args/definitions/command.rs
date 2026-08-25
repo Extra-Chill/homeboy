@@ -251,6 +251,14 @@ pub struct CookContinueArgs {
     /// without dispatching another provider execution.
     #[arg(long = "artifact-id", value_name = "ID")]
     pub artifact_id: Option<String>,
+    /// Explicitly increase the provider timeout for a new retry attempt. The
+    /// override and its operator authority are retained in the Cook recipe.
+    #[arg(
+        long = "timeout-ms",
+        value_name = "MS",
+        conflicts_with_all = ["preflight", "rearm", "artifact_id"]
+    )]
+    pub timeout_ms: Option<u64>,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,

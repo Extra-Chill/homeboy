@@ -74,6 +74,29 @@ mod retry_failure_tests {
     }
 
     #[test]
+    fn retries_provider_timeout_when_same_provider_budget_remains() {
+        let executor = TimeoutOnceExecutor::default();
+        let attempts = Arc::clone(&executor.attempts);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let mut plan = plan_with_tasks(1);
+        plan.options.execution_budget.max_provider_executions = 2;
+        plan.options.execution_budget.max_same_provider_retries = 1;
+        plan.options.retry.retryable_failure_classifications =
+            vec![AgentTaskFailureClassification::Timeout];
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "task-1"
+                && event.state == AgentTaskState::Queued
+                && event.attempt == 2
+                && event.message.as_deref() == Some("retry queued")
+        }));
+    }
+
+    #[test]
     fn default_unbounded_budget_does_not_retry_without_a_retry_policy() {
         let executor = RetryOnceExecutor::default();
         let attempts = Arc::clone(&executor.attempts);

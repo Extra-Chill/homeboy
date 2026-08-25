@@ -61,15 +61,6 @@ pub(super) fn exec_with_hydration(
         || !artifact_dir_outputs.is_empty()
         || !summary_outputs.is_empty();
 
-    if !dry_run && has_declared_outputs && run_id.is_none() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "run_id",
-            "runner exec --artifact/--artifact-dir/--summary requires --run-id so evidence can be attached to a persisted run",
-            None,
-            None,
-        ));
-    }
-
     // A read-only retrieval hydrates evidence the runner already retains; it
     // must not declare new artifact outputs or capture a mutation patch, so the
     // read never rewrites a draining generation (Extra-Chill/homeboy#9420).
@@ -96,7 +87,8 @@ pub(super) fn exec_with_hydration(
         );
     }
 
-    let validated_run_id = validate_runner_exec_run_id(run_id)?;
+    let validated_run_id =
+        validate_runner_exec_run_id(persisted_runner_exec_run_id(run_id, has_declared_outputs))?;
     let hydration_source = sync_workspace.clone();
     let (cwd, source_snapshot) = exec_workspace_context(runner_id, cwd, sync_workspace, false)?;
     if hydrate_deps {
@@ -208,6 +200,9 @@ pub(super) fn exec_with_hydration(
             read_only_artifact_access: read_only_artifact,
         },
     )?;
+    if output.mirror_run_id.is_none() {
+        output.mirror_run_id.clone_from(&validated_run_id);
+    }
     if let (Some(run_id), Some(lifecycle_store)) =
         (validated_run_id.as_deref(), lifecycle_store.as_ref())
     {
@@ -423,6 +418,13 @@ fn validate_runner_exec_run_id(run_id: Option<String>) -> homeboy::core::Result<
         ));
     }
     Ok(Some(trimmed.to_string()))
+}
+
+fn persisted_runner_exec_run_id(
+    run_id: Option<String>,
+    has_declared_outputs: bool,
+) -> Option<String> {
+    run_id.or_else(|| has_declared_outputs.then(|| format!("runner-exec-{}", uuid::Uuid::new_v4())))
 }
 
 /// Maximum number of bytes retained when reading a runner exec script into
