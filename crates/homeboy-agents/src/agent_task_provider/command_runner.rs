@@ -993,7 +993,12 @@ fn run_materialized_provider_command_once_contained(
     let liveness_timeout_ms = crate::agent_task_timeout::effective_provider_liveness_timeout_ms(
         request.limits.liveness_timeout_ms,
     );
-    let liveness_timeout = Duration::from_millis(liveness_timeout_ms);
+    // The provider receives `requested_timeout_ms` and gets the process grace
+    // specifically to serialize its timeout outcome. A liveness deadline that
+    // is equal to or later than that provider deadline must not consume the
+    // grace first and misclassify the attempt as stalled.
+    let liveness_timeout = (liveness_timeout_ms < requested_timeout_ms)
+        .then_some(Duration::from_millis(liveness_timeout_ms));
     let (status, killed_for_liveness, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (Some(status), false, false),
@@ -1002,20 +1007,24 @@ fn run_materialized_provider_command_once_contained(
                 if elapsed >= process_timeout {
                     break (None, false, true);
                 }
-                let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
-                    last_progress_ms.load(Ordering::SeqCst),
-                ));
-                if progress_age >= liveness_timeout {
-                    break (None, true, false);
+                if let Some(liveness_timeout) = liveness_timeout {
+                    let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
+                        last_progress_ms.load(Ordering::SeqCst),
+                    ));
+                    if progress_age >= liveness_timeout {
+                        break (None, true, false);
+                    }
+                    // Wake up at the earlier of process timeout and liveness deadline.
+                    let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
+                    let sleep_for = remaining_liveness
+                        .min(process_timeout - elapsed)
+                        .min(Duration::from_millis(50));
+                    if sleep_for > Duration::ZERO {
+                        std::thread::sleep(sleep_for);
+                    }
+                    continue;
                 }
-                // Wake up at the earlier of process timeout and liveness deadline.
-                let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
-                let sleep_for = remaining_liveness
-                    .min(process_timeout - elapsed)
-                    .min(Duration::from_millis(50));
-                if sleep_for > Duration::ZERO {
-                    std::thread::sleep(sleep_for);
-                }
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => break (None, false, false),
         }
@@ -1055,7 +1064,9 @@ fn run_materialized_provider_command_once_contained(
             &stdout,
             &stderr,
             &provider.id,
-            liveness_timeout.as_millis(),
+            liveness_timeout
+                .expect("liveness kill requires an earlier liveness deadline")
+                .as_millis(),
         );
         return failure_outcome(
             request,
