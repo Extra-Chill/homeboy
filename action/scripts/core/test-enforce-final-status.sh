@@ -57,6 +57,17 @@ assert_exit 1 "timed out quality results fail with their classification" \
 assert_exit 1 "missing quality results with expected commands fail closed" \
   env RESULTS='' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
+cat > "${TMPDIR}/setup.json" <<'JSON'
+{"schema":"homeboy/action-setup-result/v1","phase":"dependency_build_setup","status":"failed","owner":"Homeboy extension setup","step":"install Homeboy extension","exit_code":1,"replay_command":"bash install-extension.sh","diagnostic":"source SHA mismatch"}
+JSON
+assert_exit 1 "setup failure with not_run commands fails under the setup owner" \
+  env RESULTS='{"setup":"fail","review test":"not_run"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' HOMEBOY_SETUP_RESULT_FILE="${TMPDIR}/setup.json" bash "${ENFORCE_STATUS}"
+output="$(env RESULTS='{"setup":"fail","review test":"not_run"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' HOMEBOY_SETUP_RESULT_FILE="${TMPDIR}/setup.json" bash "${ENFORCE_STATUS}" 2>&1 || true)"
+case "${output}" in
+  *"Homeboy setup failed [Homeboy extension setup]"*"source SHA mismatch"*"Reproduce: bash install-extension.sh"*) printf 'PASS: setup enforcement preserves owner, cause, and replay command\n' ;;
+  *) printf 'FAIL: setup enforcement omitted actionable setup evidence; got: %s\n' "${output}"; exit 1 ;;
+esac
+
 assert_exit 0 "closed PR ignores stale failing quality results" \
   env RESULTS='{"review test":"fail"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
 

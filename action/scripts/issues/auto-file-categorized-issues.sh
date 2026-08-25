@@ -32,6 +32,7 @@ set -euo pipefail
 
 COMP_ID="${COMPONENT_NAME:-$(basename "${GITHUB_REPOSITORY}")}"
 OUTPUT_DIR="${HOMEBOY_CI_RESULTS_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
+SETUP_RESULT_FILE="${HOMEBOY_SETUP_RESULT_FILE:-${OUTPUT_DIR:+${OUTPUT_DIR}/setup.json}}"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
 # CI runners check out a single repo to GITHUB_WORKSPACE and don't have the
@@ -166,6 +167,12 @@ if [ "${RECONCILE_FAILURES}" -gt 0 ]; then
 fi
 
 if [ "${COMMANDS_PROCESSED}" -gt 0 ]; then
+  exit 0
+fi
+
+if [ -n "${SETUP_RESULT_FILE}" ] && [ -f "${SETUP_RESULT_FILE}" ] \
+  && jq -e '.schema == "homeboy/action-setup-result/v1" and (.status == "failed" or .status == "timeout")' "${SETUP_RESULT_FILE}" >/dev/null 2>&1; then
+  jq -r '"Skipping finding reconciliation because " + .owner + " failed during " + .step + "; requested quality commands were not run."' "${SETUP_RESULT_FILE}"
   exit 0
 fi
 

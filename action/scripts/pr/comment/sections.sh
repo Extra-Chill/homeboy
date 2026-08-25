@@ -10,7 +10,8 @@ commands_use_review_report() {
   local normalized
   normalized="$(canonicalize_commands "${COMMANDS}")"
 
-  [ "${normalized}" = "review audit,review lint,review test" ] && [ -z "${EXTRA_ARGS:-}" ]
+  local setup_file="${HOMEBOY_SETUP_RESULT_FILE:-${OUTPUT_DIR:+${OUTPUT_DIR}/setup.json}}"
+  [ "${normalized}" = "review audit,review lint,review test" ] && [ -z "${EXTRA_ARGS:-}" ] && { [ -z "${setup_file}" ] || [ ! -f "${setup_file}" ]; }
 }
 
 add_review_banner() {
@@ -74,6 +75,7 @@ status_icon() {
     timeout) printf '%s\n' ':hourglass_flowing_sand:' ;;
     baseline_red|inconclusive|no_measurement) printf '%s\n' ':warning:' ;;
     invalid_evidence|no_comparable_evidence) printf '%s\n' ':x:' ;;
+    not_run) printf '%s\n' ':fast_forward:' ;;
     skipped) printf '%s\n' ':fast_forward:' ;;
     *) printf '%s\n' ':warning:' ;;
   esac
@@ -89,6 +91,7 @@ status_label() {
     no_measurement) printf '%s\n' 'no measurement' ;;
     invalid_evidence) printf '%s\n' 'invalid evidence' ;;
     no_comparable_evidence) printf '%s\n' 'no comparable evidence' ;;
+    not_run) printf '%s\n' 'not run (setup failed)' ;;
     skipped) printf '%s\n' 'skipped' ;;
     *) printf '%s\n' 'unknown' ;;
   esac
@@ -215,7 +218,10 @@ append_split_command_section() {
 
   SECTION_BODY+="${icon} **${command}** — ${label}"$'\n'
 
-  if [ -n "${json_file}" ] && [ -f "${json_file}" ]; then
+  if [ "${status}" = "not_run" ]; then
+    SECTION_BODY+="> Setup did not complete, so this command was not executed."$'\n\n'
+    return 0
+  elif [ -n "${json_file}" ] && [ -f "${json_file}" ]; then
     append_command_details "${command}" "${json_file}"
     append_json_hints "${json_file}"
   else
@@ -274,6 +280,10 @@ append_observation_artifact_guidance() {
 
 build_section_body() {
   SECTION_BODY="### ${SECTION_TITLE}"$'\n\n'
+  local setup_file="${HOMEBOY_SETUP_RESULT_FILE:-${OUTPUT_DIR:+${OUTPUT_DIR}/setup.json}}"
+  if [ -n "${setup_file}" ] && [ -f "${setup_file}" ] && jq -e '.schema == "homeboy/action-setup-result/v1" and (.status == "failed" or .status == "timeout")' "${setup_file}" >/dev/null 2>&1; then
+    SECTION_BODY+="$(jq -r '"`:x:` **Setup failed - " + .owner + "**\n\n- Step: `" + .step + "`\n- Diagnostic: " + (if .diagnostic == "" then "Inspect the retained setup log." else .diagnostic end) + "\n- Replay: `" + .replay_command + "`\n"' "${setup_file}")"$'\n'
+  fi
   append_review_report_section
   append_observation_artifact_guidance
 }

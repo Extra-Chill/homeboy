@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 OPERATIONS_RESULTS="${OPERATIONS_RESULTS:-}"
+RESULTS_DIR="${HOMEBOY_CI_RESULTS_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
+SETUP_RESULT_FILE="${HOMEBOY_SETUP_RESULT_FILE:-${RESULTS_DIR:+${RESULTS_DIR}/setup.json}}"
 HAS_QUALITY_COMMANDS=true
 HAS_OPERATIONS_COMMANDS=true
 
@@ -41,7 +43,7 @@ emit_terminal_diagnostics() {
       [ -n "${diagnostic}" ] || continue
       printf '::error::homeboy %s terminal diagnostic: %s\n' "${command}" "${diagnostic}"
     done < <(observation_terminal_diagnostics "${HOMEBOY_OBSERVATIONS_DIR:-}" "${command}")
-  done < <(jq -r 'to_entries[] | select(.value == "fail") | .key' <<< "${RESULTS:-{}}" 2>/dev/null || true)
+  done < <(jq -r 'to_entries[] | select(.key != "setup" and .value == "fail") | .key' <<< "${RESULTS:-{}}" 2>/dev/null || true)
 }
 
 if [ -z "${RESULTS:-}" ] || [ "${RESULTS}" = "{}" ]; then
@@ -65,9 +67,15 @@ fi
 
 FAILED=false
 
+if [ -n "${SETUP_RESULT_FILE}" ] && [ -f "${SETUP_RESULT_FILE}" ] \
+  && jq -e '.schema == "homeboy/action-setup-result/v1" and (.status == "failed" or .status == "timeout")' "${SETUP_RESULT_FILE}" >/dev/null 2>&1; then
+  jq -r '"::error title=Homeboy setup failed [" + .owner + "]::" + .step + " " + .status + " (exit " + (.exit_code | tostring) + "). " + (if .diagnostic == "" then "Inspect the retained setup log." else .diagnostic end) + " Reproduce: " + .replay_command' "${SETUP_RESULT_FILE}"
+  FAILED=true
+fi
+
 # Check quality command results
 if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
-  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "fail" or .value == "invalid_evidence" or .value == "no_comparable_evidence")' > /dev/null; then
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.key != "setup" and (.value == "fail" or .value == "invalid_evidence" or .value == "no_comparable_evidence"))' > /dev/null; then
     emit_terminal_diagnostics
     echo "::error::One or more quality commands failed"
     FAILED=true
@@ -88,6 +96,9 @@ if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
   fi
   if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "no_measurement")' > /dev/null; then
     echo "::warning::One or more optional quality commands produced no measurement on either the candidate or the baseline."
+  fi
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "not_run")' > /dev/null; then
+    echo "::warning::One or more requested quality commands were not run because setup did not complete."
   fi
 fi
 

@@ -18,6 +18,23 @@ HOMEBOY_ACTION_REF="${HOMEBOY_ACTION_REF:-unknown}"
 HOMEBOY_ACTION_REPOSITORY="${HOMEBOY_ACTION_REPOSITORY:-unknown}"
 COMMANDS_CSV="${COMMANDS:-}"
 COMPONENT_NAME="${COMPONENT_NAME:-${HOMEBOY_COMPONENT_ID:-}}"
+SETUP_RESULT_FILE="${HOMEBOY_SETUP_RESULT_FILE:-${OUTPUT_DIR:+${OUTPUT_DIR}/setup.json}}"
+
+has_setup_failure() {
+  [ -n "${SETUP_RESULT_FILE}" ] && [ -f "${SETUP_RESULT_FILE}" ] || return 1
+  jq -e '.schema == "homeboy/action-setup-result/v1" and (.status == "failed" or .status == "timeout")' "${SETUP_RESULT_FILE}" >/dev/null 2>&1
+}
+
+append_setup_failure() {
+  local digest_file="$1"
+  has_setup_failure || return 0
+
+  {
+    printf '\n### Setup failure\n'
+    jq -r '"- Owner: **" + .owner + "**\n- Step: `" + .step + "`\n- Status: **" + .status + "** (exit `" + (.exit_code | tostring) + "`)\n- Diagnostic: " + (if .diagnostic == "" then "Inspect the retained setup log." else .diagnostic end) + "\n- Replay: `" + .replay_command + "`"' "${SETUP_RESULT_FILE}"
+    printf '\n'
+  } >> "${digest_file}"
+}
 
 append_local_reproduction_commands() {
   local digest_file="$1"
@@ -209,8 +226,16 @@ ARGS=(
   --commands "${COMMANDS_CSV}"
 )
 
-if ! homeboy "${ARGS[@]}" > "${DIGEST_FILE}" 2> "${RENDERER_STDERR_FILE}"; then
-  rm -f "${DIGEST_FILE}"
+if has_setup_failure; then
+  : > "${RENDERER_STDERR_FILE}"
+  {
+    printf '## Setup failure digest\n\n'
+    printf 'Action setup did not complete. The requested quality commands were not run.\n'
+  } > "${DIGEST_FILE}"
+else
+  if ! homeboy "${ARGS[@]}" > "${DIGEST_FILE}" 2> "${RENDERER_STDERR_FILE}"; then
+    rm -f "${DIGEST_FILE}"
+  fi
 fi
 
 if [ ! -s "${DIGEST_FILE}" ]; then
@@ -222,6 +247,7 @@ append_local_reproduction_commands "${DIGEST_FILE}"
 append_differential_evidence "${DIGEST_FILE}"
 append_terminal_diagnostics "${DIGEST_FILE}"
 append_timeout_triage_to_digest "${DIGEST_FILE}"
+append_setup_failure "${DIGEST_FILE}"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" >> "${GITHUB_ENV}"

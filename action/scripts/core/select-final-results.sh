@@ -5,6 +5,20 @@ set -euo pipefail
 RESULTS="${FIRST_RESULTS:-}"
 COMMANDS="${COMMANDS:-}"
 RESULTS_DIR="${HOMEBOY_CI_RESULTS_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
+SETUP_RESULT_FILE="${HOMEBOY_SETUP_RESULT_FILE:-${RESULTS_DIR:+${RESULTS_DIR}/setup.json}}"
+
+setup_failed() {
+  [ -n "${SETUP_RESULT_FILE}" ] && [ -f "${SETUP_RESULT_FILE}" ] || return 1
+  jq -e '
+    .schema == "homeboy/action-setup-result/v1"
+    and .phase == "dependency_build_setup"
+    and (.status == "failed" or .status == "timeout")
+    and (.owner | type == "string" and length > 0)
+    and (.step | type == "string" and length > 0)
+    and (.exit_code | type == "number")
+    and (.replay_command | type == "string" and length > 0)
+  ' "${SETUP_RESULT_FILE}" >/dev/null 2>&1
+}
 
 results_are_complete() {
   [ -n "${RESULTS}" ] || return 1
@@ -17,7 +31,16 @@ results_are_complete() {
 }
 
 if ! results_are_complete; then
-  if [ -n "${COMMANDS}" ]; then
+  if setup_failed; then
+    RESULTS="$(printf '%s\n' "${COMMANDS}" | jq -Rc '
+      split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0))
+      | map({key: ., value: "not_run"})
+      | from_entries + {setup: "fail"}
+    ')"
+    setup_owner="$(jq -r '.owner' "${SETUP_RESULT_FILE}")"
+    setup_step="$(jq -r '.step' "${SETUP_RESULT_FILE}")"
+    echo "::error::${setup_owner} failed during ${setup_step}; requested quality commands were not run."
+  elif [ -n "${COMMANDS}" ]; then
     RESULTS="$(printf '%s\n' "${COMMANDS}" | jq -Rc '
       split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0)) | map({key: ., value: "fail"}) | from_entries
     ')"

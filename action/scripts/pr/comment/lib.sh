@@ -83,7 +83,7 @@ summary_json_for_command() {
 
 command_status() {
   local command="$1"
-  echo "${RESULTS}" | jq -r --arg cmd "${command}" 'if .[$cmd] == "pass" or .[$cmd] == "fail" or .[$cmd] == "timeout" or .[$cmd] == "baseline_red" or .[$cmd] == "inconclusive" or .[$cmd] == "no_measurement" or .[$cmd] == "invalid_evidence" or .[$cmd] == "no_comparable_evidence" then .[$cmd] else "unknown" end' 2>/dev/null || echo "unknown"
+  echo "${RESULTS}" | jq -r --arg cmd "${command}" 'if .[$cmd] == "pass" or .[$cmd] == "fail" or .[$cmd] == "timeout" or .[$cmd] == "not_run" or .[$cmd] == "baseline_red" or .[$cmd] == "inconclusive" or .[$cmd] == "no_measurement" or .[$cmd] == "invalid_evidence" or .[$cmd] == "no_comparable_evidence" then .[$cmd] else "unknown" end' 2>/dev/null || echo "unknown"
 }
 
 is_refactor_owning_section() {

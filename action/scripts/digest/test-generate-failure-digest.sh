@@ -167,4 +167,17 @@ grep -F '`homeboy review test`: **timeout** (result: `review-test.json`)' "${DIG
 grep -F "renderer failed before producing markdown" "${DIGEST_FILE}" >/dev/null
 grep -F "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" "${ENV_FILE}" >/dev/null
 
+cat > "${OUTPUT_DIR}/setup.json" <<'JSON'
+{"schema":"homeboy/action-setup-result/v1","phase":"dependency_build_setup","status":"failed","owner":"Homeboy extension setup","step":"install Homeboy extension","exit_code":1,"replay_command":"bash install-extension.sh","diagnostic":"source SHA mismatch"}
+JSON
+export HOMEBOY_SETUP_RESULT_FILE="${OUTPUT_DIR}/setup.json"
+export RESULTS='{"setup":"fail","review lint":"not_run","review test":"not_run"}'
+bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
+grep -F '## Setup failure digest' "${DIGEST_FILE}" >/dev/null
+grep -F 'The requested quality commands were not run.' "${DIGEST_FILE}" >/dev/null
+grep -F '### Setup failure' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Owner: **Homeboy extension setup**' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Diagnostic: source SHA mismatch' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Replay: `bash install-extension.sh`' "${DIGEST_FILE}" >/dev/null
+
 echo "generate failure digest wrapper checks passed"
