@@ -762,19 +762,6 @@ pub struct DaemonStateLossRecoveryResult {
     pub replacement: DaemonStartResult,
 }
 
-/// Compatibility result for the local reconciliation helper used by lifecycle
-/// tests. The CLI uses `DaemonLeaselessRecoveryResult`, which includes the
-/// structured ownership evidence returned by remote recovery.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct DaemonLeaselessOrphanReconciliationResult {
-    pub snapshot_path: String,
-    pub affected_job_ids: Vec<String>,
-    pub affected_job_count: usize,
-    pub no_owner_proof: Vec<String>,
-    pub retry_guidance: String,
-    pub replacement: DaemonStartResult,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DaemonStopResult {
     pub stopped: bool,
