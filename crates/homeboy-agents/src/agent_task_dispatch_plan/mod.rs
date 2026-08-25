@@ -794,7 +794,7 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
 mod tests {
     use super::*;
     use crate::agent_task::{AgentCommandPolicyMode, AgentCommandRule};
-    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA};
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_dispatch_service::{
         dispatch, DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
     };
@@ -2190,19 +2190,10 @@ mod tests {
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("ok".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }
         }
     }

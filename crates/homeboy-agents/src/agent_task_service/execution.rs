@@ -2249,7 +2249,7 @@ mod tests {
     use crate::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
         AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AgentTaskWorkspaceMode,
-        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+        AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_scheduler::{
         AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskManagedService,
@@ -2273,19 +2273,11 @@ mod tests {
                 .expect("write provider change");
             }
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("succeeded".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
                 metadata: serde_json::json!({}),
+                ..Default::default()
             }
         }
     }

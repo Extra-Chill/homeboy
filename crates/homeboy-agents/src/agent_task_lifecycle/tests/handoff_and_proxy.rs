@@ -2296,19 +2296,15 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
                 ..AgentTaskAggregateTotals::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "task-a".to_string(),
                 status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
                 summary: Some("Remote provider agent task failed.".to_string()),
                 failure_classification: Some(AgentTaskFailureClassification::Provider),
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
                 evidence_refs: vec![AgentTaskEvidenceRef {
                     kind: "logs".to_string(),
                     uri: "homeboy://agent-task/run/remote-run/logs".to_string(),
                     label: Some("remote provider logs".to_string()),
                 }],
-                diagnostics: Vec::new(),
                 outputs: serde_json::json!({
                     "provider_run_result": {
                         "status": "failed",
@@ -2317,13 +2313,12 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
                         "refs": { "logs": [], "transcripts": [], "runtimes": [] }
                     }
                 }),
-                workflow: None,
-                follow_up: None,
                 metadata: serde_json::json!({
                     "provider": "fixture.agent-task-executor",
                     "remote_run_id": "provider-run-1",
                     "remote_workspace": "/runner/workspace/repo"
                 }),
+                ..Default::default()
             }],
             events: vec![AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
@@ -2601,18 +2596,12 @@ fn failed_provider_run_exposes_workflow_evidence_refs() {
             ..AgentTaskAggregateTotals::default()
         },
         outcomes: vec![AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "task-a".to_string(),
             status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
             summary: Some("provider task failed".to_string()),
             failure_classification: Some(
                 crate::agent_task::AgentTaskFailureClassification::ExecutionFailed,
             ),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
             workflow: Some(AgentTaskWorkflowEvidence {
                 schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
                 id: "provider-run-123".to_string(),
@@ -2637,8 +2626,7 @@ fn failed_provider_run_exposes_workflow_evidence_refs() {
                 }],
                 metadata: Value::Null,
             }),
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }],
         events: vec![AgentTaskProgressEvent {
             task_id: "task-a".to_string(),

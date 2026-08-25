@@ -281,15 +281,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("intentional no-change gate retry".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
                 outputs: json!({
                     "review_form": {
                         "summary": "Retry reviewed the candidate.",
@@ -298,9 +292,7 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
                         "used_for": "Reviewed failed-gate evidence."
                     }
                 }),
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }
         }
     }
@@ -312,11 +304,9 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("produced patch before failed gate".to_string()),
-                failure_classification: None,
                 artifacts: vec![AgentTaskArtifact {
                     schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                     id: "candidate".to_string(),
@@ -332,17 +322,12 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
                     sha256: Some(self.sha256.clone()),
                     metadata: Value::Null,
                 }],
-                typed_artifacts: Vec::new(),
                 evidence_refs: vec![AgentTaskEvidenceRef {
                     kind: "plan".to_string(),
                     uri: format!("homeboy://agent-task/run/{}/plan#task=task-a", self.run_id),
                     label: None,
                 }],
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }
         }
     }
@@ -932,11 +917,9 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
         assert!(status.success());
 
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("committed work".to_string()),
-            failure_classification: None,
             artifacts: vec![
                 AgentTaskArtifact {
                     schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
@@ -969,13 +952,7 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
                     metadata: Value::Null,
                 },
             ],
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
