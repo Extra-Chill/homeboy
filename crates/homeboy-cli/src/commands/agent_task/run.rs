@@ -1336,7 +1336,7 @@ mod preview_tests {
 
     #[cfg(unix)]
     #[test]
-    fn preview_reports_provider_reuse_and_unresolved_planning_without_ensuring() {
+    fn preview_matches_execution_provider_resolution_and_never_ensures() {
         use std::os::unix::fs::PermissionsExt;
 
         crate::test_support::with_isolated_home(|_| {
@@ -1363,7 +1363,7 @@ mod preview_tests {
             std::fs::write(
                 &provider,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-issue-12890-homeboy\",\"path\":\"{}\",\"branch\":\"{}\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nmissing) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nslow-plan) sleep 1 ;;\nlong-plan) sleep 10.1; printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"/provider/planned/$2\\\",\\\"branch\\\":\\\"$3\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\" ;;\nensure) touch '{}' ;;\nesac\n",
+                    "#!/bin/sh\ncase \"$1\" in\nresolve) if [ \"$2\" = \"blocks-engine@fix-issue-1167-blocks-engine\" ]; then printf '%s\\n' '{{\"handle\":\"blocks-engine@fix-issue-1167-blocks-engine\",\"path\":\"/provider/blocks-engine\",\"branch\":\"fix-issue-1167-blocks-engine\",\"task_url\":null,\"error\":\"DMC standalone identity does not provide tracker ownership.\"}}' >&2; exit 1; fi; printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-issue-12890-homeboy\",\"path\":\"{}\",\"branch\":\"{}\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nmissing) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nslow-plan) sleep 1 ;;\nlong-plan) sleep 10.1; printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"/provider/planned/$2\\\",\\\"branch\\\":\\\"$3\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\" ;;\nensure) touch '{}' ;;\nesac\n",
                     workspace.display(),
                     branch,
                     marker.display(),
@@ -1436,8 +1436,64 @@ mod preview_tests {
             );
             assert_eq!(reused["resolved"]["workspace"]["provider_id"], "fixture");
             assert_eq!(
+                reused["resolved"]["workspace"]["provider_calls"]["resolve_and_admission"],
+                "executed"
+            );
+            assert_eq!(
+                reused["resolved"]["workspace"]["provider_calls"]["ensure"],
+                "deferred"
+            );
+            assert_eq!(
                 reused["resolved"]["workspace"]["path"],
                 workspace.display().to_string()
+            );
+            let execution_resolution = homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+                "homeboy@fix-issue-12890-homeboy",
+                &config,
+                None,
+                None,
+            )
+            .expect("execution resolver accepts previewed destination");
+            assert_eq!(
+                reused["resolved"]["workspace"]["path"],
+                execution_resolution.worktree.path
+            );
+            assert_eq!(
+                reused["resolved"]["workspace"]["branch"],
+                execution_resolution.worktree.branch
+            );
+
+            let missing_tracker_args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement the issue",
+                "--repo",
+                "homeboy",
+                "--task-url",
+                "https://github.com/Extra-Chill/homeboy/issues/1167",
+                "--to-worktree",
+                "blocks-engine@fix-issue-1167-blocks-engine",
+                "--no-finalize",
+            ]);
+            let preview_error = preview_cook(missing_tracker_args, None)
+                .expect_err("missing tracker ownership blocks preview");
+            let execution_error = homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+                "blocks-engine@fix-issue-1167-blocks-engine",
+                &config,
+                None,
+                None,
+            )
+            .expect_err("missing tracker ownership blocks execution");
+            assert_eq!(preview_error.code, execution_error.code);
+            assert_eq!(preview_error.message, execution_error.message);
+            assert_eq!(
+                preview_error.details["worktree_provider_lookup"],
+                execution_error.details["worktree_provider_lookup"]
             );
 
             config
@@ -3631,8 +3687,13 @@ fn resolve_cook_preview_destination(
         path
     } else {
         let config = defaults::load_config();
-        let identity = match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(&handle, &config) {
-            Ok(identity) => identity,
+        let resolution = match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+            &handle,
+            &config,
+            None,
+            None,
+        ) {
+            Ok(resolution) => resolution,
             Err(error)
                 if issue_derived && error.details["worktree_provider_lookup"] == "not_found" =>
             {
@@ -3690,7 +3751,7 @@ fn resolve_cook_preview_destination(
             Err(error) => return Err(error),
         };
         if homeboy::core::worktree_providers::worktree_provider_path_requires_materialization(
-            &identity.path,
+            &resolution.worktree.path,
         ) {
             resolve_cook_base(&mut args)?;
             return Ok((
@@ -3699,14 +3760,18 @@ fn resolve_cook_preview_destination(
                     "action": "materialization_required",
                     "kind": "provider",
                     "handle": handle,
-                    "provider_id": identity.provider_id,
-                    "remote_path": identity.path,
+                    "provider_id": resolution.provider_id,
+                    "remote_path": resolution.worktree.path,
                     "reason": "the configured provider resolved a registered remote workspace that requires materialization before filesystem planning",
                     "apply": "rerun Cook without --preview to converge the destination through its configured provider",
+                    "provider_calls": {
+                        "resolve_and_admission": "executed",
+                        "ensure": "deferred",
+                    },
                 }),
             ));
         }
-        let path = PathBuf::from(&identity.path);
+        let path = PathBuf::from(&resolution.worktree.path);
         homeboy::core::worktree_providers::validate_task_worktree_root(&path, &handle)?;
         validate_cook_destination_identity(&args, &path)?;
         return Ok((
@@ -3714,10 +3779,14 @@ fn resolve_cook_preview_destination(
             serde_json::json!({
                 "action": "planned_reuse",
                 "kind": "provider",
-                "handle": identity.handle,
-                "path": identity.path,
-                "branch": identity.branch,
-                "provider_id": identity.provider_id,
+                "handle": resolution.worktree.handle,
+                "path": resolution.worktree.path,
+                "branch": resolution.worktree.branch,
+                "provider_id": resolution.provider_id,
+                "provider_calls": {
+                    "resolve_and_admission": "executed",
+                    "ensure": "deferred",
+                },
             }),
         ));
     };
