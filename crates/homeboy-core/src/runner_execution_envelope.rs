@@ -105,19 +105,14 @@ pub struct RunnerExecutionDispatch {
     pub extension_env_providers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerExecutionLifecycle {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub durable_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_child_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_cell_count: Option<u64>,
-}
+/// Lifecycle facts carried by a runner execution envelope.
+///
+/// This was a second declaration of
+/// [`homeboy_api_jobs_contract::RunnerJobLifecycleMetadata`] -- the same five
+/// fields with byte-identical serde attributes on each. `homeboy-core` depends
+/// on `homeboy-api-jobs-contract` directly, so the envelope and the job request
+/// were always able to name one type for the same five facts.
+pub type RunnerExecutionLifecycle = homeboy_api_jobs_contract::RunnerJobLifecycleMetadata;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerExecutionRecord {

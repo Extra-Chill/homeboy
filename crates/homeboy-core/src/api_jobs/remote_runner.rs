@@ -19,7 +19,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::lab_contract::LabRunnerWorkload;
 use crate::runner_execution_envelope::{
     PathMaterializationPlan, RunnerExecutionDispatch, RunnerExecutionEnvelope,
-    RunnerExecutionLifecycle, RunnerExecutionMutationPolicy, RunnerExecutionResultRefs,
+    RunnerExecutionMutationPolicy, RunnerExecutionResultRefs,
 };
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
@@ -263,7 +263,7 @@ impl RemoteRunnerJobRequest {
         } else {
             envelope.metadata = request.metadata.unwrap_or(Value::Null);
         }
-        envelope.lifecycle = request.lifecycle.map(RunnerExecutionLifecycle::from);
+        envelope.lifecycle = request.lifecycle.clone();
         envelope.mutation_policy = RunnerExecutionMutationPolicy {
             capture_patch: request.capture_patch,
             ..envelope.mutation_policy.clone()
@@ -399,18 +399,6 @@ impl RemoteRunnerJobRequest {
             "durable_run_id": durable_run_id,
             "agent_task_run_id": agent_task_run_id,
         }))
-    }
-}
-
-impl From<RunnerJobLifecycleMetadata> for RunnerExecutionLifecycle {
-    fn from(lifecycle: RunnerJobLifecycleMetadata) -> Self {
-        Self {
-            source: lifecycle.source,
-            kind: lifecycle.kind,
-            durable_run_id: lifecycle.durable_run_id,
-            active_child_count: lifecycle.active_child_count,
-            active_cell_count: lifecycle.active_cell_count,
-        }
     }
 }
 
