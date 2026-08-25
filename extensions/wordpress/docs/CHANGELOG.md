@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.14] - 2026-08-25
+
+### Fixed
+- order the workspace fingerprint by path components
+
 ## [3.38.13] - 2026-08-25
 
 ### Fixed
