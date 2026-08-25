@@ -454,10 +454,39 @@ pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput>
 /// every caller's test fixtures.
 #[cfg(test)]
 pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
+    record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Active);
+}
+
+#[cfg(test)]
+pub(crate) fn record_active_with_source_for_test(
+    id: &str,
+    source_checkout: &Path,
+    worktree_path: &Path,
+) {
+    record_for_test(
+        id,
+        source_checkout,
+        worktree_path,
+        TaskWorktreeState::Active,
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn record_removed_for_test(id: &str, worktree_path: &Path) {
+    record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Removed);
+}
+
+#[cfg(test)]
+fn record_for_test(
+    id: &str,
+    source_checkout: &Path,
+    worktree_path: &Path,
+    state: TaskWorktreeState,
+) {
     let record = TaskWorktreeRecord {
         id: id.to_string(),
         component_id: "fixture".to_string(),
-        source_checkout: worktree_path.to_string_lossy().to_string(),
+        source_checkout: source_checkout.to_string_lossy().to_string(),
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch: format!("task/{id}"),
         base_ref: "main".to_string(),
@@ -466,7 +495,7 @@ pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
         branch_cleanup_intent: BranchCleanupIntent::default(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
-        state: TaskWorktreeState::Active,
+        state,
         workspace_identity: Some(
             WorkspaceIdentity::new("task-worktree", format!("fixture/{id}"))
                 .expect("test workspace identity"),
@@ -476,6 +505,12 @@ pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
     };
     let store = metadata_dir().expect("task worktree store");
     write_record(&store, &record).expect("write task worktree record");
+}
+
+pub(crate) fn safety_report_for_provider(
+    record: &TaskWorktreeRecord,
+) -> Result<WorktreeSafetyReport> {
+    safety_report(record)
 }
 
 #[cfg(test)]

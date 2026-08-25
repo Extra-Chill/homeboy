@@ -2347,20 +2347,15 @@ fn resolve_worktree_provider_with_policy_from_config(
         .cloned()
         .collect::<Vec<_>>();
     provider_ids.sort();
-    let mut attempted = Vec::new();
-    let mut not_apply_enabled = Vec::new();
-
     for provider_id in provider_ids.iter().cloned() {
         let provider = &config.worktree_providers[&provider_id];
         if !provider.enabled {
             continue;
         }
         if require_apply_enabled && !provider.apply_enabled {
-            not_apply_enabled.push(provider_id);
             continue;
         }
         if let Some(command) = provider.commands.resolve.as_ref() {
-            attempted.push(provider_id.clone());
             let worktrees = run_provider_resolve_command(&provider_id, provider, command, handle)?;
             if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
                 validate_provider_handle(
@@ -2379,7 +2374,6 @@ fn resolve_worktree_provider_with_policy_from_config(
         let Some(command) = provider.commands.list.as_ref() else {
             continue;
         };
-        attempted.push(provider_id.clone());
         let worktrees = run_provider_list_command(&provider_id, provider, command)?;
         if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
             validate_provider_handle(
@@ -2395,6 +2389,46 @@ fn resolve_worktree_provider_with_policy_from_config(
         }
     }
 
+    Err(worktree_provider_not_found_error(
+        handle,
+        config,
+        require_apply_enabled,
+    ))
+}
+
+pub(crate) fn is_worktree_provider_not_found(error: &Error) -> bool {
+    error.details["worktree_provider_lookup"] == "not_found"
+}
+
+pub(crate) fn worktree_provider_not_found_error(
+    handle: &str,
+    config: &HomeboyConfig,
+    require_apply_enabled: bool,
+) -> Error {
+    let mut provider_ids = config
+        .worktree_providers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    let attempted = provider_ids
+        .iter()
+        .filter(|provider_id| {
+            let provider = &config.worktree_providers[*provider_id];
+            provider.enabled
+                && (!require_apply_enabled || provider.apply_enabled)
+                && (provider.commands.resolve.is_some() || provider.commands.list.is_some())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let not_apply_enabled = provider_ids
+        .iter()
+        .filter(|provider_id| {
+            let provider = &config.worktree_providers[*provider_id];
+            require_apply_enabled && provider.enabled && !provider.apply_enabled
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let configured = if provider_ids.is_empty() {
         "no worktree providers are configured".to_string()
     } else {
@@ -2435,7 +2469,7 @@ fn resolve_worktree_provider_with_policy_from_config(
     error.details["worktree_provider_call_classification"] = Value::String("not_found".to_string());
     error.details["worktree_provider_phase"] =
         Value::String("worktree_provider_lookup".to_string());
-    Err(error)
+    error
 }
 
 fn run_provider_resolve_command(
