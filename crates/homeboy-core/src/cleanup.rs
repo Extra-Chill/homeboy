@@ -870,6 +870,7 @@ fn collect_worktree_candidates(
     options: &ArtifactCleanupOptions,
     active: &ActiveWorktrees,
     protected: &ProtectedControllerExecutables,
+    deadline: Option<SystemTime>,
 ) -> Result<WorktreeCandidateScan> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
@@ -975,17 +976,34 @@ fn collect_worktree_candidates(
             continue;
         }
 
-        let usage = path_usage(&artifact_path)?;
-        let age_seconds = usage.age_seconds();
         let mut pressure_eligible = false;
-        if let Some(min_age_days) = effective_min_age_days(options, &declaration) {
+        let effective_min_age_days = effective_min_age_days(options, &declaration);
+        if effective_min_age_days == Some(AUTOMATIC_ARTIFACT_AGE_POLICY) {
+            let retention = crate::defaults::load_config().retention;
+            pressure_eligible = retention.reconstructable_artifact_reserve_bytes > 0
+                && filesystem_available_bytes(&artifact_path).is_some_and(|available| {
+                    available < retention.reconstructable_artifact_reserve_bytes
+                });
+        }
+
+        // Under measured disk pressure, exact size and age are reporting details,
+        // not safety gates. Walking a multi-gigabyte Cargo target before deleting
+        // it can consume the entire retention budget, so leave those estimates
+        // unknown and measure the filesystem delta after removal instead.
+        let usage = if pressure_eligible {
+            PathUsage {
+                logical_bytes: 0,
+                allocated_bytes: 0,
+                newest_modified: None,
+            }
+        } else {
+            path_usage_with_deadline(&artifact_path, deadline)?
+        };
+        let age_seconds = usage.age_seconds();
+        if let Some(min_age_days) = effective_min_age_days {
             let automatic = min_age_days == AUTOMATIC_ARTIFACT_AGE_POLICY;
             if automatic {
                 let retention = crate::defaults::load_config().retention;
-                pressure_eligible = retention.reconstructable_artifact_reserve_bytes > 0
-                    && filesystem_available_bytes(&artifact_path).is_some_and(|available| {
-                        available < retention.reconstructable_artifact_reserve_bytes
-                    });
                 if !pressure_eligible
                     && !meets_age_gate(age_seconds, retention.reconstructable_artifact_days)
                 {
@@ -1092,7 +1110,7 @@ fn cleanup_artifacts_in_worktrees(
         // A single stale/non-Git/vanished worktree candidate must not abort the
         // whole batch: classify it, record a bounded diagnostic, and continue so
         // independent valid worktrees are still cleaned (#9925).
-        match collect_worktree_candidates(worktree, options, &active, &protected) {
+        match collect_worktree_candidates(worktree, options, &active, &protected, deadline) {
             Ok(WorktreeCandidateScan {
                 candidates: worktree_candidates,
                 skipped: worktree_skipped,
@@ -1131,6 +1149,13 @@ fn cleanup_artifacts_in_worktrees(
     let cleanup_run_ref = cleanup_run
         .as_ref()
         .map(|(_, run_id)| format!("homeboy://run/{run_id}"));
+    let pressure_cleanup = options.apply
+        && candidates
+            .iter()
+            .any(|candidate| candidate.pressure_eligible);
+    let available_before_apply = pressure_cleanup
+        .then(|| filesystem_available_bytes(&root))
+        .flatten();
     let (applied, failed, apply_skipped) = if options.apply {
         let run_ref = cleanup_run
             .as_ref()
@@ -1149,11 +1174,23 @@ fn cleanup_artifacts_in_worktrees(
         (Vec::new(), Vec::new(), Vec::new())
     };
     skipped.extend(apply_skipped);
+    let measured_reclaimed_bytes = available_before_apply
+        .zip(filesystem_available_bytes(&root))
+        .map(|(before, after)| after.saturating_sub(before))
+        .unwrap_or(0);
 
     let estimated_bytes = candidates.iter().map(|row| row.size_bytes).sum();
-    let reclaimed_bytes = applied.iter().map(|row| row.size_bytes).sum();
+    let reclaimed_bytes = applied
+        .iter()
+        .map(|row| row.size_bytes)
+        .sum::<u64>()
+        .max(measured_reclaimed_bytes);
     let estimated_allocated_bytes = candidates.iter().map(|row| row.allocated_bytes).sum();
-    let reclaimed_allocated_bytes = applied.iter().map(|row| row.allocated_bytes).sum();
+    let reclaimed_allocated_bytes = applied
+        .iter()
+        .map(|row| row.allocated_bytes)
+        .sum::<u64>()
+        .max(measured_reclaimed_bytes);
     let worktree_rows = worktree_summaries(&candidates, &skipped, &applied, &active);
     let success_count = applied.len();
     let failure_count = failed.len();
@@ -1473,7 +1510,11 @@ fn remaining_candidate_totals(
         let path = Path::new(&candidate.path);
         if path.exists() {
             count += 1;
-            bytes += path_size(path).unwrap_or(candidate.size_bytes);
+            bytes += if candidate.pressure_eligible {
+                candidate.size_bytes
+            } else {
+                path_size(path).unwrap_or(candidate.size_bytes)
+            };
         }
     }
     (count, bytes)
@@ -2013,6 +2054,15 @@ fn path_size(path: &Path) -> Result<u64> {
 }
 
 pub(crate) fn path_usage(path: &Path) -> Result<PathUsage> {
+    path_usage_with_deadline(path, None)
+}
+
+fn path_usage_with_deadline(path: &Path, deadline: Option<SystemTime>) -> Result<PathUsage> {
+    if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+        return Err(Error::internal_unexpected(
+            "artifact cleanup runtime limit reached during size inspection",
+        ));
+    }
     let metadata = fs::symlink_metadata(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("stat {}", path.display()))))?;
     let modified = metadata.modified().ok();
@@ -2051,7 +2101,7 @@ pub(crate) fn path_usage(path: &Path) -> Result<PathUsage> {
                 Some(format!("read directory entry {}", path.display())),
             )
         })?;
-        usage.merge(path_usage(&entry.path())?);
+        usage.merge(path_usage_with_deadline(&entry.path(), deadline)?);
     }
     Ok(usage)
 }
@@ -2675,6 +2725,82 @@ mod tests {
             assert_eq!(output.applied_count, 1);
             assert!(!repo.path().join(".cargo-target").exists());
         });
+    }
+
+    #[test]
+    fn pressured_candidate_collection_skips_recursive_size_inspection() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            write_file(&repo.path().join("target/debug/app"), "artifact");
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: crate::defaults::RetentionConfig {
+                    reconstructable_artifact_reserve_bytes: u64::MAX,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("save pressured retention");
+
+            let scan = collect_worktree_candidates(
+                &WorktreeInfo {
+                    path: repo.path().to_path_buf(),
+                },
+                &ArtifactCleanupOptions {
+                    min_age_days: Some(AUTOMATIC_ARTIFACT_AGE_POLICY),
+                    ..Default::default()
+                },
+                &ActiveWorktrees::default(),
+                &ProtectedControllerExecutables::default(),
+                Some(SystemTime::UNIX_EPOCH),
+            )
+            .expect("pressure collection must not enter expired size traversal");
+
+            assert_eq!(scan.candidates.len(), 1);
+            assert!(scan.candidates[0].pressure_eligible);
+            assert_eq!(scan.candidates[0].size_bytes, 0);
+            assert_eq!(scan.candidates[0].allocated_bytes, 0);
+            assert_eq!(scan.candidates[0].age_seconds, None);
+        });
+    }
+
+    #[test]
+    fn automatic_retention_deletes_pressure_candidate_without_precomputed_size() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            write_file(&repo.path().join("target/debug/app"), "artifact");
+            let retention = crate::defaults::RetentionConfig {
+                reconstructable_artifact_reserve_bytes: u64::MAX,
+                ..Default::default()
+            };
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: retention.clone(),
+                ..Default::default()
+            })
+            .expect("save pressured retention");
+
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                SystemTime::now(),
+            )
+            .expect("pressure retention");
+
+            assert_eq!(output.applied_count, 1);
+            assert!(!repo.path().join("target").exists());
+            assert!(output.candidates[0].pressure_eligible);
+            assert_eq!(output.applied[0].size_bytes, 0);
+        });
+    }
+
+    #[test]
+    fn recursive_size_inspection_honors_the_cleanup_deadline() {
+        let artifact = TempDir::new().expect("artifact");
+        write_file(&artifact.path().join("nested/file"), "artifact");
+
+        let error = path_usage_with_deadline(artifact.path(), Some(SystemTime::UNIX_EPOCH))
+            .expect_err("expired size traversal must stop");
+
+        assert!(error.message.contains("runtime limit"));
     }
 
     #[test]
@@ -4072,6 +4198,7 @@ mod tests {
             &ArtifactCleanupOptions::default(),
             &ActiveWorktrees::default(),
             &ProtectedControllerExecutables::default(),
+            None,
         );
         assert!(
             scan.is_err(),
