@@ -787,6 +787,7 @@ impl CliRuntime {
                 );
                 return std::process::ExitCode::from(2);
             }
+            let mut routed_preflight = None;
             if let Some(route) = route {
                 let runner_env = matches
                     .get_many::<String>("runner_env")
@@ -821,21 +822,32 @@ impl CliRuntime {
                 ) {
                     return std::process::ExitCode::from(exit_code_to_u8(exit_code));
                 }
-                crate::commands::utils::execution_provenance::capture_composed(
-                    options.placement,
-                    options.runner,
-                    options.detach_after_handoff,
-                    options.allow_dirty_lab_workspace,
-                    options.skip_deps_hydration,
-                    options.runner_env,
-                    options.lab_env_json,
+                let preflight = match resolve_composed_capability_preflight(
+                    capability,
+                    capability_matches,
+                    &route,
+                    &options,
                     &normalized,
-                );
+                ) {
+                    Ok(preflight) => preflight,
+                    Err(error) => {
+                        output_runtime::emit_json_result_for_identity(
+                            Err(error),
+                            output_file.as_deref(),
+                            2,
+                            &command_identity,
+                        );
+                        return std::process::ExitCode::from(2);
+                    }
+                };
+                crate::core::parsed_command_preflight::capture_result(preflight.clone());
+                crate::commands::utils::execution_provenance::capture(&preflight);
                 match crate::commands::route::route_composed_lab_command(
                     &route,
                     options,
                     &normalized,
                     output_file.as_deref(),
+                    &preflight,
                 ) {
                     Ok(Some(exit_code)) => {
                         return std::process::ExitCode::from(exit_code_to_u8(exit_code));
@@ -851,11 +863,35 @@ impl CliRuntime {
                         return std::process::ExitCode::from(2);
                     }
                 }
+                routed_preflight = Some(preflight);
             }
             if let Some(path) = output_file.as_deref() {
                 if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
                     return exit;
                 }
+            }
+            if let Some(preflight) = routed_preflight {
+                let (json_result, exit_code) = if matches!(
+                    preflight.resource_admission,
+                    crate::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
+                ) {
+                    (
+                        Err(resource_admission_error(&preflight.resource_admission)),
+                        2,
+                    )
+                } else {
+                    match capability.run(capability_matches) {
+                        Ok((value, exit_code)) => (Ok(value), exit_code),
+                        Err(error) => (Err(error), 2),
+                    }
+                };
+                output_runtime::emit_json_result_for_identity(
+                    json_result,
+                    output_file.as_deref(),
+                    exit_code,
+                    &command_identity,
+                );
+                return std::process::ExitCode::from(exit_code_to_u8(exit_code));
             }
             let input = capability.preflight(capability_matches, &normalized);
             // Capabilities declare their requirement and policy only. Runtime
@@ -2476,6 +2512,126 @@ fn preflight_composed_lab_route(
         return Some(2);
     }
     None
+}
+
+fn resolve_composed_capability_preflight(
+    capability: &dyn CliCapability,
+    matches: &ArgMatches,
+    route: &LabCommandRoute,
+    options: &crate::commands::route::ComposedLabRouteOptions<'_>,
+    normalized: &[String],
+) -> crate::core::Result<crate::core::parsed_command_preflight::ParsedCommandPreflightResult> {
+    use crate::core::parsed_command_preflight::{
+        ControllerExecution, GenericRoutePolicySnapshot, LabReadinessSnapshot, LabRouteIntent,
+        PlacementIntent, ResourceAdmissionEvidence, ResourceHeat, RunnerIntent,
+    };
+
+    let mut input = capability.preflight(matches, normalized);
+    input.controller_execution = ControllerExecution::Ordinary;
+    input.placement = match options.placement {
+        crate::cli_surface::Placement::Auto => PlacementIntent::Auto,
+        crate::cli_surface::Placement::Local => PlacementIntent::Local,
+        crate::cli_surface::Placement::Lab => PlacementIntent::Lab,
+        crate::cli_surface::Placement::LabOrLocal => PlacementIntent::LabOrLocal,
+    };
+    input.runner = options
+        .runner
+        .map(|runner| RunnerIntent::Explicit(runner.to_string()))
+        .unwrap_or(RunnerIntent::Default);
+    let route_contract = route.lab_route_contract().ok_or_else(|| {
+        crate::core::Error::validation_invalid_argument(
+            "placement",
+            "this composed command has no Lab route contract",
+            None,
+            None,
+        )
+    })?;
+    input.lab_route = LabRouteIntent::Supported {
+        automatic: matches!(
+            route_contract.command.portability,
+            crate::command_contract::LabCommandPortability::Portable
+        ),
+    };
+
+    let context = resource_policy::captured_context();
+    let readiness = context
+        .as_ref()
+        .map(|context| LabReadinessSnapshot {
+            state: context.runner_selection.readiness_state.clone(),
+            selected_runner_id: options
+                .runner
+                .map(str::to_string)
+                .or_else(|| context.runner_selection.runner_id.clone()),
+            available_runner_ids: context.runner_selection.available_runner_ids.clone(),
+            reasons: context.runner_selection.readiness_reasons.clone(),
+            remediation_commands: context.runner_selection.remediation_commands.clone(),
+        })
+        .or_else(|| {
+            (options.placement != crate::cli_surface::Placement::Local)
+                .then(|| crate::runner::lab_runner_readiness().ok())
+                .flatten()
+                .map(|readiness| resource_policy::lab_readiness_snapshot(&readiness))
+        });
+    let selected_runner_id = options.runner.map(str::to_string).or_else(|| {
+        readiness
+            .as_ref()
+            .and_then(|value| value.selected_runner_id.clone())
+    });
+    let runner_admitted = selected_runner_id.as_ref().is_some_and(|selected| {
+        readiness.as_ref().is_some_and(|readiness| {
+            readiness.state == "connected_ready"
+                && readiness
+                    .available_runner_ids
+                    .iter()
+                    .any(|runner| runner == selected)
+        })
+    });
+    let resource_admission_evidence = context
+        .as_ref()
+        .map(|context| ResourceAdmissionEvidence::Observed {
+            pressure: match context.severity.as_str() {
+                "hot" => ResourceHeat::Hot,
+                "warm" => ResourceHeat::Warm,
+                _ => ResourceHeat::None,
+            },
+        })
+        .unwrap_or_else(|| match input.resource_admission {
+            crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Exempt => {
+                ResourceAdmissionEvidence::Unavailable
+            }
+            crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Required {
+                ..
+            } => crate::commands::resources::run_preflight()
+                .map(|(resources, _)| resource_policy::resource_admission_evidence(&resources))
+                .unwrap_or(ResourceAdmissionEvidence::Unavailable),
+        });
+    let command = crate::core::lab_routing::lab_offload_command_from_route_contract(route_contract);
+    let automatic_authorized = options.runner.is_some()
+        || crate::core::lab_routing::authorizes_policy_lab_runner(
+            &command.command,
+            options.placement,
+            context.as_ref().map(|context| context.severity.as_str()),
+        );
+    let auto_local_capacity_fallback = context
+        .as_ref()
+        .is_some_and(|context| context.runner_selection.reason == "local_capacity_fallback");
+    let mut policy = capability.preflight_policy(matches, normalized);
+    policy.resource_admission_evidence = resource_admission_evidence;
+    policy.resource_policy = context;
+    policy.lab_readiness = readiness;
+    policy.selected_runner_id = selected_runner_id.clone();
+    policy.generic_route = GenericRoutePolicySnapshot {
+        command_supports_lab: true,
+        automatic_authorized,
+        selected_runner_id,
+    };
+    policy.runner_admitted = runner_admitted;
+    policy.auto_local_capacity_fallback = auto_local_capacity_fallback;
+    crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+        normalized.to_vec(),
+        input,
+        policy,
+    )
 }
 
 fn preflight_hot_command_with_input(
