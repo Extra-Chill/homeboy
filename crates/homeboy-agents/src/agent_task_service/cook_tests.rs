@@ -9516,6 +9516,41 @@ fn recipe_only_initial_attempt_recovers_once_without_provider_dispatch() {
 }
 
 #[test]
+fn normal_cook_repairs_a_transient_initial_lifecycle_write_before_reporting_failure() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-initial-lifecycle-write-recovery";
+        let run_id = "cook-initial-lifecycle-write-recovery-attempt-1";
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        options.initial_run_id = run_id.to_string();
+
+        agent_task_lifecycle::fail_next_record_write_for_test();
+        let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("normal Cook converges its durable admission");
+
+        assert_eq!(report.exit_code, 1);
+        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(report.value.latest_run_id.as_deref(), Some(run_id));
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        assert!(agent_task_lifecycle::run_record_exists(run_id).expect("lifecycle exists"));
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("Cook index exists");
+        assert_eq!(index.latest_run_id, run_id);
+        assert_eq!(index.attempts.len(), 1);
+        let record = agent_task_lifecycle::exact_record(run_id).expect("recovered record");
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "cook_pre_execution"
+        );
+    });
+}
+
+#[test]
 fn recipe_recovery_rejects_foreign_lifecycle_record_before_indexing() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =

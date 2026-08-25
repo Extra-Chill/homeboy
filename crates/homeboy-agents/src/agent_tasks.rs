@@ -367,7 +367,8 @@ pub mod lifecycle {
     };
     #[cfg(feature = "test-support")]
     pub use super::super::agent_task_lifecycle::{
-        inject_raw_record_metadata_for_corruption_test, rewrite_record_for_test,
+        fail_next_record_write_for_test, inject_raw_record_metadata_for_corruption_test,
+        rewrite_record_for_test,
     };
     pub use super::super::agent_task_lifecycle::{record_completed_run, record_promotion};
 }

@@ -4094,7 +4094,24 @@ fn run_cook_reported(
         allow_historical_terminal,
     ) {
         Ok(result) => result,
-        Err(error) => {
+        Err(mut error) => {
+            // Recipe persistence is the first half of Cook admission. If the
+            // initial lifecycle write failed transiently, complete the same
+            // immutable attempt now rather than returning a recipe-only Cook
+            // whose advertised continuation has no record to address (#10849).
+            if store.recipe_exists(&failure_options.cook_id)
+                && !lifecycle_store.record_exists(&failure_options.initial_run_id)?
+                && super::cook_pre_execution::recover_recipe_attempt_with_stores(
+                    store,
+                    lifecycle_store,
+                    &failure_options.initial_run_id,
+                )
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                error.details["cook_materialized_by_invocation"] = Value::Bool(true);
+            }
             // Once the attempt exists, a controller-side validation failure has
             // not reached a provider and must retain the pre-execution contract.
             if let Ok(mut record) = lifecycle_store.read_record(&failure_options.initial_run_id) {
