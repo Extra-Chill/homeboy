@@ -1471,6 +1471,48 @@ pub fn reconcile_recipe_attempt_for_continuation(
     Ok(record)
 }
 
+/// Validate an existing continuation target without refreshing runner state or
+/// materializing its artifact projection.
+pub fn preflight_recipe_attempt_for_continuation(
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    validate_recipe_attempt_record(recipe, run_id, &record)?;
+    let finalized_candidate =
+        super::cook_promotion::persisted_promotion_for_attempt_in_store(&lifecycle_store, run_id)?
+            .is_some_and(|promotion| {
+                promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                    && promotion.finalization_eligible(false)
+            });
+    if finalized_candidate {
+        return Ok(record);
+    }
+    if let Some(reason) =
+        agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
+            &lifecycle_store,
+            run_id,
+        )?
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation.artifact_projection",
+            format!(
+                "Cook `{}` attempt `{run_id}` is terminal but its controller-owned artifact projection is not ready: {reason}",
+                recipe.cook_id
+            ),
+            Some(run_id.to_string()),
+            Some(vec![format!(
+                "Retry `{}` after the runner artifact can be harvested.",
+                super::cook_continue_command(None, run_id, false, None)
+            )]),
+        )
+        .with_retryable(true));
+    }
+    Ok(record)
+}
+
 pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
     default_store()?.enqueue_terminal_continuation(cook_id, run_id)
 }

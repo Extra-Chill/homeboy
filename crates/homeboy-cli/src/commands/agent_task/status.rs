@@ -111,6 +111,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
     let mut evidence_refs = stable_evidence_refs(&value);
     if evidence_refs.is_empty() {
         evidence_refs.push(json!({
+            "run_id": run_id,
             "ref": format!("homeboy://agent-task/run/{}/evidence", homeboy::core::execution_contract::encode_uri_component(run_id)),
             "command": evidence_command,
             "export_command": format!("{evidence_command} --output <path>"),
@@ -174,7 +175,15 @@ fn stable_evidence_refs(value: &Value) -> Vec<Value> {
                             reference.filter(|reference| reference.len() <= COMPACT_TEXT_LIMIT)
                         {
                             if seen.insert(reference.clone()) {
-                                refs.push(json!({ "ref": reference }));
+                                let run_id = item
+                                    .as_object()
+                                    .and_then(|item| item.get("run_id"))
+                                    .and_then(Value::as_str);
+                                let mut projected = json!({ "ref": reference });
+                                if let Some(run_id) = run_id {
+                                    projected["run_id"] = json!(run_id);
+                                }
+                                refs.push(projected);
                             }
                         }
                     }

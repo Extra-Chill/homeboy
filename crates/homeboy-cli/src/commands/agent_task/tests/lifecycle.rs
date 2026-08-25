@@ -1155,13 +1155,43 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             cook_or_attempt_id: cook_id.to_string(),
             preflight: true,
             rearm: false,
-            artifact_id: None,
+            artifact_id: Some("retained-patch".to_string()),
             full: false,
         })
         .expect("preflight reports provenance rejection");
 
         assert_eq!(exit_code, 1);
         assert_eq!(report["admitted"], false);
+        assert_eq!(report["run_id"], run_id);
+        assert_eq!(report["selected_attempt"]["run_id"], run_id);
+        assert_eq!(report["selected_artifact"]["artifact_id"], "retained-patch");
+        assert_eq!(
+            report["continuation_command"],
+            format!("homeboy agent-task cook-continue {run_id} --artifact-id retained-patch")
+        );
+        assert_eq!(
+            report["failure_context"]["next_action"]["command"],
+            format!("homeboy agent-task cook-continue {run_id} --artifact-id retained-patch")
+        );
+        assert!(report["failure_context"]["diagnostic"]["message"]
+            .as_str()
+            .expect("concrete blocker")
+            .contains("no concrete executed model"));
+        assert_eq!(report["evidence_refs"][0]["run_id"], run_id);
+        assert!(!report.to_string().contains("<run-id>"));
+        let bounded =
+            super::super::status::bounded_full_operation_report(report.clone(), "cook-continue");
+        assert_eq!(bounded["run_id"], run_id);
+        assert_eq!(
+            bounded["actionable"]["next_action"]["command"],
+            format!("homeboy agent-task cook-continue {run_id} --artifact-id retained-patch")
+        );
+        assert!(bounded["actionable"]["blocker"]
+            .as_str()
+            .expect("bounded concrete blocker")
+            .contains("no concrete executed model"));
+        assert_eq!(bounded["evidence_refs"][0]["run_id"], run_id);
+        assert!(!bounded.to_string().contains("<run-id>"));
         assert_eq!(
             report["phases"]
                 .as_array()
