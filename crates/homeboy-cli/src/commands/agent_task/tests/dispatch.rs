@@ -2247,7 +2247,7 @@ fn cook_cwd_matching_external_handle_never_invokes_a_sleeping_resolver() {
 
 #[cfg(unix)]
 #[test]
-fn cook_cwd_is_canonicalized_to_its_provider_handle_before_provisioning() {
+fn cook_cwd_adopts_clean_unpushed_provider_candidate_before_provisioning() {
     use std::os::unix::fs::PermissionsExt;
 
     with_isolated_home(|_| {
@@ -2278,7 +2278,7 @@ fn cook_cwd_is_canonicalized_to_its_provider_handle_before_provisioning() {
                     "handle": "homeboy@fix-13421",
                     "path": cwd,
                     "branch": "fix/13421",
-                    "safety": { "dirty": false, "unpushed": false, "primary": false }
+                    "safety": { "dirty": false, "unpushed": true, "primary": false }
                 }] })
             ),
         )
@@ -2340,6 +2340,7 @@ fn cook_cwd_is_canonicalized_to_its_provider_handle_before_provisioning() {
             "homeboy@fix-13421"
         );
         assert_eq!(provision["workspace_safety"]["fresh"], true);
+        assert_eq!(provision["workspace_safety"]["unpushed"], true);
     });
 }
 

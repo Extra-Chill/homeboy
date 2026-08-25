@@ -3475,7 +3475,10 @@ fn validate_cook_cwd_destination_identity(
                     ));
                 }
                 let safety = homeboy::core::worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(&identity, &config)?;
-                if !safety.fresh || safety.dirty || safety.unpushed || identity.primary {
+                // Cook owns mutations in an explicit CWD, so a clean committed
+                // candidate may be unpushed. Durable admission rechecks its
+                // cleanliness and base ancestry before provider execution.
+                if !safety.fresh || safety.dirty || identity.primary {
                     return Err(homeboy::core::Error::validation_invalid_argument(
                         "to_worktree",
                         "worktree provider safety attestation is not safe for Cook execution",
