@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.4] - 2026-08-25
+
+### Fixed
+- isolate parent test sidecars
+
 ## [1.37.3] - 2026-08-25
 
 ### Fixed
