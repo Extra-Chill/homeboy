@@ -296,13 +296,13 @@ pub(crate) fn preview_cook(
                 })?;
         }
     }
+    bind_cook_preview_lifecycle(&mut args);
     if let Some(backend) = unresolved_cook_backend_preview(&args)? {
         return Ok((backend, 0));
     }
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
-    bind_cook_preview_lifecycle(&mut args);
     record_preview_phase(&mut progress, "destination_resolution");
     let (args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
