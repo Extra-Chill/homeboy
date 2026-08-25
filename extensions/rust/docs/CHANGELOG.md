@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.2] - 2026-08-25
+
+### Fixed
+- canonicalize failed test identities
+
 ## [1.37.1] - 2026-08-24
 
 ### Fixed
