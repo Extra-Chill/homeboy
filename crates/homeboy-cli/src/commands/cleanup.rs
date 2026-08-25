@@ -4280,6 +4280,7 @@ mod count_unit_tests {
 
 #[cfg(test)]
 mod tests {
+    use homeboy::core::worktree;
     use homeboy::runner::runners::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
     use serde_json::json;
     use std::process::Command;
