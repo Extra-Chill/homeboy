@@ -90,9 +90,11 @@ aggregate() (
   [ "$(digest "$(jq -cS 'del(.plan_digest)' "${plan}")")" = "${plan_digest}" ] || fail "Test shard plan digest does not match its immutable contents."
   mkdir -p "${output}"
 
-  local shard id manifest manifest_attempt payload status aggregate_status="pass" expected_total payload_stream selected_attempt
+  local shard id manifest manifest_attempt payload status aggregate_status="pass" expected_total payload_stream evidence_stream selected_attempt failed_count stem
   payload_stream="$(mktemp)"
-  trap 'rm -f -- "${payload_stream:-}"' EXIT
+  evidence_stream="$(mktemp)"
+  trap 'rm -f -- "${payload_stream:-}" "${evidence_stream:-}"' EXIT
+  stem="$(command_output_stem "${command}")"
   while IFS= read -r shard; do
     id="$(jq -r .id <<< "${shard}")"; matches=(); selected_attempt=0
     while IFS= read -r manifest; do
@@ -141,6 +143,14 @@ aggregate() (
     if [ "${status}" = pass ]; then
       [ "$(jq '.data.test_counts.total' "${payload}")" = "${expected_total}" ] || fail "${phase} shard ${id} structured total does not match its planned membership."
     fi
+    failed_count="$(jq -r '.data.test_counts.failed // 0' "${payload}")"
+    jq -cn \
+      --arg id "${id}" \
+      --arg status "${status}" \
+      --arg inventory "$(dirname "${manifest}")/homeboy-ci-results/${stem}.test-inventory.json" \
+      --arg outcomes "$(dirname "${manifest}")/homeboy-ci-results/${stem}.test-outcomes.json" \
+      --argjson failed_count "${failed_count}" \
+      '{id:$id,status:$status,failed_count:$failed_count,inventory:$inventory,outcomes:$outcomes}' >> "${evidence_stream}"
     cp "${payload}" "${output}/${id}-$(command_result_filename "${command}")"
   done < <(jq -c '.shards[]' "${plan}")
   local inventory_total
@@ -152,6 +162,8 @@ aggregate() (
   ' < "${payload_stream}" > "${output}/$(command_result_filename "${command}")"; then
     fail "${phase} shard totals do not cover the complete inventory."
   fi
+  python3 "${SCRIPT_DIR}/aggregate-test-evidence.py" "${plan}" "${inventory}" "${command}" "${output}" < "${evidence_stream}" \
+    || fail "${phase} shard Test outcome/inventory pairs are incomplete or invalid."
   printf '{"%s":"%s"}\n' "${command}" "${aggregate_status}" > "${output}/results.json"
 )
 

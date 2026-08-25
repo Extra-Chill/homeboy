@@ -13,6 +13,20 @@ write_phase() {
   local dir="${tmp}/artifacts/${phase}"
   mkdir -p "${dir}/homeboy-ci-results"
   printf '%s\n' "${payload}" > "${dir}/homeboy-ci-results/review-test.json"
+  if printf '%s' "${results}" | jq -e '."review test" == "timeout"' >/dev/null; then
+    jq -cn --arg phase "${phase}" --arg repository example/repo --arg candidate_sha candidate --arg base_sha base --arg checkout_sha "${checkout_sha}" --arg command 'review test' --arg component "${component}" --arg action_revision action-sha --arg cli_revision "${cli}" --arg binary_sha256 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' --argjson run_attempt 2 --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > "${dir}/manifest.json"
+    return
+  fi
+  outcome=passed
+  printf '%s' "${results}" | jq -e '."review test" == "fail"' >/dev/null && outcome=failed
+  execution_fingerprint=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  inventory_fingerprint=9dbf5642740c6245489c5fa9cd655f95d5592393289bd250a4689dbe72e43333
+  if [ "${phase}" = baseline ]; then
+    execution_fingerprint=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+    inventory_fingerprint=b8281a5f59c43e3363b01fd17084972db2178833a4626a7088ee1ea4911369f3
+  fi
+  jq -cn --arg command 'review test' --arg outcome "${outcome}" --arg execution_fingerprint "${execution_fingerprint}" --arg inventory_fingerprint "${inventory_fingerprint}" '{schema:"homeboy/test-outcomes/v1",command:$command,runner:"nextest",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),execution_fingerprint:$execution_fingerprint,inventory_fingerprint:$inventory_fingerprint,failed_test_ids:(if $outcome == "failed" then ["stable"] else [] end)}' > "${dir}/homeboy-ci-results/review-test.test-outcomes.json"
+  jq -cn --arg command 'review test' --arg execution_fingerprint "${execution_fingerprint}" --arg inventory_fingerprint "${inventory_fingerprint}" '{schema:"homeboy/test-inventory/v1",command:$command,runner:"nextest",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),execution_fingerprint:$execution_fingerprint,inventory_fingerprint:$inventory_fingerprint,tests:[{id:"stable"}]}' > "${dir}/homeboy-ci-results/review-test.test-inventory.json"
   jq -cn --arg phase "${phase}" --arg repository example/repo --arg candidate_sha candidate --arg base_sha base --arg checkout_sha "${checkout_sha}" --arg command 'review test' --arg component "${component}" --arg action_revision action-sha --arg cli_revision "${cli}" --arg binary_sha256 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' --argjson run_attempt 2 --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > "${dir}/manifest.json"
 }
 

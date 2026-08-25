@@ -4,8 +4,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLY_GATE="${SCRIPT_DIR}/apply-differential-gate.py"
-IDENTITIES="${SCRIPT_DIR}/generate-test-failure-identities.py"
-FIXTURES="${SCRIPT_DIR}/fixtures/differential-test-identities"
 
 assert_equals() {
   local expected="$1"
@@ -31,16 +29,16 @@ printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "$
 printf '{}\n' > "${base_dir}/baseline-status.json"
 
 result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"inconclusive"}' "${result}" "missing baseline counts become inconclusive"
+assert_equals '{"review test":"no_comparable_evidence"}' "${result}" "missing per-test evidence fails closed"
 
 printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":false}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"baseline_red"}' "${result}" "red baseline without structured counts does not fail candidate"
+assert_equals '{"review test":"no_comparable_evidence"}' "${result}" "unstructured baseline does not bypass required per-test evidence"
 
 printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "${base_dir}/review-test.json"
 printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"baseline_red"}' "${result}" "a failure that reproduces unchanged on the baseline is baseline_red, not pass"
+assert_equals '{"review test":"no_comparable_evidence"}' "${result}" "aggregate counts cannot replace per-test evidence"
 
 # Sharded workflow commands retain their original spelling. A bare `test`
 # command therefore reads `test.json`, not the review-command filename.
@@ -48,12 +46,12 @@ printf '{"success":false,"data":{"test_counts":{"failed":2,"errors":0}}}\n' > "$
 printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "${base_dir}/test.json"
 printf '{"test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"test":"fail"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"test":"fail"}' "${result}" "bare test command reads its structured failing baseline and keeps regressions blocking"
+assert_equals '{"test":"no_comparable_evidence"}' "${result}" "bare test requires comparable per-test evidence"
 
 printf '{"success":false,"data":{"test_counts":{"failed":2,"errors":0}}}\n' > "${current_dir}/review-test.json"
 printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"fail"}' "${result}" "candidate regression still fails"
+assert_equals '{"review test":"no_comparable_evidence"}' "${result}" "aggregate candidate regression is not attributed without identities"
 
 printf '{"success":false,"data":{"lint_findings":[{},{}]}}\n' > "${current_dir}/review-lint.json"
 printf '{"success":false,"data":{"lint_findings":[{},{}]}}\n' > "${base_dir}/review-lint.json"
@@ -86,7 +84,7 @@ printf '%s\n' "${timed_out_payload}" > "${current_dir}/review-test.json"
 rm -f "${base_dir}/review-test.json"
 printf '{"review test":{"status":"timeout","exit_code":124,"command":"homeboy review test sample --path .","structured_output":false}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"timeout"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"no_measurement"}' "${result}" "a double timeout reports no_measurement, not a pre-existing-failure diagnosis"
+assert_equals '{"review test":"no_comparable_evidence"}' "${result}" "both failed phases without outcomes never become no_measurement"
 
 # The discriminator. Same unmeasurable baseline, but here the candidate DID
 # measure -- so "this failure reproduces on main" is a claim the evidence can
@@ -96,7 +94,7 @@ printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "$
 rm -f "${base_dir}/review-test.json"
 printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":false}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"baseline_red"}' "${result}" "a measured candidate against an unmeasurable baseline is still baseline_red"
+assert_equals '{"review test":"no_comparable_evidence"}' "${result}" "a measured aggregate candidate still requires baseline outcomes"
 
 # The important negative. A killed run reports FEWER failures than a healthy
 # baseline (0 here, versus 1), so a naive count comparison reads the timeout as
@@ -106,7 +104,7 @@ printf '%s\n' "${timed_out_payload}" > "${current_dir}/review-test.json"
 printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "${base_dir}/review-test.json"
 printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"timeout"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"timeout"}' "${result}" "an incomplete run is never promoted to pass by comparing its truncated counts"
+assert_equals '{"review test":"no_comparable_evidence"}' "${result}" "an incomplete run has no comparable per-test evidence"
 
 # Against a healthy baseline a timeout is actionable and must keep blocking.
 # `inconclusive` would only warn, which is how a red gate becomes background
@@ -115,7 +113,7 @@ printf '%s\n' "${timed_out_payload}" > "${current_dir}/review-test.json"
 rm -f "${base_dir}/review-test.json"
 printf '{}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"review test":"timeout"}' "${current_dir}" "${base_dir}")"
-assert_equals '{"review test":"timeout"}' "${result}" "a timeout against a healthy baseline stays blocking rather than degrading to inconclusive"
+assert_equals '{"review test":"no_comparable_evidence"}' "${result}" "a timeout against a healthy baseline has no comparable per-test evidence"
 
 # A timeout must never be laundered into the vocabulary of test failures.
 for status in fail inconclusive pass; do
@@ -206,20 +204,21 @@ gate_case() {
   fi
 }
 
-identity_case() {
-  local label="$1" candidate_fixture="$2" baseline_fixture="$3" expected="$4" mode="${5:-evidence}"
+outcome_case() {
+  local label="$1" candidate="$2" baseline="$3" expected="$4" mode="${5:-complete}"
   rm -rf "${current_dir}" "${base_dir}"
   mkdir -p "${current_dir}" "${base_dir}"
-  cp "${FIXTURES}/${candidate_fixture}.json" "${current_dir}/review-test.json"
-  cp "${FIXTURES}/${baseline_fixture}.json" "${base_dir}/review-test.json"
   printf '%s\n' "${base_failed_structured}" > "${base_dir}/baseline-status.json"
-  if [ "${mode}" = evidence ]; then
-    python3 "${IDENTITIES}" 'review test' "${current_dir}/review-test.json" "${current_dir}/review-test.failure-identities.json"
-    python3 "${IDENTITIES}" 'review test' "${base_dir}/review-test.json" "${base_dir}/review-test.failure-identities.json"
-  elif [ "${mode}" = malformed ]; then
-    python3 "${IDENTITIES}" 'review test' "${current_dir}/review-test.json" "${current_dir}/review-test.failure-identities.json"
-    cp "${FIXTURES}/malformed.json" "${base_dir}/review-test.failure-identities.json"
-  fi
+  for phase in current base; do
+    values="${candidate}"; [ "${phase}" = base ] && values="${baseline}"
+    if [ "${mode}" != missing ]; then
+      printf '%s' "${values}" | jq -Rc --arg command 'review test' --arg fingerprint fixture 'split(",") | map(select(length > 0) | capture("(?<id>[^:]+):(?<outcome>.*)")) | {schema:"homeboy/test-outcomes/v1",command:$command,inventory_fingerprint:$fingerprint,failed_test_ids:[.[] | select(.outcome == "failed") | .id]}' > "${tmp_dir}/${phase}-outcomes.json"
+      printf '%s' "${values}" | jq -Rc --arg command 'review test' --arg fingerprint fixture 'split(",") | map(select(length > 0) | capture("(?<id>[^:]+):")) | {schema:"homeboy/test-inventory/v1",command:$command,inventory_fingerprint:$fingerprint,tests:.}' > "${tmp_dir}/${phase}-inventory.json"
+      target="${current_dir}"; [ "${phase}" = base ] && target="${base_dir}"
+      cp "${tmp_dir}/${phase}-outcomes.json" "${target}/review-test.test-outcomes.json"
+      cp "${tmp_dir}/${phase}-inventory.json" "${target}/review-test.test-inventory.json"
+    fi
+  done
   actual="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
   assert_equals "${expected}" "${actual}" "${label}"
 }
@@ -227,75 +226,5 @@ identity_case() {
 counts() { printf '{"success":false,"data":{"test_counts":{"failed":%s,"errors":0}}}' "$1"; }
 
 base_failed_structured='{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}'
-
-# 1/1 -- the defect. Both phases completed and reported one real failure. This
-# is Extra-Chill/homeboy run 30380078587, which rendered a fully green check
-# over a test that was red on main for twelve hours across 23 consecutive runs.
-gate_case "1/1: an equal, non-zero failure count is baseline_red rather than a green check" \
-  '{"review test":"fail"}' "$(counts 1)" "$(counts 1)" "${base_failed_structured}" \
-  '{"review test":"baseline_red"}'
-
-# 1/0 -- a real regression must still block. Proves the split did not make the
-# gate permissive.
-gate_case "1/0: a candidate that adds a failure against a clean baseline still fails" \
-  '{"review test":"fail"}' "$(counts 1)" "$(counts 0)" "${base_failed_structured}" \
-  '{"review test":"fail"}'
-
-# 1/3 -- a genuine partial improvement is still accepted, so the split did not
-# make the gate over-strict either. This is the branch that, across the 81-run
-# window in #10657, fired exactly zero times.
-gate_case "1/3: a genuine reduction in failures is still accepted" \
-  '{"review test":"fail"}' "$(counts 1)" "$(counts 3)" "${base_failed_structured}" \
-  '{"review test":"pass"}'
-
-# 0/1 -- looks like "the PR fixed the last failure", but it cannot be. A run
-# that genuinely reaches zero failures exits 0, is classified `pass` upstream in
-# run-homeboy-commands.sh, and never enters the gate at all. Reaching this
-# branch means the command failed while reporting nothing, so the count does
-# not describe the failure and cannot license a pass.
-gate_case "0/1: a failing command that reports zero failures is uncounted, not improved" \
-  '{"review test":"fail"}' "$(counts 0)" "$(counts 1)" "${base_failed_structured}" \
-  '{"review test":"inconclusive"}'
-
-# 0/0 -- nothing was measured on either side. #10685: a comparison with no
-# findings on either side is never a pass.
-gate_case "0/0: a comparison in which neither side measured anything is never pass" \
-  '{"review test":"fail"}' "$(counts 0)" "$(counts 0)" "${base_failed_structured}" \
-  '{"review test":"inconclusive"}'
-
-# A killed run, classified `fail` rather than `timeout`. run-homeboy-commands.sh
-# only maps exit 124 to `timeout`; the SIGKILL/containment paths in
-# run-with-liveness-timeout.sh exit 125, and an OOM kill surfaces as 137. Those
-# land here as an ordinary `fail` carrying `failed: 0`, which is precisely the
-# shape #305's timeout guard does not cover.
-killed_as_fail='{"success":false,"data":{"exit_code":137,"failure":{"category":"infrastructure","phase":"test"},"raw_output":{"stderr_tail":"terminated child process group before returning failure evidence."},"test_counts":{"failed":0,"errors":0}}}'
-gate_case "a killed run reported as fail (exit 137, failed:0) is never promoted to pass" \
-  '{"review test":"fail"}' "${killed_as_fail}" "$(counts 1)" "${base_failed_structured}" \
-  '{"review test":"inconclusive"}'
-
-containment_kill='{"success":false,"data":{"exit_code":125,"test_counts":{"failed":0,"errors":0}}}'
-gate_case "a containment-kill run (exit 125, failed:0) is never promoted to pass" \
-  '{"review test":"fail"}' "${containment_kill}" "$(counts 4)" "${base_failed_structured}" \
-  '{"review test":"inconclusive"}'
-
-# Changed-scope gating must survive all of the above. Here zero is a real
-# measurement -- "this change introduced nothing" -- not an uncounted failure,
-# so it must still pass even though the repository is red and the raw counts
-# are non-zero. If the zero guard were applied blindly this would regress.
-scoped_clean='{"success":false,"data":{"test_counts":{"failed":3,"errors":1},"changed_since":{"introduced_failures":0}}}'
-gate_case "changed-scope zero introduced failures still passes against a red baseline" \
-  '{"review test":"fail"}' "${scoped_clean}" "$(counts 3)" "${base_failed_structured}" \
-  '{"review test":"pass"}'
-
-# Identity evidence is intentionally hashes only: provenance artifacts can be
-# retained and downloaded by broad CI audiences without copying test names,
-# paths, assertion messages, or raw output.
-identity_case "same test identities are inherited" same same '{"review test":"baseline_red"}'
-identity_case "candidate-only failure blocks even when counts match" candidate-only same '{"review test":"fail"}'
-identity_case "baseline-only flaky removals are non-blocking" same baseline-only '{"review test":"baseline_red"}'
-identity_case "equal counts with different identities block" different same '{"review test":"fail"}'
-identity_case "aggregate-only identity artifacts fall back to counts" aggregate aggregate '{"review test":"baseline_red"}'
-identity_case "legacy artifacts without identity sidecars remain compatible" aggregate aggregate '{"review test":"baseline_red"}' legacy
-identity_case "malformed identity evidence fails closed" same same '{"review test":"inconclusive"}' malformed
 
 printf 'All differential gate checks passed.\n'

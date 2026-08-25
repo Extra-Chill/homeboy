@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from hashlib import sha256
 from typing import Any
 
 
@@ -122,6 +123,15 @@ def output_stem(command: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in command).strip("-") or "homeboy-output"
 
 
+def test_evidence_command_identity(command: str) -> str:
+    parts = command.split()
+    if len(parts) >= 2 and parts[:2] == ["review", "test"]:
+        return "review test"
+    if parts and parts[0] == "test":
+        return "test"
+    return command.strip()
+
+
 # How a metric was derived. The distinction is load-bearing for the zero guard
 # in main(): zero means opposite things depending on provenance.
 #
@@ -161,33 +171,65 @@ def base_command_status(command: str, base_dir: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def test_identities(command: str, directory: str) -> tuple[str, set[str] | None]:
-    """Return absent, invalid, incomplete, or complete redacted identity evidence."""
-    path = os.path.join(directory, f"{output_stem(command)}.failure-identities.json")
-    if not os.path.exists(path):
-        return "absent", None
-    evidence = read_json(path)
-    if not isinstance(evidence, dict):
-        return "invalid", None
-    identities = evidence.get("identities")
+def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, set[str] | None]:
+    """Read Homeboy-owned per-test outcome and inventory sidecars.
+
+    The inventory makes an empty failure set meaningful. Outcome evidence names
+    only failures observed by the adapter; it never invents pass or skip facts.
+    """
+    stem = output_stem(command)
+    evidence_command = test_evidence_command_identity(command)
+    outcomes = read_json(os.path.join(directory, f"{stem}.test-outcomes.json"))
+    inventory = read_json(os.path.join(directory, f"{stem}.test-inventory.json"))
+    if outcomes is None or inventory is None:
+        return "missing", None, None
+    tests = inventory.get("tests") if isinstance(inventory, dict) else None
+    failed_ids = outcomes.get("failed_test_ids") if isinstance(outcomes, dict) else None
+    provenance = ("runner", "runner_fingerprint", "workspace_fingerprint", "execution_fingerprint")
     if (
-        evidence.get("schema") != "homeboy/test-failure-identities/v1"
-        or evidence.get("command") != command
-        or not isinstance(identities, list)
-        or not isinstance(evidence.get("truncated"), bool)
-        or len(identities) > 256
-        or any(not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value) for value in identities)
-        or identities != sorted(set(identities))
+        not isinstance(outcomes, dict)
+        or not isinstance(inventory, dict)
+        or outcomes.get("schema") != "homeboy/test-outcomes/v1"
+        or inventory.get("schema") != "homeboy/test-inventory/v1"
+        or outcomes.get("command") != evidence_command
+        or inventory.get("command") != evidence_command
+        or any(not isinstance(inventory.get(key), str) or not inventory[key] for key in provenance)
+        or any(not isinstance(outcomes.get(key), str) or outcomes[key] != inventory[key] for key in provenance)
+        or not isinstance(inventory.get("inventory_fingerprint"), str)
+        or not isinstance(outcomes.get("inventory_fingerprint"), str)
+        or outcomes["inventory_fingerprint"] != inventory["inventory_fingerprint"]
+        or not isinstance(tests, list)
+        or not isinstance(failed_ids, list)
     ):
-        return "invalid", None
-    if evidence["truncated"]:
-        return "incomplete", None
-    if not identities:
-        # A valid sidecar without identifiers is explicit aggregate-only
-        # evidence. Keep the established count comparator for that legacy
-        # result shape rather than pretending an empty set identifies failures.
-        return "aggregate", None
-    return "complete", set(identities)
+        return "invalid", None, None
+    inventory_ids = [item.get("id") for item in tests if isinstance(item, dict)]
+    if (
+        len(inventory_ids) != len(tests)
+        or not inventory_ids
+        or any(not isinstance(value, str) or not value for value in inventory_ids + failed_ids)
+        or len(set(inventory_ids)) != len(inventory_ids)
+        or len(set(failed_ids)) != len(failed_ids)
+        or not set(failed_ids).issubset(inventory_ids)
+    ):
+        return "invalid", None, None
+    canonical_inventory = {
+        "command": evidence_command,
+        "execution_fingerprint": inventory["execution_fingerprint"],
+        "runner": inventory["runner"],
+        "runner_fingerprint": inventory["runner_fingerprint"],
+        "schema": "homeboy/test-inventory/v1",
+        "tests": [{"id": identity} for identity in sorted(inventory_ids)],
+        "workspace_fingerprint": inventory["workspace_fingerprint"],
+    }
+    expected_fingerprint = sha256(
+        json.dumps(canonical_inventory, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if (
+        any(len(inventory[key]) != 64 or any(char not in "0123456789abcdef" for char in inventory[key]) for key in ("runner_fingerprint", "workspace_fingerprint", "execution_fingerprint", "inventory_fingerprint"))
+        or inventory["inventory_fingerprint"] != expected_fingerprint
+    ):
+        return "invalid", None, None
+    return "complete", set(inventory_ids), set(failed_ids)
 
 
 def command_label(command: str, metadata: dict[str, Any]) -> str:
@@ -239,6 +281,67 @@ def main() -> int:
         base_metadata = base_command_status(command, base_dir)
         base_failed = command_failed(base_metadata)
         base_structured = base_metadata.get("structured_output") is True
+
+        if base_command == "test":
+            current_evidence, current_inventory, current_failed = test_outcomes(command, current_dir)
+            base_evidence, base_inventory, base_failed = test_outcomes(command, base_dir)
+            if "invalid" in {current_evidence, base_evidence}:
+                adjusted[command] = "invalid_evidence"
+                print(
+                    f"::error::Differential gate rejected {command}: type=invalid_evidence; "
+                    "Homeboy per-test outcome/inventory sidecars are malformed, duplicate, or provenance-mismatched.",
+                    file=sys.stderr,
+                )
+                continue
+            if current_evidence != "complete" or base_evidence != "complete":
+                adjusted[command] = "no_comparable_evidence"
+                print(
+                    f"::error::Differential gate rejected {command}: type=no_comparable_evidence; "
+                    "both failed phases require complete Homeboy per-test outcome and inventory sidecars.",
+                    file=sys.stderr,
+                )
+                continue
+            assert current_inventory is not None and current_failed is not None
+            assert base_inventory is not None and base_failed is not None
+            if not current_failed:
+                adjusted[command] = "invalid_evidence"
+                print(
+                    f"::error::Differential gate rejected {command}: type=invalid_evidence; "
+                    "the candidate command failed but its complete outcome evidence contains no failed identity.",
+                    file=sys.stderr,
+                )
+                continue
+            candidate_only_inventory = current_inventory - base_inventory
+            baseline_only_inventory = base_inventory - current_inventory
+            if candidate_only_inventory:
+                adjusted[command] = "no_comparable_evidence"
+                print(
+                    f"::error::Differential gate rejected {command}: type=no_comparable_evidence; "
+                    f"{len(candidate_only_inventory)} candidate-only inventory identity(s) prevent attribution.",
+                    file=sys.stderr,
+                )
+                continue
+            introduced = current_failed - base_failed
+            if introduced:
+                print(
+                    f"::error::Differential gate rejected {command}: {len(introduced)} candidate-only failed test identity(s).",
+                    file=sys.stderr,
+                )
+                continue
+            adjusted[command] = "baseline_red"
+            if baseline_only_inventory:
+                print(
+                    f"::warning::Differential gate marked {command} baseline_red: "
+                    f"{len(baseline_only_inventory)} baseline-only inventory identity(s) drifted or were flaky; "
+                    "they were excluded from introduced-failure attribution.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"::warning::Differential gate marked {command} baseline_red: all candidate failed identities reproduce on the baseline.",
+                    file=sys.stderr,
+                )
+            continue
 
         if base_failed and (base is None or not base_structured):
             # `baseline_red` asserts something specific: this failure is
@@ -295,40 +398,6 @@ def main() -> int:
                 file=sys.stderr,
             )
             continue
-
-        if base_command == "test":
-            current_identity_status, current_identities = test_identities(command, current_dir)
-            base_identity_status, base_identities = test_identities(command, base_dir)
-            if "invalid" in {current_identity_status, base_identity_status}:
-                adjusted[command] = "inconclusive"
-                print(
-                    f"::warning::Differential gate marked {command} inconclusive: malformed per-test failure identity evidence.",
-                    file=sys.stderr,
-                )
-                continue
-            if "incomplete" in {current_identity_status, base_identity_status}:
-                adjusted[command] = "inconclusive"
-                print(
-                    f"::warning::Differential gate marked {command} inconclusive: bounded per-test failure identity evidence was truncated.",
-                    file=sys.stderr,
-                )
-                continue
-            if current_identities is not None and base_identities is not None:
-                introduced = current_identities - base_identities
-                if introduced:
-                    print(
-                        f"::error::Differential gate rejected {command}: {len(introduced)} candidate-only test failure identity(s).",
-                        file=sys.stderr,
-                    )
-                    continue
-                adjusted[command] = "baseline_red"
-                removed = base_identities - current_identities
-                detail = f"; {len(removed)} baseline-only identity(s) disappeared" if removed else ""
-                print(
-                    f"::warning::Differential gate marked {command} baseline_red: all {len(current_identities)} candidate test failure identity(s) reproduce on the baseline{detail}.",
-                    file=sys.stderr,
-                )
-                continue
 
         if current is None or base is None:
             adjusted[command] = "inconclusive"

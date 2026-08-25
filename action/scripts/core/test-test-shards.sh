@@ -8,7 +8,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
 cat > "${tmp}/inventory.json" <<'JSON'
-{"schema":"homeboy/test-inventory/v1","runner":"fixture","runner_fingerprint":"runner-a","workspace_fingerprint":"workspace-a","inventory_fingerprint":"inventory-a","tests":[{"id":"slow","duration_ms":900},{"id":"medium","duration_ms":500},{"id":"unknown"},{"id":"fast","duration_ms":100}]}
+{"schema":"homeboy/test-inventory/v1","runner":"fixture","runner_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workspace_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","inventory_fingerprint":"inventory-a","tests":[{"id":"slow","duration_ms":900},{"id":"medium","duration_ms":500},{"id":"unknown"},{"id":"fast","duration_ms":100}]}
 JSON
 
 mkdir -p "${tmp}/bin"
@@ -65,7 +65,43 @@ if TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PLAN_FILE="${
   printf 'FAIL: empty shard plans must be rejected\n'; exit 1
 fi
 jq -e 'all(.shards[]; .schema == "homeboy/test-shard-manifest/v1" and (.runner == "fixture") and (.tests | all(type == "string")))' "${tmp}/one.json" >/dev/null || { printf 'FAIL: emitted shard manifests do not match the extension contract\n'; exit 1; }
-jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:"runner-a",workspace_fingerprint:"workspace-a",inventory_fingerprint:"large-inventory-a",tests:[range(0; 12000) | {id:("test-" + tostring + ("x" * 160)),duration_ms:1}]}' > "${tmp}/large-inventory.json"
+
+write_shard_pair() {
+  local plan="$1" shard_id="$2" result_dir="$3" command="${4:-review test}" failed_count="${5:-0}"
+  python3 - "${plan}" "${shard_id}" "${result_dir}" "${command}" "${failed_count}" <<'PY'
+import hashlib, json, pathlib, sys
+plan_path, shard_id, result_dir, command, failed_count = sys.argv[1:]
+plan = json.load(open(plan_path, encoding="utf-8"))
+shard = next(value for value in plan["shards"] if value["id"] == shard_id)
+tests = sorted(shard["tests"])
+failed = tests[:int(failed_count)]
+identity = "review test" if command.split()[:2] == ["review", "test"] else "test"
+canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"))
+digest = lambda value: hashlib.sha256(canonical(value).encode()).hexdigest()
+execution = digest({
+    "inventory_fingerprint": shard["inventory_fingerprint"], "runner": shard["runner"],
+    "runner_fingerprint": shard["runner_fingerprint"], "source": "shard_manifest",
+    "source_id": shard_id, "tests": tests, "workspace_fingerprint": shard["workspace_fingerprint"],
+})
+inventory = {
+    "command": identity, "execution_fingerprint": execution, "runner": shard["runner"],
+    "runner_fingerprint": shard["runner_fingerprint"], "schema": "homeboy/test-inventory/v1",
+    "tests": [{"id": value} for value in tests], "workspace_fingerprint": shard["workspace_fingerprint"],
+}
+inventory["inventory_fingerprint"] = digest(inventory)
+outcomes = {
+    "schema": "homeboy/test-outcomes/v1", "command": identity, "runner": shard["runner"],
+    "runner_fingerprint": shard["runner_fingerprint"], "workspace_fingerprint": shard["workspace_fingerprint"],
+    "execution_fingerprint": execution, "inventory_fingerprint": inventory["inventory_fingerprint"],
+    "failed_test_ids": failed,
+}
+stem = "-".join(command.split())
+directory = pathlib.Path(result_dir)
+(directory / f"{stem}.test-inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+(directory / f"{stem}.test-outcomes.json").write_text(json.dumps(outcomes), encoding="utf-8")
+PY
+}
+jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),inventory_fingerprint:"large-inventory-a",tests:[range(0; 12000) | {id:("test-" + tostring + ("x" * 160)),duration_ms:1}]}' > "${tmp}/large-inventory.json"
 [ "$(wc -c < "${tmp}/large-inventory.json")" -gt 1048576 ] || { printf 'FAIL: large inventory must exceed a conservative argv-sized payload\n'; exit 1; }
 for output in large-one large-two; do
   TEST_INVENTORY_FILE="${tmp}/large-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/${output}.json" TEST_SHARD_COUNT=2 \
@@ -84,6 +120,7 @@ for shard in shard-1 shard-2; do
     {schema:"homeboy/command-result/v3",command:"review",success:true,status:"succeeded",exit_code:0,
      data:{test_counts:{passed:$total,failed:0,skipped:0,total:$total},test_ids:($plan[0].shards[] | select(.id == $id) | .tests)}}
   ' > "${tmp}/large-artifacts/${shard}/candidate/homeboy-ci-results/review-test.json"
+  write_shard_pair "${tmp}/large-one.json" "${shard}" "${tmp}/large-artifacts/${shard}/candidate/homeboy-ci-results"
 done
 large_payload_bytes=$(( $(wc -c < "${tmp}/large-artifacts/shard-1/candidate/homeboy-ci-results/review-test.json") + $(wc -c < "${tmp}/large-artifacts/shard-2/candidate/homeboy-ci-results/review-test.json") ))
 [ "${large_payload_bytes}" -gt 1048576 ] || { printf 'FAIL: aggregate payloads must exceed a conservative argv-sized payload\n'; exit 1; }
@@ -93,7 +130,7 @@ for output in large-aggregate-one large-aggregate-two; do
 done
 cmp "${tmp}/large-aggregate-one/review-test.json" "${tmp}/large-aggregate-two/review-test.json" || { printf 'FAIL: large shard payloads must produce byte-identical aggregates\n'; exit 1; }
 jq -e '.data.test_counts.total == 12000 and .data.shard_count == 2' "${tmp}/large-aggregate-one/review-test.json" >/dev/null || { printf 'FAIL: large shard payloads did not aggregate completely\n'; exit 1; }
-jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:"runner-a",workspace_fingerprint:"workspace-a",inventory_fingerprint:"many-shard-inventory-a",tests:[range(0; 32) | {id:("test-" + tostring),duration_ms:1}]}' > "${tmp}/many-shard-inventory.json"
+jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),inventory_fingerprint:"many-shard-inventory-a",tests:[range(0; 32) | {id:("test-" + tostring),duration_ms:1}]}' > "${tmp}/many-shard-inventory.json"
 TEST_INVENTORY_FILE="${tmp}/many-shard-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/many-shard-plan.json" TEST_SHARD_COUNT=32 bash "${ROOT}/scripts/core/shard-tests.sh" plan
 many_plan_digest="$(jq -r .plan_digest "${tmp}/many-shard-plan.json")"
 many_inventory_digest="$(jq -r .inventory_digest "${tmp}/many-shard-plan.json")"
@@ -102,6 +139,7 @@ while IFS= read -r shard; do
   jq -cn --arg shard "${shard}" --arg inventory "${many_inventory_digest}" --arg plan "${many_plan_digest}" \
     '{phase:"candidate",command:"review test",shard_id:$shard,inventory_digest:$inventory,plan_digest:$plan,run_attempt:2,results:{"review test":"pass"}}' > "${tmp}/many-shard-artifacts/${shard}/candidate/manifest.json"
   jq -n '{schema:"homeboy/command-result/v3",command:"review",success:true,status:"succeeded",exit_code:0,data:{test_counts:{passed:1,failed:0,skipped:0,total:1}}}' > "${tmp}/many-shard-artifacts/${shard}/candidate/homeboy-ci-results/review-test.json"
+  write_shard_pair "${tmp}/many-shard-plan.json" "${shard}" "${tmp}/many-shard-artifacts/${shard}/candidate/homeboy-ci-results"
 done < <(jq -r '.shards[].id' "${tmp}/many-shard-plan.json")
 real_jq="$(command -v jq)"
 cat > "${tmp}/bin/jq" <<'SH'
@@ -129,7 +167,7 @@ printf 'PASS: deterministic duration-balanced plan has exact membership\n'
 # on any test and LPT falls back to the shared default -- i.e. equal-count
 # partitioning. Every existing plan fixture above carries durations, so the one
 # path CI always takes was untested (homeboy#11751 W1-7).
-jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:"runner-a",workspace_fingerprint:"workspace-a",inventory_fingerprint:"durationless-a",tests:[range(0; 40) | {id:("test-" + tostring)}]}' > "${tmp}/durationless-inventory.json"
+jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),inventory_fingerprint:"durationless-a",tests:[range(0; 40) | {id:("test-" + tostring)}]}' > "${tmp}/durationless-inventory.json"
 TEST_INVENTORY_FILE="${tmp}/durationless-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/durationless-plan.json" TEST_SHARD_COUNT=4 bash "${ROOT}/scripts/core/shard-tests.sh" plan
 jq -e '[.shards[].tests | length] | (unique | length) == 1 and .[0] == 10' "${tmp}/durationless-plan.json" >/dev/null || {
   printf 'FAIL: an inventory without durations must partition into equal counts\n'; exit 1; }
@@ -144,7 +182,7 @@ printf 'PASS: an inventory without durations partitions into deterministic equal
 
 # Forward compatibility: if a producer ever does emit durations, weight must beat
 # count, so the LPT path is not quietly dead code.
-jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:"runner-a",workspace_fingerprint:"workspace-a",inventory_fingerprint:"weighted-a",tests:[{id:"heavy",duration_ms:10000},{id:"light-1",duration_ms:100},{id:"light-2",duration_ms:100},{id:"light-3",duration_ms:100}]}' > "${tmp}/weighted-inventory.json"
+jq -n '{schema:"homeboy/test-inventory/v1",runner:"fixture",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),inventory_fingerprint:"weighted-a",tests:[{id:"heavy",duration_ms:10000},{id:"light-1",duration_ms:100},{id:"light-2",duration_ms:100},{id:"light-3",duration_ms:100}]}' > "${tmp}/weighted-inventory.json"
 TEST_INVENTORY_FILE="${tmp}/weighted-inventory.json" TEST_SHARD_PLAN_FILE="${tmp}/weighted-plan.json" TEST_SHARD_COUNT=2 bash "${ROOT}/scripts/core/shard-tests.sh" plan
 jq -e '[.shards[] | select(.tests == ["heavy"])] | length == 1' "${tmp}/weighted-plan.json" >/dev/null || {
   printf 'FAIL: a duration-bearing inventory must isolate the heavy test rather than split by count\n'; exit 1; }
@@ -172,6 +210,7 @@ for phase in candidate baseline; do
       '{phase:$phase,command:$command,shard_id:$shard,inventory_digest:$inventory,plan_digest:$plan,run_attempt:2,results:{"review test":"pass"}}' > "${tmp}/artifacts/${phase}-${shard}/${phase}/manifest.json"
     total="$(jq -r --arg id "${shard}" '.shards[] | select(.id == $id) | .tests | length' "${tmp}/one.json")"
     jq -cn --argjson total "${total}" '{schema:"homeboy/command-result/v3",command:"review",success:true,status:"succeeded",exit_code:0,data:{test_counts:{passed:$total,failed:0,skipped:0,total:$total}}}' > "${tmp}/artifacts/${phase}-${shard}/${phase}/homeboy-ci-results/review-test.json"
+    write_shard_pair "${tmp}/one.json" "${shard}" "${tmp}/artifacts/${phase}-${shard}/${phase}/homeboy-ci-results"
   done
   TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE="${phase}" TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/${phase}-output" RUN_ATTEMPT=2 \
     bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
@@ -183,6 +222,36 @@ jq -e '.data.test_counts.total == 4' "${tmp}/candidate-replay-output/review-test
 jq -e '.data.shard_plan_digest == $digest' --arg digest "${plan_digest}" "${tmp}/candidate-replay-output/review-test.json" >/dev/null || { printf 'FAIL: aggregation did not preserve immutable plan identity\n'; exit 1; }
 jq -e '."review test" == "pass"' "${tmp}/candidate-output/results.json" >/dev/null
 jq -e '.data.test_counts.total == 4' "${tmp}/candidate-output/review-test.json" >/dev/null || { printf 'FAIL: aggregation did not sum actual structured shard counts\n'; exit 1; }
+jq -e '.schema == "homeboy/test-inventory/v1" and .command == "review test" and ([.tests[].id] | sort == ["fast","medium","slow","unknown"]) and (.inventory_fingerprint | test("^[0-9a-f]{64}$")) and (.execution_fingerprint | test("^[0-9a-f]{64}$"))' "${tmp}/candidate-output/review-test.test-inventory.json" >/dev/null || { printf 'FAIL: aggregate inventory sidecar is not canonical and complete\n'; exit 1; }
+jq -e '.schema == "homeboy/test-outcomes/v1" and .command == "review test" and .failed_test_ids == []' "${tmp}/candidate-output/review-test.test-outcomes.json" >/dev/null || { printf 'FAIL: aggregate outcomes sidecar is not canonical and complete\n'; exit 1; }
+cmp "${tmp}/candidate-output/review-test.test-inventory.json" "${tmp}/baseline-output/review-test.test-inventory.json" >/dev/null || { printf 'FAIL: identical shard provenance did not produce deterministic aggregate evidence\n'; exit 1; }
+
+# Full configured commands own filenames and execution, while producer sidecars
+# retain the canonical command identity reported by Homeboy.
+for shard in shard-1 shard-2; do
+  source_dir="${tmp}/artifacts/candidate-${shard}/candidate"
+  target_dir="${tmp}/suffixed-artifacts/${shard}/candidate"
+  mkdir -p "${target_dir}/homeboy-ci-results"
+  jq '.command = "review test package-a" | .results = {"review test package-a":"pass"}' "${source_dir}/manifest.json" > "${target_dir}/manifest.json"
+  cp "${source_dir}/homeboy-ci-results/review-test.json" "${target_dir}/homeboy-ci-results/review-test-package-a.json"
+  write_shard_pair "${tmp}/one.json" "${shard}" "${target_dir}/homeboy-ci-results" 'review test package-a'
+done
+TEST_SHARD_ARTIFACT_ROOT="${tmp}/suffixed-artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test package-a' TEST_SHARD_OUTPUT_DIR="${tmp}/suffixed-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
+jq -e '.command == "review test"' "${tmp}/suffixed-output/review-test-package-a.test-inventory.json" >/dev/null || { printf 'FAIL: suffixed aggregate did not retain canonical producer command identity\n'; exit 1; }
+[ -f "${tmp}/suffixed-output/review-test-package-a.json" ] || { printf 'FAIL: suffixed aggregate did not retain the full command output stem\n'; exit 1; }
+printf 'PASS: suffixed Test commands retain full execution stems and canonical evidence identity\n'
+
+# A malformed or provenance-crossed member of an otherwise complete pair must
+# invalidate the whole aggregate rather than silently dropping that shard.
+pair="${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.test-outcomes.json"
+cp "${pair}" "${tmp}/valid-shard-outcomes.json"
+jq '.runner_fingerprint = ("f" * 64)' "${pair}" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${pair}"
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/malformed-pair-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: mismatched shard sidecar provenance must fail closed\n'; exit 1
+fi
+cp "${tmp}/valid-shard-outcomes.json" "${pair}"
+printf 'PASS: malformed and provenance-mismatched shard pairs fail closed\n'
 
 # The producing shard validates its own uploaded terminal provenance after
 # publication. Only a coherent, complete pass remains green; all other cases
@@ -265,35 +334,48 @@ for phase in candidate baseline; do
   mv "${tmp}/bad.json" "${tmp}/artifacts/${phase}-shard-1/${phase}/manifest.json"
   jq '.success = false | .status = "failed" | .exit_code = 1 | .data.test_counts.failed = 1 | .data.test_counts.passed -= 1' "${tmp}/artifacts/${phase}-shard-1/${phase}/homeboy-ci-results/review-test.json" > "${tmp}/bad.json"
   mv "${tmp}/bad.json" "${tmp}/artifacts/${phase}-shard-1/${phase}/homeboy-ci-results/review-test.json"
+  write_shard_pair "${tmp}/one.json" shard-1 "${tmp}/artifacts/${phase}-shard-1/${phase}/homeboy-ci-results" 'review test' 1
   TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE="${phase}" TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/${phase}-failed-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
   jq -e '."review test" == "fail"' "${tmp}/${phase}-failed-output/results.json" >/dev/null || { printf 'FAIL: failed shard did not retain a failure result\n'; exit 1; }
 done
 printf 'PASS: complete provenance-bound shard sets aggregate into Test\n'
 
+# Every failed shard contributes its own observed identities to the aggregate.
+jq '.results["review test"] = "fail"' "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json"
+jq '.success = false | .status = "failed" | .exit_code = 1 | .data.test_counts.failed = 1 | .data.test_counts.passed -= 1' "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results/review-test.json" > "${tmp}/bad.json"
+mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results/review-test.json"
+write_shard_pair "${tmp}/one.json" shard-2 "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results" 'review test' 1
+TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/multi-failed-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
+jq -e '.failed_test_ids | length == 2 and (unique | length) == 2' "${tmp}/multi-failed-output/review-test.test-outcomes.json" >/dev/null || { printf 'FAIL: aggregate did not union observed failures from every failed shard\n'; exit 1; }
+printf 'PASS: multiple failed shards aggregate every observed failed identity\n'
+
 jq '.results["review test"] = "fail"' "${tmp}/artifacts/candidate-shard-1/candidate/manifest.json" > "${tmp}/bad.json"
 mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-1/candidate/manifest.json"
 jq '{schema,command,success:false,status:"failed",exit_code:1,data:{test_counts:{passed:0,failed:0,skipped:0,total:0}}}' "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" > "${tmp}/bad.json"
 mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
-TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/zero-count-failed-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
-jq -e '."review test" == "fail"' "${tmp}/zero-count-failed-output/results.json" >/dev/null || { printf 'FAIL: failed zero-count shard did not retain a failure result\n'; exit 1; }
-jq -e '.schema == "homeboy/command-result/v3" and .success == false and .status == "failed" and .exit_code == 1 and (.data.test_counts.passed + .data.test_counts.failed + .data.test_counts.skipped == .data.test_counts.total)' "${tmp}/zero-count-failed-output/review-test.json" >/dev/null || { printf 'FAIL: failed zero-count shard did not emit an aggregate failed v3 result\n'; exit 1; }
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/zero-count-failed-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: failed shard without observed failure evidence must fail closed\n'; exit 1
+fi
 cp "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json" "${tmp}/valid-failed-shard.json"
 jq '.exit_code = 0' "${tmp}/valid-failed-shard.json" > "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
 if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/incoherent-exit-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
   printf 'FAIL: failed shard evidence with zero exit code must fail closed\n'; exit 1
 fi
 cp "${tmp}/valid-failed-shard.json" "${tmp}/artifacts/candidate-shard-1/candidate/homeboy-ci-results/review-test.json"
-printf 'PASS: failed zero-count v3 shard aggregates without obsolete errors counts\n'
+printf 'PASS: failed shard without observed failure identities fails closed\n'
 
 jq '.results["review test"] = "timeout"' "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json" > "${tmp}/bad.json"
 mv "${tmp}/bad.json" "${tmp}/artifacts/candidate-shard-2/candidate/manifest.json"
 rm "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results/review-test.json"
-TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/timeout-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
-jq -e '."review test" == "timeout"' "${tmp}/timeout-output/results.json" >/dev/null || { printf 'FAIL: timeout without payload must not pass\n'; exit 1; }
+rm -f "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results/review-test.test-inventory.json" "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results/review-test.test-outcomes.json"
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/timeout-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: timeout without current paired evidence must fail closed\n'; exit 1
+fi
 jq -n '{schema:"homeboy/command-result/v3",command:"review",success:false,status:"failed",exit_code:124,summary:"test phase timed out before reporting test counts",data:{failure:{category:"infrastructure",phase:"test"}}}' > "${tmp}/artifacts/candidate-shard-2/candidate/homeboy-ci-results/review-test.json"
-TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/structured-timeout-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate
-jq -e '.schema == "homeboy/command-result/v3" and .success == false and .status == "failed" and .exit_code == 124 and .data.test_counts == {passed:0,failed:0,skipped:0,total:0}' "${tmp}/structured-timeout-output/review-test.json" >/dev/null || { printf 'FAIL: structured timeout without completed counts did not aggregate deterministically\n'; exit 1; }
-jq -e '."review test" == "timeout"' "${tmp}/structured-timeout-output/results.json" >/dev/null || { printf 'FAIL: structured timeout did not retain its timeout result\n'; exit 1; }
+if TEST_SHARD_ARTIFACT_ROOT="${tmp}/artifacts" TEST_SHARD_PLAN_FILE="${tmp}/one.json" TEST_INVENTORY_FILE="${tmp}/captured-inventory.json" TEST_SHARD_PHASE=candidate TEST_SHARD_COMMAND='review test' TEST_SHARD_OUTPUT_DIR="${tmp}/structured-timeout-output" RUN_ATTEMPT=2 bash "${ROOT}/scripts/core/shard-tests.sh" aggregate >/dev/null 2>&1; then
+  printf 'FAIL: structured timeout without paired identity evidence must fail closed\n'; exit 1
+fi
 
 jq '.data.test_counts.total = 999' "${tmp}/artifacts/baseline-shard-2/baseline/homeboy-ci-results/review-test.json" > "${tmp}/bad.json"
 mv "${tmp}/bad.json" "${tmp}/artifacts/baseline-shard-2/baseline/homeboy-ci-results/review-test.json"

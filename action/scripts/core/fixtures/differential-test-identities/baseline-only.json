@@ -1,1 +1,0 @@
-{"success":false,"data":{"test_counts":{"failed":2,"errors":0},"findings":[{"fingerprint":"test::same"},{"fingerprint":"test::baseline-only"}]}}

@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Exercise Homeboy-owned per-test outcome/inventory reconciliation fixtures."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).parent
+GATE = ROOT / "apply-differential-gate.py"
+FIXTURES = ROOT / "fixtures" / "differential-test-outcomes"
+COMMAND = "review test"
+STEM = "review-test"
+BASELINE_STATUS = {COMMAND: {"status": "fail", "exit_code": 1, "structured_output": True}}
+
+
+def gate(current: Path, baseline: Path, command: str = COMMAND) -> dict:
+    completed = subprocess.run(
+        ["python3", str(GATE), json.dumps({command: "fail"}), str(current), str(baseline)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def install_pair(directory: Path, prefix: str) -> None:
+    shutil.copy(FIXTURES / f"{prefix}-outcomes.json", directory / f"{STEM}.test-outcomes.json")
+    shutil.copy(FIXTURES / f"{prefix}-inventory.json", directory / f"{STEM}.test-inventory.json")
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        current, baseline = root / "current", root / "baseline"
+        current.mkdir()
+        baseline.mkdir()
+        (baseline / "baseline-status.json").write_text(json.dumps(BASELINE_STATUS), encoding="utf-8")
+
+        install_pair(current, "13290-candidate")
+        install_pair(baseline, "13290-baseline")
+        assert gate(current, baseline) == {COMMAND: "fail"}, "#13290 nondeterministic identity must block"
+
+        for path in current.iterdir():
+            path.unlink()
+        for path in baseline.iterdir():
+            if path.name != "baseline-status.json":
+                path.unlink()
+        shutil.copy(FIXTURES / "1195-candidate-result.json", current / f"{STEM}.json")
+        shutil.copy(FIXTURES / "1195-baseline-result.json", baseline / f"{STEM}.json")
+        assert gate(current, baseline) == {COMMAND: "no_comparable_evidence"}, "#1195 must fail closed"
+
+        install_pair(current, "13290-candidate")
+        install_pair(baseline, "13290-baseline")
+        payload = json.loads((current / f"{STEM}.test-outcomes.json").read_text(encoding="utf-8"))
+        payload["failed_test_ids"].append(payload["failed_test_ids"][0])
+        (current / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "duplicate identities must fail closed"
+
+        install_pair(current, "13290-candidate")
+        payload = json.loads((current / f"{STEM}.test-inventory.json").read_text(encoding="utf-8"))
+        payload["inventory_fingerprint"] = "0" * 64
+        (current / f"{STEM}.test-inventory.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "arbitrary inventory fingerprints must fail closed"
+
+        install_pair(current, "13290-candidate")
+        payload = json.loads((current / f"{STEM}.test-outcomes.json").read_text(encoding="utf-8"))
+        payload["failed_test_ids"] = []
+        (current / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "failed commands need a failed candidate identity"
+
+        install_pair(current, "13290-candidate")
+        install_pair(baseline, "13290-baseline")
+        suffixed = "review test package-a"
+        suffixed_stem = "review-test-package-a"
+        for directory in (current, baseline):
+            for kind in ("inventory", "outcomes"):
+                (directory / f"{STEM}.test-{kind}.json").rename(directory / f"{suffixed_stem}.test-{kind}.json")
+        (baseline / "baseline-status.json").write_text(
+            json.dumps({suffixed: BASELINE_STATUS[COMMAND]}), encoding="utf-8"
+        )
+        assert gate(current, baseline, suffixed) == {suffixed: "fail"}, "suffixed commands use canonical sidecar identity"
+
+        bare_suffixed = "test package-a"
+        bare_stem = "test-package-a"
+        for directory in (current, baseline):
+            inventory_path = directory / f"{suffixed_stem}.test-inventory.json"
+            outcomes_path = directory / f"{suffixed_stem}.test-outcomes.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))
+            inventory["command"] = "test"
+            canonical = {key: value for key, value in inventory.items() if key != "inventory_fingerprint"}
+            inventory["inventory_fingerprint"] = hashlib.sha256(
+                json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            outcomes["command"] = "test"
+            outcomes["inventory_fingerprint"] = inventory["inventory_fingerprint"]
+            inventory_path.rename(directory / f"{bare_stem}.test-inventory.json")
+            outcomes_path.rename(directory / f"{bare_stem}.test-outcomes.json")
+            (directory / f"{bare_stem}.test-inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+            (directory / f"{bare_stem}.test-outcomes.json").write_text(json.dumps(outcomes), encoding="utf-8")
+        (baseline / "baseline-status.json").write_text(
+            json.dumps({bare_suffixed: BASELINE_STATUS[COMMAND]}), encoding="utf-8"
+        )
+        assert gate(current, baseline, bare_suffixed) == {bare_suffixed: "fail"}, "bare suffixed Test uses canonical sidecar identity"
+
+    print("PASS: Test outcome/inventory reconciliation fixtures")
+
+
+if __name__ == "__main__":
+    main()
