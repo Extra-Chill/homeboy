@@ -23,6 +23,11 @@ await writeFile(path.join(component, 'tests/Unit/FirstTest.php'), '<?php\nuse PH
 await writeFile(path.join(component, 'tests/Unit/Deep/SecondTest.php'), '<?php\nuse PHPUnit\\Framework\\TestCase;\nfinal class SecondTest extends TestCase {}\n');
 await writeFile(path.join(component, 'tests/standalone-smoke.php'), '<?php\necho "standalone smoke";\n');
 
+const subpathComponent = path.join(root, 'subpath-component');
+await mkdir(path.join(subpathComponent, 'plugin/tests/Unit/Deep'), { recursive: true });
+await writeFile(path.join(subpathComponent, 'plugin/sample-plugin.php'), '<?php\n/* Plugin Name: Sample Plugin */\n');
+await writeFile(path.join(subpathComponent, 'plugin/tests/Unit/Deep/OwnershipTest.php'), '<?php\nuse PHPUnit\\Framework\\TestCase;\nfinal class OwnershipTest extends TestCase {}\n');
+
 await writeFile(cli, `#!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
@@ -70,7 +75,7 @@ process.exitCode = failed ? 2 : 0;
 `);
 await chmod(cli, 0o755);
 
-function execute(name, changed, scenario = 'passed', env = {}) {
+function execute(name, changed, scenario = 'passed', env = {}, settings = {}, componentPath = component) {
   const artifacts = path.join(root, `${name}-artifacts`);
   const capturedOptions = path.join(root, `${name}-options.json`);
   const run = spawnSync('bash', [runner], {
@@ -78,13 +83,13 @@ function execute(name, changed, scenario = 'passed', env = {}) {
       ...process.env,
       CAPTURED_OPTIONS: capturedOptions,
       SELECTION_SCENARIO: scenario,
-      HOMEBOY_COMPONENT_PATH: component,
+      HOMEBOY_COMPONENT_PATH: componentPath,
       COMPONENT_ID: 'sample-plugin',
       HOMEBOY_WP_CODEBOX_BIN: cli,
       HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts,
-       HOMEBOY_SETTINGS_JSON: JSON.stringify({ phpunit_no_tests: 'fail', wp_codebox_phpunit_bootstrap_mode: 'managed' }),
-       HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES: changed,
-       ...env,
+      HOMEBOY_SETTINGS_JSON: JSON.stringify({ phpunit_no_tests: 'fail', wp_codebox_phpunit_bootstrap_mode: 'managed', ...settings }),
+      HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES: changed,
+      ...env,
     },
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
@@ -116,6 +121,42 @@ try {
     unknown: 0,
   });
 
+  const subpath = execute(
+    'subpath',
+    'plugin/tests/Unit/Deep/OwnershipTest.php',
+    'passed',
+    {},
+    { wp_codebox_source_subpath: 'plugin' },
+    subpathComponent,
+  );
+  assert.equal(subpath.run.status, 0, subpath.run.stderr || subpath.run.stdout);
+  assert.deepEqual(JSON.parse(await readFile(subpath.capturedOptions, 'utf8')).changedTestFiles, [
+    '/wordpress/wp-content/plugins/sample-plugin/tests/Unit/Deep/OwnershipTest.php',
+  ]);
+
+  const mounted = execute(
+    'mounted',
+    'tests/Unit/Deep/SecondTest.php',
+    'passed',
+    {},
+    {
+      wp_codebox_phpunit_mounts: [{ source: component, target: '/home/example/public_html', mode: 'readwrite' }],
+      wp_codebox_phpunit_test_root: '/home/example/public_html/tests',
+    },
+  );
+  assert.equal(mounted.run.status, 0, mounted.run.stderr || mounted.run.stdout);
+  const mountedOptions = JSON.parse(await readFile(mounted.capturedOptions, 'utf8'));
+  assert.deepEqual(mountedOptions.changedTestFiles, [
+    '/home/example/public_html/tests/Unit/Deep/SecondTest.php',
+  ]);
+  assert.ok(mountedOptions.changedTestFiles[0].startsWith(`${mountedOptions.testRoot}/`));
+
+  const outside = execute('outside', '../elsewhere/tests/StrayTest.php');
+  assert.equal(outside.run.status, 0, outside.run.stderr || outside.run.stdout);
+  const outsideOptions = JSON.parse(await readFile(outside.capturedOptions, 'utf8'));
+  assert.deepEqual(outsideOptions.changedTestFiles, ['../elsewhere/tests/StrayTest.php']);
+  assert.notEqual(outsideOptions.changedTestFiles.length, 0, 'an untranslatable path must not empty the scope');
+
   const invalid = execute('standalone-script', `${selected}\ntests/standalone-smoke.php`);
   assert.notEqual(invalid.run.status, 0, 'a standalone PHP script must not enter the PHPUnit scope');
   assert.match(`${invalid.run.stdout}${invalid.run.stderr}`, /contains non-PHPUnit paths: tests\/standalone-smoke\.php/);
@@ -125,26 +166,26 @@ try {
   assert.equal((await artifactResults(zero.artifacts)).status, 'failed');
   assert.match(zero.run.stdout, /PHPUNIT_ZERO_TESTS/);
 
-   const commandFailed = execute('command-failed', selected, 'command-failed');
-   assert.notEqual(commandFailed.run.status, 0, 'a PHPUnit command failure must remain a failure');
-   assert.equal((await artifactResults(commandFailed.artifacts)).status, 'failed');
+  const commandFailed = execute('command-failed', selected, 'command-failed');
+  assert.notEqual(commandFailed.run.status, 0, 'a PHPUnit command failure must remain a failure');
+  assert.equal((await artifactResults(commandFailed.artifacts)).status, 'failed');
 
-   const managedSource = path.join(root, 'managed-runtime', 'source');
-   const managedCli = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
-   await mkdir(path.dirname(managedCli), { recursive: true });
-   await writeFile(managedCli, await readFile(cli));
-   spawnSync('git', ['init', '-q'], { cwd: managedSource });
-   spawnSync('git', ['add', '.'], { cwd: managedSource });
-   spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture'], { cwd: managedSource });
-   const sourceSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: managedSource, encoding: 'utf8' }).stdout.trim();
-   await writeFile(path.join(managedSource, '.homeboy-runtime-identity.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-managed-runtime-identity/v1', source_sha: sourceSha, cli_sha256: createHash('sha256').update(await readFile(managedCli)).digest('hex'), required_capabilities: ['wp-codebox/browser-contained-site-open/v1'] }));
-   await writeFile(managedCli, `${await readFile(managedCli, 'utf8')}\n// tampered after setup\n`);
-   const tampered = execute('tampered-managed', selected, 'passed', {
-     HOMEBOY_WP_CODEBOX_BIN: managedCli,
-     HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.dirname(managedSource),
-   });
-   assert.notEqual(tampered.run.status, 0, 'the adapter must reject a tampered managed resolved command');
-   assert.match(`${tampered.run.stdout}${tampered.run.stderr}`, /wp_codebox_managed_source_identity_invalid/);
+  const managedSource = path.join(root, 'managed-runtime', 'source');
+  const managedCli = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
+  await mkdir(path.dirname(managedCli), { recursive: true });
+  await writeFile(managedCli, await readFile(cli));
+  spawnSync('git', ['init', '-q'], { cwd: managedSource });
+  spawnSync('git', ['add', '.'], { cwd: managedSource });
+  spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture'], { cwd: managedSource });
+  const sourceSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: managedSource, encoding: 'utf8' }).stdout.trim();
+  await writeFile(path.join(managedSource, '.homeboy-runtime-identity.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-managed-runtime-identity/v1', source_sha: sourceSha, cli_sha256: createHash('sha256').update(await readFile(managedCli)).digest('hex'), required_capabilities: ['wp-codebox/browser-contained-site-open/v1'] }));
+  await writeFile(managedCli, `${await readFile(managedCli, 'utf8')}\n// tampered after setup\n`);
+  const tampered = execute('tampered-managed', selected, 'passed', {
+    HOMEBOY_WP_CODEBOX_BIN: managedCli,
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.dirname(managedSource),
+  });
+  assert.notEqual(tampered.run.status, 0, 'the adapter must reject a tampered managed resolved command');
+  assert.match(`${tampered.run.stdout}${tampered.run.stderr}`, /wp_codebox_managed_source_identity_invalid/);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
