@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.360.4] - 2026-08-25
+
+### Changed
+- pin JobStatus's wire string to its serde form
+- seal the crate boundary and delete what rustc exposed
+- collapse five twin report declarations onto two
+- route capabilities from parsed preflight
+
+### Fixed
+- delete four unreachable variants from the durable subsystem enums
+- stop collapsing recoverable runs into partial failure
+- restore test fixtures corrupted by the visibility narrowing
+
 ## [0.360.3] - 2026-08-25
 
 ### Fixed
