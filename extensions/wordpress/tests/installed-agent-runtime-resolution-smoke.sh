@@ -57,8 +57,9 @@ for target in \
 done
 
 # Resolving a shim filename is insufficient: execute the copied runtime shim so
-# its dependency on the copied WordPress extension is proven in the installed
-# sibling layout that failed before test inventory started in #2690.
+# its dependency on the copied WordPress extension is proven after installation
+# in the sibling layout that failed before test inventory started in #2690 and
+# must remain the runtime path after the setup bootstrap fix in #2700.
 selection_module="$(fixture_node "${EXTENSION_DIR}/scripts/lib/agent-runtime-paths.cjs" "wp-codebox/lib/wp-codebox-runtime-selection.js" 2>&1)"
 selection_output="$(fixture_node - "${selection_module}" <<'NODE' 2>&1
 const selection = require(process.argv[2]);
