@@ -476,14 +476,14 @@ impl WorktreeProviderTerminalDisposition {
         }
     }
 
-    fn owner_outcome(self) -> &'static str {
+    pub(crate) fn owner_outcome(self) -> &'static str {
         match self {
             Self::Succeeded => "success",
             Self::Failed | Self::Cancelled | Self::TimedOut | Self::Interrupted => "failure",
         }
     }
 
-    fn lifecycle_state(self) -> &'static str {
+    pub(crate) fn lifecycle_state(self) -> &'static str {
         match self {
             Self::Succeeded => "completed",
             Self::Failed => "failed",

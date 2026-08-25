@@ -337,6 +337,7 @@ fn create_with_store_unlocked(
         cleanup_policy: options
             .cleanup_policy
             .unwrap_or_else(|| CleanupPolicy::default_for_run(options.run_id.as_deref())),
+        terminal_disposition: None,
         branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
         created_at: chrono::Utc::now().to_rfc3339(),
         state: TaskWorktreeState::Active,

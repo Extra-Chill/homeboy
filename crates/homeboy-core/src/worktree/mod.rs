@@ -109,6 +109,58 @@ pub fn persist_terminal_workspace_authority(
     })
 }
 
+/// Bind one terminal outcome to the native lifecycle owner. Cleanup remains a
+/// separate authority-gated operation; finalization only makes successful runs
+/// eligible and durably preserves every non-successful workspace.
+pub fn finalize_provider_lifecycle(
+    id: &str,
+    owner_run_ref: &str,
+    disposition: crate::worktree_providers::WorktreeProviderTerminalDisposition,
+) -> Result<TaskWorktreeRecord> {
+    with_task_worktree_registry_write_lock(|| {
+        let store = metadata_dir()?;
+        let mut record = read_record(&store, id)?;
+        if record.run_id.as_deref() != Some(owner_run_ref) {
+            return Err(Error::validation_invalid_argument(
+                "owner_run_ref",
+                "native worktree lifecycle owner does not match the finalization request",
+                Some(owner_run_ref.to_string()),
+                None,
+            ));
+        }
+        if let Some(existing) = record.terminal_disposition.as_deref() {
+            if existing != disposition.as_str() {
+                return Err(Error::validation_invalid_argument(
+                    "terminal_disposition",
+                    "native worktree lifecycle already finalized with a different disposition",
+                    Some(existing.to_string()),
+                    None,
+                ));
+            }
+            return Ok(record);
+        }
+        record.cleanup_policy = if disposition
+            == crate::worktree_providers::WorktreeProviderTerminalDisposition::Succeeded
+        {
+            CleanupPolicy::RemoveWhenSafe
+        } else {
+            CleanupPolicy::PreserveOnFailure
+        };
+        record.terminal_disposition = Some(disposition.as_str().to_string());
+        record.lifecycle_revision = record.lifecycle_revision.checked_add(1).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lifecycle_revision",
+                "task worktree lifecycle revision overflowed during finalization",
+                Some(id.to_string()),
+                None,
+            )
+        })?;
+        record.terminal_workspace_authority = None;
+        store_ops::write_record_unlocked(&store, &record)?;
+        Ok(record)
+    })
+}
+
 pub(crate) fn list_unlocked() -> Result<WorktreeListOutput> {
     list_with_store(&metadata_dir()?)
 }
@@ -493,6 +545,7 @@ fn record_for_test(
         task_url: None,
         run_id: None,
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+        terminal_disposition: None,
         branch_cleanup_intent: BranchCleanupIntent::default(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
         state,

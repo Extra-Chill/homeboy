@@ -563,6 +563,7 @@ mod tests {
                 task_url: None,
                 run_id: None,
                 cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+                terminal_disposition: None,
                 branch_cleanup_intent: Default::default(),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 state: TaskWorktreeState::Active,

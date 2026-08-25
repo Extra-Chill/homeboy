@@ -1694,9 +1694,6 @@ fn finalize_provider_worktrees(
     report: &agent_task_service::AgentTaskCookBatchReport,
     previously_terminal: Option<&BTreeMap<String, String>>,
 ) -> Result<()> {
-    if !configured_provider_workspace_creation()? {
-        return Ok(());
-    }
     let config = homeboy::core::defaults::load_config();
     for cell in &report.cooks {
         if !cell.lifecycle().terminal {
@@ -1712,27 +1709,13 @@ fn finalize_provider_worktrees(
         if previously_terminal.is_some_and(|terminal| terminal.contains_key(&cook.run_id())) {
             continue;
         }
-        let resolution =
-            homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-                &cook.to_worktree,
-                &config,
-                None,
-            )?;
-        if homeboy::core::worktree_providers::worktree_provider_lifecycle_finalizer_argv_from_config(
-            &resolution.provider_id,
-            &config,
-        )?
-        .is_none()
-        {
-            continue;
-        }
         let disposition = if cell.exit_code == 0 {
             homeboy::core::worktree_providers::WorktreeProviderTerminalDisposition::Succeeded
         } else {
             homeboy::core::worktree_providers::WorktreeProviderTerminalDisposition::Failed
         };
-        homeboy::core::worktree_providers::finalize_apply_enabled_worktree_provider_from_config(
-            &resolution,
+        let finalization = homeboy::core::worktree_provider::finalize_worktree_from_config(
+            &cook.to_worktree,
             &homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
                 purpose: "agent_task_cook".to_string(),
                 owner_run_ref: cook.run_id(),
@@ -1741,6 +1724,18 @@ fn finalize_provider_worktrees(
             disposition,
             &config,
         )?;
+        if matches!(
+            finalization,
+            homeboy::core::worktree_provider::WorktreeFinalizationLookup::NotFound
+        ) && configured_provider_workspace_creation()?
+        {
+            return Err(
+                homeboy::core::worktree_provider::worktree_finalization_not_found_error(
+                    &cook.to_worktree,
+                    &config,
+                ),
+            );
+        }
     }
     Ok(())
 }
@@ -5969,6 +5964,84 @@ mod tests {
                 plan.cooks[0].run_id(),
                 plan.cooks[0].run_id(),
             )));
+        });
+    }
+
+    #[test]
+    fn dispatcher_fanout_finalizes_native_failure_as_preserved() {
+        with_isolated_home(|home| {
+            let source = home.path().join("Developer/fixture");
+            std::fs::create_dir_all(&source).expect("source checkout");
+            for args in [
+                vec!["init", "--quiet", "-b", "main"],
+                vec!["config", "user.email", "test@example.com"],
+                vec!["config", "user.name", "Homeboy Test"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git runs")
+                    .success());
+            }
+            std::fs::write(source.join("homeboy.json"), r#"{"id":"fixture"}"#)
+                .expect("component manifest");
+            assert!(Command::new("git")
+                .args(["add", "."])
+                .current_dir(&source)
+                .status()
+                .expect("git add")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(&source)
+                .status()
+                .expect("git commit")
+                .success());
+            write_component_registration(home.path(), "fixture", &source);
+
+            let mut plan = test_batch_plan();
+            plan.cooks.truncate(1);
+            plan.cooks[0].to_worktree = "fixture@native-finalization".to_string();
+            homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                component_id: "fixture".to_string(),
+                branch: "native-finalization".to_string(),
+                from: Some("main".to_string()),
+                task_url: plan.cooks[0].task_url.clone(),
+                run_id: Some(plan.cooks[0].run_id()),
+                cleanup_policy: Some(homeboy::core::worktree::CleanupPolicy::RemoveWhenSafe),
+            })
+            .expect("native destination");
+            let report = agent_task_service::AgentTaskCookBatchReport {
+                schema: "homeboy/agent-task-cook-batch/v1",
+                batch_id: plan.fanout_id.clone(),
+                status: "failed".to_string(),
+                total: 1,
+                queued: 0,
+                running: 0,
+                succeeded: 0,
+                failed: 1,
+                cancelled: 0,
+                timed_out: 0,
+                cooks: vec![agent_task_service::AgentTaskCookBatchCellReport {
+                    cook_id: plan.cooks[0].cook_id.clone(),
+                    initial_run_id: plan.cooks[0].run_id(),
+                    status: "failed".to_string(),
+                    exit_code: 1,
+                    result: None,
+                    error: None,
+                }],
+            };
+
+            finalize_provider_worktrees(&plan, &report, None)
+                .expect("native terminal finalization");
+            let record = homeboy::core::worktree::resolve(&plan.cooks[0].to_worktree)
+                .expect("native record");
+            assert_eq!(
+                record.cleanup_policy,
+                homeboy::core::worktree::CleanupPolicy::PreserveOnFailure
+            );
+            assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
         });
     }
 

@@ -144,6 +144,24 @@ pub trait WorktreeProvisionProvider {
     ) -> Result<WorktreeProvision>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeFinalizationLookup {
+    Finalized(worktree_providers::WorktreeProviderFinalization),
+    Unsupported,
+    NotFound,
+}
+
+/// Optional terminal lifecycle capability. Finalization is idempotent and only
+/// records cleanup disposition; deletion remains a separately authorized step.
+pub trait WorktreeFinalizationProvider {
+    fn finalize(
+        &self,
+        handle: &str,
+        lifecycle: &WorktreeProvisionLifecycle,
+        disposition: worktree_providers::WorktreeProviderTerminalDisposition,
+    ) -> Result<WorktreeFinalizationLookup>;
+}
+
 /// Built-in provider for Homeboy's standalone task-worktree registry.
 ///
 /// This intentionally excludes adopted workspace refs because the first
@@ -340,6 +358,42 @@ impl WorktreeProvisionProvider for NativeWorktreeProvider {
     }
 }
 
+impl WorktreeFinalizationProvider for NativeWorktreeProvider {
+    fn finalize(
+        &self,
+        handle: &str,
+        lifecycle: &WorktreeProvisionLifecycle,
+        disposition: worktree_providers::WorktreeProviderTerminalDisposition,
+    ) -> Result<WorktreeFinalizationLookup> {
+        let Some(record) = worktree::resolve_if_present(handle)? else {
+            return Ok(WorktreeFinalizationLookup::NotFound);
+        };
+        if record.id != handle {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                format!(
+                    "native worktree registry record `{}` does not match requested handle `{handle}`",
+                    record.id
+                ),
+                Some(handle.to_string()),
+                None,
+            ));
+        }
+        let record =
+            worktree::finalize_provider_lifecycle(handle, &lifecycle.owner_run_ref, disposition)?;
+        Ok(WorktreeFinalizationLookup::Finalized(
+            worktree_providers::WorktreeProviderFinalization {
+                provider_id: "native".to_string(),
+                handle: record.id,
+                disposition,
+                owner_outcome: disposition.owner_outcome().to_string(),
+                lifecycle_state: disposition.lifecycle_state().to_string(),
+                inspection_path: record.worktree_path,
+            },
+        ))
+    }
+}
+
 fn validate_native_provision_handle(intent: &WorktreeProvisionIntent) -> Result<()> {
     let expected = worktree::handle_for_branch(&intent.repo, &intent.head);
     if expected == intent.handle {
@@ -517,6 +571,44 @@ impl WorktreeProvisionProvider for CommandWorktreeProvider<'_> {
     }
 }
 
+impl WorktreeFinalizationProvider for CommandWorktreeProvider<'_> {
+    fn finalize(
+        &self,
+        handle: &str,
+        lifecycle: &WorktreeProvisionLifecycle,
+        disposition: worktree_providers::WorktreeProviderTerminalDisposition,
+    ) -> Result<WorktreeFinalizationLookup> {
+        let resolution =
+            match worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+                handle,
+                self.config,
+                None,
+            ) {
+                Ok(resolution) => resolution,
+                Err(error) if worktree_providers::is_worktree_provider_not_found(&error) => {
+                    return Ok(WorktreeFinalizationLookup::NotFound);
+                }
+                Err(error) => return Err(error),
+            };
+        if worktree_providers::worktree_provider_lifecycle_finalizer_argv_from_config(
+            &resolution.provider_id,
+            self.config,
+        )?
+        .is_none()
+        {
+            return Ok(WorktreeFinalizationLookup::Unsupported);
+        }
+        Ok(WorktreeFinalizationLookup::Finalized(
+            worktree_providers::finalize_apply_enabled_worktree_provider_from_config(
+                &resolution,
+                lifecycle,
+                disposition,
+                self.config,
+            )?,
+        ))
+    }
+}
+
 fn command_provision_destination(
     resolution: worktree_providers::WorktreeProviderResolution,
 ) -> WorktreeProvisionDestination {
@@ -652,6 +744,26 @@ pub fn ensure_worktree_provision_from_config(
         }
         None => NativeWorktreeProvider.ensure(intent, lifecycle),
     }
+}
+
+/// Finalize through native ownership first, then configured ownership. Absence
+/// and unsupported optional finalization are explicit non-error outcomes.
+pub fn finalize_worktree_from_config(
+    handle: &str,
+    lifecycle: &WorktreeProvisionLifecycle,
+    disposition: worktree_providers::WorktreeProviderTerminalDisposition,
+    config: &HomeboyConfig,
+) -> Result<WorktreeFinalizationLookup> {
+    let native = NativeWorktreeProvider;
+    match native.finalize(handle, lifecycle, disposition)? {
+        WorktreeFinalizationLookup::NotFound => {}
+        outcome => return Ok(outcome),
+    }
+    CommandWorktreeProvider::new(config).finalize(handle, lifecycle, disposition)
+}
+
+pub fn worktree_finalization_not_found_error(handle: &str, config: &HomeboyConfig) -> Error {
+    worktree_providers::worktree_provider_not_found_error(handle, config, true)
 }
 
 fn configured_provisioning_declared(config: &HomeboyConfig) -> bool {
@@ -889,6 +1001,41 @@ mod tests {
                 .expect("native ensure replay");
             assert_eq!(replay.action, WorktreeProvisionAction::Admitted);
             assert_eq!(replay.idempotency_key, ensured.idempotency_key);
+            let WorktreeFinalizationLookup::Finalized(finalized) = NativeWorktreeProvider
+                .finalize(
+                    &intent.handle,
+                    &lifecycle,
+                    worktree_providers::WorktreeProviderTerminalDisposition::Failed,
+                )
+                .expect("native finalization")
+            else {
+                panic!("native lifecycle must finalize");
+            };
+            assert_eq!(finalized.provider_id, "native");
+            assert_eq!(finalized.owner_outcome, "failure");
+            assert_eq!(finalized.lifecycle_state, "failed");
+            let record = worktree::resolve_if_present(&intent.handle)
+                .expect("native record lookup")
+                .expect("native record");
+            assert_eq!(
+                record.cleanup_policy,
+                worktree::CleanupPolicy::PreserveOnFailure
+            );
+            assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+            NativeWorktreeProvider
+                .finalize(
+                    &intent.handle,
+                    &lifecycle,
+                    worktree_providers::WorktreeProviderTerminalDisposition::Failed,
+                )
+                .expect("native finalization replay");
+            NativeWorktreeProvider
+                .finalize(
+                    &intent.handle,
+                    &lifecycle,
+                    worktree_providers::WorktreeProviderTerminalDisposition::Succeeded,
+                )
+                .expect_err("terminal disposition cannot change");
             std::fs::write(path.join("dirty"), "dirty\n").expect("dirty native worktree");
             assert_unsafe_lookup(&NativeWorktreeProvider, "fixture@native");
         });
