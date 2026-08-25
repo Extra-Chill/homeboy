@@ -1627,6 +1627,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unsupported_remote_stat_returns_typed_capability_failure() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("plugin.php");
+        fs::write(&root, "release").expect("file");
+
+        let output = run_probe_command(&root, Some("stat() { return 127; }"));
+        assert_eq!(
+            output.status.code(),
+            Some(RemoteProbeCapability::Stat.exit_code())
+        );
+
+        let error = remote_probe_capability_error(
+            root.to_str().expect("path"),
+            RemoteProbeCapability::Stat,
+            "remote",
+            &command_output(&output),
+        );
+        assert_eq!(
+            error.code,
+            homeboy_core::error::ErrorCode::RemoteCapabilityMissing
+        );
+        assert_eq!(
+            error
+                .details
+                .get("capability")
+                .and_then(|value| value.as_str()),
+            Some("stat")
+        );
+    }
+
     /// #10290: deploy and recovery now share one walker, and this pins the two
     /// deliberate divergences so a future "just unify them" change has to argue
     /// with a test instead of silently flipping a drift detector's answer.
