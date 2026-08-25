@@ -134,7 +134,7 @@ fi
 # until this candidate has its checkout, artifacts, identity, and readiness.
 CANDIDATE_DIR="$(mktemp -d "${PARENT_DIR}/.wp-codebox-candidate.XXXXXX")" || fail "failed to create staged WP Codebox cache checkout"
 echo "Staging WP Codebox cache update: $SOURCE -> $CANDIDATE_DIR"
-git clone --quiet --no-checkout "$SOURCE" "$CANDIDATE_DIR" || fail "git clone failed for $SOURCE"
+git clone --quiet --no-checkout -- "$SOURCE" "$CANDIDATE_DIR" || fail "git clone failed for $SOURCE"
 
 if [ -z "$REQUESTED_REF" ]; then
     REQUESTED_REF="$(git ls-remote --symref "$SOURCE" HEAD 2>/dev/null | sed -n 's#^ref: refs/heads/##; s#[[:space:]]HEAD$##p' | head -n 1)"
