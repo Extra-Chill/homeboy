@@ -25,10 +25,6 @@ use crate::cli_surface::{
 };
 use crate::command_contract::{registered_command, CommandSafetySpec};
 
-pub(crate) fn command_safety_manifest_from(surface: CommandSurface) -> CommandSafetyManifest {
-    command_safety_manifest_from_dynamic(surface, &[])
-}
-
 pub(crate) fn command_safety_manifest_from_dynamic(
     surface: CommandSurface,
     dynamic_commands: &[DynamicCommandDescriptor],
