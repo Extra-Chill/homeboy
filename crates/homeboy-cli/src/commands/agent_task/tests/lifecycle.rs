@@ -877,32 +877,37 @@ fn recoverable_runner_cook_args(source: &std::path::Path) -> AgentTaskCookArgs {
     *cook
 }
 
+fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().expect("fixture root");
+    let primary = root.path().join("primary");
+    let source = root.path().join("worktree");
+    std::fs::create_dir(&primary).expect("create primary checkout");
+    init_runtime_component_checkout(&primary);
+    let remote = Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/fixture.git",
+        ])
+        .current_dir(&primary)
+        .status()
+        .expect("configure fixture remote");
+    assert!(remote.success());
+    let worktree = Command::new("git")
+        .args(["worktree", "add", "-b", "fixture-recovery"])
+        .arg(&source)
+        .current_dir(&primary)
+        .status()
+        .expect("create fixture worktree");
+    assert!(worktree.success());
+    (root, source)
+}
+
 #[test]
 fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_commands() {
     with_temp_home(|| {
-        let root = tempfile::tempdir().expect("fixture root");
-        let primary = root.path().join("primary");
-        let source = root.path().join("worktree");
-        std::fs::create_dir(&primary).expect("create primary checkout");
-        init_runtime_component_checkout(&primary);
-        let remote = Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/fixture.git",
-            ])
-            .current_dir(&primary)
-            .status()
-            .expect("configure fixture remote");
-        assert!(remote.success());
-        let worktree = Command::new("git")
-            .args(["worktree", "add", "-b", "fixture-recovery"])
-            .arg(&source)
-            .current_dir(&primary)
-            .status()
-            .expect("create fixture worktree");
-        assert!(worktree.success());
+        let (_root, source) = recoverable_runner_worktree();
         let dispatcher = Arc::new(RecoverableRunnerDispatcher {
             unavailable: AtomicBool::new(true),
         });
@@ -960,6 +965,41 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
             .0["metadata"]["worktree_provision"]["action"],
             "existing",
             "resuming preserves Cook worktree evidence"
+        );
+    });
+}
+
+#[test]
+fn cli_cook_converges_recipe_lifecycle_and_index_after_transient_first_write_failure() {
+    with_temp_home(|| {
+        let (_root, source) = recoverable_runner_worktree();
+        let dispatcher = Arc::new(RecoverableRunnerDispatcher {
+            unavailable: AtomicBool::new(false),
+        });
+        agent_task_lifecycle::fail_next_record_write_for_test();
+
+        let (failed, exit_code) = run_cook_with_executor_and_dispatcher(
+            recoverable_runner_cook_args(&source),
+            Arc::new(CapturingExecutor::default()),
+            Some(dispatcher),
+        )
+        .expect("CLI Cook converges its durable admission");
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(failed["status"], "pre_execution_failure");
+        let run_id = failed["latest_run_id"]
+            .as_str()
+            .expect("report names the repaired attempt");
+        assert!(agent_task_lifecycle::run_record_exists_readonly(run_id).expect("lifecycle exists"));
+        let index = agent_task_lifecycle::cook_index("cook-cli-preflight-recovery")
+            .expect("Cook index exists");
+        assert_eq!(index.latest_run_id, run_id);
+        assert_eq!(index.attempts.len(), 1);
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id)
+                .expect("recovered attempt")
+                .metadata["provider_executions_consumed"],
+            0
         );
     });
 }
