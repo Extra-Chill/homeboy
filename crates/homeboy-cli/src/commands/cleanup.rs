@@ -1,8 +1,10 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use fs4::fs_std::FileExt;
 use homeboy::core::cleanup::{
@@ -35,7 +37,7 @@ pub use homeboy_command_contract::cleanup::{
     CleanupRetainedStorageArgs, CleanupWorktreesArgs, LEAKED_TEST_HOMES_METADATA,
     RUNNER_DOWNLOADS_METADATA,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::runs::{runs_resources, RunsOutput, RunsResourcesArgs, RunsResourcesOutput};
@@ -44,10 +46,56 @@ use super::CmdResult;
 
 const AUTOMATIC_RETENTION_LOCK_FILE: &str = "automatic-retention-controller.lock";
 const AUTOMATIC_RETENTION_STATE_FILE: &str = "automatic-retention-controller.json";
+const CLEANUP_CATEGORY_CHILD_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_CHILD";
+const CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_TIMEOUT_MS";
+const CLEANUP_CATEGORY_TIMEOUT: Duration = Duration::from_secs(30);
+const CLEANUP_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(120);
+const CLEANUP_CHILD_TERMINATION_ALLOWANCE: Duration = Duration::from_secs(5);
+const CLEANUP_CATEGORY_HEARTBEAT: Duration = Duration::from_secs(5);
+const CLEANUP_CATEGORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+#[cfg(any(test, feature = "test-support"))]
+const CLEANUP_CATEGORY_FIXTURE_ENV: &str = "HOMEBOY_TEST_CLEANUP_CATEGORY_FIXTURE";
+#[cfg(any(test, feature = "test-support"))]
+const CLEANUP_CATEGORY_TIMEOUT_ENV: &str = "HOMEBOY_TEST_CLEANUP_CATEGORY_TIMEOUT_MS";
 
 // Advisory file locks are process-scoped on POSIX. Keep the process-local gate
 // so a manual invocation cannot overlap a scheduled pass in this process.
 static AUTOMATIC_RETENTION_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CleanupProgressContext {
+    run_ref: String,
+    report: Box<dyn FnMut(Value) -> homeboy::core::Result<()>>,
+}
+
+thread_local! {
+    static CLEANUP_PROGRESS_CONTEXT: RefCell<Option<CleanupProgressContext>> = const { RefCell::new(None) };
+}
+
+fn with_cleanup_progress_context<T>(context: CleanupProgressContext, run: impl FnOnce() -> T) -> T {
+    CLEANUP_PROGRESS_CONTEXT.with(|active| {
+        let previous = active.replace(Some(context));
+        let result = run();
+        active.replace(previous);
+        result
+    })
+}
+
+fn report_cleanup_progress(progress: Value) {
+    CLEANUP_PROGRESS_CONTEXT.with(|active| {
+        if let Some(context) = active.borrow_mut().as_mut() {
+            let _ = (context.report)(progress);
+        }
+    });
+}
+
+fn active_cleanup_run_ref() -> Option<String> {
+    CLEANUP_PROGRESS_CONTEXT.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .map(|context| context.run_ref.clone())
+    })
+}
 
 #[derive(Serialize)]
 struct AutomaticRetentionControllerOutput {
@@ -161,38 +209,31 @@ pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> Cmd
             })
         })
         .map(|output| (output, 0)),
-        Some(CleanupCommand::Worktrees(args)) => cleanup::cleanup_resources_from_config(
-            ResourceCleanupOptions {
-                intent: cleanup_intent(args.apply),
-                artifacts: None,
-                worktree_providers: Some(WorktreeProviderCleanupOptions {
-                    provider: args.provider,
-                    all_providers: args.all_providers,
-                    apply: args.apply,
-                    timeout: None,
-                }),
-            },
-            defaults::load_config(),
-        )
-        .and_then(|output| {
-            serde_json::to_value(output).map_err(|err| {
-                homeboy::core::Error::internal_json(
-                    err.to_string(),
-                    Some("serialize cleanup worktrees output".to_string()),
-                )
-            })
-        })
-        .map(|output| (output, 0)),
-        Some(CleanupCommand::RetainedStorage(args)) => retained_storage_report(args)
-            .and_then(|output| {
-                serde_json::to_value(output).map_err(|err| {
+        Some(CleanupCommand::Worktrees(args)) => {
+            let output = cleanup::cleanup_resources_from_config(
+                ResourceCleanupOptions {
+                    intent: cleanup_intent(args.apply),
+                    artifacts: None,
+                    worktree_providers: Some(WorktreeProviderCleanupOptions {
+                        provider: args.provider,
+                        all_providers: args.all_providers,
+                        apply: args.apply,
+                        timeout: None,
+                    }),
+                },
+                defaults::load_config(),
+            )?;
+            let exit_code = (output.failure_count > 0) as i32;
+            serde_json::to_value(output)
+                .map_err(|err| {
                     homeboy::core::Error::internal_json(
                         err.to_string(),
-                        Some("serialize retained storage report".to_string()),
+                        Some("serialize cleanup worktrees output".to_string()),
                     )
                 })
-            })
-            .map(|output| (output, 0)),
+                .map(|output| (output, exit_code))
+        }
+        Some(CleanupCommand::RetainedStorage(args)) => bounded_retained_storage_report(args),
         Some(CleanupCommand::AutomaticRetention) => automatic_retention(),
         Some(CleanupCommand::Status(args)) => {
             cleanup_job_status(&args.job_id, args.full).map(|output| (output, 0))
@@ -244,7 +285,7 @@ impl ControllerJobDriver for CleanupJobDriver {
     }
 
     fn public_progress(&self, progress: &Value) -> homeboy::core::Result<Value> {
-        Ok(serde_json::json!({ "phase": progress.get("phase").cloned().unwrap_or(Value::Null) }))
+        Ok(progress.clone())
     }
 
     fn public_result(&self, result: &Value) -> homeboy::core::Result<Value> {
@@ -257,7 +298,11 @@ impl ControllerJobDriver for CleanupJobDriver {
         ControllerJobPublicError {
             message: "durable cleanup failed; inspect cleanup status for retained evidence"
                 .to_string(),
-            data: serde_json::json!({ "code": error.code.as_str() }),
+            data: serde_json::json!({
+                "code": error.code.as_str(),
+                "kind": error.details.get("kind").cloned().unwrap_or(Value::Null),
+                "failed_category_count": error.details.get("failed_category_count").cloned().unwrap_or(Value::Null),
+            }),
         }
     }
 
@@ -289,7 +334,7 @@ impl ControllerJobDriver for CleanupJobDriver {
         handle: ControllerJobHandle,
     ) -> homeboy::core::Result<Value> {
         if let Some(result) = checkpoint.get("completed") {
-            return Ok(result.clone());
+            return completed_cleanup_job_result(result.clone());
         }
         self.run(
             checkpoint.get("request").cloned().unwrap_or(checkpoint),
@@ -321,9 +366,17 @@ impl CleanupJobDriver {
                 Some("serialize cleanup recovery request".to_string()),
             )
         })?;
-        let result = cleanup_inventory(args)?;
+        let progress_handle = handle.clone();
+        let job_id = handle.job_id();
+        let result = with_cleanup_progress_context(
+            CleanupProgressContext {
+                run_ref: format!("homeboy://job/{job_id}"),
+                report: Box::new(move |progress| progress_handle.progress(progress)),
+            },
+            || cleanup_inventory(args),
+        )?;
         let output = serde_json::json!({
-            "phase": "completed",
+            "phase": if result.exit_code == 0 { "completed" } else { "partial_failure" },
             "exit_code": result.exit_code,
             "evidence": result.output,
         });
@@ -333,9 +386,33 @@ impl CleanupJobDriver {
         handle.checkpoint(
             serde_json::json!({ "request": checkpoint_request, "completed": output }),
         )?;
-        handle.progress(serde_json::json!({ "phase": "completed" }))?;
-        Ok(output)
+        handle.progress(serde_json::json!({
+            "phase": output["phase"],
+            "failed_category_count": output.pointer("/evidence/failed_category_count").cloned().unwrap_or(Value::Null),
+            "evidence_command": format!("homeboy cleanup status {job_id} --full"),
+        }))?;
+        completed_cleanup_job_result(output)
     }
+}
+
+fn completed_cleanup_job_result(output: Value) -> homeboy::core::Result<Value> {
+    if output.get("exit_code").and_then(Value::as_i64).unwrap_or(0) == 0 {
+        return Ok(output);
+    }
+    let failed_category_count = output
+        .pointer("/evidence/failed_category_count")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut error = homeboy::core::Error::internal_unexpected(
+        "cleanup completed with one or more failed categories",
+    );
+    error.details = serde_json::json!({
+        "kind": "cleanup_partial_failure",
+        "failed_category_count": failed_category_count,
+        "completed": output,
+    });
+    error.retryable = Some(true);
+    Err(error)
 }
 
 fn cleanup_job_parse_error(error: serde_json::Error) -> homeboy::core::Error {
@@ -573,6 +650,127 @@ struct RetainedStorageReconciliation {
     physical_difference_direction: &'static str,
 }
 
+fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResult<Value> {
+    const CATEGORY: &str = "retained_storage";
+    if cfg!(test) || std::env::var(CLEANUP_CATEGORY_CHILD_ENV).ok().as_deref() == Some(CATEGORY) {
+        run_cleanup_category_fixture(CATEGORY)?;
+        return retained_storage_report(args)
+            .and_then(|output| {
+                serde_json::to_value(output).map_err(|error| {
+                    homeboy::core::Error::internal_json(
+                        error.to_string(),
+                        Some("serialize retained storage report".to_string()),
+                    )
+                })
+            })
+            .map(|output| (output, 0));
+    }
+
+    let timeout =
+        cleanup_category_timeout(None).saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE);
+    let executable = std::env::current_exe().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("resolve retained-storage executable".to_string()),
+        )
+    })?;
+    let mut process = Command::new(executable);
+    process
+        .args([
+            "--placement",
+            "local",
+            "cleanup",
+            "retained-storage",
+            "--limit",
+            &args.limit.to_string(),
+        ])
+        .env(CLEANUP_CATEGORY_CHILD_ENV, CATEGORY)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cursor) = &args.cursor {
+        process.args(["--cursor", cursor]);
+    }
+    homeboy::core::engine::command::isolate_process_tree(&mut process);
+    eprintln!(
+        "[cleanup category={CATEGORY} phase=starting timeout_ms={}]",
+        timeout.as_millis()
+    );
+    let started = Instant::now();
+    let mut last_progress = None;
+    let mut child = process.spawn().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("start retained-storage inventory".to_string()),
+        )
+    })?;
+    let supervised = homeboy::core::engine::command::wait_with_bounded_output_supervised(
+        &mut child,
+        CLEANUP_CATEGORY_OUTPUT_LIMIT,
+        timeout,
+        cleanup_category_heartbeat(),
+        || false,
+        |elapsed, tail| {
+            let progress = tail
+                .lines()
+                .last()
+                .map(str::trim)
+                .filter(|line| !line.is_empty());
+            if let Some(progress) = progress {
+                last_progress = Some(progress.to_string());
+            }
+            eprintln!(
+                "[cleanup category={CATEGORY} phase=running elapsed_ms={} remaining_ms={}] {}",
+                elapsed.as_millis(),
+                timeout.saturating_sub(elapsed).as_millis(),
+                progress.unwrap_or("waiting for retained-storage evidence")
+            );
+            Ok(())
+        },
+    )
+    .map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("supervise retained-storage inventory".to_string()),
+        )
+    })?;
+    let elapsed_ms = started.elapsed().as_millis();
+    if supervised.termination
+        != homeboy::core::engine::command::SupervisedCommandTermination::Completed
+    {
+        return Ok((
+            serde_json::json!({
+                "command": "cleanup.retained_storage",
+                "status": "partial_failure",
+                "outcome": "timed_out",
+                "inventory_completeness": "partial",
+                "elapsed_ms": elapsed_ms,
+                "timeout_ms": timeout.as_millis(),
+                "last_progress": last_progress,
+                "continuation_command": format!("homeboy cleanup retained-storage --limit {}", args.limit),
+                "failure": {
+                    "code": "cleanup.category_timeout",
+                    "message": format!("retained-storage inventory timed out after {elapsed_ms} ms"),
+                    "retryable": true,
+                },
+            }),
+            1,
+        ));
+    }
+    let envelope: Value = serde_json::from_slice(&supervised.output.stdout).map_err(|error| {
+        homeboy::core::Error::internal_json(
+            error.to_string(),
+            Some("parse retained-storage child evidence".to_string()),
+        )
+    })?;
+    let output = envelope.get("data").cloned().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected(
+            "retained-storage child returned no structured data",
+        )
+    })?;
+    Ok((output, supervised.output.status.code().unwrap_or(1)))
+}
+
 fn retained_storage_report(
     args: CleanupRetainedStorageArgs,
 ) -> homeboy::core::Result<RetainedStorageReport> {
@@ -586,6 +784,7 @@ fn retained_storage_report(
     }
 
     let mut records = Vec::new();
+    retained_storage_progress("controller_runtimes");
     let runtime = controller_runtime::retention_report()?;
     for snapshot in runtime.snapshots {
         if snapshot.eligible {
@@ -606,6 +805,7 @@ fn retained_storage_report(
 
     // The report reads the same resolved policy the delete paths use, so an
     // operator cannot be shown a window cleanup would not actually apply.
+    retained_storage_progress("shared_cargo_targets");
     let policy = cleanup::resolve_cleanup_policy(CleanupPolicyOverrides::default())?;
     let cargo = cleanup::shared_cargo_target_inventory(
         None,
@@ -647,6 +847,7 @@ fn retained_storage_report(
         });
     }
 
+    retained_storage_progress("controller_scratch");
     for resource in homeboy::agents::controller_scratch::retained_storage_inventory()? {
         records.push(RetainedStorageRecord {
             category: "controller_scratch".to_string(),
@@ -664,6 +865,7 @@ fn retained_storage_report(
         });
     }
 
+    retained_storage_progress("runtime_tmp");
     let runtime_tmp =
         engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
             apply: false,
@@ -691,6 +893,7 @@ fn retained_storage_report(
             .map(runtime_tmp_retained_record),
     );
 
+    retained_storage_progress("artifact_roots");
     records.extend(artifact_root_records(policy)?);
 
     let database_path = homeboy::core::observation::store::database_path()?;
@@ -719,6 +922,7 @@ fn retained_storage_report(
         });
     }
 
+    retained_storage_progress("filesystem_reconciliation");
     let filesystem = retained_storage_filesystem_inventory()?;
     let mut report = build_retained_storage_report(
         records,
@@ -732,6 +936,10 @@ fn retained_storage_report(
         report.source_continuations.push(command);
     }
     Ok(report)
+}
+
+fn retained_storage_progress(source: &str) {
+    eprintln!("HOMEBOY_PROGRESS {{\"phase\":\"retained_storage\",\"current\":\"{source}\"}}");
 }
 
 fn runtime_tmp_retained_record(row: engine::temp::RuntimeTempCleanupRow) -> RetainedStorageRecord {
@@ -1350,9 +1558,9 @@ pub struct CleanupInventoryOutput {
 /// manifest cannot describe a window the deletion did not apply.
 pub type CleanupRetentionManifest = CleanupPolicy;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CleanupInventoryCategory {
-    pub category: &'static str,
+    pub category: String,
     pub canonical_cleanup_command: String,
     pub specialist_command: String,
     pub included: bool,
@@ -1361,6 +1569,15 @@ pub struct CleanupInventoryCategory {
     pub skip_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<CleanupInventoryCategoryFailure>,
+    pub outcome: String,
+    pub inventory_completeness: String,
+    pub elapsed_ms: u128,
+    pub timeout_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_progress: Option<String>,
+    pub continuation_command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_run_ref: Option<String>,
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
@@ -1370,7 +1587,7 @@ pub struct CleanupInventoryCategory {
     pub output: Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CleanupInventoryCategoryFailure {
     pub code: String,
     pub message: String,
@@ -1674,7 +1891,18 @@ fn automatic_retention() -> CmdResult<Value> {
 }
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventoryResult> {
-    cleanup_inventory_with_deadline(args, None)
+    cleanup_inventory_with_deadline(
+        args,
+        SystemTime::now().checked_add(cleanup_inventory_timeout()),
+    )
+}
+
+fn cleanup_inventory_timeout() -> Duration {
+    std::env::var(CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(CLEANUP_AGGREGATE_TIMEOUT)
 }
 
 fn cleanup_inventory_with_deadline(
@@ -1712,23 +1940,25 @@ fn cleanup_inventory_with_deadline(
     let mut categories = Vec::new();
 
     if selected.includes(CleanupCategoryArg::RepoArtifacts) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             REPO_ARTIFACTS_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || repo_artifacts_category(apply).map(|category| vec![category]),
         );
     }
 
     if selected.includes(CleanupCategoryArg::TaskWorktrees) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             TASK_WORKTREES_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 let output = worktree::cleanup(WorktreeCleanupOptions {
                     force: false,
@@ -1742,12 +1972,13 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::WorktreeProviders) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             WORKTREE_PROVIDERS_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 let output = cleanup::cleanup_resources_from_config(
                     ResourceCleanupOptions {
@@ -1778,6 +2009,7 @@ fn cleanup_inventory_with_deadline(
                 // fabrication in the opposite direction.
                 let effects = output.worktree_provider_effects.as_ref();
                 let blockers = effects.and_then(|effects| effects.reconciliation_blockers);
+                let provider_failure_count = output.failure_count;
                 let metrics = CleanupCategoryMetrics {
                     candidate_count: output.applied_count,
                     applied_count: output.applied_count,
@@ -1795,6 +2027,17 @@ fn cleanup_inventory_with_deadline(
                             category.reconciliation_blocker_count =
                                 usize::try_from(blockers).unwrap_or(usize::MAX);
                         }
+                        if provider_failure_count > 0 {
+                            category.failure = Some(CleanupInventoryCategoryFailure {
+                                code: "cleanup.provider_failure".to_string(),
+                                message: format!(
+                                    "{provider_failure_count} worktree cleanup provider(s) failed"
+                                ),
+                                retryable: Some(true),
+                            });
+                            category.outcome = "failed".to_string();
+                            category.inventory_completeness = "partial".to_string();
+                        }
                         vec![category]
                     },
                 )
@@ -1803,10 +2046,12 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::TerminalRuns) {
-        isolate_store_backed_cleanup_category(
+        isolate_store_backed_cleanup_category_bounded(
             &mut categories,
             TERMINAL_RUNS_METADATA,
             apply,
+            &args,
+            deadline,
             &store,
             || {
                 let output = runs_service::retain_terminal_runs(
@@ -1839,10 +2084,12 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::PersistedRunArtifacts) {
-        isolate_store_backed_cleanup_category(
+        isolate_store_backed_cleanup_category_bounded(
             &mut categories,
             PERSISTED_RUN_ARTIFACTS_METADATA,
             apply,
+            &args,
+            deadline,
             &store,
             || {
                 let persisted =
@@ -1877,12 +2124,13 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::OrphanedArtifactBytes) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             ORPHANED_ARTIFACT_BYTES_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 let mut output = runs_service::cleanup_orphaned_artifact_bytes(
                     OrphanedArtifactBytesCleanupOptions {
@@ -1916,12 +2164,13 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::RunnerDownloads) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             RUNNER_DOWNLOADS_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 let output =
                     runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
@@ -1965,23 +2214,25 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::RemoteLabWorkspaces) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             REMOTE_LAB_WORKSPACES_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || remote_lab_workspace_categories(policy, apply),
         );
     }
 
     if selected.includes(CleanupCategoryArg::RunnerBinaryCaches) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             RUNNER_BINARY_CACHES_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || runner_binary_cache_categories(policy, apply),
         );
     }
@@ -1992,12 +2243,16 @@ fn cleanup_inventory_with_deadline(
             .map(|days| runtime_tmp_commands(apply, days));
         let canonical_cleanup_command = commands.as_ref().map(|(canonical, _)| canonical.clone());
         let specialist_command = commands.as_ref().map(|(_, specialist)| specialist.clone());
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             RUNTIME_TMP_METADATA,
             apply,
-            canonical_cleanup_command.as_deref(),
-            specialist_command.as_deref(),
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides {
+                canonical: canonical_cleanup_command.as_deref(),
+                specialist: specialist_command.as_deref(),
+            },
             || {
                 let mut output = engine::temp::cleanup_runtime_tmp_bounded(
                     engine::temp::RuntimeTempCleanupOptions {
@@ -2051,12 +2306,13 @@ fn cleanup_inventory_with_deadline(
     // differ — and on any host that moved `TMPDIR` to a dedicated volume they do
     // — the second category is the only one looking at the leak (#11073).
     if selected.includes(CleanupCategoryArg::LeakedTestHomes) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             LEAKED_TEST_HOMES_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 let output =
                     cleanup::cleanup_leaked_test_homes(cleanup::LeakedTestHomeCleanupOptions {
@@ -2084,12 +2340,13 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::ControllerScratch) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             CONTROLLER_SCRATCH_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 let output = homeboy::agents::controller_scratch::cleanup(
                     homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
@@ -2124,12 +2381,13 @@ fn cleanup_inventory_with_deadline(
         );
     }
     if selected.includes(CleanupCategoryArg::ControllerRuntimes) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             CONTROLLER_RUNTIMES_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 // Policy is resolved by core so this path and `homeboy runtime
                 // controller-prune` cannot drift apart again (#10288).
@@ -2169,12 +2427,13 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::SharedCargoTargets) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             SHARED_CARGO_TARGETS_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 let output =
                     cleanup::cleanup_shared_cargo_targets(cleanup::CargoTargetCleanupOptions {
@@ -2210,12 +2469,13 @@ fn cleanup_inventory_with_deadline(
     }
 
     if selected.includes(CleanupCategoryArg::ExternalStorage) {
-        isolate_cleanup_category(
+        isolate_cleanup_category_bounded(
             &mut categories,
             EXTERNAL_STORAGE_METADATA,
             apply,
-            None,
-            None,
+            &args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
             || {
                 let output = cleanup::cleanup_external_storage_from_extensions(
                     cleanup::ExternalStorageCleanupOptions {
@@ -2389,16 +2649,440 @@ fn isolate_cleanup_category(
     specialist_command: Option<&str>,
     action: impl FnOnce() -> homeboy::core::Result<Vec<CleanupInventoryCategory>>,
 ) {
+    let started = Instant::now();
     match action() {
-        Ok(mut completed) => categories.append(&mut completed),
-        Err(error) => categories.push(cleanup_category_failure(
+        Ok(mut completed) => {
+            for category in &mut completed {
+                category.elapsed_ms = started.elapsed().as_millis();
+            }
+            categories.append(&mut completed)
+        }
+        Err(error) => {
+            let mut category = cleanup_category_failure(
+                metadata,
+                apply,
+                canonical_cleanup_command,
+                specialist_command,
+                error,
+            );
+            category.elapsed_ms = started.elapsed().as_millis();
+            categories.push(category);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct CleanupCategoryCommandOverrides<'a> {
+    canonical: Option<&'a str>,
+    specialist: Option<&'a str>,
+}
+
+fn isolate_cleanup_category_bounded(
+    categories: &mut Vec<CleanupInventoryCategory>,
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    args: &CleanupArgs,
+    deadline: Option<SystemTime>,
+    commands: CleanupCategoryCommandOverrides<'_>,
+    action: impl FnOnce() -> homeboy::core::Result<Vec<CleanupInventoryCategory>>,
+) {
+    let category_child =
+        std::env::var(CLEANUP_CATEGORY_CHILD_ENV).ok().as_deref() == Some(metadata.category);
+    if cfg!(test) || category_child {
+        if category_child {
+            eprintln!(
+                "HOMEBOY_PROGRESS {{\"phase\":\"cleanup_category\",\"current\":\"{}\"}}",
+                metadata.category
+            );
+        }
+        if let Err(error) = run_cleanup_category_fixture(metadata.category) {
+            categories.push(cleanup_category_failure(
+                metadata,
+                apply,
+                commands.canonical,
+                commands.specialist,
+                error,
+            ));
+            return;
+        }
+        isolate_cleanup_category(
+            categories,
             metadata,
             apply,
-            canonical_cleanup_command,
-            specialist_command,
-            error,
-        )),
+            commands.canonical,
+            commands.specialist,
+            action,
+        );
+        return;
     }
+
+    report_cleanup_progress(serde_json::json!({
+        "phase": "category_running",
+        "category": metadata.category,
+        "continuation_command": metadata.canonical_cleanup_command(apply),
+    }));
+    match run_cleanup_category_process(metadata, args, deadline) {
+        Ok(mut completed) => {
+            let failed = completed.iter().any(|category| category.failure.is_some());
+            report_cleanup_progress(serde_json::json!({
+                "phase": if failed { "category_failed" } else { "category_completed" },
+                "category": metadata.category,
+                "outcome": if failed { "failed" } else { "completed" },
+                "elapsed_ms": completed.iter().map(|category| category.elapsed_ms).max().unwrap_or(0),
+                "continuation_command": metadata.canonical_cleanup_command(apply),
+            }));
+            categories.append(&mut completed)
+        }
+        Err(category) => {
+            let category = *category;
+            report_cleanup_progress(serde_json::json!({
+                "phase": "category_failed",
+                "category": metadata.category,
+                "outcome": category.outcome.clone(),
+                "elapsed_ms": category.elapsed_ms,
+                "last_progress": category.last_progress.clone(),
+                "continuation_command": category.continuation_command.clone(),
+            }));
+            categories.push(category)
+        }
+    }
+}
+
+fn run_cleanup_category_process(
+    metadata: CleanupInventoryCategoryMetadata,
+    args: &CleanupArgs,
+    deadline: Option<SystemTime>,
+) -> std::result::Result<Vec<CleanupInventoryCategory>, Box<CleanupInventoryCategory>> {
+    let wall_clock_budget = cleanup_category_timeout(deadline);
+    if wall_clock_budget <= CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2) {
+        return Err(Box::new(cleanup_category_timeout_failure(
+            metadata,
+            args.apply,
+            Duration::ZERO,
+            0,
+            Some(
+                "aggregate cleanup has too little time remaining to start and reap this category"
+                    .to_string(),
+            ),
+        )));
+    }
+    let timeout = wall_clock_budget.saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE);
+    let mut process = match std::env::current_exe() {
+        Ok(executable) => Command::new(executable),
+        Err(error) => {
+            return Err(Box::new(cleanup_category_process_failure(
+                metadata,
+                args.apply,
+                timeout,
+                0,
+                None,
+                format!("resolve cleanup category executable: {error}"),
+            )))
+        }
+    };
+    process
+        .args([
+            "--placement",
+            "local",
+            "cleanup",
+            "--include",
+            metadata.include_arg,
+        ])
+        .env(CLEANUP_CATEGORY_CHILD_ENV, metadata.category)
+        .env(
+            CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV,
+            timeout
+                .saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE)
+                .as_millis()
+                .to_string(),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    append_cleanup_child_args(&mut process, args);
+    homeboy::core::engine::command::isolate_process_tree(&mut process);
+    eprintln!(
+        "[cleanup category={} phase=starting timeout_ms={}]",
+        metadata.category,
+        timeout.as_millis()
+    );
+    let started = Instant::now();
+    let mut last_progress = None;
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return Err(Box::new(cleanup_category_process_failure(
+                metadata,
+                args.apply,
+                timeout,
+                started.elapsed().as_millis(),
+                None,
+                format!("start cleanup category process: {error}"),
+            )))
+        }
+    };
+    let supervised = match homeboy::core::engine::command::wait_with_bounded_output_supervised(
+        &mut child,
+        CLEANUP_CATEGORY_OUTPUT_LIMIT,
+        timeout,
+        cleanup_category_heartbeat(),
+        || false,
+        |elapsed, tail| {
+            let progress = tail
+                .lines()
+                .last()
+                .map(str::trim)
+                .filter(|line| !line.is_empty());
+            if let Some(progress) = progress {
+                last_progress = Some(progress.to_string());
+            }
+            eprintln!(
+                "[cleanup category={} phase=running elapsed_ms={} remaining_ms={}] {}",
+                metadata.category,
+                elapsed.as_millis(),
+                timeout.saturating_sub(elapsed).as_millis(),
+                progress.unwrap_or("waiting for category evidence")
+            );
+            Ok(())
+        },
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(Box::new(cleanup_category_process_failure(
+                metadata,
+                args.apply,
+                timeout,
+                started.elapsed().as_millis(),
+                last_progress,
+                format!("supervise cleanup category process: {error}"),
+            )))
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    if supervised.termination
+        != homeboy::core::engine::command::SupervisedCommandTermination::Completed
+    {
+        return Err(Box::new(cleanup_category_timeout_failure(
+            metadata,
+            args.apply,
+            timeout,
+            elapsed_ms,
+            last_progress,
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&supervised.output.stdout);
+    let envelope: Value = match serde_json::from_str(&stdout) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(Box::new(cleanup_category_process_failure(
+                metadata,
+                args.apply,
+                timeout,
+                elapsed_ms,
+                last_progress,
+                format!("parse cleanup category evidence: {error}"),
+            )))
+        }
+    };
+    let Some(rows) = envelope
+        .pointer("/data/categories")
+        .and_then(Value::as_array)
+    else {
+        return Err(Box::new(cleanup_category_process_failure(
+            metadata,
+            args.apply,
+            timeout,
+            elapsed_ms,
+            last_progress,
+            format!(
+                "cleanup category process returned no category evidence (status {:?})",
+                supervised.output.status.code()
+            ),
+        )));
+    };
+    let mut categories = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut category: CleanupInventoryCategory = match serde_json::from_value(row.clone()) {
+            Ok(category) => category,
+            Err(error) => {
+                return Err(Box::new(cleanup_category_process_failure(
+                    metadata,
+                    args.apply,
+                    timeout,
+                    elapsed_ms,
+                    last_progress,
+                    format!("decode cleanup category evidence: {error}"),
+                )))
+            }
+        };
+        category.elapsed_ms = elapsed_ms;
+        category.timeout_ms = timeout.as_millis();
+        if category.last_progress.is_none() {
+            category.last_progress.clone_from(&last_progress);
+        }
+        category.cleanup_run_ref = active_cleanup_run_ref();
+        categories.push(category);
+    }
+    eprintln!(
+        "[cleanup category={} phase=completed elapsed_ms={elapsed_ms}]",
+        metadata.category
+    );
+    Ok(categories)
+}
+
+fn append_cleanup_child_args(process: &mut Command, args: &CleanupArgs) {
+    if args.apply {
+        process.arg("--apply");
+    }
+    if args.include_untagged {
+        process.arg("--include-untagged");
+    }
+    if let Some(days) = args.older_than_days {
+        process.args(["--older-than-days", &days.to_string()]);
+    }
+    if let Some(days) = args.runtime_tmp_managed_older_than_days {
+        process.args(["--runtime-tmp-managed-older-than-days", &days.to_string()]);
+    }
+    if let Some(limit) = args.limit {
+        process.args(["--limit", &limit.to_string()]);
+    }
+    if args.full {
+        process.arg("--full");
+    }
+    if let Some(cursor) = &args.cursor {
+        process.args(["--cursor", cursor]);
+    }
+}
+
+fn cleanup_category_timeout(deadline: Option<SystemTime>) -> Duration {
+    let configured = test_cleanup_category_timeout().unwrap_or(CLEANUP_CATEGORY_TIMEOUT);
+    deadline.map_or(configured, |deadline| {
+        configured.min(
+            deadline
+                .duration_since(SystemTime::now())
+                .unwrap_or(Duration::ZERO),
+        )
+    })
+}
+
+fn cleanup_category_heartbeat() -> Duration {
+    if cfg!(any(test, feature = "test-support")) {
+        Duration::from_millis(50)
+    } else {
+        CLEANUP_CATEGORY_HEARTBEAT
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_cleanup_category_timeout() -> Option<Duration> {
+    std::env::var(CLEANUP_CATEGORY_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn test_cleanup_category_timeout() -> Option<Duration> {
+    None
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn run_cleanup_category_fixture(category: &str) -> homeboy::core::Result<()> {
+    let Some(fixture) = std::env::var_os(CLEANUP_CATEGORY_FIXTURE_ENV) else {
+        return Ok(());
+    };
+    eprintln!("HOMEBOY_PROGRESS {{\"phase\":\"fixture\",\"current\":\"{category}\"}}");
+    let status = Command::new(fixture)
+        .arg(category)
+        .status()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!("run {category} cleanup test fixture")),
+            )
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(homeboy::core::Error::internal_unexpected(format!(
+            "{category} cleanup test fixture exited with {status}"
+        )))
+    }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn run_cleanup_category_fixture(_category: &str) -> homeboy::core::Result<()> {
+    Ok(())
+}
+
+fn cleanup_category_timeout_failure(
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    timeout: Duration,
+    elapsed_ms: u128,
+    last_progress: Option<String>,
+) -> CleanupInventoryCategory {
+    let continuation = metadata.canonical_cleanup_command(apply);
+    CleanupInventoryCategory {
+        category: metadata.category.to_string(),
+        canonical_cleanup_command: continuation.clone(),
+        specialist_command: metadata.specialist_command(apply).to_string(),
+        included: true,
+        skipped: true,
+        skip_reason: Some(format!(
+            "cleanup category exceeded its {} ms deadline",
+            timeout.as_millis()
+        )),
+        failure: Some(CleanupInventoryCategoryFailure {
+            code: "cleanup.category_timeout".to_string(),
+            message: format!(
+                "cleanup category `{}` timed out after {elapsed_ms} ms",
+                metadata.category
+            ),
+            retryable: Some(true),
+        }),
+        outcome: "timed_out".to_string(),
+        inventory_completeness: "partial".to_string(),
+        elapsed_ms,
+        timeout_ms: timeout.as_millis(),
+        last_progress,
+        continuation_command: continuation,
+        cleanup_run_ref: active_cleanup_run_ref(),
+        candidate_count: 0,
+        applied_count: 0,
+        skipped_count: 1,
+        reconciliation_blocker_count: 0,
+        estimated_bytes: 0,
+        reclaimed_bytes: 0,
+        output: serde_json::json!({
+            "category": metadata.category,
+            "outcome": "timed_out",
+            "elapsed_ms": elapsed_ms,
+            "timeout_ms": timeout.as_millis(),
+        }),
+    }
+}
+
+fn cleanup_category_process_failure(
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    timeout: Duration,
+    elapsed_ms: u128,
+    last_progress: Option<String>,
+    message: String,
+) -> CleanupInventoryCategory {
+    let mut category = cleanup_category_failure(
+        metadata,
+        apply,
+        None,
+        None,
+        homeboy::core::Error::internal_unexpected(message),
+    );
+    category.elapsed_ms = elapsed_ms;
+    category.timeout_ms = timeout.as_millis();
+    category.last_progress = last_progress;
+    category
 }
 
 /// Run a category that cannot plan without the observation store, gating on a
@@ -2409,16 +3093,35 @@ fn isolate_cleanup_category(
 /// its own open and surfacing an undifferentiated failure. At zero free inodes
 /// that open cannot succeed and is itself another write against a filesystem
 /// with nothing left (#11127, #10603).
-fn isolate_store_backed_cleanup_category(
+fn isolate_store_backed_cleanup_category_bounded(
     categories: &mut Vec<CleanupInventoryCategory>,
     metadata: CleanupInventoryCategoryMetadata,
     apply: bool,
+    args: &CleanupArgs,
+    deadline: Option<SystemTime>,
     store: &cleanup::StoreAvailability,
     action: impl FnOnce() -> homeboy::core::Result<Vec<CleanupInventoryCategory>>,
 ) {
     match store.skip_reason() {
-        Some(reason) => categories.push(store_unavailable_category(metadata, apply, store, reason)),
-        None => isolate_cleanup_category(categories, metadata, apply, None, None, action),
+        Some(reason) => {
+            let category = store_unavailable_category(metadata, apply, store, reason);
+            report_cleanup_progress(serde_json::json!({
+                "phase": "category_failed",
+                "category": metadata.category,
+                "outcome": category.outcome.clone(),
+                "continuation_command": category.continuation_command.clone(),
+            }));
+            categories.push(category);
+        }
+        None => isolate_cleanup_category_bounded(
+            categories,
+            metadata,
+            apply,
+            args,
+            deadline,
+            CleanupCategoryCommandOverrides::default(),
+            action,
+        ),
     }
 }
 
@@ -2445,7 +3148,7 @@ fn store_unavailable_category(
         } => (code.as_str(), Some(!storage_exhausted)),
     };
     CleanupInventoryCategory {
-        category: metadata.category,
+        category: metadata.category.to_string(),
         canonical_cleanup_command: metadata.canonical_cleanup_command(apply),
         specialist_command: metadata.specialist_command(apply).to_string(),
         included: true,
@@ -2456,6 +3159,13 @@ fn store_unavailable_category(
             message: reason,
             retryable,
         }),
+        outcome: "failed".to_string(),
+        inventory_completeness: "partial".to_string(),
+        elapsed_ms: 0,
+        timeout_ms: 0,
+        last_progress: None,
+        continuation_command: metadata.canonical_cleanup_command(apply),
+        cleanup_run_ref: active_cleanup_run_ref(),
         candidate_count: 0,
         applied_count: 0,
         skipped_count: 1,
@@ -2486,8 +3196,9 @@ fn cleanup_category_failure(
         specialist_command.to_string()
     };
     CleanupInventoryCategory {
-        category: metadata.category,
+        category: metadata.category.to_string(),
         canonical_cleanup_command,
+        continuation_command: specialist_command.clone(),
         specialist_command,
         included: true,
         skipped: true,
@@ -2497,6 +3208,12 @@ fn cleanup_category_failure(
             message: error.message,
             retryable: error.retryable,
         }),
+        outcome: "failed".to_string(),
+        inventory_completeness: "partial".to_string(),
+        elapsed_ms: 0,
+        timeout_ms: 0,
+        last_progress: None,
+        cleanup_run_ref: active_cleanup_run_ref(),
         candidate_count: 0,
         applied_count: 0,
         skipped_count: 1,
@@ -2588,7 +3305,7 @@ fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventor
         .filter(|diagnostic| !diagnostic.success)
         .count();
     Ok(CleanupInventoryCategory {
-        category: REPO_ARTIFACTS_METADATA.category,
+        category: REPO_ARTIFACTS_METADATA.category.to_string(),
         canonical_cleanup_command: REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
         specialist_command: REPO_ARTIFACTS_METADATA
             .specialist_command(apply)
@@ -2601,7 +3318,28 @@ fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventor
                 .all(|diagnostic| !diagnostic.success),
         skip_reason: (failure_count > 0)
             .then(|| format!("{failure_count} owned cleanup root(s) could not be inspected")),
-        failure: None,
+        failure: (failure_count > 0).then(|| CleanupInventoryCategoryFailure {
+            code: "cleanup.partial_inventory".to_string(),
+            message: format!("{failure_count} owned cleanup root(s) could not be inspected"),
+            retryable: Some(true),
+        }),
+        outcome: if failure_count > 0 {
+            "failed"
+        } else {
+            "completed"
+        }
+        .to_string(),
+        inventory_completeness: if failure_count > 0 {
+            "partial"
+        } else {
+            "complete"
+        }
+        .to_string(),
+        elapsed_ms: 0,
+        timeout_ms: 0,
+        last_progress: None,
+        continuation_command: REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
+        cleanup_run_ref: None,
         candidate_count: output.candidate_count,
         applied_count: output.applied_count,
         skipped_count: output.skipped_count + failure_count,
@@ -2779,13 +3517,20 @@ fn category_from_command<T: Serialize>(
     output: T,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     Ok(CleanupInventoryCategory {
-        category: commands.category,
+        category: commands.category.to_string(),
         canonical_cleanup_command: commands.canonical_cleanup_command,
+        continuation_command: commands.specialist_command.clone(),
         specialist_command: commands.specialist_command,
         included: true,
         skipped: false,
         skip_reason: None,
         failure: None,
+        outcome: "completed".to_string(),
+        inventory_completeness: "complete".to_string(),
+        elapsed_ms: 0,
+        timeout_ms: 0,
+        last_progress: None,
+        cleanup_run_ref: None,
         candidate_count: metrics.candidate_count,
         applied_count: metrics.applied_count,
         skipped_count: metrics.skipped_count,
@@ -2837,7 +3582,7 @@ fn persisted_artifacts_category(
         "resource_lifecycle": resources,
     });
     Ok(CleanupInventoryCategory {
-        category: PERSISTED_RUN_ARTIFACTS_METADATA.category,
+        category: PERSISTED_RUN_ARTIFACTS_METADATA.category.to_string(),
         canonical_cleanup_command: PERSISTED_RUN_ARTIFACTS_METADATA
             .canonical_cleanup_command(apply),
         specialist_command: PERSISTED_RUN_ARTIFACTS_METADATA
@@ -2847,6 +3592,15 @@ fn persisted_artifacts_category(
         skipped: false,
         skip_reason: None,
         failure: None,
+        outcome: "completed".to_string(),
+        inventory_completeness: "complete".to_string(),
+        elapsed_ms: 0,
+        timeout_ms: 0,
+        last_progress: None,
+        continuation_command: PERSISTED_RUN_ARTIFACTS_METADATA
+            .specialist_command(apply)
+            .to_string(),
+        cleanup_run_ref: None,
         candidate_count: persisted.planned_record_count + resource_cleanup_candidates,
         applied_count: persisted.removed_record_count,
         skipped_count: persisted.skipped_count,
@@ -2865,7 +3619,7 @@ fn remote_lab_workspace_categories(
     for status in runner::statuses()? {
         if !remote_workspace_cleanup_connected(&status) {
             categories.push(CleanupInventoryCategory {
-                category: "remote_lab_workspaces",
+                category: "remote_lab_workspaces".to_string(),
                 canonical_cleanup_command: REMOTE_LAB_WORKSPACES_METADATA
                     .canonical_cleanup_command(apply),
                 specialist_command: format!(
@@ -2876,6 +3630,14 @@ fn remote_lab_workspace_categories(
                 skipped: true,
                 skip_reason: Some("runner is not connected".to_string()),
                 failure: None,
+                outcome: "completed".to_string(),
+                inventory_completeness: "complete".to_string(),
+                elapsed_ms: 0,
+                timeout_ms: 0,
+                last_progress: None,
+                continuation_command: REMOTE_LAB_WORKSPACES_METADATA
+                    .canonical_cleanup_command(apply),
+                cleanup_run_ref: None,
                 candidate_count: 0,
                 applied_count: 0,
                 skipped_count: 1,
@@ -4423,6 +5185,41 @@ mod tests {
     }
 
     #[test]
+    fn durable_partial_cleanup_is_terminal_failure_with_retained_evidence() {
+        let completed = serde_json::json!({
+            "phase": "partial_failure",
+            "exit_code": 1,
+            "evidence": {
+                "status": "partial_failure",
+                "failed_category_count": 2,
+                "categories": [{ "category": "repo_artifacts", "outcome": "timed_out" }]
+            }
+        });
+
+        let error = completed_cleanup_job_result(completed.clone())
+            .expect_err("provider/category failure must fail the durable job");
+        assert_eq!(error.details["kind"], "cleanup_partial_failure");
+        assert_eq!(error.details["failed_category_count"], 2);
+        assert_eq!(error.details["completed"], completed);
+
+        let public = CleanupJobDriver
+            .public_progress(&serde_json::json!({
+                "phase": "category_failed",
+                "category": "repo_artifacts",
+                "outcome": "timed_out",
+                "elapsed_ms": 30_000,
+                "continuation_command": "homeboy cleanup --include repo-artifacts"
+            }))
+            .expect("public cleanup progress");
+        assert_eq!(public["category"], "repo_artifacts");
+        assert_eq!(public["outcome"], "timed_out");
+        assert_eq!(
+            public["continuation_command"],
+            "homeboy cleanup --include repo-artifacts"
+        );
+    }
+
+    #[test]
     fn aggregate_repo_artifact_roots_do_not_depend_on_the_caller_directory() {
         let configured = vec![
             PathBuf::from("/configured/one"),
@@ -4677,7 +5474,7 @@ mod tests {
 
         for (apply, command) in cases {
             let category = CleanupInventoryCategory {
-                category: TASK_WORKTREES_METADATA.category,
+                category: TASK_WORKTREES_METADATA.category.to_string(),
                 canonical_cleanup_command: TASK_WORKTREES_METADATA.canonical_cleanup_command(apply),
                 specialist_command: TASK_WORKTREES_METADATA
                     .specialist_command(apply)
@@ -4686,6 +5483,15 @@ mod tests {
                 skipped: false,
                 skip_reason: None,
                 failure: None,
+                outcome: "completed".to_string(),
+                inventory_completeness: "complete".to_string(),
+                elapsed_ms: 0,
+                timeout_ms: 0,
+                last_progress: None,
+                continuation_command: TASK_WORKTREES_METADATA
+                    .specialist_command(apply)
+                    .to_string(),
+                cleanup_run_ref: None,
                 candidate_count: 1,
                 applied_count: 0,
                 skipped_count: 0,
