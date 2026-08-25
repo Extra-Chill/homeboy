@@ -680,6 +680,16 @@ pub struct WorktreeProviderCommands {
     /// absent destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve_task: Option<Vec<String>>,
+    /// Read-only eligibility check for attaching `{task_url}` to one exact
+    /// `{handle}`. It also receives a stable `{idempotency_key}` and returns a
+    /// `homeboy/worktree-provider-task-attachment/v1` envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_attachment_preview: Option<Vec<String>>,
+    /// Provider-owned mutation that attaches `{task_url}` to one exact
+    /// `{handle}` after the matching preview succeeds. It receives the same
+    /// stable `{idempotency_key}` and returns the same versioned envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_attachment_apply: Option<Vec<String>>,
     /// Targeted tracker lookup exit statuses that mean the requested task is
     /// absent. This is independent from exact handle/path resolution.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -743,6 +753,8 @@ impl Default for WorktreeProviderCommands {
             attest_safety: None,
             resolve: None,
             resolve_task: None,
+            task_attachment_preview: None,
+            task_attachment_apply: None,
             resolve_task_not_found_exit_codes: Vec::new(),
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
@@ -1213,6 +1225,8 @@ mod tests {
             attest_safety: None,
             resolve: None,
             resolve_task: None,
+            task_attachment_preview: None,
+            task_attachment_apply: None,
             resolve_task_not_found_exit_codes: Vec::new(),
             resolve_path: None,
             resolve_not_found_exit_codes: Vec::new(),
