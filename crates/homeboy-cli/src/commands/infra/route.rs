@@ -621,6 +621,7 @@ pub(crate) fn route_composed_lab_command(
     options: ComposedLabRouteOptions<'_>,
     normalized_args: &[String],
     output_file: Option<&str>,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
 ) -> homeboy::core::Result<Option<i32>> {
     let Some(route_contract) = route.lab_route_contract() else {
         if options.placement == homeboy::cli_surface::Placement::Lab || options.runner.is_some() {
@@ -658,21 +659,18 @@ pub(crate) fn route_composed_lab_command(
     let read_only_polling = route_contract.command.routing_policy.read_only_polling;
     let command = lab_routing::lab_offload_command_from_route_contract(route_contract);
     let task = command.command.hot_label;
-    let inferred_runner = options.runner.map(ToOwned::to_owned).or_else(|| {
-        (command.command.routing_policy.default_lab_offload
-            || options.placement == homeboy::cli_surface::Placement::Lab)
-            .then(|| runners::lab_runner_readiness().ok())
-            .flatten()
-            .and_then(|readiness| readiness.selected_runner_id)
-    });
-    let runner_id = inferred_runner.as_deref().filter(|_| {
-        options.runner.is_some()
-            || lab_routing::authorizes_policy_lab_runner(
-                &command.command,
-                options.placement,
-                lab_routing::captured_pressure_severity().as_deref(),
-            )
-    });
+    let runner_id = preflight.generic_route_runner_id.as_deref();
+    if preflight.placement.required
+        == homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab
+        && runner_id.is_none()
+    {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "required Lab placement has no selected ready runner",
+            Some("lab".to_string()),
+            None,
+        ));
+    }
     if runner_id.is_none() && options.placement != homeboy::cli_surface::Placement::Lab {
         return Ok(None);
     }
@@ -683,13 +681,19 @@ pub(crate) fn route_composed_lab_command(
             Some("resolve composed Lab source path".to_string()),
         )
     })?;
-    let decision = composed_placement_decision(
-        options.placement,
-        options.runner.is_some(),
-        runner_id,
-        task,
-        &source_path,
-    )?;
+    let decision =
+        preflight
+            .placement
+            .finalize(homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: source_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "controller-cwd".to_string()),
+                workspace: source_path.display().to_string(),
+                task: task.to_string(),
+                candidate: homeboy::core::git::head_sha(&source_path),
+                base: homeboy::core::git::rev_parse(&source_path, "origin/HEAD"),
+            });
     let outcome = lab_routing::dispatch_lab_offload(
         LabRoutingRequest {
             placement_decision: decision,
@@ -734,70 +738,6 @@ pub(crate) fn route_composed_lab_command(
             Ok(Some(output.exit_code))
         }
     }
-}
-
-fn composed_placement_decision(
-    placement: homeboy::cli_surface::Placement,
-    explicit_runner: bool,
-    runner_id: Option<&str>,
-    task: &str,
-    source_path: &Path,
-) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
-    use homeboy_lab_runner_contract::{
-        EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
-        ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
-        ExecutionPlacementRunnerSelection, RunnerSelectionSource,
-    };
-    if placement == homeboy::cli_surface::Placement::Lab && runner_id.is_none() {
-        return Err(Error::validation_invalid_argument(
-            "placement",
-            "required Lab placement has no selected ready runner",
-            Some("lab".to_string()),
-            None,
-        ));
-    }
-    let required = (placement == homeboy::cli_surface::Placement::Lab || explicit_runner)
-        .then_some(ExecutionPlacementRequirement::Lab)
-        .unwrap_or(ExecutionPlacementRequirement::Either);
-    Ok(
-        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-            "lab-route-contract",
-            "v1",
-            ExecutionPlacementIdentity {
-                repository: source_path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "controller-cwd".to_string()),
-                workspace: source_path.display().to_string(),
-                task: task.to_string(),
-                candidate: homeboy::core::git::head_sha(source_path),
-                base: homeboy::core::git::rev_parse(source_path, "origin/HEAD"),
-            },
-            placement,
-            required,
-            runner_id
-                .map(|_| EffectiveExecutionPlacement::Lab)
-                .unwrap_or(EffectiveExecutionPlacement::Local),
-            runner_id.map(|runner_id| ExecutionPlacementRunnerSelection {
-                runner_id: runner_id.to_string(),
-                source: if explicit_runner {
-                    RunnerSelectionSource::Explicit
-                } else {
-                    RunnerSelectionSource::Policy
-                },
-            }),
-            ExecutionPlacementFallback {
-                local_allowed: required != ExecutionPlacementRequirement::Lab
-                    && placement.allows_local_fallback(),
-                reason: None,
-            },
-            ExecutionPlacementOverrideAuthorization {
-                authorized: placement == homeboy::cli_surface::Placement::Local,
-                authority: (placement == homeboy::cli_surface::Placement::Local)
-                    .then(|| "operator --placement local".to_string()),
-            },
-        ),
-    )
 }
 
 fn composed_lab_job_overrides(
@@ -892,17 +832,6 @@ fn authoritative_preflight(
         Error::internal_unexpected("route requires a completed parsed-command preflight result")
     })
 }
-
-/// The runner the *generic* Lab route may use, given what the command's
-/// contract actually authorizes.
-///
-/// An operator-pinned `--runner` always passes: pinning names the runner
-/// directly and is its own authority. A policy-selected default runner has to
-/// earn its place through
-/// [`lab_routing::authorizes_policy_lab_runner`], which is the same predicate
-/// the offload executor applies — so the canonical placement decision this
-/// controller writes and the dispatch the executor performs can never disagree
-/// about whether a command was entitled to leave this machine.
 
 fn finalize_placement(
     directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
