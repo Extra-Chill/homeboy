@@ -505,6 +505,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
 
         ErrorCode::RemoteCommandFailed
         | ErrorCode::RemoteCommandTimeout
+        | ErrorCode::RemoteCapabilityMissing
         | ErrorCode::DeployNoComponentsConfigured
         | ErrorCode::DeployBuildFailed
         | ErrorCode::DeployUploadFailed

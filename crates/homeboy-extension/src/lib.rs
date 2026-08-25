@@ -70,8 +70,8 @@ pub use execution::execute_action;
 pub use execution::{
     extension_ready_status, extension_ready_status_with, is_extension_compatible, run_action,
     run_deployment_provider, run_extension, run_setup, ExtensionExecutionMode,
-    ExtensionReadinessMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult,
-    ExtensionStepFilter,
+    ExtensionReadinessMode, ExtensionReadinessState, ExtensionReadyStatus, ExtensionRunResult,
+    ExtensionSetupResult, ExtensionStepFilter,
 };
 pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateDefinitionFact, AggregateFieldFact,
