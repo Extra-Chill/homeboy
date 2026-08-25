@@ -47,11 +47,20 @@ fi
 
 results="${RESULTS:-}"
 [ -n "${results}" ] || results='{}'
-if ! jq -e --arg command "${COMMAND}" \
-  'type == "object" and (.[$command] == "pass" or .[$command] == "fail" or .[$command] == "timeout")' \
-  <<< "${results}" >/dev/null 2>&1; then
-  publication_error results "must be an object recording '${COMMAND}' as pass, fail, or timeout" "${results}"
-fi
+execution_state="${EXECUTION_STATE:-completed}"
+case "${execution_state}" in
+  completed)
+    if ! jq -e --arg command "${COMMAND}" \
+      'type == "object" and (.[$command] == "pass" or .[$command] == "fail" or .[$command] == "timeout")' \
+      <<< "${results}" >/dev/null 2>&1; then
+      publication_error results "must be an object recording '${COMMAND}' as pass, fail, or timeout" "${results}"
+    fi
+    ;;
+  pr_closed)
+    results='{}'
+    ;;
+  *) publication_error execution_state "must be 'completed' or 'pr_closed'" "${execution_state}" ;;
+esac
 
 mkdir -p "${output_dir}"
 manifest="${output_dir}/manifest.json"
@@ -68,9 +77,10 @@ jq -cn \
   --arg action_revision "${ACTION_REVISION}" \
   --arg cli_revision "${CLI_REVISION}" \
   --arg binary_sha256 "${BINARY_SHA256}" \
+  --arg execution_state "${execution_state}" \
   --argjson run_attempt "${RUN_ATTEMPT}" \
   --argjson results "${results}" \
-  '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' \
+  '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,execution_state:$execution_state,run_attempt:$run_attempt,results:$results}' \
   > "${temporary}"
 mv "${temporary}" "${manifest}"
 echo "Validated ${phase} differential provenance for artifact '${artifact_name}'."

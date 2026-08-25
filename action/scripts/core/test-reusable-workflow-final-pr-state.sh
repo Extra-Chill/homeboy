@@ -47,6 +47,8 @@ import yaml
 action = yaml.safe_load(open(sys.argv[1]))
 probes = [step for step in action["runs"]["steps"] if step.get("id") in ("check-pr-state", "final-pr-state")]
 problems = []
+if action.get("outputs", {}).get("pr-state-reason", {}).get("value") != "${{ steps.check-pr-state.outputs.reason }}":
+    problems.append("composite action does not expose its pre-execution PR lifecycle state")
 if len(probes) != 2:
     problems.append("composite action must have initial and final PR-state probes")
 for probe in probes:
@@ -82,6 +84,10 @@ for job_name in ("reconcile", "reconcile-test-shards"):
                 problems.append(f"{job_name} PR comment can run after PR closure")
         elif "steps.final-pr-state.outputs.active != 'false'" in condition:
             problems.append(f"{job_name} immutable evidence step {name!r} is skipped after PR closure")
+    if job_name == "reconcile":
+        reconcile = next((step for step in steps if step.get("name") == "Reconcile provenance-bound phase evidence"), {})
+        if reconcile.get("env", {}).get("PR_ACTIVE") != "${{ steps.final-pr-state.outputs.active }}":
+            problems.append("differential reconciliation lacks the final PR lifecycle state")
 
 if problems:
     print("\n".join(problems))

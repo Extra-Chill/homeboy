@@ -236,6 +236,9 @@ outputs:
   results:
     description: 'JSON object with pass/fail results for each command'
     value: ${{ steps.select-results.outputs.results }}
+  pr-state-reason:
+    description: 'Final pre-execution PR lifecycle state: active or pr_closed.'
+    value: ${{ steps.check-pr-state.outputs.reason }}
   binary-source:
     description: 'How the binary was obtained: "prebuilt", "source", "fallback", or "release"'
     value: ${{ steps.resolve-binary.outputs.binary-source }}
