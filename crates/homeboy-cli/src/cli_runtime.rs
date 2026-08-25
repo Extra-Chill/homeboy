@@ -25,6 +25,7 @@ use homeboy::extension::{
     ExtensionManifest as InstalledExtensionManifest, ExtensionReadinessMode, ExtensionSummary,
 };
 use homeboy_agents::agent_task_service::cook_continue_command;
+#[cfg(test)]
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
 use homeboy_upgrade::upgrade;
 
@@ -2073,7 +2074,7 @@ fn collect_extension_cli_info() -> ExtensionCliDiscovery {
 /// Neither reads readiness, so the rendered `--help` surface and the augmented
 /// parser are byte-identical either way (#10616).
 fn collect_extension_cli_info_metadata_only() -> ExtensionCliDiscovery {
-    collect_extension_cli_info_with(ExtensionReadinessMode::Skip)
+    collect_extension_cli_info_with(ExtensionReadinessMode::Cached)
 }
 
 fn collect_extension_cli_info_with(readiness: ExtensionReadinessMode) -> ExtensionCliDiscovery {
@@ -2184,28 +2185,28 @@ fn extension_command_manifest(
 
 fn extension_command_health_from_summary(summary: &ExtensionSummary) -> ExtensionCommandHealth {
     // An extension whose `ready_check` was never run is `unknown`, not `ready`.
-    // `ExtensionReadinessMode::Skip` reports `ready: true` so that inventory
-    // output is not mistaken for a *failed* probe, but a command-health
-    // contract that copied that through would be asserting a readiness nobody
-    // measured — the fail-open defect class in #10685. Report the absence of a
-    // measurement as an absence. (#10616)
-    let readiness_skipped = summary.ready_reason.as_deref() == Some(READY_CHECK_SKIPPED_REASON);
+    // A command-health contract that treated an absent measurement as ready
+    // would reproduce the fail-open defect class in #10685. (#10616)
+    let readiness_unknown =
+        summary.readiness == homeboy_extension::ExtensionReadinessState::Unknown;
 
     let status = if summary.error.is_some() {
         "error"
     } else if !summary.compatible {
         "incompatible"
-    } else if readiness_skipped {
+    } else if readiness_unknown {
         "unknown"
-    } else if summary.ready {
+    } else if summary.ready == Some(true) {
         "ready"
+    } else if summary.readiness == homeboy_extension::ExtensionReadinessState::TimedOut {
+        "timed_out"
     } else {
         "not_ready"
     };
 
     ExtensionCommandHealth {
         status: status.to_string(),
-        ready: summary.ready && !readiness_skipped,
+        ready: summary.ready == Some(true),
         compatible: summary.compatible,
         linked: summary.linked,
         reason: summary
