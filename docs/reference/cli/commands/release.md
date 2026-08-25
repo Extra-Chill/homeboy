@@ -158,14 +158,15 @@ Write a source-authority manifest for assembled release artifacts
 ## `homeboy release contains`
 
 ```sh
-homeboy release contains [OPTIONS] [COMMIT]
+homeboy release contains [OPTIONS] [COMPONENT_ID_OR_COMMIT] [COMMIT]
 ```
 
 Report which release first contained a commit, and whether the installed build has it
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `[COMMIT]` | no | Commit sha (or any commit-ish) to locate. Omit when using --issue |
+| `[COMPONENT_ID_OR_COMMIT]` | no | Component ID when followed by COMMIT or paired with --issue. A lone value remains the commit-ish for compatibility |
+| `[COMMIT]` | no | Commit sha (or any commit-ish) to locate after COMPONENT_ID |
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -177,14 +178,18 @@ Report which release first contained a commit, and whether the installed build h
 ## `homeboy release gap`
 
 ```sh
-homeboy release gap [OPTIONS]
+homeboy release gap [OPTIONS] [COMPONENT_ID]
 ```
 
 Report how far the installed build is behind the newest release
 
+| Argument | Required | Description |
+| --- | --- | --- |
+| `[COMPONENT_ID]` | no | Component whose release tag namespace to search (default: the component discovered from the working directory) |
+
 | Option | Value | Description |
 | --- | --- | --- |
-| `--component` | `<COMPONENT_ID>` | Component whose release tag namespace to search (default: the component discovered from the working directory) |
+| `--component` | `<COMPONENT_ID>` | Component whose release tag namespace to search (alternative to the positional component target) |
 | `--path` | `<PATH>` | Checkout to inspect directly. Useful for unregistered clones, CI runners, and worktrees |
 | `--installed` | `<VERSION>` | Version to treat as installed instead of the running binary's version |
 
@@ -211,7 +216,7 @@ Show one retained readiness operation by operation:// reference or ID
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<REFERENCE>` | yes | _no help text_ |
+| `<REFERENCE>` | yes | Readiness operation:// reference or operation ID |
 
 ## `homeboy release readiness list`
 
@@ -223,4 +228,4 @@ List retained readiness operations for a component
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<COMPONENT_ID>` | yes | _no help text_ |
+| `<COMPONENT_ID>` | yes | Component whose retained readiness operations to list |
