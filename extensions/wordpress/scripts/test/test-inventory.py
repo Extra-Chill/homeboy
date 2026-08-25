@@ -18,8 +18,9 @@ Two details are load-bearing and easy to get wrong:
   matching Python's `json.dumps` is the contract.
 
 * The workspace fingerprint concatenates `f"{relative_path}\\0{text}\\0"` over
-  the selected files in sorted order, where `text` has been read with universal
-  newlines. Core normalizes CRLF and lone CR to LF for the same reason.
+  the selected files ordered **by path components**, where `text` has been read
+  with universal newlines. Core normalizes CRLF and lone CR to LF for the same
+  reason, and orders by components because Rust's `Ord for PathBuf` does.
 
 The file selection, skip list, root markers and runner identity are read from
 the extension manifest's `test.inventory` block, so this script and the
@@ -93,8 +94,25 @@ def workspace_fingerprint(root, config):
             if path.is_file() and selected_for_fingerprint(path, config):
                 selected.append(path)
 
+    # Ordered by path components, never by the joined text.
+    #
+    # Core hashes in `Ord for PathBuf` order, which compares component by
+    # component. Sorting `str(relative)` instead disagrees with it whenever a
+    # directory name is a prefix of a sibling followed by a byte below "/":
+    #
+    #     inc/auth-tokens/browser-handoff-token.php   # first by joined text ("-" < "/")
+    #     inc/auth/browser-handoff-handler.php        # first by components ("auth" < "auth-tokens")
+    #
+    # Same files, different order, different digest -- so core rejected every
+    # inventory this producer wrote for `extrachill-users` (which has exactly
+    # that pair of directories) as a workspace-provenance mismatch, and no rerun
+    # could ever fix a sort order. Extra-Chill/homeboy#13494.
+    #
+    # `sorted()` over `Path` objects is not a substitute: it returned joined-text
+    # order before Python 3.12 and component order after it, which would make the
+    # fingerprint depend on the interpreter installed on the runner.
     content = []
-    for path in sorted(selected, key=lambda item: str(item.relative_to(root))):
+    for path in sorted(selected, key=lambda item: item.relative_to(root).parts):
         try:
             # `read_text` applies universal newlines, which is what core's
             # CRLF/CR normalization reproduces.

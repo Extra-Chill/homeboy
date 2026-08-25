@@ -42,13 +42,24 @@ def run(command, cwd):
 
 
 def workspace_fingerprint(root):
+    # Ordered by path components, explicitly.
+    #
+    # Core hashes in `Ord for PathBuf` order, which is component-wise. A bare
+    # `sorted()` over `Path` objects happened to agree only because Python 3.12
+    # switched path comparison from the joined string to the components -- on
+    # 3.11 the same code ordered `src/auth-tokens/...` before `src/auth/...` and
+    # produced a fingerprint core would reject. Pin the order here rather than
+    # letting the runner's interpreter decide it. Extra-Chill/homeboy#13494.
     root = Path(root).resolve()
     files = sorted(
-        path for path in root.rglob("*")
-        if path.is_file()
-        and ".git" not in path.parts
-        and "target" not in path.parts
-        and (path.name in {"Cargo.toml", "Cargo.lock"} or path.suffix == ".rs")
+        (
+            path for path in root.rglob("*")
+            if path.is_file()
+            and ".git" not in path.parts
+            and "target" not in path.parts
+            and (path.name in {"Cargo.toml", "Cargo.lock"} or path.suffix == ".rs")
+        ),
+        key=lambda path: path.relative_to(root).parts,
     )
     content = "".join(f"{path.relative_to(root)}\0{path.read_text()}\0" for path in files)
     return digest(content)
