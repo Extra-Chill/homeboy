@@ -32,5 +32,8 @@ fn main() -> std::process::ExitCode {
         &[homeboy_triage::COMMAND_NAME],
     )
     .expect("standard product capability composition must be complete");
+    if let Some(exit_code) = runtime.run_startup_fast_path(&args) {
+        return exit_code;
+    }
     runtime.run_from_args(args)
 }

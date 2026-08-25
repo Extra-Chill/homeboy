@@ -43,6 +43,10 @@ use homeboy_core::run_lifecycle_record::{
     ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
     RunLifecycleRecord,
 };
+use homeboy_lab_contract::lab::transport_failure::{
+    preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportAttemptReceipt,
+    LabTransportErrorKind, LabTransportOperation,
+};
 use serde::Deserialize;
 use sha2::Digest;
 use std::process::Command;
@@ -664,19 +668,12 @@ fn review_form_aggregate(plan: &AgentTaskPlan) -> crate::agent_task_scheduler::A
             ..Default::default()
         },
         outcomes: vec![AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: task.task_id.clone(),
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("provider dispatched once".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
             outputs: serde_json::json!({ "review_form": form }),
-            workflow: None,
-            follow_up: None,
             metadata: serde_json::json!({ "model": task.executor.model() }),
+            ..Default::default()
         }],
         events: Vec::new(),
         artifact_lineage: Vec::new(),
@@ -705,19 +702,11 @@ fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
                 ..Default::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: task.task_id.clone(),
                 status: AgentTaskOutcomeStatus::Timeout,
                 summary: Some("review form provider timed out".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
                 metadata: serde_json::json!({ "model": task.executor.model() }),
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -748,19 +737,11 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
                 ..Default::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: task.task_id.clone(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("candidate prepared without review form".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
                 metadata: serde_json::json!({ "model": task.executor.model() }),
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -898,19 +879,13 @@ fn seed_patch_alias_aggregate_with_metadata(
                     ..Default::default()
                 },
                 outcomes: vec![AgentTaskOutcome {
-                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: task.task_id.clone(),
                     status: AgentTaskOutcomeStatus::Succeeded,
-                    summary: None,
-                    failure_classification: None,
                     artifacts,
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
                     diagnostics,
                     outputs: test_review_form_outputs(),
-                    workflow: None,
-                    follow_up: None,
                     metadata: serde_json::json!({ "model": task.executor.model() }),
+                    ..Default::default()
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
@@ -968,19 +943,12 @@ fn seed_patch_alias_aggregate_in_store(
                     ..Default::default()
                 },
                 outcomes: vec![AgentTaskOutcome {
-                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: task.task_id.clone(),
                     status: AgentTaskOutcomeStatus::Succeeded,
-                    summary: None,
-                    failure_classification: None,
                     artifacts,
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
                     outputs: test_review_form_outputs(),
-                    workflow: None,
-                    follow_up: None,
                     metadata: serde_json::json!({ "model": task.executor.model() }),
+                    ..Default::default()
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
@@ -1777,38 +1745,20 @@ fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
             },
             outcomes: vec![
                 crate::agent_task::AgentTaskOutcome {
-                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "winner".to_string(),
                     status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
-                    summary: None,
-                    failure_classification: None,
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
                     outputs: test_review_form_outputs(),
-                    workflow: None,
-                    follow_up: None,
                     metadata: serde_json::json!({ "candidate_selection": {
                         "policy": "first_green",
                         "selected_task_id": "winner",
                         "promotion_action": "promote_selected_candidate_only"
                     }}),
+                    ..Default::default()
                 },
                 crate::agent_task::AgentTaskOutcome {
-                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "late-sibling".to_string(),
                     status: crate::agent_task::AgentTaskOutcomeStatus::Cancelled,
-                    summary: None,
-                    failure_classification: None,
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
-                    metadata: Value::Null,
+                    ..Default::default()
                 },
             ],
             events: Vec::new(),
@@ -2731,19 +2681,11 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
                     ..Default::default()
                 },
                 outcomes: vec![AgentTaskOutcome {
-                    schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "provider".to_string(),
                     status: AgentTaskOutcomeStatus::Succeeded,
                     summary: Some("provider dispatched once".to_string()),
-                    failure_classification: None,
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
                     outputs: test_review_form_outputs(),
-                    workflow: None,
-                    follow_up: None,
-                    metadata: Value::Null,
+                    ..Default::default()
                 }],
                 events: vec![AgentTaskProgressEvent {
                     task_id: "provider".to_string(),
@@ -3269,19 +3211,10 @@ impl AgentTaskExecutorAdapter for ImmediateSuccessExecutor {
         _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
     ) -> crate::agent_task::AgentTaskOutcome {
         crate::agent_task::AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
             summary: Some("fixture provider succeeded".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3389,19 +3322,10 @@ impl AgentTaskExecutorAdapter for SucceedingExecutor {
             "provider change",
         ]);
         crate::agent_task::AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
             summary: Some("fixture provider succeeded".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3421,19 +3345,12 @@ impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
         );
         assert_eq!(request.policy.write, "none");
         crate::agent_task::AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
             summary: Some("review form emitted without modifying the candidate".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
             outputs: test_review_form_outputs(),
-            workflow: None,
-            follow_up: None,
             metadata: serde_json::json!({ "model": request.executor.model() }),
+            ..Default::default()
         }
     }
 }
@@ -3464,19 +3381,10 @@ impl AgentTaskExecutorAdapter for TerminalSuccessExecutor {
         _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
     ) -> crate::agent_task::AgentTaskOutcome {
         crate::agent_task::AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
             summary: Some("terminal retry fixture succeeded".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3491,25 +3399,18 @@ impl AgentTaskExecutorAdapter for ProviderMissingExecutor {
         _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
     ) -> crate::agent_task::AgentTaskOutcome {
         crate::agent_task::AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
             summary: Some("no extension agent-task provider found".to_string()),
             failure_classification: Some(
                 crate::agent_task::AgentTaskFailureClassification::CapabilityMissing,
             ),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
             diagnostics: vec![crate::agent_task::AgentTaskDiagnostic {
                 class: "agent_task.provider_missing".to_string(),
                 message: "no extension agent-task provider found".to_string(),
                 data: Value::Null,
             }],
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3653,6 +3554,7 @@ struct AdmissionFailingAttemptDispatcher {
 #[derive(Debug)]
 struct RetryableTransportFailingAttemptDispatcher {
     dispatches: Arc<AtomicUsize>,
+    runner_jobs_created: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
@@ -3824,16 +3726,31 @@ impl AgentTaskCookAttemptDispatcher for RetryableTransportFailingAttemptDispatch
     fn dispatch_attempt(
         &self,
         _plan: AgentTaskPlan,
-        _run_id: &str,
+        run_id: &str,
         _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> Result<()> {
         self.dispatches.fetch_add(1, Ordering::SeqCst);
-        Err(Error::new(
-            homeboy_core::error::ErrorCode::RunnerLabTransportFailure,
-            "fixture transport disconnected",
-            serde_json::json!({ "phase": "lab_handoff" }),
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_id"] = serde_json::json!("fixture-lab");
+        })?;
+        let io_error = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "Authorization: Bearer fixture-preacceptance-secret",
+        );
+        let error = Error::internal_io(
+            io_error.to_string(),
+            Some("submit selected Lab runner job".to_string()),
         )
-        .with_retryable(true))
+        .with_source(io_error)
+        .with_retryable(true);
+        debug_assert_eq!(self.runner_jobs_created.load(Ordering::SeqCst), 0);
+        Err(preacceptance_transport_error(
+            run_id,
+            "fixture-lab",
+            LabTransportOperation::DispatchCookAttempt,
+            LabJobAcceptanceDisposition::NoJobAccepted,
+            error,
+        ))
     }
 }
 
@@ -6855,6 +6772,13 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
         config
             .worktree_providers
             .insert("competing".to_string(), provider_config(&competing, false));
+        config.settings.insert(
+            homeboy_core::worktree_providers::WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY
+                .to_string(),
+            serde_json::json!({
+                "owner": { "repository": "fixture" }
+            }),
+        );
         homeboy_core::defaults::save_config(&config).expect("save provider config");
 
         let cook_id = "owner-timeout";
@@ -6862,6 +6786,8 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
         options.to_worktree = "fixture@owner-timeout".to_string();
+        options.no_finalize = false;
+        options.gates.private_verify = vec!["PRIVATE_GATE_SECRET=do-not-persist".to_string()];
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
@@ -6892,6 +6818,32 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
             record.metadata["pre_execution_failure"]["details"]["worktree_provider_operation"],
             "ensure"
         );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_self_repair"]
+                ["failed_operation"],
+            "ensure"
+        );
+        assert!(record.metadata["pre_execution_failure"]["details"]
+            ["worktree_provider_self_repair"]["replay_argv"]
+            .as_array()
+            .expect("typed self-repair replay")
+            .iter()
+            .any(|argument| argument == "--worktree-provider-self-repair"));
+        let route =
+            &record.metadata["pre_execution_failure"]["details"]["worktree_provider_self_repair"];
+        assert!(route["replay_argv"]
+            .as_array()
+            .expect("typed self-repair replay")
+            .iter()
+            .any(|argument| argument == "<redacted:--private-verify>"));
+        assert!(!route.to_string().contains("PRIVATE_GATE_SECRET"));
+        assert!(route["replay_requires"]
+            .as_array()
+            .expect("replay requirements")
+            .iter()
+            .any(|requirement| requirement
+                .as_str()
+                .is_some_and(|requirement| requirement.contains("private gate"))));
         let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
         assert_eq!(
             plan.metadata["cook_provision"]["worktree_provider_id"],
@@ -10748,11 +10700,13 @@ fn cook_ignores_untrusted_or_malformed_lab_runtime_recovery_metadata() {
 fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let dispatches = Arc::new(AtomicUsize::new(0));
+        let runner_jobs_created = Arc::new(AtomicUsize::new(0));
         let cook_id = "cook-retryable-transport";
         let mut options = batch_cook_options(
             cook_id,
             Arc::new(RetryableTransportFailingAttemptDispatcher {
                 dispatches: Arc::clone(&dispatches),
+                runner_jobs_created: Arc::clone(&runner_jobs_created),
             }),
         );
         options.provider_command = Some("fixture-provider".to_string());
@@ -10766,6 +10720,7 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
         assert_eq!(result.value.status, "pre_execution_failure");
         assert_eq!(result.value.attempts.len(), 2);
         assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+        assert_eq!(runner_jobs_created.load(Ordering::SeqCst), 0);
         assert_eq!(result.value.history_run_ids.len(), 2);
         assert_eq!(
             result.value.history_run_ids[0],
@@ -10781,15 +10736,36 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
         let recipe = super::super::load_recipe(cook_id).expect("transport retries are durable");
         assert_eq!(recipe.attempts.len(), 2);
         assert!(recipe.attempts.iter().all(|attempt| attempt.attempt == 1));
-        for run_id in &result.value.history_run_ids {
+        for (transport_attempt, run_id) in result.value.history_run_ids.iter().enumerate() {
             let record = agent_task_lifecycle::status(run_id).expect("retry attempt exists");
             assert!(record.provider_handles.is_empty());
+            assert!(record.lab_handoff.is_none());
+            assert!(record.runner_job_id().is_none());
+            assert_eq!(record.runner_id(), Some("fixture-lab"));
             assert_eq!(record.metadata["provider_executions_consumed"], 0);
             assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
             assert_eq!(
                 record.metadata["pre_execution_failure"]["failure_classification"],
                 "transient"
             );
+            let receipt: LabTransportAttemptReceipt = serde_json::from_value(
+                record.metadata["pre_execution_failure"]["details"]
+                    ["lab_transport_attempt_receipt"]
+                    .clone(),
+            )
+            .expect("durable typed transport receipt");
+            assert_eq!(receipt.transport_attempt as usize, transport_attempt);
+            assert_eq!(receipt.transport_retry_limit, 1);
+            assert_eq!(receipt.selected_runner, "fixture-lab");
+            assert_eq!(receipt.error.kind, LabTransportErrorKind::BrokenPipe);
+            assert_eq!(
+                receipt.acceptance,
+                LabJobAcceptanceDisposition::NoJobAccepted
+            );
+            assert!(receipt.receipt_id.starts_with(run_id));
+            assert!(!serde_json::to_string(&record)
+                .expect("serialize durable record")
+                .contains("fixture-preacceptance-secret"));
         }
     });
 }
@@ -10889,6 +10865,7 @@ fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_rep
             cook_id,
             Arc::new(RetryableTransportFailingAttemptDispatcher {
                 dispatches: Arc::clone(&lab_dispatches),
+                runner_jobs_created: Arc::new(AtomicUsize::new(0)),
             }),
         );
         options.provider_command = Some("fixture-provider".to_string());

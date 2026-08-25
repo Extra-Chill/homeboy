@@ -2466,24 +2466,15 @@ mod tests {
             queue: AgentTaskQueueStatus::default(),
         };
         aggregate.outcomes.push(AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "task".to_string(),
             status: AgentTaskOutcomeStatus::Succeeded,
-            summary: None,
-            failure_classification: None,
             artifacts: vec![
                 artifact("patch", "patch", Some("runner-a")),
                 artifact("transcript", "transcript", None),
                 artifact("result", "result", None),
                 artifact("runtime-log", "runtime-log", None),
             ],
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         });
 
         assert_eq!(

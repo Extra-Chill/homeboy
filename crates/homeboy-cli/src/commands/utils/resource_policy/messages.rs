@@ -113,7 +113,7 @@ pub(super) fn warning_message(
     )
 }
 
-pub(super) fn runner_pinned_controller_notice(
+pub(super) fn lab_routed_controller_notice(
     command: HotCommand,
     recommendation: ResourceRecommendation,
     resources: &DoctorOutput,

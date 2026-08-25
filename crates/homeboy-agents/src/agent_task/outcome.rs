@@ -241,19 +241,9 @@ mod default_construction_tests {
             ..Default::default()
         };
         let verbose = AgentTaskOutcome {
-            schema: outcome_schema(),
             task_id: "cook".to_string(),
             status: AgentTaskOutcomeStatus::Succeeded,
-            summary: None,
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         };
         assert_eq!(via_default, verbose);
     }

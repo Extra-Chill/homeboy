@@ -2730,13 +2730,10 @@ pub(super) fn failure_outcome(
     data: Value,
 ) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: request.task_id.clone(),
         status,
         summary: Some(message.clone()),
         failure_classification: Some(classification),
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
         evidence_refs: vec![AgentTaskEvidenceRef {
             kind: "agent-task-provider".to_string(),
             uri: format!("homeboy://agent-task/{}", diagnostic_class),
@@ -2747,10 +2744,7 @@ pub(super) fn failure_outcome(
             message,
             data,
         }],
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     }
 }
 

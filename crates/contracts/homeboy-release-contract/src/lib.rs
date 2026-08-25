@@ -174,9 +174,3 @@ pub struct ChangelogSnapshotData {
     pub label: String,
     pub items: Vec<String>,
 }
-
-/// Baseline-alignment validation warning for a component's version target.
-#[derive(Debug, Clone)]
-pub struct BaselineAlignmentWarning {
-    pub message: String,
-}

@@ -384,26 +384,6 @@ pub struct PublishRequest {
     pub controls: ExecutionControls,
 }
 
-/// Result of publishing an already-applied change.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PublishResult {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    #[serde(default = "publish_phase")]
-    pub phase: ExecutionPhase,
-    pub status: ExecutionStatus,
-    pub published: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub operations: Vec<PublishOperation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub metadata: HashMap<String, serde_json::Value>,
-}
-
 const fn apply_phase() -> ExecutionPhase {
     ExecutionPhase::Apply
 }

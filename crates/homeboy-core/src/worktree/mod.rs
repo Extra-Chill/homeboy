@@ -8,6 +8,7 @@ use crate::ownership;
 use crate::{git, paths};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 mod queue_ops;
 mod store_ops;
@@ -29,12 +30,12 @@ pub use types::{
     WorktreeCreateReconciliation, WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization,
     WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence, WorktreeInventoryOptions,
     WorktreeInventoryOutput, WorktreeInventoryRecord, WorktreeListOutput,
-    WorktreeLivenessAuthority, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
-    WorktreeQueueCreateRequest, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
-    WorktreeQueueLockHolder, WorktreeReconciliationAction, WorktreeReconciliationAuthority,
-    WorktreeReconciliationResult, WorktreeRemoveOptions, WorktreeRemoveOutput,
-    WorktreeSafetyReport, WorktreeStatusOutput, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
-    TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+    WorktreeLivenessAuthority, WorktreeQueueCreateFailure, WorktreeQueueCreateOptions,
+    WorktreeQueueCreateOutput, WorktreeQueueCreateRequest, WorktreeQueueCreateRow,
+    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeReconciliationAction,
+    WorktreeReconciliationAuthority, WorktreeReconciliationResult, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+    TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
 /// The managed handle a repo and branch pair resolves to. Creation slugifies the
@@ -511,6 +512,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                         command,
                         WorktreeQueueCreateStatus::Failed,
                     );
+                    row.failure = Some(queue_failure(&error));
                     row.error = Some(error.message);
                     rows.push(row);
                 }
@@ -562,6 +564,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     command,
                     WorktreeQueueCreateStatus::Failed,
                 );
+                row.failure = Some(queue_failure(&error));
                 row.error = Some(error.message);
                 rows.push(row);
                 for queued_request in options.requests.iter().take(total).skip(index + 1) {
@@ -584,6 +587,34 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
         dry_run: options.dry_run,
         rows,
     })
+}
+
+fn queue_failure(error: &Error) -> WorktreeQueueCreateFailure {
+    let provider_id = error
+        .details
+        .get("worktree_provider_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let classification = error
+        .details
+        .get("worktree_provider_call_classification")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| error.code.as_str())
+        .to_string();
+    let phase = error
+        .details
+        .get("worktree_provider_phase")
+        .and_then(Value::as_str)
+        .unwrap_or("worktree_preflight")
+        .to_string();
+    WorktreeQueueCreateFailure {
+        code: error.code.as_str().to_string(),
+        classification,
+        phase,
+        message: error.message.clone(),
+        provider_id,
+        details: error.details.clone(),
+    }
 }
 
 /// Validate a prospective native worktree creation and return the exact path

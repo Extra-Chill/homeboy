@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 use super::agent_task::candidate::{
     changed_files_for_artifact, classify_candidates, CandidateState,
 };
-use super::agent_task::{AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand};
+use super::agent_task::{
+    AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand, AgentTaskFanoutCommand,
+};
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
 
 mod controller;
@@ -16,6 +18,7 @@ pub(crate) enum AgentTaskSummaryKind {
     Review,
     Controller,
     Providers,
+    FanoutCookBatch,
 }
 
 pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskSummaryKind> {
@@ -25,6 +28,11 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
         AgentTaskCommand::Logs(_) => Some(AgentTaskSummaryKind::Logs),
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
         AgentTaskCommand::Providers(_) => Some(AgentTaskSummaryKind::Providers),
+        AgentTaskCommand::Fanout(args)
+            if matches!(&args.command, AgentTaskFanoutCommand::CookBatch(_)) =>
+        {
+            Some(AgentTaskSummaryKind::FanoutCookBatch)
+        }
         AgentTaskCommand::Controller(controller_args) => match &controller_args.command {
             AgentTaskControllerCommand::Status(_)
             | AgentTaskControllerCommand::Diagnose(_)
@@ -51,7 +59,65 @@ pub(crate) fn render_agent_task_summary(
         AgentTaskSummaryKind::Review => render_review_summary(payload),
         AgentTaskSummaryKind::Controller => controller::render_controller_summary(payload),
         AgentTaskSummaryKind::Providers => render_providers_summary(payload),
+        AgentTaskSummaryKind::FanoutCookBatch => render_fanout_cook_batch_summary(payload),
     }
+}
+
+fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
+    if payload.get("schema")?.as_str()? != "homeboy/agent-task-cook-batch/v1"
+        || payload.get("status")?.as_str()? != "blocked"
+    {
+        return None;
+    }
+    let fanout_id = payload.get("fanout_id")?.as_str()?;
+    let primary = payload.get("primary_failure")?.as_object()?;
+    let phase = primary.get("phase")?.as_str()?;
+    let reason = primary.get("reason")?.as_str()?.lines().next()?.trim();
+    let next_action = primary.get("next_action")?.as_str()?;
+    let failures = payload.get("causal_failures")?;
+    let total = failures.get("total")?.as_u64()?;
+    let provider = primary
+        .get("provider_id")
+        .and_then(Value::as_str)
+        .map(|id| format!(" provider={id}"))
+        .unwrap_or_default();
+    let mut lines = vec![format!(
+        "Fanout {fanout_id}: blocked phase={phase} causal_rows={total}{provider} reason={reason}; next={next_action}"
+    )];
+    if let Some(additional) = failures
+        .get("additional_failures")
+        .and_then(Value::as_array)
+    {
+        for failure in additional {
+            let row = failure.get("row").and_then(Value::as_u64)?;
+            let handle = failure.get("handle").and_then(Value::as_str)?;
+            let classification = failure.get("classification").and_then(Value::as_str)?;
+            let reason = failure
+                .get("reason")
+                .and_then(Value::as_str)?
+                .lines()
+                .next()?
+                .trim();
+            lines.push(format!(
+                "Additional cause: row={row} handle={handle} classification={classification} reason={reason}"
+            ));
+        }
+    }
+    let returned = failures
+        .get("returned")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let evidence_path = failures
+        .get("complete_evidence_path")
+        .and_then(Value::as_str)
+        .unwrap_or("worktrees.rows");
+    lines.push(format!(
+        "Evidence: {evidence_path} (showing {returned} of {total} causal rows)"
+    ));
+    if let Some(sha256) = payload.pointer("/plan_ref/sha256").and_then(Value::as_str) {
+        lines.push(format!("Plan: plan_ref.sha256={sha256}"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn render_providers_summary(payload: &Value) -> Option<String> {
@@ -2150,6 +2216,61 @@ mod tests {
         );
         assert!(summary.contains("Last failure: action-2: executor returned exit code 1\n"));
         assert!(summary.contains("Next: homeboy agent-task controller resume loop-456\n"));
+    }
+
+    #[test]
+    fn blocked_fanout_summary_leads_with_distinct_causes_without_repeating_shared_plan() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-batch/v1",
+            "fanout_id": "issue-wave",
+            "status": "blocked",
+            "summary": {"causal_worktree_failures": 2},
+            "primary_failure": {
+                "phase": "worktree_preflight",
+                "row": 0,
+                "handle": "repo@fix-a",
+                "provider_id": "workspace-owner",
+                "classification": "command",
+                "reason": "Component not found: repo\nprovider detail",
+                "next_action": "workspace-owner worktree add repo fix/a",
+                "evidence_path": "worktrees.rows[0]"
+            },
+            "causal_failures": {
+                "total": 2,
+                "returned": 2,
+                "omitted": 0,
+                "complete_evidence_path": "worktrees.rows",
+                "additional_failures": [{
+                    "phase": "worktree_preflight",
+                    "row": 1,
+                    "handle": "repo@fix-b",
+                    "provider_id": "workspace-owner",
+                    "classification": "timeout",
+                    "reason": "provider deadline exceeded",
+                    "next_action": "workspace-owner worktree add repo fix/b"
+                }]
+            },
+            "plan_ref": {"fanout_id": "issue-wave", "sha256": "sha256:shared-plan"},
+            "plan": {"shared_marker": "FULL_SHARED_PLAN_MUST_NOT_RENDER"},
+            "worktrees": {"rows": [{"command": ["FULL_ROW_COMMAND_A"]}, {"command": ["FULL_ROW_COMMAND_B"]}]},
+            "commands": {"run": "FULL_BATCH_COMMAND_MUST_NOT_RENDER"}
+        });
+        let lossless = payload.clone();
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::FanoutCookBatch, &payload)
+            .expect("blocked fanout summary");
+
+        assert!(summary.starts_with("Fanout issue-wave: blocked phase=worktree_preflight causal_rows=2 provider=workspace-owner reason=Component not found: repo; next=workspace-owner worktree add repo fix/a"), "{summary}");
+        assert!(summary.contains("Additional cause: row=1 handle=repo@fix-b classification=timeout reason=provider deadline exceeded"), "{summary}");
+        assert!(summary.contains("Evidence: worktrees.rows (showing 2 of 2 causal rows)"));
+        assert!(summary.contains("Plan: plan_ref.sha256=sha256:shared-plan"));
+        assert!(!summary.contains("FULL_SHARED_PLAN_MUST_NOT_RENDER"));
+        assert!(!summary.contains("FULL_ROW_COMMAND"));
+        assert!(!summary.contains("FULL_BATCH_COMMAND_MUST_NOT_RENDER"));
+        assert_eq!(
+            payload, lossless,
+            "rendering must not compact structured evidence"
+        );
     }
 
     #[test]

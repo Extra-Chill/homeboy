@@ -2499,23 +2499,14 @@ fn provider_run_result_reads_declared_output_alias() {
     }))
     .expect("role aliases");
     let outcome = AgentTaskOutcome {
-        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: "task-a".to_string(),
         status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
-        summary: None,
-        failure_classification: None,
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
         outputs: json!({
             "custom_run_result": {
                 "run_id": "custom-run-1"
             }
         }),
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     };
 
     assert_eq!(
@@ -4286,11 +4277,9 @@ fn record_completed_run_exposes_logs_and_artifacts() {
                 ..AgentTaskAggregateTotals::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "task-a".to_string(),
                 status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("ok".to_string()),
-                failure_classification: None,
                 artifacts: vec![AgentTaskArtifact {
                     schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                     id: "patch".to_string(),
@@ -4306,17 +4295,12 @@ fn record_completed_run_exposes_logs_and_artifacts() {
                     sha256: None,
                     metadata: Value::Null,
                 }],
-                typed_artifacts: Vec::new(),
                 evidence_refs: vec![AgentTaskEvidenceRef {
                     kind: "transcript".to_string(),
                     uri: "file:///tmp/transcript.json".to_string(),
                     label: Some("provider transcript".to_string()),
                 }],
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }],
             events: vec![AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),

@@ -5,7 +5,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::plan::{PlanStep, PlanStepStatus};
 use homeboy_extension::ExtensionManifest;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -828,7 +828,7 @@ fn failed_result(id: &str, step_type: &str, err: Error) -> ReleaseStepResult {
 fn tracked_dirty_snapshot_for_step(
     step: &PlanStep,
     context: &ReleaseExecutionContext,
-) -> Result<Option<BTreeSet<String>>> {
+) -> Result<Option<BTreeMap<String, String>>> {
     if !release_step_dirty_side_effects_are_guarded(step) {
         return Ok(None);
     }
@@ -842,7 +842,7 @@ fn tracked_dirty_snapshot_for_step(
 fn guard_step_dirty_side_effects(
     step: &PlanStep,
     context: &ReleaseExecutionContext,
-    before: Option<BTreeSet<String>>,
+    before: Option<BTreeMap<String, String>>,
     result: ReleaseStepResult,
 ) -> Result<ReleaseStepResult> {
     if !matches!(result.status, ReleaseStepStatus::Success) {
@@ -854,13 +854,20 @@ fn guard_step_dirty_side_effects(
     };
 
     let after = tracked_dirty_snapshot(&context.component.local_path)?;
-    let introduced: Vec<String> = after.difference(&before).cloned().collect();
-    let introduced = release_step_unexpected_dirty_files(step, context, introduced)?;
-    if introduced.is_empty() {
+    let changed = before
+        .keys()
+        .chain(after.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|file| before.get(*file) != after.get(*file))
+        .cloned()
+        .collect();
+    let changed = release_step_unexpected_dirty_files(step, context, changed)?;
+    if changed.is_empty() {
         return Ok(result);
     }
 
-    Ok(dirty_side_effect_failure(step, introduced))
+    Ok(dirty_side_effect_failure(step, changed))
 }
 
 fn release_step_dirty_side_effects_are_guarded(step: &PlanStep) -> bool {
@@ -944,16 +951,43 @@ fn release_prepare_allowed_dirty_files(
     ))
 }
 
-fn tracked_dirty_snapshot(path: &str) -> Result<BTreeSet<String>> {
+fn tracked_dirty_snapshot(path: &str) -> Result<BTreeMap<String, String>> {
     let changes = git::get_uncommitted_changes(path)?;
     let files = changes
         .staged
         .into_iter()
         .chain(changes.unstaged)
         .collect::<Vec<_>>();
-    Ok(super::planning_worktree::filter_homeboy_managed(files)
+    super::planning_worktree::filter_homeboy_managed(files)
         .into_iter()
-        .collect())
+        .map(|file| {
+            let output = git::execute_git_for_release(
+                path,
+                &[
+                    "diff",
+                    "--binary",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "HEAD",
+                    "--",
+                    &file,
+                ],
+            )
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("git diff HEAD -- {file}")))
+            })?;
+            if !output.status.success() {
+                return Err(Error::git_command_failed(format!(
+                    "git diff failed for tracked release path {file}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            Ok((
+                file,
+                homeboy_engine_primitives::content_hash::sha256_hex(&output.stdout),
+            ))
+        })
+        .collect()
 }
 
 fn dirty_side_effect_failure(step: &PlanStep, files: Vec<String>) -> ReleaseStepResult {
@@ -1010,7 +1044,7 @@ mod tests {
     use super::{
         dependency_preflight_result, execute_release_plan_step, planned_release_tag_name,
         release_step_is_plan_only, release_step_is_show_stopper,
-        release_step_unexpected_dirty_files, ReleaseExecutionContext,
+        release_step_unexpected_dirty_files, tracked_dirty_snapshot, ReleaseExecutionContext,
     };
     use crate::release::types::{
         ReleaseOptions, ReleasePipelineOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
@@ -1175,6 +1209,70 @@ mod tests {
                 std::fs::read(repo.path().join("build/fixture.zip")).expect("source artifact"),
                 std::fs::read(durable).expect("uploaded artifact"),
             );
+        });
+    }
+
+    #[test]
+    fn release_package_cannot_rewrite_an_existing_release_mutation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let repo = tempfile::tempdir().expect("repo");
+            std::fs::write(repo.path().join("VERSION"), "1.2.2\n").expect("version");
+            run_in(repo.path(), &["git", "init", "-q"]);
+            configure_git_user(repo.path());
+            run_in(repo.path(), &["git", "add", "VERSION"]);
+            run_in(repo.path(), &["git", "commit", "-qm", "Initial commit"]);
+            std::fs::write(repo.path().join("VERSION"), "1.2.3\n").expect("release version");
+            assert!(tracked_dirty_snapshot(&repo.path().to_string_lossy())
+                .expect("dirty snapshot")
+                .contains_key("VERSION"));
+
+            let package = package_extension(
+                "printf '9.9.9\n' > VERSION; printf artifact > fixture.zip; \
+                 printf '[{\"path\":\"fixture.zip\",\"type\":\"archive\"}]'",
+            );
+            homeboy_extension::save_manifest(&package).expect("save package extension");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: repo.path().to_string_lossy().to_string(),
+                ..Component::default()
+            };
+            let options = ReleaseOptions {
+                skip_build_validation: true,
+                ..ReleaseOptions::default()
+            };
+            let extensions = vec![package];
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &extensions,
+                component_id: "fixture",
+                options: &options,
+                roots: test_roots(),
+                state: ReleaseState {
+                    version: Some("1.2.3".to_string()),
+                    ..ReleaseState::default()
+                },
+                publish_failed: false,
+            };
+
+            let result = execute_release_plan_step(&plan_step("package"), &mut context)
+                .expect("package dispatch")
+                .expect("package result");
+
+            assert_eq!(
+                std::fs::read_to_string(repo.path().join("VERSION"))
+                    .expect("version after package"),
+                "9.9.9\n"
+            );
+            assert_eq!(result.status, ReleaseStepStatus::Failed);
+            assert!(release_step_is_show_stopper(&result));
+            assert!(result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("dirty_tracked_files"))
+                .and_then(|files| files.as_array())
+                .expect("changed tracked files")
+                .iter()
+                .any(|file| file.as_str() == Some("VERSION")));
         });
     }
 

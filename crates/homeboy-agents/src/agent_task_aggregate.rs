@@ -918,15 +918,8 @@ mod tests {
             task_id: task_id.to_string(),
             status,
             summary: Some(format!("{task_id} summary")),
-            failure_classification: None,
             artifacts,
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 

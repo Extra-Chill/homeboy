@@ -2470,18 +2470,11 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
                 ..AgentTaskAggregateTotals::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "cook-conductor".to_string(),
                 status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
                 summary: Some("Remote provider agent task failed.".to_string()),
                 failure_classification: Some(AgentTaskFailureClassification::Provider),
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
                 outputs: serde_json::json!({}),
-                workflow: None,
-                follow_up: None,
                 metadata: serde_json::json!({
                     "provider": "fixture.agent-task-executor",
                     "provider_run_result": {
@@ -2490,6 +2483,7 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
                         "failure_classification": "runtime"
                     }
                 }),
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
