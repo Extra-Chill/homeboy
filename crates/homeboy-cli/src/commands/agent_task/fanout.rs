@@ -100,6 +100,7 @@ const DRY_RUN_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 const DRY_RUN_MAX_ISSUES: usize = 128;
 const DRY_RUN_MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
 const DRY_RUN_MAX_GATE_BYTES: usize = 8 * 1024;
+const COMPACT_FANOUT_FAILURE_LIMIT: usize = 3;
 
 #[cfg(test)]
 thread_local! {
@@ -2127,6 +2128,7 @@ fn cook_batch_inner(
     let resume_legal = run_result
         .as_ref()
         .is_some_and(|result| batch_resume_is_legal(&result["result"]));
+    let (primary_failure, causal_failures) = blocked_worktree_failure_projection(&worktrees);
 
     Ok((
         serde_json::json!({
@@ -2136,9 +2138,12 @@ fn cook_batch_inner(
                 "dry_run": args.dry_run,
                 "summary": {
                     "issues": plan.cooks.len(),
-                    "worktrees_total": worktrees.rows.len(),
-                    "worktrees_blocked": blocked,
-                },
+                     "worktrees_total": worktrees.rows.len(),
+                     "worktrees_blocked": blocked,
+                     "causal_worktree_failures": causal_failures["total"],
+                 },
+                "primary_failure": primary_failure,
+                "causal_failures": causal_failures,
                 "preflight": {
                     "provider_readiness_command": provider_readiness_command(&args),
                     "provider_selection": provider_selection_preflight(&args, args.dry_run),
@@ -2165,6 +2170,61 @@ fn cook_batch_inner(
             }),
         exit_code,
     ))
+}
+
+fn blocked_worktree_failure_projection(
+    worktrees: &worktree::WorktreeQueueCreateOutput,
+) -> (Option<Value>, Value) {
+    let causal_rows = worktrees
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            matches!(
+                row.status,
+                worktree::WorktreeQueueCreateStatus::Failed
+                    | worktree::WorktreeQueueCreateStatus::ActiveLockHolder
+            )
+        })
+        .collect::<Vec<_>>();
+    let total = causal_rows.len();
+    let mut failures = causal_rows
+        .into_iter()
+        .take(COMPACT_FANOUT_FAILURE_LIMIT)
+        .map(|(index, row)| {
+            let fallback_classification = match row.status {
+                worktree::WorktreeQueueCreateStatus::ActiveLockHolder => "active_lock_holder",
+                _ => "worktree_creation_failed",
+            };
+            let reason = row
+                .failure
+                .as_ref()
+                .map(|failure| failure.message.as_str())
+                .or(row.error.as_deref())
+                .unwrap_or(fallback_classification);
+            serde_json::json!({
+                "phase": "worktree_preflight",
+                "cause_phase": row.failure.as_ref().map(|failure| failure.phase.as_str()),
+                "row": index,
+                "handle": row.handle,
+                "provider_id": row.failure.as_ref().and_then(|failure| failure.provider_id.as_deref()),
+                "classification": row.failure.as_ref().map(|failure| failure.classification.as_str()).unwrap_or(fallback_classification),
+                "reason": reason,
+                "next_action": quote_args(&row.command),
+                "evidence_path": format!("worktrees.rows[{index}]"),
+            })
+        })
+        .collect::<Vec<_>>();
+    let returned = failures.len();
+    let primary = (!failures.is_empty()).then(|| failures.remove(0));
+    let summary = serde_json::json!({
+        "total": total,
+        "returned": returned,
+        "omitted": total.saturating_sub(returned),
+        "additional_failures": failures,
+        "complete_evidence_path": "worktrees.rows",
+    });
+    (primary, summary)
 }
 
 /// Static dry-run deliberately stops before any repository, provider, workspace,
@@ -2787,6 +2847,7 @@ fn queue_or_reuse_worktrees(
                 active_lock_holder: None,
                 path: Some(workspace.path.clone()),
                 error: None,
+                failure: None,
             });
             continue;
         }
@@ -2803,6 +2864,7 @@ fn queue_or_reuse_worktrees(
                     active_lock_holder: None,
                     path: Some(path),
                     error: None,
+                    failure: None,
                 });
             }
             _ => to_create.push(cook),
@@ -2860,6 +2922,7 @@ fn static_worktrees_dry_run(
                 active_lock_holder: None,
                 path: None,
                 error: None,
+                failure: None,
             })
             .collect(),
     }
@@ -6941,6 +7004,7 @@ fi
                         active_lock_holder: None,
                         path: Some(workspace.path().display().to_string()),
                         error: None,
+                        failure: None,
                     }],
                 },
             );
@@ -7272,6 +7336,7 @@ fi
                 active_lock_holder: None,
                 path: Some(root.display().to_string()),
                 error: None,
+                failure: None,
             })
             .collect();
         bind_materialized_worktrees(
@@ -7325,6 +7390,7 @@ fi
                 active_lock_holder: None,
                 path: Some(materialized_root.display().to_string()),
                 error: None,
+                failure: None,
             })
             .collect();
         bind_materialized_worktrees(
@@ -8121,6 +8187,7 @@ fi
             active_lock_holder: None,
             path: None,
             error: None,
+            failure: None,
         }
     }
 
@@ -8209,6 +8276,56 @@ fi
         assert!(commands
             .iter()
             .any(|command| command == "homeboy agent-task fanout artifacts issue-wave"));
+    }
+
+    #[test]
+    fn blocked_worktree_projection_orders_distinct_causes_and_bounds_rows() {
+        let mut rows = (0..4)
+            .map(|index| {
+                worktree_row(
+                    &format!("homeboy@fix-{index}"),
+                    worktree::WorktreeQueueCreateStatus::Failed,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.error = Some(format!("cause {index}"));
+            row.failure = Some(worktree::WorktreeQueueCreateFailure {
+                code: "validation.invalid_argument".to_string(),
+                classification: format!("cause_{index}"),
+                phase: if index % 2 == 0 {
+                    "worktree_provider_ensure"
+                } else {
+                    "worktree_provider_resolve"
+                }
+                .to_string(),
+                message: format!("cause {index}"),
+                provider_id: Some(format!("provider-{index}")),
+                details: serde_json::json!({"complete": index}),
+            });
+        }
+
+        let (primary, projection) = blocked_worktree_failure_projection(&worktree_output(rows));
+        let primary = primary.expect("primary failure");
+
+        assert_eq!(projection["total"], 4);
+        assert_eq!(projection["returned"], COMPACT_FANOUT_FAILURE_LIMIT);
+        assert_eq!(projection["omitted"], 1);
+        assert_eq!(projection["complete_evidence_path"], "worktrees.rows");
+        assert_eq!(primary["row"], 0);
+        assert_eq!(primary["provider_id"], "provider-0");
+        assert_eq!(
+            projection["additional_failures"][0]["classification"],
+            "cause_1"
+        );
+        assert_eq!(
+            projection["additional_failures"][0]["cause_phase"],
+            "worktree_provider_resolve"
+        );
+        assert_eq!(
+            primary["next_action"],
+            "homeboy worktree create homeboy --branch fix/homeboy@fix-0 --from origin/main"
+        );
     }
 
     #[test]
