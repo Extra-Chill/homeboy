@@ -253,6 +253,32 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     );
 }
 
+#[test]
+fn local_retry_launch_token_is_not_reinterpreted_as_a_detached_cook() {
+    let context = HermeticTestContext::new();
+    let token_path = context.root().join("retry-launch-token");
+    std::fs::write(&token_path, "consumed-token").expect("publish retry launch token");
+    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    command
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "0")
+        .env("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN", "consumed-token")
+        .env("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH", token_path)
+        .args([
+            "--placement",
+            "local",
+            "agent-task",
+            "retry",
+            "missing-cook-run",
+            "--run",
+        ]);
+
+    let output = bounded_output(command);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    assert!(!stdout.contains("empty_detached_plan"), "{stdout}");
+    assert!(stdout.contains("missing-cook-run"), "{stdout}");
+}
+
 /// A detached Cook cannot resume a handoff parent without a materialized recipe.
 /// A mismatched daemon is therefore rejected, with its lease-bound repair, before
 /// the launcher announces or persists that parent (#12982).

@@ -635,6 +635,14 @@ pub(super) fn intercept_local_detached_cook(
     provider_placement: Option<&str>,
     provider_runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
+    if !matches!(
+        &cli.command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+        })
+    ) {
+        return Ok(None);
+    }
     // The detached child cannot enter Cook admission until its parent publishes
     // the one-use token carrying the exact durable supervisor identity.
     if local_cook_launch_token_is_present() {
