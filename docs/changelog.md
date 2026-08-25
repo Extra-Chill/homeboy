@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.2] - 2026-08-25
+
+### Fixed
+- carry the reason a baseline comparison could not conclude
+- harden bounded pressure retention
+- bypass sizing under disk pressure
+- isolate cleanup deadlines
+- bind preview lifecycle before replay
+
 ## [0.361.1] - 2026-08-25
 
 ### Changed
