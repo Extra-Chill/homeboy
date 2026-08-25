@@ -178,7 +178,7 @@ pub mod controller_service {
         init_from_spec_for_resume, list, load_materialize_spec_source, mark_human_ready,
         optional_bool, optional_string, optional_string_array, optional_u32, optional_usize,
         plan_from_controller_request, plan_from_spec, prepare_controller_proof,
-        resolve_proof_profile, resume, resume_with_options, run_action, run_next, status,
+        resolve_proof_profile, resume, resume_with_options, run_action, run_next,
         AgentTaskRepoLoopSpec, AgentTaskRepoLoopSpecAbility, AgentTaskRepoLoopSpecAgent,
         AgentTaskRepoLoopSpecArtifact, AgentTaskRepoLoopSpecDependency,
         AgentTaskRepoLoopSpecEntity, AgentTaskRepoLoopSpecEvent, AgentTaskRepoLoopSpecGate,
@@ -206,14 +206,16 @@ pub mod cook_loop {
 
 /// Durable batch/fanout lifecycle records built from independent child runs.
 pub mod batch {
+    pub use super::super::agent_task_batch::status;
     pub use super::super::agent_task_batch::{
-        artifacts, claim_fanout_run_batch, coordinator_is_cancelled, fanout_aggregate_state,
-        fanout_dependency_graph_with_finalization_statuses, fanout_ready_child_run_ids,
+        artifacts, claim_fanout_run_batch, fanout_dependency_graph_with_finalization_statuses,
         heartbeat_fanout_run_batch, owned_child_run_ids, persist_fanout_run_batch,
-        read_batch_record, record_coordinator_cancellation,
-        record_fanout_run_batch_failed_admissions, record_fanout_run_batch_failure, status,
-        submit_plan_batch, AgentTaskBatchArtifactsReport, AgentTaskBatchChildArtifacts,
-        AgentTaskBatchChildRun, AgentTaskBatchCommands, AgentTaskBatchRecord, AgentTaskBatchState,
+        read_batch_record, record_fanout_run_batch_failure,
+    };
+    pub use super::super::agent_task_batch::{
+        fanout_aggregate_state, record_fanout_run_batch_failed_admissions, submit_plan_batch,
+        AgentTaskBatchArtifactsReport, AgentTaskBatchChildArtifacts, AgentTaskBatchChildRun,
+        AgentTaskBatchCommands, AgentTaskBatchRecord, AgentTaskBatchState,
         AgentTaskBatchStatusReport, AgentTaskBatchTotals, FanoutRunBatchChild,
         AGENT_TASK_BATCH_ARTIFACTS_SCHEMA, AGENT_TASK_BATCH_SCHEMA, AGENT_TASK_BATCH_STATUS_SCHEMA,
     };
@@ -301,46 +303,41 @@ pub mod gate {
 /// Durable run lifecycle: submit, run-record state, log/artifact loaders.
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
-        aggregate_source, artifacts, cancel, cancel_run, claim_cook_operation_in_store,
-        claim_local_cook_retry_launch_in_store,
-        claim_next_eligible_queued_run_with_preflight_and_filter_and_limit,
+        aggregate_source, artifacts, cancel_run, cook_index, durable_local_read,
+        fail_detached_cook_handoff_parent, list_records, load_plan, logs, persisted_status,
+        reconcile_terminal_artifact_projection, record_cook_finalization,
+        recover_unmaterialized_cook_input_publication, retry, run_id_for_aggregate_path,
+        run_record_exists, run_record_exists_readonly, run_status, submit_plan,
+    };
+    pub use super::super::agent_task_lifecycle::{
+        cancel, claim_cook_operation_in_store, claim_local_cook_retry_launch_in_store,
         complete_cook_operation_in_store, consume_unmaterialized_cook_replay_claim,
-        cook_attempt_run_id, cook_index, cook_index_exists, cook_index_exists_in_store,
-        cook_index_in_store, cook_terminal_notification_outcome, durable_local_read,
-        durable_local_read_in_store, exact_durable_local_read_in_store, exact_record,
-        fail_cook_operation_in_store, fail_detached_cook_handoff_parent,
+        cook_attempt_run_id, cook_index_exists_in_store, cook_index_in_store,
+        cook_terminal_notification_outcome, durable_local_read_in_store,
+        exact_durable_local_read_in_store, fail_cook_operation_in_store,
         fail_detached_cook_handoff_parent_in_store, has_accepted_runner_handoff,
-        invalidate_cook_finalization_for_dependency, is_unmaterialized_cook_admission,
-        lifecycle_action_eligibility, list_records, load_controller_plan, load_plan,
-        load_plan_in_store, logs, mark_running, materialize_recovered_patch_artifact,
-        persisted_status, pin_current_controller_runtime, pinned_runtime_for_mutation,
-        precheck_unmaterialized_cook_admission, prepare_unmaterialized_cook_admission,
-        prune_controller_runtime_pins, quarantine_queued_run_exact_in_store,
-        rearm_quarantined_run_in_store, rearm_unmaterialized_cook_admission,
-        reconcile_record_health_in_store, reconcile_terminal_artifact_projection,
-        record_acceptance_verdict_with_feedback_in_store, record_completed_run,
-        record_cook_attempt_in_store, record_cook_finalization, record_cook_finalization_in_store,
-        record_cook_force_with_lease_receipt_in_store, record_detached_cook_handoff_child_in_store,
-        record_detached_cook_handoff_parent_in_store, record_detached_cook_supervisor_in_store,
-        record_detached_lab_run, record_lab_offload_phase, record_lab_offload_planned,
-        record_local_cook_retry_child_in_store, record_local_cook_retry_supervisor_in_store,
-        record_manual_finalization_failure, record_manual_finalization_retry,
-        record_pre_dispatch_failure, record_pre_execution_failure,
-        record_pre_execution_failure_in_store, record_promotion, record_remote_dispatch_failure,
-        record_run_aggregate, record_runner_job_identity,
-        record_unmaterialized_cook_admission_in_store,
-        recover_unmaterialized_cook_input_publication, register_acceptance_verifier,
+        is_unmaterialized_cook_admission, lifecycle_action_eligibility, load_plan_in_store,
+        materialize_recovered_patch_artifact, pin_current_controller_runtime,
+        pinned_runtime_for_mutation, precheck_unmaterialized_cook_admission,
+        prepare_unmaterialized_cook_admission, prune_controller_runtime_pins,
+        quarantine_queued_run_exact_in_store, rearm_quarantined_run_in_store,
+        rearm_unmaterialized_cook_admission, reconcile_record_health_in_store,
+        record_acceptance_verdict_with_feedback_in_store, record_cook_attempt_in_store,
+        record_cook_finalization_in_store, record_cook_force_with_lease_receipt_in_store,
+        record_detached_cook_handoff_child_in_store, record_detached_cook_handoff_parent_in_store,
+        record_detached_cook_supervisor_in_store, record_local_cook_retry_child_in_store,
+        record_local_cook_retry_supervisor_in_store, record_manual_finalization_failure,
+        record_manual_finalization_retry, record_pre_execution_failure_in_store,
+        record_unmaterialized_cook_admission_in_store, register_acceptance_verifier,
         register_acceptance_verifier_from_config,
         release_unmaterialized_cook_replay_claim_after_worker_exit,
         renew_unmaterialized_cook_replay_claim, require_detached_cook_handoff_fence_open_in_store,
         reserve_detached_cook_handoff_materialization_in_store,
         resolve_detached_cook_materializing_attempt_in_store, resolve_promotion_patch_artifact_id,
-        retry, run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly,
-        run_record_exists_resolved_in_store, run_status, runner_diagnostic_probe,
+        run_record_exists_resolved_in_store, runner_diagnostic_probe,
         runner_pinned_runtime_for_mutation, runner_probe_plan, select_cook_candidate_from_attempts,
-        status, status_in_store, status_with_options, submit_plan,
-        transition_execution_placement_for_continuation_in_store,
-        verified_controller_artifact_projection_path, AgentTaskAcceptanceAttestation,
+        status_in_store, status_with_options,
+        transition_execution_placement_for_continuation_in_store, AgentTaskAcceptanceAttestation,
         AgentTaskAcceptanceRecord, AgentTaskAcceptanceRequirement, AgentTaskAcceptanceVerdict,
         AgentTaskAcceptanceVerificationRequest, AgentTaskAcceptanceVerifier,
         AgentTaskAcceptanceVerifierProvenance, AgentTaskActionAvailability,
@@ -359,10 +356,20 @@ pub mod lifecycle {
         RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT, RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL,
         RUNNER_PROBE_SKIPPED_NOT_RUNNING,
     };
+    pub use super::super::agent_task_lifecycle::{
+        cook_index_exists, mark_running, record_run_aggregate, record_runner_job_identity,
+        verified_controller_artifact_projection_path,
+    };
+    pub use super::super::agent_task_lifecycle::{
+        exact_record, load_controller_plan, record_detached_lab_run, record_lab_offload_phase,
+        record_lab_offload_planned, record_pre_dispatch_failure, record_pre_execution_failure,
+        record_remote_dispatch_failure, status,
+    };
     #[cfg(feature = "test-support")]
     pub use super::super::agent_task_lifecycle::{
         inject_raw_record_metadata_for_corruption_test, rewrite_record_for_test,
     };
+    pub use super::super::agent_task_lifecycle::{record_completed_run, record_promotion};
 }
 
 /// Durable agent-task loop controller state, events, and policy.
@@ -491,36 +498,34 @@ pub mod secrets {
 
 /// High-level service entry points combining lifecycle and scheduling.
 pub mod service {
+    pub use super::super::agent_task_service::status;
     pub use super::super::agent_task_service::{
         adopt_cook_candidate, adopt_cook_candidate_with_dispatcher,
         adopt_cook_candidate_with_options_and_dispatcher,
         adopt_cook_candidate_with_options_dispatcher_and_executor,
         adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt, aggregate_exit_code,
-        artifacts, authorize_cook_continue_route, authorize_cook_continue_route_with_artifact,
-        cancel, claim_continuation_for, claim_continuation_for_recovery_in_store,
-        compile_cook_attempt, compile_cook_attempt_with_catalog_and_readiness_cache,
+        authorize_cook_continue_route, authorize_cook_continue_route_with_artifact, cancel,
+        claim_continuation_for, claim_continuation_for_recovery_in_store, compile_cook_attempt,
+        compile_cook_attempt_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_readiness_cache, consume_claimed_terminal_with_dispatcher,
         consume_claimed_with_dispatcher, continuation_state_in_store, cook_batch_job_submission,
         detached_batch_coordinator_control, discover_runs, enqueue_terminal_continuation,
         evidence_ref_task_id, execute_promotion, execute_promotion_with_progress,
-        hydrate_evidence_ref, hydrate_evidence_summary, load_recipe, load_recipe_for_attempt, logs,
-        normalize_plan_workspaces, offloaded_status_remediation, persist_initial_recipe,
+        hydrate_evidence_ref, hydrate_evidence_summary, load_recipe, load_recipe_for_attempt,
+        normalize_plan_workspaces, offloaded_status_remediation,
         persist_manual_finalization_intent, persist_manual_finalization_receipt,
         persist_manual_finalization_retry_intent, persist_provider_boundary_replay_evidence,
-        persisted_status, preflight_cook_continuation_admission,
-        prepare_manual_finalization_identity, promotion_is_resumable, promotion_source, read_plan,
-        reconcile_recipe_attempt_for_continuation, reconcile_terminal_artifact_projection,
+        preflight_cook_continuation_admission, prepare_manual_finalization_identity,
+        promotion_is_resumable, read_plan, reconcile_recipe_attempt_for_continuation,
         reconstruct_adoption_options_with_dispatcher, reconstruct_options_with_dispatcher,
         record_replacement_gate_proof, recover_cook_pr, recover_terminal_transport_proxy_evidence,
-        register_cook_batch_job_driver, register_promotion_job_driver,
-        resolve_cook_continuation_run_id, resolve_supervision_policy, resume, resume_cook,
-        resume_cook_batch, retry, run_cook, run_cook_batch, run_cook_batch_with_control,
-        run_loaded_plan, run_next, run_next_with_cook_dispatcher, run_status, run_submitted,
-        run_submitted_with_timeout, run_terminal_cook_continuation, source_worktree_path, status,
-        submit_plan_spec, terminal_review_form_continuation_is_eligible,
-        terminal_transport_recovery_required, validate_initial_recipe_compatibility,
-        validate_recipe_attempt_record, verify_replacement_gates,
-        AgentTaskCandidateAdoptionOptions, AgentTaskCookAttemptReport,
+        register_cook_batch_job_driver, register_promotion_job_driver, resolve_supervision_policy,
+        resume, resume_cook, resume_cook_batch, run_cook, run_cook_batch,
+        run_cook_batch_with_control, run_loaded_plan, run_next, run_next_with_cook_dispatcher,
+        run_submitted, run_submitted_with_timeout, run_terminal_cook_continuation,
+        source_worktree_path, submit_plan_spec, terminal_review_form_continuation_is_eligible,
+        terminal_transport_recovery_required, validate_recipe_attempt_record,
+        verify_replacement_gates, AgentTaskCandidateAdoptionOptions, AgentTaskCookAttemptReport,
         AgentTaskCookBatchCellReport, AgentTaskCookBatchControl, AgentTaskCookBatchJob,
         AgentTaskCookBatchJobPhase, AgentTaskCookBatchJobRequest, AgentTaskCookBatchOptions,
         AgentTaskCookBatchReport, AgentTaskCookCellError, AgentTaskCookReport,
@@ -533,5 +538,10 @@ pub mod service {
         CookSupervisionTick, CookSupervisor, AGENT_TASK_COOK_BATCH_JOB_TYPE,
         AGENT_TASK_COOK_BATCH_JOB_VERSION, AGENT_TASK_PROMOTION_JOB_TYPE,
         AGENT_TASK_PROMOTION_JOB_VERSION, DETACHED_BATCH_COORDINATOR_ENV,
+    };
+    pub use super::super::agent_task_service::{
+        artifacts, logs, persist_initial_recipe, persisted_status, promotion_source,
+        reconcile_terminal_artifact_projection, resolve_cook_continuation_run_id, retry,
+        run_status, validate_initial_recipe_compatibility,
     };
 }

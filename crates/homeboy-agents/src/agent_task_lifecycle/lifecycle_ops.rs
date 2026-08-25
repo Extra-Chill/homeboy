@@ -3010,7 +3010,7 @@ pub fn load_controller_plan_in_store(
 
 /// Load a durable plan for a scheduler or provider execution. This is the only
 /// read path allowed to upgrade a legacy execution-budget envelope.
-pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
+pub(crate) fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     load_plan_for_execution_in_store(&lifecycle_store, run_id)
 }
@@ -3401,7 +3401,7 @@ pub fn reserve_provider_execution_in_store(
 /// Fanout workers are threads and therefore share the coordinator PID. The
 /// provider subprocess is the first process identity unique to one child run;
 /// using it keeps liveness and activity evidence from crossing child records.
-pub fn record_provider_execution_process(
+pub(crate) fn record_provider_execution_process(
     run_id: &str,
     task_id: &str,
     attempt: u32,
@@ -3494,7 +3494,7 @@ pub fn record_cook_progress_in_store(
 
 /// Retain a redacted, bounded controller failure independently of continuation
 /// claim transitions. Claims describe ownership; they must not replace cause.
-pub fn record_cook_controller_failure(
+pub(crate) fn record_cook_controller_failure(
     run_id: &str,
     diagnostic: &Value,
 ) -> Result<AgentTaskRunRecord> {
@@ -3878,7 +3878,7 @@ pub fn record_provider_execution_runtime_evidence_in_store(
     })
 }
 
-pub fn record_provider_execution_runtime_evidence(
+pub(crate) fn record_provider_execution_runtime_evidence(
     run_id: &str,
     task_id: &str,
     attempt: u32,
@@ -4202,7 +4202,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
 
 /// Scoped queued admission with an explicit remaining budget shared with other
 /// admission phases in the same dispatch invocation.
-pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
+pub(crate) fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
     include: impl Fn(&AgentTaskRunRecord) -> bool,
     limit: usize,
     preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
@@ -5388,8 +5388,8 @@ pub fn list_records_with_health_in_store(
 /// Read the durable registry snapshot without runner reconciliation. Bounded
 /// recovery readers use this path so disconnected historical runner mirrors
 /// cannot delay access to controller-owned state.
-pub fn read_records_with_health() -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)>
-{
+pub(crate) fn read_records_with_health(
+) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
     read_records_with_health_bounded(1000)
 }
 
@@ -5401,7 +5401,7 @@ pub fn read_records_with_health_in_store(
     read_records_with_health_bounded_in_store(lifecycle_store, 1000)
 }
 
-pub fn read_records_with_health_bounded(
+pub(crate) fn read_records_with_health_bounded(
     limit: usize,
 ) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
@@ -5423,7 +5423,7 @@ pub fn read_records_with_health_bounded_in_store(
 ///
 /// Exact-match discovery uses this path so filtering happens before a result is
 /// selected rather than against the ordinary bounded display snapshot.
-pub fn read_all_records_with_health(
+pub(crate) fn read_all_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     read_all_records_with_health_in_store(&lifecycle_store)
@@ -6307,7 +6307,7 @@ fn durable_local_read_record_in_store(
 
 /// Read the aggregate after a transport reconciliation completed it without
 /// scheduling the controller-side synthetic handoff task.
-pub fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
+pub(crate) fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     read_aggregate_in_store(&lifecycle_store, run_id)
 }
@@ -6323,7 +6323,7 @@ pub fn read_aggregate_in_store(
 
 /// Read an immutable attempt directly; unlike `read_aggregate`, this never
 /// treats a Cook ID as an alias for its latest attempt.
-pub fn read_attempt_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
+pub(crate) fn read_attempt_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
     store::read_aggregate(&sanitize_run_id(run_id))
 }
 
@@ -6560,7 +6560,7 @@ pub fn record_cook_recovery_checkpoint_in_store(
 /// Re-arm a finalized candidate after a dependency rebase. The original
 /// provider output remains authoritative; Cook resumes at the promotion/gate
 /// boundary and finalizes a fresh review only after those gates pass again.
-pub fn invalidate_cook_finalization_for_dependency(
+pub(crate) fn invalidate_cook_finalization_for_dependency(
     run_id: &str,
     dependency_revision: &str,
     next_command: &str,
@@ -6744,7 +6744,7 @@ const COOK_CANDIDATE_SELECTION_WINDOW: usize = 64;
 /// Select the latest attempt with controller-readable actionable patch bytes.
 /// Ties use run ID so duplicate attempt numbers remain deterministic. When no
 /// attempt has candidate bytes, retain the legacy latest attempt for old runs.
-pub fn select_cook_candidate(cook_id: &str) -> Result<AgentTaskCookCandidateSelection> {
+pub(crate) fn select_cook_candidate(cook_id: &str) -> Result<AgentTaskCookCandidateSelection> {
     let index = cook_index(cook_id)?;
     select_cook_candidate_from_index(cook_id, index, None)
 }

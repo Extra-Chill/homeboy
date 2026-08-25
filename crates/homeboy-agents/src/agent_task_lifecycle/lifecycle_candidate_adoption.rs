@@ -102,7 +102,7 @@ pub fn start_candidate_adoption_with_rerun_policy(
     )
 }
 
-pub fn start_candidate_adoption_with_policy(
+pub(crate) fn start_candidate_adoption_with_policy(
     run_id: &str,
     candidate_sha: &str,
     ai_model: &str,
@@ -403,14 +403,6 @@ pub(crate) fn checkpoint_candidate_adoption_in_store(
     Ok(())
 }
 
-pub fn finish_candidate_adoption(
-    run_id: &str,
-    error: Option<String>,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    finish_candidate_adoption_in_store(&lifecycle_store, run_id, error)
-}
-
 pub fn finish_candidate_adoption_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -440,11 +432,6 @@ pub fn finish_candidate_adoption_in_store(
         true
     })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&run_id)?))
-}
-
-pub fn record_candidate_adoption_result(run_id: &str, result: Value) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_candidate_adoption_result_in_store(&lifecycle_store, run_id, result)
 }
 
 pub fn record_candidate_adoption_result_in_store(

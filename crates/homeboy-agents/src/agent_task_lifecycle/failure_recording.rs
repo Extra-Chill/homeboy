@@ -1382,7 +1382,7 @@ fn terminal_artifact_projection_is_verified_with(
 /// from a verified controller-owned projection. Missing aggregates remain
 /// outside this check so historical terminal records keep their existing
 /// recovery behavior.
-pub fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<String>> {
+pub(crate) fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<String>> {
     let record = store::read_record(&super::sanitize_run_id(run_id))?;
     terminal_artifact_projection_readiness_for_record(
         &record,
@@ -1421,7 +1421,9 @@ pub fn terminal_artifact_projection_readiness_in_store(
 
 /// Bounded read-only counterpart used by fanout status while coordinators are
 /// writing observations. It intentionally leaves reconciliation to `resume`.
-pub fn terminal_artifact_projection_readiness_bounded(run_id: &str) -> Result<Option<String>> {
+pub(crate) fn terminal_artifact_projection_readiness_bounded(
+    run_id: &str,
+) -> Result<Option<String>> {
     let record = store::read_record_bounded(&super::sanitize_run_id(run_id))?;
     terminal_artifact_projection_readiness_for_record(
         &record,
@@ -2220,7 +2222,7 @@ pub fn verified_controller_artifact_projection_path_in_store(
 /// Resolve a controller-retained artifact by its durable logical identity. This
 /// is intentionally independent of the runner-reported path: Lab workspaces
 /// are disposable after their aggregate has been mirrored.
-pub fn verified_controller_artifact_projection(
+pub(crate) fn verified_controller_artifact_projection(
     run_id: &str,
     task_id: &str,
     logical_artifact_id: &str,

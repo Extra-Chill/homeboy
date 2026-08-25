@@ -12122,12 +12122,14 @@ fn legacy_adoption_budget_failure_reenters_once_through_review_authority() {
             "historical gate",
         )
         .unwrap();
-        agent_task_lifecycle::finish_candidate_adoption(
+        agent_task_lifecycle::finish_candidate_adoption_in_store(
+            &test_lifecycle_store(),
             &fixture.run_id,
             Some("candidate remediation budget exhausted".to_string()),
         )
         .unwrap();
-        agent_task_lifecycle::record_candidate_adoption_result(
+        agent_task_lifecycle::record_candidate_adoption_result_in_store(
+            &test_lifecycle_store(),
             &fixture.run_id,
             serde_json::json!({
                 "status": "execution_budget_exhausted",
