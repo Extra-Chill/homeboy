@@ -6,6 +6,9 @@
 homeboy release [OPTIONS] [COMPONENTS]...
 homeboy release version show [<component_id>] [--path <path>]
 homeboy release changes [<component_id>] [--path <path>] [--since <tag>] [--git-diffs]
+homeboy release contains [<component_id>] <commit> [--path <path>]
+homeboy release gap [<component_id>] [--path <path>]
+homeboy release readiness list <component_id>
 homeboy release changelog show [<component_id>]
 homeboy release artifact-source-authority <component_id> --dir <DIR> --tag <TAG> --version <VERSION> --commit <SHA>
 ```
@@ -98,8 +101,8 @@ whether the build in front of you is running it. Before it existed the answer wa
 hand-rolled `git merge-base --is-ancestor <sha> <tag>`, once per candidate tag.
 
 ```sh
-homeboy release contains 6043c013d
-homeboy release contains --issue 11702
+homeboy release contains data-machine-code 6043c013d
+homeboy release contains data-machine-code --issue 11702
 ```
 
 `--issue <n>` resolves through the merged pull request that closed the issue, so
@@ -128,14 +131,15 @@ command failure.
 ### `gap` — how far behind is this build?
 
 ```sh
-homeboy release gap
+homeboy release gap data-machine-code
 ```
 
 The inverse query: the installed version, the newest release tag in the checkout,
 how many releases and commits separate them, and whether that counts as behind at
 all. A source build on an unreleased branch reports `ahead`, not `behind`.
 
-Both commands accept `--component`, `--path`, and `--installed <version>`;
+Both commands accept a positional component target, `--path`, and
+`--installed <version>`; `--component` remains available as an explicit selector.
 `--installed` overrides the running binary's version so you can ask about a
 version you are not currently running.
 

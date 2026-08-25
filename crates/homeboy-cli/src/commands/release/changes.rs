@@ -10,6 +10,9 @@ use crate::commands::utils::resolve::resolve_project_components;
 use crate::commands::CmdResult;
 
 #[derive(Args)]
+#[command(
+    after_help = "Examples:\n  homeboy release changes data-machine-code\n  homeboy release changes data-machine-code --path /path/to/repo --full"
+)]
 pub struct ChangesArgs {
     /// Target ID: component ID (single mode) or project ID (if followed by component IDs)
     pub target_id: Option<String>,
