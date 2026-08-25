@@ -25,7 +25,8 @@ use homeboy::core::observation::runs_service::{
 };
 use homeboy::core::output::OutputBudget;
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
-use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
+use homeboy::core::worktree::{WorktreeCleanupOptions, WorktreeCleanupOutput};
+use homeboy::core::worktree_provider::cleanup_native_worktree_provider;
 use homeboy::core::worktree_providers::WorktreeProviderCleanupOptions;
 use homeboy::runner::runners::{
     self as runner, RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput,
@@ -1960,7 +1961,7 @@ fn cleanup_inventory_with_deadline(
             deadline,
             CleanupCategoryCommandOverrides::default(),
             || {
-                let output = worktree::cleanup(WorktreeCleanupOptions {
+                let output = cleanup_native_worktree_provider(WorktreeCleanupOptions {
                     force: false,
                     dry_run: !apply,
                     cleanup_branches: apply,

@@ -68,6 +68,16 @@ pub trait WorktreeInventoryProvider {
     }
 }
 
+/// Cleanup capability with provider-owned request, authority, and evidence
+/// types. Native and configured providers intentionally retain distinct
+/// options because their cleanup authorities are not interchangeable.
+pub trait WorktreeCleanupProvider {
+    type Options;
+    type Output;
+
+    fn cleanup(&self, options: Self::Options) -> Result<Self::Output>;
+}
+
 /// Canonical local target admitted for a provider-owned mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeMutationTarget {
@@ -277,6 +287,15 @@ impl WorktreeInventoryProvider for NativeWorktreeProvider {
                 })
             })
             .collect()
+    }
+}
+
+impl WorktreeCleanupProvider for NativeWorktreeProvider {
+    type Options = worktree::WorktreeCleanupOptions;
+    type Output = worktree::WorktreeCleanupOutput;
+
+    fn cleanup(&self, options: Self::Options) -> Result<Self::Output> {
+        worktree::cleanup(options)
     }
 }
 
@@ -517,6 +536,15 @@ impl WorktreeInventoryProvider for CommandWorktreeProvider<'_> {
             Err(error) if worktree_providers::is_worktree_provider_not_found(&error) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+}
+
+impl WorktreeCleanupProvider for CommandWorktreeProvider<'_> {
+    type Options = worktree_providers::WorktreeProviderCleanupOptions;
+    type Output = worktree_providers::WorktreeProviderCleanupOutput;
+
+    fn cleanup(&self, options: Self::Options) -> Result<Self::Output> {
+        worktree_providers::cleanup_worktree_providers_from_config(options, self.config.clone())
     }
 }
 
@@ -797,6 +825,19 @@ pub fn observe_worktree_provider_workspace_from_config(
     Err(worktree_providers::worktree_provider_not_found_error(
         handle, config, false,
     ))
+}
+
+pub fn cleanup_native_worktree_provider(
+    options: worktree::WorktreeCleanupOptions,
+) -> Result<worktree::WorktreeCleanupOutput> {
+    NativeWorktreeProvider.cleanup(options)
+}
+
+pub fn cleanup_configured_worktree_providers_from_config(
+    options: worktree_providers::WorktreeProviderCleanupOptions,
+    config: &HomeboyConfig,
+) -> Result<worktree_providers::WorktreeProviderCleanupOutput> {
+    CommandWorktreeProvider::new(config).cleanup(options)
 }
 
 /// Resolve a local mutation target through native ownership first, then the
@@ -1230,6 +1271,15 @@ mod tests {
                     worktree_providers::WorktreeProviderTerminalDisposition::Succeeded,
                 )
                 .expect_err("terminal disposition cannot change");
+            let cleanup = NativeWorktreeProvider
+                .cleanup(worktree::WorktreeCleanupOptions {
+                    force: false,
+                    dry_run: true,
+                    cleanup_branches: false,
+                    allow_unmerged_branches: false,
+                })
+                .expect("native cleanup preview");
+            assert!(cleanup.dry_run);
             std::fs::write(path.join("dirty"), "dirty\n").expect("dirty native worktree");
             assert_unsafe_lookup(&NativeWorktreeProvider, "fixture@native");
         });

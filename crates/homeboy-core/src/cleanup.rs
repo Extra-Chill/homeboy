@@ -13,9 +13,9 @@ use crate::defaults::HomeboyConfig;
 use crate::error::StorageExhaustedDetails;
 use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
+use crate::worktree_provider::cleanup_configured_worktree_providers_from_config;
 use crate::worktree_providers::{
-    cleanup_worktree_providers_from_config, WorktreeProviderCleanupEffects,
-    WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
+    WorktreeProviderCleanupEffects, WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
 };
 use crate::{git, Error, Result};
 
@@ -1411,9 +1411,9 @@ pub fn cleanup_resources_from_config(
 
     if let Some(mut provider_options) = options.worktree_providers.take() {
         provider_options.apply = apply;
-        providers = Some(cleanup_worktree_providers_from_config(
+        providers = Some(cleanup_configured_worktree_providers_from_config(
             provider_options,
-            config,
+            &config,
         )?);
     }
 

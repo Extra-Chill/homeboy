@@ -16,6 +16,9 @@ use homeboy::core::worktree::{
 use homeboy::core::worktree_provider::{
     self, WorktreeProviderIdentity, WorktreeProviderSafety, WorktreeProviderWorkspace,
 };
+use homeboy::core::worktree_providers::{
+    WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
+};
 
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
 
@@ -286,6 +289,8 @@ impl From<WorktreeProviderSafety> for ProviderWorktreeSafetyOutput {
 pub struct WorktreeCleanupCommandOutput {
     pub worktrees: WorktreeCleanupOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_worktrees: Option<WorktreeProviderCleanupOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_cleanup: Option<ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deprecated_flag: Option<&'static str>,
@@ -432,6 +437,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             }
         }
     }
+    let mut exit_code = 0;
     let output = match args.command {
         WorktreeCommand::Create {
             component_id,
@@ -558,12 +564,26 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             let apply = mutation.is_apply();
             let deprecated_dry_run = mutation.dry_run;
             let dry_run = cleanup_is_dry_run(apply);
-            let worktrees = worktree::cleanup(WorktreeCleanupOptions {
-                force,
-                dry_run,
-                cleanup_branches,
-                allow_unmerged_branches,
-            })?;
+            let worktrees =
+                worktree_provider::cleanup_native_worktree_provider(WorktreeCleanupOptions {
+                    force,
+                    dry_run,
+                    cleanup_branches,
+                    allow_unmerged_branches,
+                })?;
+            let provider_worktrees =
+                worktree_provider::cleanup_configured_worktree_providers_from_config(
+                    WorktreeProviderCleanupOptions {
+                        provider: Vec::new(),
+                        all_providers: true,
+                        apply,
+                        timeout: None,
+                    },
+                    &homeboy::core::defaults::load_config(),
+                )?;
+            exit_code = (provider_worktrees.failure_count > 0) as i32;
+            let provider_worktrees =
+                (provider_worktrees.provider_count > 0).then_some(provider_worktrees);
             let artifact_cleanup = if cleanup_artifacts {
                 Some(artifact_cleanup::cleanup_artifacts(
                     ArtifactCleanupOptions {
@@ -584,6 +604,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             let actionable = worktree_cleanup_actionable(&worktrees, cleanup_branches);
             WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
                 worktrees,
+                provider_worktrees,
                 artifact_cleanup,
                 deprecated_flag: deprecated_dry_run.then_some("--dry-run"),
                 actionable,
@@ -604,7 +625,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             }
         },
     };
-    Ok((output, 0))
+    Ok((output, exit_code))
 }
 
 fn cleanup_is_dry_run(apply: bool) -> bool {
