@@ -270,7 +270,7 @@ jobs:
     # (sharded Test result retrieval works across reruns), #424 (extension-owned
     # Cargo build and quality caches), and #425 (cache ownership assertions).
     #
-    # v2.15.7 additionally carries the per-test identity path, without which the
+    # v2.15.12 additionally carries the per-test identity path, without which the
     # differential gate has no `Test` verdict it can attribute. The previous pin
     # predates `apply-differential-gate.py`'s outcome/inventory branch entirely —
     # `test_outcomes` and `failed_test_ids` do not appear in it — so every failed
@@ -283,10 +283,12 @@ jobs:
     # and terminal evidence contract), #432/#13269 (canonical failure-digest
     # result filenames, so a multi-word command no longer reads
     # `review test.json` while the writer emits `review-test.json`), #433
-    # (bounded action setup subprocesses), and suffixed measurement commands.
+    # (bounded action setup subprocesses), #448 (equivalent failed test identity
+    # evidence), and suffixed measurement commands.
     #
-    # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, and #13437.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@95924a6c4841d1db8d6dedc8a337fa07c6ac7b6a
+    # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, #13437, and
+    # #13536.
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@824a88fe781cb2a3394116f714483ef289fe6bb1
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
@@ -305,8 +307,8 @@ jobs:
       # workflow checks out to run the gate itself — it is what surfaces as
       # `ACTION_REVISION` in the Test job — so leaving it behind would keep the
       # old `apply-differential-gate.py` even with a newer workflow.
-      action-ref: 95924a6c4841d1db8d6dedc8a337fa07c6ac7b6a
-      # v3.38.8. Must move with the action pin, not after it: the action consumes
+      action-ref: 824a88fe781cb2a3394116f714483ef289fe6bb1
+      # rust v1.37.4. Must move with the action pin, not after it: the action consumes
       # per-test identities, and homeboy-extensions#2699 (`fix(rust): canonicalize
       # failed test identities`, released in rust v1.37.2) is what produces them.
       # Bumping only the action would swap an unattributable `current > base`
@@ -316,8 +318,9 @@ jobs:
       # are WordPress-scoped and unreachable from this component. This also
       # carries #2697 (structural generic field-type resolution), which has been
       # released since v1.37.1 but could not reach this repository while the pin
-      # was frozen.
-      extension-ref: fd4165ef2b9713672d0e25786c3af27c03012aae
+      # was frozen. This also carries homeboy-extensions#2722, which prevents
+      # child tests from corrupting the parent failed-test identity sidecar.
+      extension-ref: 9c95310bd12a78cb900dc2fe4ed2411396cb30ca
       source: .
       scope: auto
       differential-gating: 'true'
