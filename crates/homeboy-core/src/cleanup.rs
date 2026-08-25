@@ -14,8 +14,8 @@ use crate::error::StorageExhaustedDetails;
 use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
 use crate::worktree_providers::{
-    cleanup_worktree_providers_from_config, WorktreeProviderCleanupOptions,
-    WorktreeProviderCleanupOutput,
+    cleanup_worktree_providers_from_config, WorktreeProviderCleanupEffects,
+    WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
 };
 use crate::{git, Error, Result};
 
@@ -386,6 +386,12 @@ pub struct ResourceCleanupOutput {
     pub artifacts: Option<ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_providers: Option<WorktreeProviderCleanupOutput>,
+    /// Normalized provider effects, projected from the untyped provider
+    /// payloads and also summed into the counts above (#9825). `None` when no
+    /// provider sweep ran; absent fields inside mean the provider did not
+    /// report that effect — never that nothing happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_provider_effects: Option<WorktreeProviderCleanupEffects>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1312,6 +1318,29 @@ pub fn cleanup_resources_from_config(
         (artifact_success_count, artifact_failure_count)
     };
 
+    // Provider mutations are real resources. Leaving them out of the top-level
+    // counts is what let a sweep that pruned 49 lock files report
+    // `applied_count: 0` (#9825): every count above is artifact-derived, and
+    // providers previously contributed only success/failure.
+    //
+    // An absent effect stays absent. `mutated_resource_count` folds unreported
+    // effects as zero *for the sum only*, which is correct — a provider that
+    // never reported locks pruned adds no locks. The typed effects below retain
+    // the distinction between "reported zero" and "did not report".
+    let provider_effects = providers.as_ref().map(|output| output.effects.clone());
+    let provider_mutated = provider_effects
+        .as_ref()
+        .map(|effects| effects.mutated_resource_count())
+        .unwrap_or(0);
+    let provider_bytes = provider_effects
+        .as_ref()
+        .and_then(|effects| effects.bytes_reclaimed)
+        .unwrap_or(0);
+
+    let applied_count =
+        applied_count.saturating_add(usize::try_from(provider_mutated).unwrap_or(usize::MAX));
+    let reclaimed_bytes = reclaimed_bytes.saturating_add(provider_bytes);
+
     Ok(ResourceCleanupOutput {
         command: "cleanup.resources",
         mode: options.intent.as_str(),
@@ -1325,6 +1354,7 @@ pub fn cleanup_resources_from_config(
         reclaimed_allocated_bytes,
         artifacts,
         worktree_providers: providers,
+        worktree_provider_effects: provider_effects,
     })
 }
 
