@@ -99,8 +99,9 @@ pub(crate) use conversion::*;
 pub(crate) use lifecycle_record_ops::*;
 pub(crate) use runner_continuation::with_runner_continuation;
 
-#[cfg(test)]
-pub(crate) fn fail_next_record_write_for_test() {
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn fail_next_record_write_for_test() {
     store::fail_next_record_write_for_test();
 }
 
