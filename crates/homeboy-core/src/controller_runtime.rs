@@ -208,6 +208,19 @@ fn digest_memo_min_hash_time() -> std::time::Duration {
     DIGEST_MEMO_MIN_HASH_TIME
 }
 
+/// Non-unix has no digest memo. `memoized_executable_digest` always misses and
+/// `memoize_executable_digest` is a no-op, so no elapsed hash time can make
+/// memoization reachable. `MAX` states that, rather than implying a threshold
+/// that decides nothing.
+///
+/// `executable_digest` is not itself `cfg`-gated, so the unix-only definition
+/// above escaped its call site and only Windows could see it (E0425). The two
+/// helpers beside it already carry `cfg(not(unix))` stubs; this one was missed.
+#[cfg(not(unix))]
+fn digest_memo_min_hash_time() -> std::time::Duration {
+    std::time::Duration::MAX
+}
+
 #[cfg(unix)]
 static EXECUTABLE_DIGESTS: OnceLock<Mutex<BTreeMap<ExecutableFileIdentity, String>>> =
     OnceLock::new();
@@ -2703,6 +2716,7 @@ fn executable_digest(path: &Path) -> Result<String> {
     // hash it, in a process that is about to fork a controller runtime.
     #[cfg(all(test, unix))]
     EXECUTABLE_DIGEST_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(unix)]
     let hashing_started = std::time::Instant::now();
     let digest = content_hash::sha256_file(path).map_err(|error| {
         Error::internal_io(
@@ -2710,6 +2724,7 @@ fn executable_digest(path: &Path) -> Result<String> {
             Some("hash pinned controller executable".to_string()),
         )
     })?;
+    #[cfg(unix)]
     if hashing_started.elapsed() >= digest_memo_min_hash_time() {
         memoize_executable_digest(identity, &digest);
     }
