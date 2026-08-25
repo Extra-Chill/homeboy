@@ -2881,19 +2881,10 @@ mod tests {
                 ..Default::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "task".to_string(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("ok".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }],
             events: vec![AgentTaskProgressEvent {
                 task_id: "task".to_string(),

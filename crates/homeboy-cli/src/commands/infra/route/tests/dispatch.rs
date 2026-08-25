@@ -3968,15 +3968,7 @@ impl homeboy::agents::agent_task_scheduler::AgentTaskExecutorAdapter for ReplayR
             task_id: request.task_id,
             status: homeboy::agents::agent_task::AgentTaskOutcomeStatus::Succeeded,
             summary: Some("remote replay fixture completed".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: serde_json::Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: serde_json::Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -4345,50 +4337,95 @@ fn split_placement_cook_without_a_runner_reports_readiness_not_a_placement_contr
         "--prompt",
         "route this attempt to Lab",
     ]);
-    let readiness = homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
-        state: "disconnected".to_string(),
-        selected_runner_id: None,
-        available_runner_ids: vec!["homeboy-lab".to_string()],
-        reasons: vec!["homeboy-lab is disconnected".to_string()],
-        remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
-    };
+    for (state, reason, remediation) in [
+        (
+            "stale",
+            "homeboy-lab daemon is stale",
+            "homeboy runner doctor homeboy-lab --scope lab-offload",
+        ),
+        (
+            "disconnected",
+            "homeboy-lab is disconnected",
+            "homeboy runner connect homeboy-lab",
+        ),
+        (
+            "capacity_blocked",
+            "homeboy-lab reached capacity",
+            "homeboy runner status homeboy-lab",
+        ),
+    ] {
+        let readiness = homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+            state: state.to_string(),
+            selected_runner_id: None,
+            available_runner_ids: Vec::new(),
+            reasons: vec![reason.to_string()],
+            remediation_commands: vec![remediation.to_string()],
+        };
 
-    let error = split_placement_lab_runner_unavailable_error(
-        &cli.command,
-        cli.placement,
+        let error = split_placement_lab_runner_unavailable_error(
+            &cli.command,
+            cli.placement,
+            None,
+            Some(&readiness),
+        )
+        .expect("lab placement with no runner must be explained");
+
+        assert_eq!(error.details["field"].as_str(), Some("placement"));
+        let problem = error.details["problem"].as_str().expect("problem");
+        assert!(
+            problem.contains("accepts `--placement lab`"),
+            "guidance and runtime must agree: {problem}"
+        );
+        assert!(
+            problem.contains(state),
+            "the readiness verdict is the real cause: {problem}"
+        );
+        assert!(
+            problem.contains("controller-owned target preparation did not start"),
+            "the refusal must name the controller phase: {problem}"
+        );
+        let hints = error.details["tried"]
+            .as_array()
+            .expect("remediation hints")
+            .iter()
+            .filter_map(|hint| hint.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            hints.iter().any(|hint| hint.contains(remediation)),
+            "readiness remediation must be carried through: {hints:?}"
+        );
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("`--placement lab` is the supported spelling")),
+            "remediation must confirm the documented spelling: {hints:?}"
+        );
+    }
+}
+
+#[test]
+fn lab_cook_preparation_failure_names_controller_phase_and_selected_runner() {
+    let error = Error::validation_invalid_argument(
+        "to_worktree",
+        "worktree provider lookup failed",
+        Some("fixture@target".to_string()),
         None,
-        Some(&readiness),
-    )
-    .expect("lab placement with no runner must be explained");
+    );
 
-    assert_eq!(error.details["field"].as_str(), Some("placement"));
-    let problem = error.details["problem"].as_str().expect("problem");
-    assert!(
-        problem.contains("accepts `--placement lab`"),
-        "guidance and runtime must agree: {problem}"
-    );
-    assert!(
-        problem.contains("disconnected"),
-        "the readiness verdict is the real cause: {problem}"
-    );
-    let hints = error.details["tried"]
-        .as_array()
-        .expect("remediation hints")
-        .iter()
-        .filter_map(|hint| hint.as_str())
-        .collect::<Vec<_>>();
-    assert!(
-        hints
-            .iter()
-            .any(|hint| hint.contains("homeboy runner connect homeboy-lab")),
-        "readiness remediation must be carried through: {hints:?}"
-    );
-    assert!(
-        hints
-            .iter()
-            .any(|hint| hint.contains("`--placement lab` is the supported spelling")),
-        "remediation must confirm the documented spelling: {hints:?}"
-    );
+    let error = annotate_cook_controller_preparation_error(error, "homeboy-lab");
+
+    assert!(error
+        .message
+        .contains("controller-owned target preparation"));
+    assert!(error
+        .message
+        .contains("before its Lab provider attempt was dispatched"));
+    assert_eq!(error.details["cook_phase"], "controller_target_preparation");
+    assert_eq!(error.details["provider_execution_placement"], "lab");
+    assert_eq!(error.details["selected_runner_id"], "homeboy-lab");
+    assert!(error.hints.iter().any(|hint| hint
+        .message
+        .contains("repair this controller preparation failure")));
 }
 
 /// `--placement lab-or-local` authorizes controller execution, so it must keep

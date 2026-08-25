@@ -15,9 +15,6 @@ use homeboy_extension_contract::ExtensionManifest;
 use serde::Serialize;
 use std::collections::HashMap;
 
-/// A map of event names to command lists.
-pub type HookMap = HashMap<String, Vec<String>>;
-
 /// Result of running a single hook command.
 #[derive(Debug, Clone, Serialize)]
 pub struct HookCommandResult {

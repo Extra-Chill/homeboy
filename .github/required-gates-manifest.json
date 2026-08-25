@@ -1,0 +1,205 @@
+{
+  "schema": "homeboy/required-gates/v1",
+  "description": "Single source of truth for which CI checks gate merges to main. Every other representation - the live-ruleset payload (.github/required-gates-ruleset.json, generated), workflow emission validation, terminal execution aggregation, capacity critical-path evidence, and documentation - is derived from or validated against this manifest. Gate changes are made HERE and nowhere else; run .github/generate-required-gates-artifacts.sh and commit the regenerated artifacts.",
+  "status_checks": {
+    "integration_id": 15368,
+    "strict_required_status_checks_policy": true,
+    "do_not_enforce_on_create": false,
+    "zero_context_policy": {
+      "enforcement_outcome": "not-required",
+      "execution_outcome": "not-required",
+      "execution_basis": "reporting-only-policy"
+    }
+  },
+  "ruleset_projection": {
+    "name": "main",
+    "target": "branch",
+    "enforcement": "active",
+    "bypass_actors": [],
+    "conditions": {
+      "ref_name": {
+        "include": [
+          "~DEFAULT_BRANCH"
+        ],
+        "exclude": []
+      }
+    },
+    "base_rules": [
+      {
+        "type": "deletion"
+      },
+      {
+        "type": "non_fast_forward"
+      }
+    ]
+  },
+  "execution_evidence": {
+    "terminal_script": ".github/ci-required-gates-executed.sh",
+    "terminal_runs_under": "${{ always() }}",
+    "self_observation_excluded": true,
+    "duplicate_context_aggregation": {
+      "rule": "any_success_and_no_hard_failure",
+      "tolerated_conclusions": [
+        "skipped"
+      ],
+      "hard_failure_conclusions": [
+        "failure",
+        "cancelled",
+        "timed_out",
+        "startup_failure"
+      ],
+      "absent_state": "not-executed"
+    }
+  },
+  "gates": [
+    {
+      "id": "declaration",
+      "context": "homeboy / Required Gates Declaration",
+      "producer": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "required-gates-declaration",
+        "emission": "job_name"
+      },
+      "aggregation": "single_job",
+      "required_status_check": true,
+      "execution_required_events": [
+        "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.reopened",
+        "workflow_dispatch"
+      ],
+      "admission_gate": "pr_state_active"
+    },
+    {
+      "id": "workspace-tests-compile",
+      "context": "homeboy / Workspace Tests Compile",
+      "producer": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "workspace-tests-compile",
+        "emission": "job_name"
+      },
+      "aggregation": "single_job",
+      "required_status_check": true,
+      "execution_required_events": [
+        "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.reopened",
+        "workflow_dispatch"
+      ],
+      "admission_gate": "pr_state_active"
+    },
+    {
+      "id": "windows-compile",
+      "context": "homeboy / Windows Compile",
+      "producer": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "windows-compile",
+        "emission": "job_name"
+      },
+      "aggregation": "single_job",
+      "required_status_check": true,
+      "execution_required_events": [
+        "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.reopened",
+        "workflow_dispatch"
+      ],
+      "admission_gate": "pr_state_active"
+    },
+    {
+      "id": "rustfmt",
+      "context": "homeboy / Rustfmt",
+      "producer": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "rustfmt",
+        "emission": "job_name"
+      },
+      "aggregation": "single_job",
+      "required_status_check": true,
+      "execution_required_events": [
+        "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.reopened",
+        "workflow_dispatch"
+      ],
+      "admission_gate": "pr_state_active"
+    },
+    {
+      "id": "audit",
+      "context": "homeboy / Audit",
+      "producer": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "homeboy-fast",
+        "emission": "matrix_title",
+        "matrix_title": "Audit"
+      },
+      "aggregation": "matrix_legs",
+      "required_status_check": true,
+      "execution_required_events": [
+        "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.reopened",
+        "workflow_dispatch"
+      ],
+      "admission_gate": "pr_state_active"
+    },
+    {
+      "id": "lint",
+      "context": "homeboy / Lint",
+      "producer": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "homeboy-fast",
+        "emission": "matrix_title",
+        "matrix_title": "Lint"
+      },
+      "aggregation": "matrix_legs",
+      "required_status_check": true,
+      "execution_required_events": [
+        "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.reopened",
+        "workflow_dispatch"
+      ],
+      "admission_gate": "pr_state_active"
+    },
+    {
+      "id": "test",
+      "context": "homeboy / Test",
+      "producer": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "homeboy",
+        "emission": "reusable_workflow_call",
+        "called_workflow": "Extra-Chill/homeboy-action/.github/workflows/ci.yml",
+        "called_job_name": "Test"
+      },
+      "aggregation": "reusable_workflow_jobs",
+      "required_status_check": true,
+      "execution_required_events": [
+        "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.reopened",
+        "workflow_dispatch"
+      ],
+      "admission_gate": "pr_state_active"
+    },
+    {
+      "id": "executed",
+      "context": "homeboy / Required Gates Executed",
+      "producer": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "required-gates-executed",
+        "emission": "job_name"
+      },
+      "aggregation": "single_job",
+      "required_status_check": true,
+      "terminal": true,
+      "execution_required_events": [
+        "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.reopened",
+        "workflow_dispatch"
+      ],
+      "admission_gate": "pr_state_active"
+    }
+  ]
+}

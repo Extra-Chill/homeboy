@@ -914,9 +914,7 @@ fn is_legacy_outside_root(error: &Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task::{
-        AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-    };
+    use crate::agent_task::{AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA};
 
     fn capture(root: &Path, temp: &Path) -> ExecutorArtifactRootIdentity {
         ExecutorArtifactRootIdentity::capture_with_finalized_root(
@@ -928,11 +926,8 @@ mod tests {
 
     fn outcome(path: impl Into<String>) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "task-a".to_string(),
             status: AgentTaskOutcomeStatus::Succeeded,
-            summary: None,
-            failure_classification: None,
             artifacts: vec![AgentTaskArtifact {
                 schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                 id: "patch".to_string(),
@@ -948,13 +943,7 @@ mod tests {
                 sha256: None,
                 metadata: serde_json::Value::Null,
             }],
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: serde_json::Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: serde_json::Value::Null,
+            ..Default::default()
         }
     }
 

@@ -1,6 +1,6 @@
 use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::commands::{
@@ -56,7 +56,8 @@ pub struct Cli {
     pub notification_route: Option<String>,
 
     /// Select where eligible work executes. `auto` (default) follows command
-    /// policy; `local` is an explicit authorized override.
+    /// policy; `lab` selects an eligible ready runner; `local` is an explicit
+    /// authorized override. Use `--runner <id>` instead to pin one runner.
     #[arg(
         long,
         global = true,
@@ -452,6 +453,7 @@ pub struct CommandSafetyAuditFinding {
 pub struct CommandSurfaceDoctorReport {
     pub agrees: bool,
     pub source_registry_commands: Vec<String>,
+    pub command_provenance: Vec<CommandSurfaceCommandProvenance>,
     pub docs_index_commands: Vec<String>,
     pub help_commands: Vec<String>,
     pub runtime_extension_docs: Vec<String>,
@@ -459,7 +461,31 @@ pub struct CommandSurfaceDoctorReport {
     pub stale_docs_index: Vec<String>,
     pub missing_from_help: Vec<String>,
     pub missing_from_source_registry: Vec<String>,
+    pub drift_evidence: Vec<CommandSurfaceDriftEvidence>,
     pub drift_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSurfaceRegistry {
+    Core,
+    Descriptor,
+    Extension,
+    DocsIndex,
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandSurfaceCommandProvenance {
+    pub command: String,
+    pub registry: CommandSurfaceRegistry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandSurfaceDriftEvidence {
+    pub command: String,
+    pub drift: String,
+    pub registry: CommandSurfaceRegistry,
 }
 
 impl CommandSafetyManifest {}
@@ -611,12 +637,15 @@ mod dynamic_impls {
 // entry points here so existing call sites keep importing them from
 // `crate::cli_surface` unchanged while this module leans toward clap shapes.
 mod safety_manifest;
-pub(crate) use safety_manifest::{
-    command_safety_manifest_from, command_safety_manifest_from_dynamic,
-};
+pub(crate) use safety_manifest::command_safety_manifest_from_dynamic;
 
 mod surface {
     use super::*;
+
+    thread_local! {
+        static CURRENT_DOCTOR_REPORT: std::cell::RefCell<Option<CommandSurfaceDoctorReport>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     pub(crate) fn current_command_surface() -> CommandSurface {
         command_surface_from(Cli::command())
@@ -633,13 +662,19 @@ mod surface {
     }
 
     pub(crate) fn current_command_surface_doctor_report() -> CommandSurfaceDoctorReport {
+        if let Some(report) = CURRENT_DOCTOR_REPORT.with(|current| current.borrow().clone()) {
+            return report;
+        }
+
         let surface = current_command_surface();
-        let manifest = command_safety_manifest_from(surface.clone());
-        let source_registry_commands = manifest
+        let command_provenance = surface
             .commands
             .iter()
-            .filter(|entry| visible_manifest_entry_with_docs_path(entry))
-            .map(|entry| entry.name.clone())
+            .filter(|entry| !entry.hidden)
+            .map(|entry| CommandSurfaceCommandProvenance {
+                command: entry.name.clone(),
+                registry: CommandSurfaceRegistry::Core,
+            })
             .collect();
         let help_commands = surface
             .commands
@@ -652,31 +687,109 @@ mod surface {
         ));
 
         command_surface_doctor_report(
-            source_registry_commands,
+            command_provenance,
             docs_index_commands,
             help_commands,
             runtime_extension_doc_commands(),
         )
     }
 
-    fn command_surface_doctor_report(
-        source_registry_commands: BTreeSet<String>,
+    pub(crate) fn with_command_surface_doctor_report<T>(
+        report: Option<CommandSurfaceDoctorReport>,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        struct Reset(Option<CommandSurfaceDoctorReport>);
+
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CURRENT_DOCTOR_REPORT.with(|current| {
+                    current.replace(self.0.take());
+                });
+            }
+        }
+
+        let previous = CURRENT_DOCTOR_REPORT.with(|current| current.replace(report));
+        let _reset = Reset(previous);
+        run()
+    }
+
+    pub(crate) fn command_surface_doctor_report_from_composed(
+        command: Command,
+        command_provenance: Vec<CommandSurfaceCommandProvenance>,
+    ) -> CommandSurfaceDoctorReport {
+        let help_commands = command_surface_from(command)
+            .commands
+            .into_iter()
+            .filter(|entry| !entry.hidden)
+            .map(|entry| entry.name)
+            .collect();
+        let docs_index_commands = documented_command_index_entries(include_str!(
+            "../../../../docs/commands/commands-index.md"
+        ));
+
+        command_surface_doctor_report(
+            command_provenance,
+            docs_index_commands,
+            help_commands,
+            runtime_extension_doc_commands(),
+        )
+    }
+
+    pub(crate) fn command_surface_doctor_report(
+        mut command_provenance: Vec<CommandSurfaceCommandProvenance>,
         docs_index_commands: BTreeSet<String>,
         help_commands: BTreeSet<String>,
         runtime_extension_docs: BTreeSet<String>,
     ) -> CommandSurfaceDoctorReport {
+        command_provenance.sort_by(|left, right| left.command.cmp(&right.command));
+        let provenance_by_command: BTreeMap<_, _> = command_provenance
+            .iter()
+            .map(|entry| (entry.command.clone(), entry.registry))
+            .collect();
+        let source_registry_commands = provenance_by_command.keys().cloned().collect();
+        let docs_required_commands = command_provenance
+            .iter()
+            .filter(|entry| entry.registry != CommandSurfaceRegistry::Extension)
+            .map(|entry| entry.command.clone())
+            .collect();
         let documented_core_commands: BTreeSet<String> = docs_index_commands
             .difference(&runtime_extension_docs)
             .cloned()
             .collect();
 
         let missing_from_docs_index =
-            sorted_difference(&source_registry_commands, &docs_index_commands);
+            sorted_difference(&docs_required_commands, &docs_index_commands);
         let stale_docs_index =
-            sorted_difference(&documented_core_commands, &source_registry_commands);
+            sorted_difference(&documented_core_commands, &docs_required_commands);
         let missing_from_help = sorted_difference(&source_registry_commands, &help_commands);
         let missing_from_source_registry =
             sorted_difference(&help_commands, &source_registry_commands);
+
+        let mut drift_evidence = Vec::new();
+        extend_drift_evidence(
+            &mut drift_evidence,
+            &missing_from_docs_index,
+            "missing_from_docs_index",
+            |command| provenance_by_command[command],
+        );
+        extend_drift_evidence(
+            &mut drift_evidence,
+            &stale_docs_index,
+            "stale_docs_index",
+            |_| CommandSurfaceRegistry::DocsIndex,
+        );
+        extend_drift_evidence(
+            &mut drift_evidence,
+            &missing_from_help,
+            "missing_from_help",
+            |command| provenance_by_command[command],
+        );
+        extend_drift_evidence(
+            &mut drift_evidence,
+            &missing_from_source_registry,
+            "missing_from_source_registry",
+            |_| CommandSurfaceRegistry::Help,
+        );
 
         let mut drift_notes = Vec::new();
         push_drift_note(
@@ -703,6 +816,7 @@ mod surface {
         CommandSurfaceDoctorReport {
             agrees: drift_notes.is_empty(),
             source_registry_commands: source_registry_commands.into_iter().collect(),
+            command_provenance,
             docs_index_commands: docs_index_commands.into_iter().collect(),
             help_commands: help_commands.into_iter().collect(),
             runtime_extension_docs: runtime_extension_docs.into_iter().collect(),
@@ -710,12 +824,9 @@ mod surface {
             stale_docs_index,
             missing_from_help,
             missing_from_source_registry,
+            drift_evidence,
             drift_notes,
         }
-    }
-
-    fn visible_manifest_entry_with_docs_path(entry: &CommandSafetyEntry) -> bool {
-        !entry.hidden && entry.docs.path.is_some()
     }
 
     fn documented_command_index_entries(index: &str) -> BTreeSet<String> {
@@ -743,6 +854,19 @@ mod surface {
         if !commands.is_empty() {
             notes.push(format!("{label}: {}", commands.join(", ")));
         }
+    }
+
+    fn extend_drift_evidence(
+        evidence: &mut Vec<CommandSurfaceDriftEvidence>,
+        commands: &[String],
+        drift: &str,
+        registry: impl Fn(&String) -> CommandSurfaceRegistry,
+    ) {
+        evidence.extend(commands.iter().map(|command| CommandSurfaceDriftEvidence {
+            command: command.clone(),
+            drift: drift.to_string(),
+            registry: registry(command),
+        }));
     }
 
     fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
@@ -803,6 +927,58 @@ mod tests {
             .filter(|subcommand| !subcommand.is_hide_set())
             .map(|subcommand| subcommand.get_name().to_string())
             .collect()
+    }
+
+    fn provenance(
+        command: &str,
+        registry: CommandSurfaceRegistry,
+    ) -> CommandSurfaceCommandProvenance {
+        CommandSurfaceCommandProvenance {
+            command: command.to_string(),
+            registry,
+        }
+    }
+
+    #[test]
+    fn doctor_reports_actual_missing_docs_with_registry_provenance() {
+        let report = command_surface_doctor_report(
+            vec![provenance("composed", CommandSurfaceRegistry::Descriptor)],
+            BTreeSet::new(),
+            BTreeSet::from(["composed".to_string()]),
+            BTreeSet::new(),
+        );
+
+        assert!(!report.agrees);
+        assert_eq!(report.missing_from_docs_index, ["composed"]);
+        assert_eq!(
+            report.drift_evidence,
+            [CommandSurfaceDriftEvidence {
+                command: "composed".to_string(),
+                drift: "missing_from_docs_index".to_string(),
+                registry: CommandSurfaceRegistry::Descriptor,
+            }]
+        );
+    }
+
+    #[test]
+    fn doctor_reports_actual_stale_docs_with_docs_registry_provenance() {
+        let report = command_surface_doctor_report(
+            vec![provenance("core", CommandSurfaceRegistry::Core)],
+            BTreeSet::from(["core".to_string(), "removed".to_string()]),
+            BTreeSet::from(["core".to_string()]),
+            BTreeSet::new(),
+        );
+
+        assert!(!report.agrees);
+        assert_eq!(report.stale_docs_index, ["removed"]);
+        assert_eq!(
+            report.drift_evidence,
+            [CommandSurfaceDriftEvidence {
+                command: "removed".to_string(),
+                drift: "stale_docs_index".to_string(),
+                registry: CommandSurfaceRegistry::DocsIndex,
+            }]
+        );
     }
 
     fn assert_docs_cover_subcommands(command_name: &str) {
@@ -1127,6 +1303,20 @@ mod tests {
         }
         assert!(help.contains("without pinning a runner"));
         assert!(help.contains("This implies Lab placement"));
+    }
+
+    #[test]
+    fn compact_cook_help_explains_lab_selection_without_a_runner_pin() {
+        let help = scoped_help(&["agent-task", "cook"]);
+
+        assert!(
+            help.contains("`lab` selects an eligible ready runner"),
+            "{help}"
+        );
+        assert!(
+            help.contains("Use `--runner <id>` instead to pin one runner"),
+            "{help}"
+        );
     }
 
     #[test]

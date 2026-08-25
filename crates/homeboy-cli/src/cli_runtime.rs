@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::capability_registry::CommandCapabilityRegistry;
 use crate::cli_surface::{
     command_safety_manifest_from_dynamic, command_surface_from, Cli, CommandSafetyManifest,
-    Commands, DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
+    CommandSurfaceCommandProvenance, CommandSurfaceDoctorReport, CommandSurfaceRegistry, Commands,
+    DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
     ExtensionCommandHealth, ExtensionCommandManifest,
 };
 use crate::command_capability::{
@@ -252,6 +253,11 @@ struct ExtensionCliDiscovery {
     health: ExtensionCliHealth,
 }
 
+struct ComposedCommandRegistry {
+    command: Command,
+    provenance: Vec<CommandSurfaceCommandProvenance>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupFastPath {
     Help,
@@ -269,7 +275,10 @@ enum StartupFastPathOutput {
     Identity(serde_json::Value),
 }
 
-fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
+fn startup_fast_path_output(
+    runtime: &CliRuntime,
+    args: &[String],
+) -> Option<StartupFastPathOutput> {
     Some(match startup_fast_path(args)? {
         // Root help renders the augmented command because extension-provided
         // subcommands are part of the user-visible surface; the static derive
@@ -283,10 +292,7 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
             // parsed successfully aborted the process instead of running the
             // command (#11577). The fast path is an optimization; disagreeing
             // with clap must cost a slow path, never a panic.
-            let Err(error) = CliRuntime::new()
-                .build_augmented_command()
-                .try_get_matches_from(args)
-            else {
+            let Err(error) = runtime.build_augmented_command().try_get_matches_from(args) else {
                 return None;
             };
             if error.kind() != clap::error::ErrorKind::DisplayHelp {
@@ -304,7 +310,11 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
 }
 
 pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
-    match startup_fast_path_output(args)? {
+    CliRuntime::new().run_startup_fast_path(args)
+}
+
+fn emit_startup_fast_path_output(output: StartupFastPathOutput) -> std::process::ExitCode {
+    match output {
         StartupFastPathOutput::Help(help) => print!("{help}"),
         StartupFastPathOutput::Version(version) => println!("{version}"),
         StartupFastPathOutput::Identity(identity) => {
@@ -317,7 +327,7 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
         }
     }
 
-    Some(std::process::ExitCode::SUCCESS)
+    std::process::ExitCode::SUCCESS
 }
 
 pub(crate) fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
@@ -601,7 +611,16 @@ impl CliRuntime {
         })
     }
 
+    pub fn run_startup_fast_path(&self, args: &[String]) -> Option<std::process::ExitCode> {
+        startup_fast_path_output(self, args).map(emit_startup_fast_path_output)
+    }
+
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
+        #[cfg(feature = "test-support")]
+        if let Some(path) = std::env::var_os("HOMEBOY_TEST_RUNTIME_INITIALIZATION_SENTINEL") {
+            std::fs::write(path, b"initialized").expect("write runtime initialization sentinel");
+        }
+
         let normalized = args::normalize(args);
         let command_capability = classify_command_capability(&normalized);
         if let Some(message) = args::runner_exec_option_boundary_error(&normalized) {
@@ -1334,21 +1353,33 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        let exit_code = crate::core::notification_route::with_current_resolution(
-            Some(notification_resolution.evidence),
+        let command_surface_doctor_report = matches!(
+            &cli.command,
+            Commands::SelfCmd(crate::commands::self_cmd::SelfArgs {
+                command: crate::commands::self_cmd::SelfCommand::Doctor(_),
+            })
+        )
+        .then(|| self.command_surface_doctor_report());
+        let exit_code = crate::cli_surface::with_command_surface_doctor_report(
+            command_surface_doctor_report,
             || {
-                crate::core::notification_route::with_current(notification_route, || {
-                    #[cfg(test)]
-                    record_marker_context_before_run_command();
-                    commands::output_runtime::run_command(
-                        cli.command,
-                        command_spec,
-                        output_file.as_deref(),
-                        &command_identity,
-                        command_provenance,
-                        cli.placement,
-                    )
-                })
+                crate::core::notification_route::with_current_resolution(
+                    Some(notification_resolution.evidence),
+                    || {
+                        crate::core::notification_route::with_current(notification_route, || {
+                            #[cfg(test)]
+                            record_marker_context_before_run_command();
+                            commands::output_runtime::run_command(
+                                cli.command,
+                                command_spec,
+                                output_file.as_deref(),
+                                &command_identity,
+                                command_provenance,
+                                cli.placement,
+                            )
+                        })
+                    },
+                )
             },
         );
         // The command's initial outcome is now durable and returned. Historical
@@ -1361,12 +1392,47 @@ impl CliRuntime {
     }
 
     fn build_augmented_command(&self) -> Command {
+        self.composed_command_registry().command
+    }
+
+    fn command_surface_doctor_report(&self) -> CommandSurfaceDoctorReport {
+        let registry = self.composed_command_registry();
+        crate::cli_surface::command_surface_doctor_report_from_composed(
+            registry.command,
+            registry.provenance,
+        )
+    }
+
+    fn composed_command_registry(&self) -> ComposedCommandRegistry {
         let discovery = self.extension_discovery();
         self.capabilities
             .validate_external_names(discovery.info.iter().map(|info| info.tool.as_str()))
             .expect("dynamic and typed capability command names must not conflict");
         let mut command = build_augmented_command(&discovery.info, &discovery.health);
+        let mut provenance = Cli::command_with_scoped_lab_args()
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| CommandSurfaceCommandProvenance {
+                command: subcommand.get_name().to_string(),
+                registry: CommandSurfaceRegistry::Core,
+            })
+            .collect::<Vec<_>>();
+        provenance.extend(
+            discovery
+                .info
+                .iter()
+                .map(|info| CommandSurfaceCommandProvenance {
+                    command: info.descriptor.name.clone(),
+                    registry: CommandSurfaceRegistry::Extension,
+                }),
+        );
         for entry in self.capabilities.entries() {
+            if !entry.command.is_hide_set() {
+                provenance.push(CommandSurfaceCommandProvenance {
+                    command: entry.capability.name().to_string(),
+                    registry: CommandSurfaceRegistry::Descriptor,
+                });
+            }
             command = command.subcommand(entry.command.clone());
         }
         let support = self
@@ -1375,7 +1441,10 @@ impl CliRuntime {
             .iter()
             .filter_map(|entry| entry.capability.lab_command_route_support())
             .collect::<Vec<_>>();
-        crate::command_contract::scope_composed_lab_cli_arguments(command, &support)
+        ComposedCommandRegistry {
+            command: crate::command_contract::scope_composed_lab_cli_arguments(command, &support),
+            provenance,
+        }
     }
 
     fn capability_matches<'a>(
@@ -2784,12 +2853,15 @@ fn preflight_hot_command_with_input(
                 lab_readiness.as_ref(),
                 cli.placement,
             );
-            let explicit_runner_placement = explicit_runner_placement(cli, hot_command);
-            // An explicit runner resolves workload placement before resource
-            // guidance. Controller pressure still matters for handoff overhead,
-            // but it must not be presented as a local workload warning.
-            let warning = explicit_runner_placement
-                .is_none()
+            let required_lab_placement = required_lab_placement(cli, hot_command);
+            let required_lab_runner = required_lab_placement
+                .then_some(selected_lab_runner)
+                .flatten();
+            // Required Lab placement resolves workload ownership before resource
+            // guidance, whether policy selected the runner or the operator pinned
+            // it. Controller pressure still matters for preparation and transport,
+            // but it must not be presented as local provider execution.
+            let warning = (!required_lab_placement)
                 .then(|| {
                     resource_policy::evaluate_with_runner_hint(
                         hot_command,
@@ -2799,8 +2871,8 @@ fn preflight_hot_command_with_input(
                 })
                 .flatten();
             let runner_hosted = resource_policy::is_runner_hosted_exec();
-            if let Some(runner_id) = explicit_runner_placement {
-                if let Some(notice) = resource_policy::explicit_runner_controller_notice(
+            if let Some(runner_id) = required_lab_runner {
+                if let Some(notice) = resource_policy::lab_routed_controller_notice_message(
                     hot_command,
                     &resources,
                     runner_id,
@@ -3122,11 +3194,9 @@ fn resource_policy_runner_hint<'a>(
     cli.runner.as_deref().or(default_runner)
 }
 
-fn explicit_runner_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> Option<&str> {
-    cli.runner.as_deref().filter(|_| {
-        hot_command.lab_offload_supported
-            && !matches!(cli.placement, crate::cli_surface::Placement::Local)
-    })
+fn required_lab_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> bool {
+    hot_command.lab_offload_supported
+        && (cli.runner.is_some() || cli.placement == crate::cli_surface::Placement::Lab)
 }
 
 fn run_startup_update_checks(command: &Commands) {
@@ -3523,6 +3593,45 @@ mod tests {
     static ADMISSION_FIXTURE_CAPABILITIES: [&'static dyn CliCapability; 1] =
         [&ADMISSION_FIXTURE_CAPABILITY];
 
+    struct ComposedDoctorCapability;
+    struct HiddenComposedDoctorCapability;
+
+    static COMPOSED_DOCTOR_CAPABILITY: ComposedDoctorCapability = ComposedDoctorCapability;
+    static HIDDEN_COMPOSED_DOCTOR_CAPABILITY: HiddenComposedDoctorCapability =
+        HiddenComposedDoctorCapability;
+    static COMPOSED_DOCTOR_CAPABILITIES: [&'static dyn CliCapability; 2] = [
+        &COMPOSED_DOCTOR_CAPABILITY,
+        &HIDDEN_COMPOSED_DOCTOR_CAPABILITY,
+    ];
+
+    impl CliCapability for ComposedDoctorCapability {
+        fn name(&self) -> &'static str {
+            "triage"
+        }
+
+        fn command(&self) -> Command {
+            Command::new(self.name()).about("composed doctor fixture")
+        }
+
+        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
+            unreachable!("the command-surface fixture is never dispatched")
+        }
+    }
+
+    impl CliCapability for HiddenComposedDoctorCapability {
+        fn name(&self) -> &'static str {
+            "hidden-doctor-fixture"
+        }
+
+        fn command(&self) -> Command {
+            Command::new(self.name()).hide(true)
+        }
+
+        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
+            unreachable!("the command-surface fixture is never dispatched")
+        }
+    }
+
     impl CliCapability for AdmissionFixtureCapability {
         fn name(&self) -> &'static str {
             "admission-fixture"
@@ -3666,6 +3775,40 @@ mod tests {
                 .unwrap_or_default(),
             reasons: Vec::new(),
             remediation_commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_lab_placement_resolves_only_a_ready_policy_runner() {
+        use crate::runner::runners::LabRunnerReadinessState;
+
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--placement",
+            "lab",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "route the provider attempt",
+            "--to-worktree",
+            "fixture@lab-placement",
+            "--verify",
+            "true",
+        ]);
+        let command = resource_policy::hot_command(&cli.command).expect("verified Cook is hot");
+        assert!(required_lab_placement(&cli, command));
+        assert_eq!(cli.runner, None);
+
+        for (state, expected) in [
+            (LabRunnerReadinessState::ConnectedReady, Some("lab-a")),
+            (LabRunnerReadinessState::Stale, None),
+            (LabRunnerReadinessState::Disconnected, None),
+            (LabRunnerReadinessState::CapacityBlocked, None),
+        ] {
+            let readiness = lab_readiness(state);
+            let selected =
+                resource_policy_runner_hint(&cli, readiness.selected_runner_id.as_deref());
+            assert_eq!(selected, expected, "{state:?}");
         }
     }
 
@@ -4585,19 +4728,23 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    startup_fast_path_output(&argv(values)),
+                    startup_fast_path_output(&CliRuntime::new(), &argv(values)),
                     Some(StartupFastPathOutput::Help(_))
                 ),
                 "{values:?} should render before runtime initialization"
             );
         }
 
-        assert!(startup_fast_path_output(&argv(&["homeboy", "help", "status"])).is_none());
+        assert!(startup_fast_path_output(
+            &CliRuntime::new(),
+            &argv(&["homeboy", "help", "status"])
+        )
+        .is_none());
     }
 
     #[test]
     fn version_fast_path_reports_the_build_version_without_extension_discovery() {
-        match startup_fast_path_output(&argv(&["homeboy", "--version"])) {
+        match startup_fast_path_output(&CliRuntime::new(), &argv(&["homeboy", "--version"])) {
             Some(StartupFastPathOutput::Version(version)) => {
                 assert_eq!(version, upgrade::current_build_version());
             }
@@ -4637,7 +4784,7 @@ mod tests {
     /// (instead of calling `build_augmented_command` directly) is what makes
     /// these tests fail if root help ever regresses to the static command.
     fn root_help_for(argv_values: &[&str]) -> String {
-        match startup_fast_path_output(&argv(argv_values)) {
+        match startup_fast_path_output(&CliRuntime::new(), &argv(argv_values)) {
             Some(StartupFastPathOutput::Help(help)) => help,
             _ => panic!("{argv_values:?} should resolve to the root-help startup fast path"),
         }
@@ -4658,6 +4805,54 @@ mod tests {
                 assert!(
                     help.contains("sample-cli"),
                     "`homeboy {flag}` should list the extension subcommand: {help}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn doctor_uses_the_same_composed_registry_as_root_help() {
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
+            let runtime = CliRuntime::with_capabilities(&COMPOSED_DOCTOR_CAPABILITIES);
+            let registry = runtime.composed_command_registry();
+
+            let help = registry
+                .command
+                .clone()
+                .try_get_matches_from(["homeboy", "--help"])
+                .expect_err("root help should terminate Clap parsing")
+                .to_string();
+            let report = crate::cli_surface::command_surface_doctor_report_from_composed(
+                registry.command,
+                registry.provenance,
+            );
+
+            assert!(report.agrees, "{:?}", report.drift_notes);
+            assert!(help.contains("triage"), "root help omitted triage: {help}");
+            assert!(
+                help.contains("sample-cli"),
+                "root help omitted extension command: {help}"
+            );
+            assert!(!help.contains("hidden-doctor-fixture"));
+            assert!(!report
+                .source_registry_commands
+                .contains(&"hidden-doctor-fixture".to_string()));
+            assert!(report.help_commands.contains(&"triage".to_string()));
+            assert!(report
+                .source_registry_commands
+                .contains(&"triage".to_string()));
+            for (command, registry) in [
+                ("status", CommandSurfaceRegistry::Core),
+                ("triage", CommandSurfaceRegistry::Descriptor),
+                ("sample-cli", CommandSurfaceRegistry::Extension),
+            ] {
+                assert!(
+                    report
+                        .command_provenance
+                        .iter()
+                        .any(|entry| { entry.command == command && entry.registry == registry }),
+                    "missing {registry:?} provenance for {command}"
                 );
             }
         });
@@ -5142,9 +5337,8 @@ mod tests {
 
             assert!(hot_command.lab_offload_supported);
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-            assert_eq!(
-                explicit_runner_placement(&cli, hot_command),
-                Some("homeboy-lab"),
+            assert!(
+                required_lab_placement(&cli, hot_command),
                 "resource preflight resolves explicit runner placement before warning"
             );
         }

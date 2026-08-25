@@ -453,11 +453,8 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
         std::fs::write(&patch_path, "").expect("write empty patch");
         let source_path = temp.path().join("outcome.json");
         let outcome = AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "task-1".to_string(),
             status: AgentTaskOutcomeStatus::Succeeded,
-            summary: None,
-            failure_classification: None,
             artifacts: vec![AgentTaskArtifact {
                 schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                 id: "patch".to_string(),
@@ -475,13 +472,7 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
                 ),
                 metadata: serde_json::json!({ "role": "patch" }),
             }],
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         };
         let source = serde_json::to_string(&outcome).expect("serialize outcome");
         std::fs::write(&source_path, &source).expect("write source");
@@ -625,11 +616,8 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
 #[test]
 fn select_patch_artifact_requires_unambiguous_patch() {
     let outcome = AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: "task-1".to_string(),
         status: AgentTaskOutcomeStatus::Succeeded,
-        summary: None,
-        failure_classification: None,
         artifacts: vec![
             AgentTaskArtifact {
                 schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
@@ -662,13 +650,7 @@ fn select_patch_artifact_requires_unambiguous_patch() {
                 metadata: Value::Null,
             },
         ],
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     };
 
     let err = select_patch_artifact(&outcome, None).expect_err("ambiguous patch rejected");

@@ -11,8 +11,7 @@ use super::{
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome,
     AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskTypedArtifact,
-    AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-    AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_controller_service::{
     AgentTaskRepoLoopSpec, AgentTaskRepoLoopSpecAbility, AgentTaskRepoLoopSpecArtifact,
@@ -297,19 +296,10 @@ impl AgentTaskExecutorAdapter for CapturingExecutor {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -321,11 +311,9 @@ impl AgentTaskExecutorAdapter for EvidenceExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("evidence captured".to_string()),
-            failure_classification: None,
             artifacts: vec![AgentTaskArtifact {
                 schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                 id: "report".to_string(),
@@ -354,11 +342,8 @@ impl AgentTaskExecutorAdapter for EvidenceExecutor {
                 uri: "artifacts/transcript.log".to_string(),
                 label: Some("transcript".to_string()),
             }],
-            diagnostics: Vec::new(),
             outputs: json!({ "ok": true }),
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }

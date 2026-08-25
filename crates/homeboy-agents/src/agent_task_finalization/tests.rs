@@ -5,7 +5,7 @@ use super::*;
 use crate::{
     agent_task::{
         AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
-        AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+        AGENT_TASK_ARTIFACT_SCHEMA,
     },
     agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
@@ -2786,11 +2786,9 @@ fn durable_task(task_id: &str, backend: &str, model: Option<&str>) -> AgentTaskR
 
 fn durable_succeeded_outcome(task_id: &str, metadata: serde_json::Value) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: task_id.to_string(),
         status: AgentTaskOutcomeStatus::Succeeded,
         summary: Some("succeeded".to_string()),
-        failure_classification: None,
         artifacts: vec![AgentTaskArtifact {
             schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             id: format!("{task_id}-patch"),
@@ -2806,13 +2804,8 @@ fn durable_succeeded_outcome(task_id: &str, metadata: serde_json::Value) -> Agen
             sha256: None,
             metadata: serde_json::Value::Null,
         }],
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
-        outputs: serde_json::Value::Null,
-        workflow: None,
-        follow_up: None,
         metadata,
+        ..Default::default()
     }
 }
 

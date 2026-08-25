@@ -826,23 +826,16 @@ pub(super) mod concurrency_tests {
             .expect("write agent change");
             if attempt == 1 {
                 return AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: request.task_id,
                     status: AgentTaskOutcomeStatus::Failed,
                     summary: Some("permission denied".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Transient),
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
                     diagnostics: vec![AgentTaskDiagnostic {
                         class: "provider.permission_denied".to_string(),
                         message: "executor was denied the requested operation".to_string(),
                         data: json!({ "operation": "write_file" }),
                     }],
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
-                    metadata: Value::Null,
+                    ..Default::default()
                 };
             }
             assert!(Command::new("git")

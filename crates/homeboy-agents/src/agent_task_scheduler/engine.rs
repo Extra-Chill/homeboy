@@ -1921,45 +1921,31 @@ fn terminal_reason(outcome: &AgentTaskOutcome, cancelled: bool) -> &'static str 
 
 fn scratch_allocation_failure(task_id: String, error: String) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id,
         status: AgentTaskOutcomeStatus::Failed,
         summary: Some(format!("could not allocate provider scratch root: {error}")),
         failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
         diagnostics: vec![AgentTaskDiagnostic {
             class: "agent_task.controller_scratch_allocation_failed".to_string(),
             message: error,
             data: serde_json::Value::Null,
         }],
-        outputs: serde_json::Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: serde_json::Value::Null,
+        ..Default::default()
     }
 }
 
 fn provider_worker_panic(task_id: String) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id,
         status: AgentTaskOutcomeStatus::Failed,
         summary: Some("provider worker panicked".to_string()),
         failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
         diagnostics: vec![AgentTaskDiagnostic {
             class: "agent_task.provider_worker_panicked".to_string(),
             message: "provider worker panicked before returning an outcome".to_string(),
             data: serde_json::Value::Null,
         }],
-        outputs: serde_json::Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: serde_json::Value::Null,
+        ..Default::default()
     }
 }
 
@@ -1969,14 +1955,10 @@ fn execution_deadline_outcome(
     completed_phase: &str,
 ) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id,
         status: AgentTaskOutcomeStatus::Timeout,
         summary: Some("agent-task execution deadline expired before provider dispatch".to_string()),
         failure_classification: Some(AgentTaskFailureClassification::Timeout),
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
         diagnostics: vec![AgentTaskDiagnostic {
             class: "agent_task.execution_deadline_exceeded".to_string(),
             message: format!(
@@ -1988,10 +1970,7 @@ fn execution_deadline_outcome(
                 "completed_phase": completed_phase,
             }),
         }],
-        outputs: serde_json::Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: serde_json::Value::Null,
+        ..Default::default()
     }
 }
 

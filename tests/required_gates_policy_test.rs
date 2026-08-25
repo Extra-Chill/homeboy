@@ -4,32 +4,62 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static SCRATCH_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
+/// The one declaration (#13125). Every other artifact in this test is either
+/// generated from this file or validated against it; nothing here restates the
+/// gate list. A test that hardcodes the thing it pins cannot catch the drift it
+/// was written to prevent, which is how `tests/fixtures/` grew a second copy.
+fn manifest() -> &'static serde_json::Value {
+    static MANIFEST: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        serde_json::from_str(include_str!("../.github/required-gates-manifest.json"))
+            .expect("valid required-gates manifest JSON")
+    })
+}
+
+fn gates() -> &'static [serde_json::Value] {
+    manifest()["gates"].as_array().expect("manifest gates")
+}
+
+/// The generated live-ruleset payload. It is derived from the manifest, so it
+/// doubles as the shipped execution policy the validator and terminal gate read.
+const RULESET_PATH: &str = ".github/required-gates-ruleset.json";
+
 fn ruleset() -> &'static str {
-    include_str!("fixtures/required-gates-execution-policy.json")
+    include_str!("../.github/required-gates-ruleset.json")
 }
 
 fn versioned_ruleset() -> &'static str {
-    include_str!("../.github/required-gates-ruleset.json")
+    ruleset()
 }
 
 fn ci_workflow() -> &'static str {
     include_str!("../.github/workflows/ci.yml")
 }
 
+/// Resolve one gate's context by its stable manifest id. Tests that need a
+/// specific gate as a sample name it by id, so renaming a context in the
+/// manifest cannot leave a stale literal asserting against the old name.
+fn context_of(id: &str) -> String {
+    gates()
+        .iter()
+        .find(|gate| gate["id"] == id)
+        .unwrap_or_else(|| panic!("manifest declares no gate with id {id:?}"))["context"]
+        .as_str()
+        .expect("gate context")
+        .to_string()
+}
+
 fn declared_contexts() -> Vec<String> {
-    [
-        "homeboy / Required Gates Declaration",
-        "homeboy / Workspace Tests Compile",
-        "homeboy / Windows Compile",
-        "homeboy / Rustfmt",
-        "homeboy / Audit",
-        "homeboy / Lint",
-        "homeboy / Test",
-        "homeboy / Required Gates Executed",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    gates()
+        .iter()
+        .filter(|gate| gate["required_status_check"] == true)
+        .map(|gate| {
+            gate["context"]
+                .as_str()
+                .expect("manifest gate context")
+                .to_string()
+        })
+        .collect()
 }
 
 /// A throwaway directory for live-state fixtures. The validator's live probe is
@@ -130,10 +160,7 @@ fn run_validator(mode: &str, env: &[(&str, &str)]) -> Output {
         "REQUIRED_GATES_HEAD_SHA",
         "0000000000000000000000000000000000000000",
     );
-    command.env(
-        "REQUIRED_GATES_CONFIG",
-        "tests/fixtures/required-gates-execution-policy.json",
-    );
+    command.env("REQUIRED_GATES_CONFIG", RULESET_PATH);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -151,10 +178,7 @@ fn run_execution_gate(env: &[(&str, &str)]) -> Output {
         "REQUIRED_GATES_HEAD_SHA",
         "0000000000000000000000000000000000000000",
     );
-    command.env(
-        "REQUIRED_GATES_CONFIG",
-        "tests/fixtures/required-gates-execution-policy.json",
-    );
+    command.env("REQUIRED_GATES_CONFIG", RULESET_PATH);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -208,40 +232,53 @@ fn required_gate_execution_contract_is_complete_and_emitted_by_every_pr_ci_run()
         rule["type"] == "required_status_checks"
             && rule["parameters"]["strict_required_status_checks_policy"] == true
     }));
-    for context in &contexts {
-        let matrix_title = context.trim_start_matches("homeboy / ");
-        let reusable_test = context == "homeboy / Test"
-            && ci_workflow().contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@")
-            && ci_workflow().contains("commands: review test");
-        // Anchored to a whole YAML key. A bare `contains("title: Test")` also
-        // matches `comment-section-title: Test`, which made this assertion — and
-        // the shipped validator's matching branch — vacuous for `homeboy / Test`.
-        let declares_matrix_title = ci_workflow().contains("name: homeboy / ${{ matrix.title }}")
-            && ci_workflow()
-                .lines()
-                .any(|line| line.trim() == format!("title: {matrix_title}"));
+    // Each gate declares HOW it reaches GitHub, so the workflow is validated
+    // against the manifest instead of the test guessing per-context. A gate that
+    // changes emission mode without changing the workflow fails here.
+    for gate in gates()
+        .iter()
+        .filter(|gate| gate["required_status_check"] == true)
+    {
+        let context = gate["context"].as_str().expect("gate context");
+        let producer = &gate["producer"];
+        let emission = producer["emission"].as_str().expect("gate emission");
+
+        let emitted = match emission {
+            "job_name" => ci_workflow().contains(&format!("name: {context}")),
+            // Anchored to a whole YAML key. A bare `contains("title: Audit")`
+            // also matches `comment-section-title: Audit`, which made this
+            // assertion vacuous for any matrix leg.
+            "matrix_title" => {
+                let title = producer["matrix_title"].as_str().expect("matrix title");
+                ci_workflow().contains("name: homeboy / ${{ matrix.title }}")
+                    && ci_workflow()
+                        .lines()
+                        .any(|line| line.trim() == format!("title: {title}"))
+            }
+            "reusable_workflow_call" => {
+                let job = producer["job"].as_str().expect("producer job");
+                ci_workflow().contains("uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@")
+                    && ci_workflow().contains(&format!("\n  {job}:\n"))
+            }
+            other => panic!("gate {context:?} declares unknown emission {other:?}"),
+        };
+
         assert!(
-            ci_workflow().contains(&format!("name: {context}"))
-                || declares_matrix_title
-                || reusable_test,
-            "required context {context:?} is not emitted by the always-run CI workflow"
+            emitted,
+            "required context {context:?} declares emission {emission:?} but the always-run CI workflow does not emit it that way"
         );
+
+        // A gate must reach GitHub exactly one way. If a literal job name ever
+        // appears for a gate declared as a matrix leg or a reusable call, the
+        // declared mode has silently stopped being load-bearing.
+        if emission != "job_name" {
+            assert!(
+                !ci_workflow().contains(&format!("name: {context}")),
+                "gate {context:?} declares emission {emission:?}, but a literal job named {context:?} also exists — the declared mode is no longer what keeps the context green"
+            );
+        }
     }
 
-    // The reusable-workflow branch is the ONLY thing that can legitimately
-    // satisfy `homeboy / Test`: there is no literal `name: homeboy / Test`, and
-    // no matrix entry titled Test. Pin that, so a future edit cannot leave the
-    // context green through an unrelated substring again.
-    assert!(
-        !ci_workflow().contains("name: homeboy / Test"),
-        "if a literal Test job appears, the reusable-workflow branch below is no longer load-bearing and this test must be revisited"
-    );
-    assert!(
-        !ci_workflow()
-            .lines()
-            .any(|line| line.trim() == "title: Test"),
-        "no matrix entry is titled Test, so the matrix branch must not be what keeps `homeboy / Test` declared"
-    );
     assert!(
         !ci_workflow().contains("paths:"),
         "a required CI check cannot be path-filtered because unrelated PRs would wait forever"
@@ -260,18 +297,106 @@ fn required_gate_execution_contract_is_complete_and_emitted_by_every_pr_ci_run()
     assert!(test_gate.contains("      test-timeout-seconds: '1800'"));
 }
 
+/// This assertion replaces `versioned_ruleset_retains_current_main_no_check_policy`,
+/// which asserted the shipped ruleset required NO status checks while the shipped
+/// ruleset required eight. That is the exact drift this manifest exists to make
+/// impossible: a policy statement and the policy disagreeing, with nothing forcing
+/// them to move together. Pin the relationship instead of either side's contents.
 #[test]
-fn versioned_ruleset_retains_current_main_no_check_policy() {
+fn versioned_ruleset_projects_exactly_the_manifest_declaration() {
     let policy: serde_json::Value =
         serde_json::from_str(versioned_ruleset()).expect("valid ruleset JSON");
+    let declared = declared_contexts();
+
+    let checks = policy["rules"]
+        .as_array()
+        .expect("ruleset rules")
+        .iter()
+        .find(|rule| rule["type"] == "required_status_checks");
+
+    if declared.is_empty() {
+        assert!(
+            checks.is_none(),
+            "a zero-context manifest must project a ruleset with no required_status_checks rule"
+        );
+        return;
+    }
+
+    let parameters = &checks
+        .expect("a manifest declaring required gates must project a required_status_checks rule")
+        ["parameters"];
+    let projected: Vec<String> = parameters["required_status_checks"]
+        .as_array()
+        .expect("required status checks")
+        .iter()
+        .map(|check| check["context"].as_str().expect("context").to_string())
+        .collect();
+
+    assert_eq!(
+        projected, declared,
+        "the ruleset payload must project exactly the manifest's declared contexts, in order"
+    );
+    assert_eq!(
+        parameters["strict_required_status_checks_policy"],
+        manifest()["status_checks"]["strict_required_status_checks_policy"],
+        "strictness is what forces a check to have run against the PR's own head"
+    );
+}
+
+/// Criterion: the derived artifacts cannot drift from the manifest. Regenerating
+/// must be a no-op on a clean tree, so editing a gate anywhere but the manifest —
+/// or editing the manifest without regenerating — fails here rather than in
+/// production enforcement.
+#[test]
+fn regenerating_every_derived_artifact_is_a_no_op() {
+    let output = Command::new("bash")
+        .args([".github/generate-required-gates-artifacts.sh", "--check"])
+        .output()
+        .expect("required-gates generator should run");
 
     assert!(
-        !policy["rules"]
-            .as_array()
-            .expect("ruleset rules")
-            .iter()
-            .any(|rule| rule["type"] == "required_status_checks"),
-        "the versioned ruleset policy must retain main's no-required-checks policy"
+        output.status.success(),
+        "a derived artifact drifted from .github/required-gates-manifest.json:\n{}\n{}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+}
+
+/// Criterion: duplicate GitHub contexts are rejected at declaration time, not
+/// interpreted after execution. Two gates claiming one context makes both the
+/// ruleset payload and the terminal verdict ambiguous.
+#[test]
+fn a_duplicate_declared_context_is_refused_by_the_generator() {
+    let scratch = Scratch::new("duplicate-context");
+    let mut mutated = manifest().clone();
+    let gates = mutated["gates"].as_array_mut().expect("manifest gates");
+    let mut clone = gates[0].clone();
+    clone["id"] = serde_json::json!("declaration-duplicate");
+    gates.push(clone);
+    let path = scratch.write(
+        "manifest.json",
+        &serde_json::to_string_pretty(&mutated).expect("mutated manifest"),
+    );
+
+    let output = Command::new("bash")
+        .args([".github/generate-required-gates-artifacts.sh", "--check"])
+        .env("REQUIRED_GATES_MANIFEST", &path)
+        .env(
+            "REQUIRED_GATES_RULESET_OUTPUT",
+            scratch.missing("ruleset.json"),
+        )
+        .env("REQUIRED_GATES_DOCS_OUTPUT", "")
+        .output()
+        .expect("required-gates generator should run");
+
+    assert!(
+        !output.status.success(),
+        "two gates claiming one context must be refused before any execution is interpreted"
+    );
+    assert!(
+        stderr_of(&output).contains("duplicate"),
+        "the refusal must name the ambiguity: {}",
+        stderr_of(&output)
     );
 }
 
@@ -293,7 +418,7 @@ fn shipped_validator_accepts_the_versioned_policy() {
 #[test]
 fn ci_job_claims_only_the_declaration_and_reports_live_enforcement() {
     assert!(
-        ci_workflow().contains("name: homeboy / Required Gates Declaration"),
+        ci_workflow().contains(&format!("name: {}", context_of("declaration"))),
         "the CI job must be named for the claim its green tick actually proves"
     );
     assert!(
@@ -582,7 +707,7 @@ fn github_mode_rejects_rulesets_that_omit_the_terminal_execution_verdict() {
     let scratch = Scratch::new("missing-terminal-verdict");
     let contexts: Vec<String> = declared_contexts()
         .into_iter()
-        .filter(|context| context != "homeboy / Required Gates Executed")
+        .filter(|context| *context != context_of("executed"))
         .collect();
     let rules = scratch.write("rules.json", &live_rules(&contexts, true));
     let output = run_validator("--github", &[("REQUIRED_GATES_LIVE_RULES", rules.as_str())]);
@@ -605,7 +730,8 @@ fn github_mode_rejects_rulesets_that_omit_the_terminal_execution_verdict() {
 #[test]
 fn terminal_execution_verdict_rejects_pending_skipped_cancelled_failed_and_absent_contexts() {
     let contexts = declared_contexts();
-    let target = "homeboy / Test";
+    let target = context_of("test");
+    let target = target.as_str();
 
     for (state, conclusion, expected_outcome) in [
         ("pending", serde_json::Value::Null, "failed"),
@@ -700,7 +826,7 @@ fn terminal_execution_verdict_does_not_require_its_own_in_progress_conclusion() 
         "jobs.json",
         &execution_jobs(
             &contexts,
-            Some(("homeboy / Required Gates Executed", serde_json::Value::Null)),
+            Some((context_of("executed").as_str(), serde_json::Value::Null)),
         ),
     );
     let output = run_execution_gate(&[("REQUIRED_GATES_EXECUTED_JOBS", jobs.as_str())]);
@@ -725,7 +851,7 @@ fn terminal_execution_verdict_accepts_a_skipped_planning_duplicate_after_success
     let mut jobs: Vec<serde_json::Value> =
         serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
     jobs.push(serde_json::json!({
-        "name": "homeboy / Test",
+        "name": context_of("test"),
         "head_sha": "0000000000000000000000000000000000000000",
         "conclusion": "skipped",
     }));
@@ -763,7 +889,7 @@ fn terminal_execution_verdict_keeps_duplicate_failures_and_cancellations_fail_cl
         let mut jobs: Vec<serde_json::Value> =
             serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
         jobs.push(serde_json::json!({
-            "name": "homeboy / Test",
+            "name": context_of("test"),
             "head_sha": "0000000000000000000000000000000000000000",
             "conclusion": conclusion,
         }));
@@ -793,11 +919,11 @@ fn terminal_execution_verdict_rejects_skipped_only_and_ignores_other_head_duplic
     let scratch = Scratch::new("skipped-only-other-head");
     let mut jobs: Vec<serde_json::Value> = serde_json::from_str(&execution_jobs(
         &contexts,
-        Some(("homeboy / Test", serde_json::json!("skipped"))),
+        Some((context_of("test").as_str(), serde_json::json!("skipped"))),
     ))
     .expect("execution jobs");
     jobs.push(serde_json::json!({
-        "name": "homeboy / Test",
+        "name": context_of("test"),
         "head_sha": "1111111111111111111111111111111111111111",
         "conclusion": "success",
     }));
@@ -828,7 +954,7 @@ fn terminal_execution_verdict_accepts_duplicate_success() {
     let mut jobs: Vec<serde_json::Value> =
         serde_json::from_str(&execution_jobs(&contexts, None)).expect("execution jobs");
     jobs.push(serde_json::json!({
-        "name": "homeboy / Test",
+        "name": context_of("test"),
         "head_sha": "0000000000000000000000000000000000000000",
         "conclusion": "success",
     }));

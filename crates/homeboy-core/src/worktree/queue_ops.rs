@@ -75,6 +75,7 @@ pub(super) fn queue_row(
         active_lock_holder: None,
         path: None,
         error: None,
+        failure: None,
     }
 }
 

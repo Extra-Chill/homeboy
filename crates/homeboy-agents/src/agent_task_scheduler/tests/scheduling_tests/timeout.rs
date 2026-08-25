@@ -94,11 +94,9 @@ mod timeout_tests {
         fs::write(
             &agent_result_path,
             serde_json::to_string(&AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "task-1".to_string(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("patch ready".to_string()),
-                failure_classification: None,
                 artifacts: vec![AgentTaskArtifact {
                     schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                     id: "fix".to_string(),
@@ -114,17 +112,13 @@ mod timeout_tests {
                     sha256: None,
                     metadata: json!({ "role": "patch" }),
                 }],
-                typed_artifacts: Vec::new(),
                 evidence_refs: vec![AgentTaskEvidenceRef {
                     kind: "runtime_bundle".to_string(),
                     uri: artifact_root.display().to_string(),
                     label: Some("runtime bundle".to_string()),
                 }],
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
                 metadata: json!({}),
+                ..Default::default()
             })
             .expect("agent result json"),
         )

@@ -15,7 +15,7 @@ use classification::{
     is_lab_offloadable_fanout_coordinator, is_local_registry_management, is_plan_only_command,
 };
 use messages::{
-    append_local_placement, primary_action, runner_pinned_controller_notice, severity_str,
+    append_local_placement, lab_routed_controller_notice, primary_action, severity_str,
     warning_message,
 };
 
@@ -565,7 +565,7 @@ pub(crate) fn evaluate_with_runner_hint(
 /// runner. This is placement evidence, not a local-execution warning: the
 /// runner handoff owns reporting an authorized fallback if remote preparation
 /// later fails.
-pub(crate) fn explicit_runner_controller_notice(
+pub(crate) fn lab_routed_controller_notice_message(
     command: HotCommand,
     resources: &DoctorOutput,
     runner_id: &str,
@@ -573,7 +573,7 @@ pub(crate) fn explicit_runner_controller_notice(
     command
         .engages_resource_admission(resources.recommendation)
         .then(|| {
-            runner_pinned_controller_notice(command, resources.recommendation, resources, runner_id)
+            lab_routed_controller_notice(command, resources.recommendation, resources, runner_id)
         })
 }
 
@@ -1238,8 +1238,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_runner_notice_separates_controller_overhead_from_runner_workload() {
-        let notice = explicit_runner_controller_notice(
+    fn lab_routed_notice_separates_controller_overhead_from_runner_workload() {
+        let notice = lab_routed_controller_notice_message(
             lab_supported_hot("worktree cleanup"),
             &resources(ResourceRecommendation::Warm),
             "homeboy-lab",

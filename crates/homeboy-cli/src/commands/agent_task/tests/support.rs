@@ -124,19 +124,10 @@ impl AgentTaskExecutorAdapter for InspectingExecutor {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(record);
 
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -158,19 +149,10 @@ impl AgentTaskExecutorAdapter for CapturingExecutor {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
 
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -184,25 +166,18 @@ impl AgentTaskExecutorAdapter for DiagnosticFailureExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: request.task_id,
-                status: AgentTaskOutcomeStatus::ProviderError,
-                summary: Some("Embedded agent runtime failed.".to_string()),
-                failure_classification: Some(AgentTaskFailureClassification::Provider),
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: vec![AgentTaskDiagnostic {
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::ProviderError,
+            summary: Some("Embedded agent runtime failed.".to_string()),
+            failure_classification: Some(AgentTaskFailureClassification::Provider),
+            diagnostics: vec![AgentTaskDiagnostic {
                     class: "provider_discovery".to_string(),
                     message: "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
                         .to_string(),
                     data: json!({ "registered_provider_plugins": [] }),
                 }],
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
-            }
+            ..Default::default()
+        }
     }
 }
 
@@ -219,13 +194,10 @@ impl AgentTaskExecutorAdapter for ClassifiedFailureExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Failed,
             summary: Some("classified failure fixture".to_string()),
             failure_classification: Some(self.classification),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "transcript".to_string(),
                 uri: "target/agent-task-review/transcript.log".to_string(),
@@ -236,10 +208,7 @@ impl AgentTaskExecutorAdapter for ClassifiedFailureExecutor {
                 message: "classified failure fixture".to_string(),
                 data: Value::Null,
             }],
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -255,7 +224,6 @@ impl AgentTaskExecutorAdapter for ExecutorResultEvidenceFailureExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::ProviderError,
             summary: Some(
@@ -263,8 +231,6 @@ impl AgentTaskExecutorAdapter for ExecutorResultEvidenceFailureExecutor {
                     .to_string(),
             ),
             failure_classification: Some(AgentTaskFailureClassification::Provider),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "executor-result".to_string(),
                 uri: self.evidence_uri.clone(),
@@ -290,9 +256,8 @@ impl AgentTaskExecutorAdapter for ExecutorResultEvidenceFailureExecutor {
                     ]
                 }
             }),
-            workflow: None,
-            follow_up: None,
             metadata: json!({ "expected_artifacts": ["concept_packet", "design_packet"] }),
+            ..Default::default()
         }
     }
 }
@@ -308,13 +273,9 @@ impl AgentTaskExecutorAdapter for ExecutorInputEvidenceExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("captured executor input".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: self
                 .evidence_uris
                 .iter()
@@ -324,11 +285,7 @@ impl AgentTaskExecutorAdapter for ExecutorInputEvidenceExecutor {
                     label: Some("latest raw executor input".to_string()),
                 })
                 .collect(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -342,11 +299,9 @@ impl AgentTaskExecutorAdapter for ApplyArtifactExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("produced patch".to_string()),
-            failure_classification: None,
             artifacts: vec![AgentTaskArtifact {
                 schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                 id: "patch-a".to_string(),
@@ -362,17 +317,12 @@ impl AgentTaskExecutorAdapter for ApplyArtifactExecutor {
                 sha256: Some("abc123".to_string()),
                 metadata: Value::Null,
             }],
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "transcript".to_string(),
                 uri: "target/agent-task-review/transcript.log".to_string(),
                 label: Some("transcript".to_string()),
             }],
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
