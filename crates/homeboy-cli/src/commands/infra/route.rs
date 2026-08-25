@@ -14,6 +14,9 @@ use homeboy::core::observation::{
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::Error;
 use homeboy::runner::runners::{self, RunnerExecOptions};
+use homeboy_lab_contract::lab::transport_failure::{
+    preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportOperation,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -557,7 +560,9 @@ pub(crate) fn route_after_parse_with_provenance(
         observer,
     )
     .map_err(|error| match retry_handoff.as_ref() {
-        Some(handoff) => persist_retry_handoff_preacceptance_failure(handoff, error),
+        Some(handoff) => {
+            persist_retry_handoff_preacceptance_failure(handoff, route_runner_id, error)
+        }
         None => error,
     })?;
 
@@ -2651,13 +2656,14 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                 // remain sufficient for later authoritative reconciliation.
                 return Ok(());
             }
-            Err(mut error) => {
+            Err(error) => {
                 // This boundary is reached only after runner preflight has
                 // accepted the Cook but before a provider command is handed
                 // off. Transport, daemon publication, and reconciliation
                 // failures here are safe to retry and must not spend provider
                 // budget by being classified as invalid input.
-                error.retryable = Some(true);
+                let error =
+                    durable_lab_preacceptance_transport_error(run_id, &self.runner_id, error);
                 let recovery = format!(
                     "Resolve the Lab handoff, then retry controller-owned attempt `{run_id}`."
                 );
@@ -3894,8 +3900,18 @@ fn retry_plan_primary_workspace(
 
 fn persist_retry_handoff_preacceptance_failure(
     handoff: &AgentTaskRetryHandoff,
+    route_runner_id: Option<&str>,
     error: Error,
 ) -> Error {
+    let selected_runner = route_runner_id
+        .map(str::to_string)
+        .or_else(|| {
+            agent_task_lifecycle::status(&handoff.run_id)
+                .ok()
+                .and_then(|record| record.runner_id().map(str::to_string))
+        })
+        .unwrap_or_else(|| "selected-lab-runner".to_string());
+    let error = durable_lab_preacceptance_transport_error(&handoff.run_id, &selected_runner, error);
     let recovery = format!(
         "Fix the Lab preflight failure, then retry with `homeboy agent-task retry {} --run --runner <runner-id> --detach-after-handoff`.",
         handoff.run_id
@@ -3912,6 +3928,28 @@ fn persist_retry_handoff_preacceptance_failure(
         ));
     }
     error.with_hint(recovery)
+}
+
+fn durable_lab_preacceptance_transport_error(
+    run_id: &str,
+    selected_runner: &str,
+    mut error: Error,
+) -> Error {
+    error.retryable = Some(true);
+    let is_transport = matches!(
+        error.code.as_str(),
+        "internal.io_error" | "runner.lab_transport_failure"
+    ) || error.details.get("daemon_transport_error").is_some();
+    if !is_transport {
+        return error;
+    }
+    preacceptance_transport_error(
+        run_id,
+        selected_runner,
+        LabTransportOperation::DispatchCookAttempt,
+        LabJobAcceptanceDisposition::NoJobAccepted,
+        error,
+    )
 }
 
 /// Insert one env pair into the overrides, recording the key as secret when
