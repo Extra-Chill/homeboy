@@ -269,7 +269,10 @@ enum StartupFastPathOutput {
     Identity(serde_json::Value),
 }
 
-fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
+fn startup_fast_path_output(
+    runtime: &CliRuntime,
+    args: &[String],
+) -> Option<StartupFastPathOutput> {
     Some(match startup_fast_path(args)? {
         // Root help renders the augmented command because extension-provided
         // subcommands are part of the user-visible surface; the static derive
@@ -283,10 +286,7 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
             // parsed successfully aborted the process instead of running the
             // command (#11577). The fast path is an optimization; disagreeing
             // with clap must cost a slow path, never a panic.
-            let Err(error) = CliRuntime::new()
-                .build_augmented_command()
-                .try_get_matches_from(args)
-            else {
+            let Err(error) = runtime.build_augmented_command().try_get_matches_from(args) else {
                 return None;
             };
             if error.kind() != clap::error::ErrorKind::DisplayHelp {
@@ -304,7 +304,11 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
 }
 
 pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
-    match startup_fast_path_output(args)? {
+    CliRuntime::new().run_startup_fast_path(args)
+}
+
+fn emit_startup_fast_path_output(output: StartupFastPathOutput) -> std::process::ExitCode {
+    match output {
         StartupFastPathOutput::Help(help) => print!("{help}"),
         StartupFastPathOutput::Version(version) => println!("{version}"),
         StartupFastPathOutput::Identity(identity) => {
@@ -317,7 +321,7 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
         }
     }
 
-    Some(std::process::ExitCode::SUCCESS)
+    std::process::ExitCode::SUCCESS
 }
 
 pub(crate) fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
@@ -601,7 +605,16 @@ impl CliRuntime {
         })
     }
 
+    pub fn run_startup_fast_path(&self, args: &[String]) -> Option<std::process::ExitCode> {
+        startup_fast_path_output(self, args).map(emit_startup_fast_path_output)
+    }
+
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
+        #[cfg(feature = "test-support")]
+        if let Some(path) = std::env::var_os("HOMEBOY_TEST_RUNTIME_INITIALIZATION_SENTINEL") {
+            std::fs::write(path, b"initialized").expect("write runtime initialization sentinel");
+        }
+
         let normalized = args::normalize(args);
         let command_capability = classify_command_capability(&normalized);
         if let Some(message) = args::runner_exec_option_boundary_error(&normalized) {
@@ -4585,19 +4598,23 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    startup_fast_path_output(&argv(values)),
+                    startup_fast_path_output(&CliRuntime::new(), &argv(values)),
                     Some(StartupFastPathOutput::Help(_))
                 ),
                 "{values:?} should render before runtime initialization"
             );
         }
 
-        assert!(startup_fast_path_output(&argv(&["homeboy", "help", "status"])).is_none());
+        assert!(startup_fast_path_output(
+            &CliRuntime::new(),
+            &argv(&["homeboy", "help", "status"])
+        )
+        .is_none());
     }
 
     #[test]
     fn version_fast_path_reports_the_build_version_without_extension_discovery() {
-        match startup_fast_path_output(&argv(&["homeboy", "--version"])) {
+        match startup_fast_path_output(&CliRuntime::new(), &argv(&["homeboy", "--version"])) {
             Some(StartupFastPathOutput::Version(version)) => {
                 assert_eq!(version, upgrade::current_build_version());
             }
@@ -4637,7 +4654,7 @@ mod tests {
     /// (instead of calling `build_augmented_command` directly) is what makes
     /// these tests fail if root help ever regresses to the static command.
     fn root_help_for(argv_values: &[&str]) -> String {
-        match startup_fast_path_output(&argv(argv_values)) {
+        match startup_fast_path_output(&CliRuntime::new(), &argv(argv_values)) {
             Some(StartupFastPathOutput::Help(help)) => help,
             _ => panic!("{argv_values:?} should resolve to the root-help startup fast path"),
         }
