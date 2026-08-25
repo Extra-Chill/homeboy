@@ -952,7 +952,6 @@ mod tests {
             panic!("Cook command");
         };
         assert!(draft.draft_pr);
-
         assert!(crate::cli_surface::Cli::try_parse_from([
             "homeboy",
             "agent-task",
@@ -963,6 +962,27 @@ mod tests {
             "homeboy@existing",
             "--no-finalize",
             "--draft-pr",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn self_repair_bootstrap_cannot_disable_finalization() {
+        assert!(crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "repair the provider",
+            "--repo",
+            "homeboy",
+            "--task-url",
+            "https://github.com/Extra-Chill/homeboy/issues/13410",
+            "--cwd",
+            "/tmp/homeboy-self-repair",
+            "--worktree-provider-self-repair",
+            "fixture",
+            "--no-finalize",
         ])
         .is_err());
     }
@@ -1025,7 +1045,7 @@ pub struct AgentTaskCookArgs {
         long,
         value_name = "PROVIDER_ID",
         requires = "cwd",
-        conflicts_with_all = ["workspace", "to_worktree"]
+        conflicts_with_all = ["workspace", "to_worktree", "no_finalize"]
     )]
     pub worktree_provider_self_repair: Option<String>,
     #[arg(

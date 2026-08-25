@@ -3583,6 +3583,11 @@ fn annotate_worktree_provider_self_repair_route(
     config: &defaults::HomeboyConfig,
     head: Option<&str>,
 ) -> homeboy::core::Error {
+    // A bootstrap is a publication route, not an escape hatch from the review
+    // and finalization contract selected by the original Cook.
+    if args.no_finalize {
+        return error;
+    }
     let provider_id = error.details["worktree_provider_id"].as_str();
     let operation = error.details["worktree_provider_operation"].as_str();
     let Some((provider_id, operation)) = provider_id.zip(operation) else {
@@ -3609,8 +3614,18 @@ fn annotate_worktree_provider_self_repair_route(
     replay_args.to_worktree = None;
     replay_args.dispatch.cwd = Some("<clean-existing-linked-worktree>".to_string());
     replay_args.worktree_provider_self_repair = Some(provider_id.to_string());
-    let replay_argv = cook_replay_argv(&replay_args);
+    let mut replay_argv = cook_replay_argv(&replay_args);
+    for _ in &args.gates.private_verify {
+        replay_argv.extend([
+            "--private-verify".to_string(),
+            "<redacted:--private-verify>".to_string(),
+        ]);
+    }
     let replay_command = quote_args(&replay_argv);
+    let mut replay_requires = vec!["replace <clean-existing-linked-worktree> with an existing clean linked checkout of the configured owning repository".to_string()];
+    if !args.gates.private_verify.is_empty() {
+        replay_requires.push("replace each <redacted:--private-verify> placeholder with the original private gate before replaying".to_string());
+    }
     error.details["worktree_provider_self_repair"] = serde_json::json!({
         "schema": "homeboy/worktree-provider-self-repair-route/v1",
         "provider_id": provider_id,
@@ -3618,7 +3633,7 @@ fn annotate_worktree_provider_self_repair_route(
         "failed_operation": operation,
         "workspace_authority": "explicit_clean_existing_checkout",
         "replay_argv": replay_argv,
-        "replay_requires": ["replace <clean-existing-linked-worktree> with an existing clean linked checkout of the configured owning repository"],
+        "replay_requires": replay_requires,
         "provider_lifecycle_reconciliation": {
             "status": "required_after_repair_ships",
             "action": "resume_normal_provider_lifecycle_finalization",

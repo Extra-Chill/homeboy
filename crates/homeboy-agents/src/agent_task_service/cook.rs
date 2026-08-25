@@ -7845,7 +7845,7 @@ fn annotate_pending_provider_self_repair_route(
     mut error: Error,
     options: &AgentTaskCookServiceOptions,
 ) -> Error {
-    if error.details["worktree_provider_operation"] != "ensure" {
+    if options.no_finalize || error.details["worktree_provider_operation"] != "ensure" {
         return error;
     }
     let Some(provider_id) = error.details["worktree_provider_id"].as_str() else {
@@ -7909,13 +7909,18 @@ fn annotate_pending_provider_self_repair_route(
     for gate in &options.gates.verify {
         replay_argv.extend(["--verify".to_string(), gate.clone()]);
     }
-    for gate in &options.gates.private_verify {
-        replay_argv.extend(["--private-verify".to_string(), gate.clone()]);
+    for _ in &options.gates.private_verify {
+        replay_argv.extend([
+            "--private-verify".to_string(),
+            "<redacted:--private-verify>".to_string(),
+        ]);
     }
-    if options.no_finalize {
-        replay_argv.push("--no-finalize".to_string());
-    } else if options.draft_pr {
+    if options.draft_pr {
         replay_argv.push("--draft-pr".to_string());
+    }
+    let mut replay_requires = vec!["replace <clean-existing-linked-worktree> with an existing clean linked checkout of the configured owning repository".to_string()];
+    if !options.gates.private_verify.is_empty() {
+        replay_requires.push("replace each <redacted:--private-verify> placeholder with the original private gate before replaying".to_string());
     }
     error.details["worktree_provider_self_repair"] = serde_json::json!({
         "schema": "homeboy/worktree-provider-self-repair-route/v1",
@@ -7924,7 +7929,7 @@ fn annotate_pending_provider_self_repair_route(
         "failed_operation": "ensure",
         "workspace_authority": "explicit_clean_existing_checkout",
         "replay_argv": replay_argv,
-        "replay_requires": ["replace <clean-existing-linked-worktree> with an existing clean linked checkout of the configured owning repository"],
+        "replay_requires": replay_requires,
         "provider_lifecycle_reconciliation": {
             "status": "required_after_repair_ships",
             "action": "resume_normal_provider_lifecycle_finalization",

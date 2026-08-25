@@ -324,6 +324,27 @@ fn self_repair_bootstrap_uses_explicit_checkout_and_preserves_normal_cook_contra
         );
         homeboy::core::defaults::save_config(&config).expect("save provider ownership");
 
+        let nonfinalizing_failure =
+            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "repair without publication".to_string(),
+                "--repo".to_string(),
+                "workspace-service-component".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/workspace-service/issues/13410".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect_err("non-finalizing provider failure is not a self-repair route");
+        assert!(nonfinalizing_failure
+            .details
+            .get("worktree_provider_self_repair")
+            .is_none());
+
         let failure = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -338,6 +359,8 @@ fn self_repair_bootstrap_uses_explicit_checkout_and_preserves_normal_cook_contra
             "fixture".to_string(),
             "--verify".to_string(),
             "cargo test --workspace".to_string(),
+            "--private-verify".to_string(),
+            "PRIVATE_GATE_SECRET=do-not-persist".to_string(),
         ]))
         .expect_err("normal provider-owned lookup fails before bootstrap");
         assert_eq!(
@@ -363,6 +386,17 @@ fn self_repair_bootstrap_uses_explicit_checkout_and_preserves_normal_cook_contra
             .iter()
             .any(|value| value == "--worktree-provider-self-repair"));
         assert!(replay.iter().any(|value| value == "cargo test --workspace"));
+        assert!(replay
+            .iter()
+            .any(|value| value == "<redacted:--private-verify>"));
+        assert!(!route.to_string().contains("PRIVATE_GATE_SECRET"));
+        assert!(route["replay_requires"]
+            .as_array()
+            .expect("replay requirements")
+            .iter()
+            .any(|requirement| requirement
+                .as_str()
+                .is_some_and(|requirement| requirement.contains("private gate"))));
 
         let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
             "homeboy".to_string(),
@@ -394,7 +428,7 @@ fn self_repair_bootstrap_uses_explicit_checkout_and_preserves_normal_cook_contra
                 .expect("provider invocation record")
                 .lines()
                 .count(),
-            1,
+            2,
             "bootstrap must not invoke the failed provider again"
         );
         assert!(!args.no_finalize, "self-repair retains normal finalization");
