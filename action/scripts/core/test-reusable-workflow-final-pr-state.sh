@@ -25,6 +25,12 @@ assert_pr_state() {
     printf 'FAIL: %s did not report active=%s\n' "${label}" "${expected}"
     exit 1
   fi
+  expected_reason=active
+  [ "${expected}" = false ] && expected_reason=pr_closed
+  if ! grep -Fxq "reason=${expected_reason}" "${TMP_DIR}/output"; then
+    printf 'FAIL: %s did not report reason=%s\n' "${label}" "${expected_reason}"
+    exit 1
+  fi
   printf 'PASS: %s\n' "${label}"
 }
 
@@ -70,25 +76,28 @@ for job_name in ("reconcile", "reconcile-test-shards"):
         problems.append(f"{job_name} final PR state probe does not run after cancelled dependencies")
     for step in steps[probe + 1:]:
         condition = step.get("if", "")
-        if "steps.final-pr-state.outputs.active != 'false'" not in condition:
-            name = step.get("name", step.get("uses", "unnamed step"))
-            problems.append(f"{job_name} finalization step {name!r} can run after PR closure")
+        name = step.get("name", step.get("uses", "unnamed step"))
+        if name in ("Generate GitHub App token", "Post reconciled PR comment"):
+            if "steps.final-pr-state.outputs.active != 'false'" not in condition:
+                problems.append(f"{job_name} PR comment can run after PR closure")
+        elif "steps.final-pr-state.outputs.active != 'false'" in condition:
+            problems.append(f"{job_name} immutable evidence step {name!r} is skipped after PR closure")
 
 if problems:
     print("\n".join(problems))
     sys.exit(1)
 PY
 
-# `always()` is intentional for active candidates: cancelled dependencies must
-# fail closed rather than silently becoming a passing required gate. Closed or
-# merged PRs reach the same finalizer, then every remaining step is skipped.
+# `always()` is intentional: immutable artifacts must reconcile even if the PR
+# closes while jobs are completing. Active and closed PRs both fail closed when
+# the evidence is missing or malformed; only PR publication is skipped.
 grep -F "if: \${{ !inputs.contract-probe && always() && needs.plan.outputs.non-test-commands-enabled == 'true' }}" "${WORKFLOW}" >/dev/null \
   || { printf 'FAIL: active non-Test cancellation can bypass reconciliation\n'; exit 1; }
 grep -F "if: \${{ !inputs.contract-probe && always() && needs.plan.outputs.test-shards-enabled == 'true' }}" "${WORKFLOW}" >/dev/null \
   || { printf 'FAIL: active sharded Test cancellation can bypass reconciliation\n'; exit 1; }
-grep -F "steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result != 'success'" "${WORKFLOW}" >/dev/null \
-  || { printf 'FAIL: active Test inventory failure is not terminal\n'; exit 1; }
-grep -F "steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'" "${WORKFLOW}" >/dev/null \
-  || { printf 'FAIL: active Test aggregation failure is not terminal\n'; exit 1; }
+grep -F "if: needs.candidate-test-plan.result != 'success'" "${WORKFLOW}" >/dev/null \
+  || { printf 'FAIL: closed-PR Test inventory failure is not terminal\n'; exit 1; }
+grep -F "if: needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'" "${WORKFLOW}" >/dev/null \
+  || { printf 'FAIL: closed-PR Test aggregation failure is not terminal\n'; exit 1; }
 
-printf 'PASS: reusable finalizers suppress inactive PRs and fail active cancellations or failures\n'
+printf 'PASS: reusable finalizers reconcile immutable evidence after PR closure and skip publication\n'

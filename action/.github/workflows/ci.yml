@@ -1034,13 +1034,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: bash .homeboy-action/scripts/core/check-pr-state.sh
       - name: Download candidate Test inventory failure provenance
-        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result != 'success'
+        if: needs.candidate-test-plan.result != 'success'
         uses: actions/download-artifact@v7
         with:
           name: homeboy-test-inventory-failure-${{ github.run_attempt }}
           path: test-inventory-failure
       - name: Report candidate Test inventory generation failure
-        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result != 'success'
+        if: needs.candidate-test-plan.result != 'success'
         run: |
           provenance=test-inventory-failure/provenance.json
           command="$(jq -r .command "${provenance}")"
@@ -1052,17 +1052,17 @@ jobs:
       # their aggregate. Resolve the newest complete aggregate it can consume.
       - name: Resolve candidate Test result
         id: candidate-test-result-artifact
-        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-result.result == 'success'
+        if: needs.candidate-test-result.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-candidate-test-results
       - uses: actions/download-artifact@v7
-        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-result.result == 'success'
+        if: needs.candidate-test-result.result == 'success'
         with:
           name: ${{ steps.candidate-test-result-artifact.outputs.artifact-name }}
           path: candidate-test-results
       - name: Report candidate Test aggregation failure
-        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'
+        if: needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'
         run: |
           echo '::error::Candidate Test shard evidence could not be aggregated into a canonical result.'
           exit 1
@@ -1075,7 +1075,7 @@ jobs:
       # enforcement step running at all. Every reachable outcome above either
       # exits non-zero or falls through to exactly this step.
       - name: Enforce sharded Test result
-        if: steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-result.result == 'success'
+        if: needs.candidate-test-result.result == 'success'
         env:
           COMMAND: ${{ needs.plan.outputs.test-command }}
         run: RESULTS="$(cat candidate-test-results/homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
@@ -1101,21 +1101,9 @@ jobs:
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: bash .homeboy-action/scripts/core/check-pr-state.sh
-      - name: Download candidate Homeboy binary
-        id: candidate-binary
-        if: steps.final-pr-state.outputs.active != 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
-        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
-      - name: Install candidate Homeboy binary
-        if: steps.final-pr-state.outputs.active != 'false'
-        run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
       - id: action-revision
-        if: steps.final-pr-state.outputs.active != 'false'
         run: echo "value=$(git -C .homeboy-action rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v7
-        if: steps.final-pr-state.outputs.active != 'false'
         continue-on-error: true
         with:
           pattern: homeboy-differential-*-${{ matrix.artifact_key }}-*
@@ -1123,7 +1111,6 @@ jobs:
       - name: Reconcile provenance-bound phase evidence
         id: reconcile
         shell: bash
-        if: steps.final-pr-state.outputs.active != 'false'
         env:
           PHASE_ARTIFACT_ROOT: differential-artifacts
           REPOSITORY: ${{ github.repository }}

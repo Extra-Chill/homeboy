@@ -434,7 +434,10 @@ enforce_steps="$(grep -c 'enforce-final-status.sh' "${WORKFLOW}")"
 [ "${enforce_steps}" -eq 1 ] || { printf 'FAIL: sharded Test must have exactly one enforcement step, got %s\n' "${enforce_steps}"; exit 1; }
 enforce_guard="$(grep -A2 'name: Enforce sharded Test result' "${WORKFLOW}")"
 printf '%s\n' "${enforce_guard}" | grep -qF "needs.candidate-test-result.result == 'success'" || { printf 'FAIL: sharded Test enforcement is not gated on the aggregate result\n'; exit 1; }
-printf '%s\n' "${enforce_guard}" | grep -qF "steps.final-pr-state.outputs.active != 'false'" || { printf 'FAIL: sharded Test enforcement can publish a verdict after PR closure\n'; exit 1; }
+if printf '%s\n' "${enforce_guard}" | grep -qF "steps.final-pr-state.outputs.active != 'false'"; then
+  printf 'FAIL: sharded Test enforcement skips immutable evidence after PR closure\n'
+  exit 1
+fi
 grep -A2 'name: Enforce sharded Test result' "${WORKFLOW}" | grep -q 'baseline' && { printf 'FAIL: sharded Test enforcement is gated on a baseline that never runs\n'; exit 1; }
 
 # shellcheck disable=SC2016
@@ -464,7 +467,7 @@ if printf '%s\n' "${aggregate_condition}" | grep -q 'needs.candidate-test-shards
   exit 1
 fi
 grep -F 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not report candidate inventory generation failures\n'; exit 1; }
-grep -F "steps.final-pr-state.outputs.active != 'false' && needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test artifact downloads are not gated on a successful candidate plan\n'; exit 1; }
+grep -F "if: needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test artifact downloads are not gated on a successful candidate plan\n'; exit 1; }
 grep -F "Candidate Test inventory generation failed; shard execution was not started" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate inventory producer is not terminal\n'; exit 1; }
 grep -F "::error::Test inventory generation failed for" "${WORKFLOW}" >/dev/null || { printf 'FAIL: Test does not emit the inventory generation diagnostic\n'; exit 1; }
 if grep -A4 'name: Report candidate Test inventory generation failure' "${WORKFLOW}" | grep -F 'homeboy-test-shard-plan-' >/dev/null; then
