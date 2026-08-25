@@ -1,9 +1,19 @@
 use homeboy_core::component::Component;
 use homeboy_core::project::Project;
 use homeboy_core::server::SshClient;
+use std::time::Duration;
 
 use super::types::DeployEffect;
 use super::version_overrides::fetch_remote_versions_for_project;
+
+const POST_DEPLOY_VERSION_PROBE_ATTEMPTS: usize = 3;
+const POST_DEPLOY_VERSION_PROBE_SETTLE_DELAY: Duration = Duration::from_millis(200);
+
+#[derive(Debug)]
+pub(super) enum PostDeployVerification {
+    Verified(Option<String>),
+    AppliedUnverified(String),
+}
 
 pub(super) fn remote_version_after_deploy_effect(
     component: &Component,
@@ -12,9 +22,9 @@ pub(super) fn remote_version_after_deploy_effect(
     client: &SshClient,
     effect: Option<&DeployEffect>,
     local_version: Option<&String>,
-) -> std::result::Result<Option<String>, String> {
+) -> std::result::Result<PostDeployVerification, String> {
     let Some(effect) = effect else {
-        return Ok(local_version.cloned());
+        return Ok(PostDeployVerification::Verified(local_version.cloned()));
     };
     let has_version_targets = component
         .version_targets
@@ -35,22 +45,17 @@ pub(super) fn remote_version_after_deploy_effect(
                 component.id, effect.remote_path
             ));
         }
-        return Ok(local_version.cloned());
+        return Ok(PostDeployVerification::Verified(local_version.cloned()));
     }
 
-    let observed_versions = fetch_remote_versions_for_project(
-        std::slice::from_ref(component),
-        Some(project),
-        base_path,
-        client,
-    )
-    .versions;
-    let observed = observed_versions.get(&component.id).cloned().ok_or_else(|| {
-        format!(
-            "Deploy command completed for '{}' at '{}', but Homeboy could not read remote_version from the applied tree. Refusing to report success from stale pre-deploy observations.",
-            component.id, effect.remote_path
-        )
-    })?;
+    let Some(observed) =
+        observe_remote_version_from_applied_tree(component, project, base_path, client)
+    else {
+        return Ok(PostDeployVerification::AppliedUnverified(format!(
+            "Deploy command completed for '{}' at '{}', and Homeboy retried post-deploy remote_version verification against the applied tree, but the postcondition remained unreadable. Artifact mutation evidence is preserved; reverify with 'homeboy deploy {} --check'.",
+            component.id, effect.remote_path, project.id
+        )));
+    };
 
     if let Some(expected) = local_version {
         if &observed != expected {
@@ -61,12 +66,36 @@ pub(super) fn remote_version_after_deploy_effect(
         }
     }
 
-    Ok(Some(observed))
+    Ok(PostDeployVerification::Verified(Some(observed)))
+}
+
+fn observe_remote_version_from_applied_tree(
+    component: &Component,
+    project: &Project,
+    base_path: &str,
+    client: &SshClient,
+) -> Option<String> {
+    for attempt in 0..POST_DEPLOY_VERSION_PROBE_ATTEMPTS {
+        let observed_versions = fetch_remote_versions_for_project(
+            std::slice::from_ref(component),
+            Some(project),
+            base_path,
+            client,
+        )
+        .versions;
+        if let Some(observed) = observed_versions.get(&component.id).cloned() {
+            return Some(observed);
+        }
+        if attempt + 1 < POST_DEPLOY_VERSION_PROBE_ATTEMPTS {
+            std::thread::sleep(POST_DEPLOY_VERSION_PROBE_SETTLE_DELAY);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::remote_version_after_deploy_effect;
+    use super::{remote_version_after_deploy_effect, PostDeployVerification};
     use crate::types::DeployEffect;
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::project::Project;
@@ -105,14 +134,17 @@ mod tests {
             Some(&effect),
             Some(&expected_version),
         )
-        .expect("post-effect version")
-        .expect("observed version");
+        .expect("post-effect version");
+
+        let PostDeployVerification::Verified(Some(version)) = version else {
+            panic!("expected verified post-effect version");
+        };
 
         assert_eq!(version, "1.2.3");
     }
 
     #[test]
-    fn post_effect_version_read_rejects_unobserved_configured_version_target() {
+    fn post_effect_version_read_returns_applied_unverified_when_probe_remains_unreadable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let remote_dir = temp.path().join("plugin");
         std::fs::create_dir_all(&remote_dir).expect("remote dir");
@@ -133,19 +165,29 @@ mod tests {
         };
         let expected_version = "1.2.3".to_string();
 
-        let error = remote_version_after_deploy_effect(
+        let result = remote_version_after_deploy_effect(
             &component,
-            &Project::default(),
+            &Project {
+                id: "site".to_string(),
+                ..Project::default()
+            },
             temp.path().to_str().expect("base path"),
             &local_client(),
             Some(&effect),
             Some(&expected_version),
         )
-        .expect_err("missing post-effect remote version should fail");
+        .expect("missing post-effect remote version should stay typed");
 
+        let PostDeployVerification::AppliedUnverified(message) = result else {
+            panic!("expected applied_unverified outcome");
+        };
         assert!(
-            error.contains("could not read remote_version from the applied tree"),
-            "unexpected error: {error}"
+            message.contains("postcondition remained unreadable"),
+            "unexpected outcome: {message}"
+        );
+        assert!(
+            message.contains("homeboy deploy site --check"),
+            "unexpected outcome: {message}"
         );
     }
 
@@ -213,6 +255,9 @@ mod tests {
         )
         .expect("verified artifact deploy without version_targets should succeed");
 
+        let PostDeployVerification::Verified(version) = version else {
+            panic!("expected verified outcome");
+        };
         assert_eq!(version.as_deref(), Some("0.14.0"));
     }
 
@@ -238,6 +283,9 @@ mod tests {
         )
         .expect("no-effect deploy should return local_version");
 
+        let PostDeployVerification::Verified(version) = version else {
+            panic!("expected verified outcome");
+        };
         assert_eq!(version.as_deref(), Some("1.0.0"));
     }
 
