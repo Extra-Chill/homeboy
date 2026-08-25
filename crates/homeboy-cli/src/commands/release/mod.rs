@@ -23,6 +23,9 @@ pub mod changes;
 pub mod contains;
 pub mod version;
 
+#[cfg(test)]
+mod cli_tests;
+
 #[derive(Args)]
 pub struct ReleaseArgs {
     #[command(subcommand)]
@@ -69,6 +72,9 @@ enum ReleaseSubcommand {
 }
 
 #[derive(Args)]
+#[command(
+    after_help = "Examples:\n  homeboy release readiness list data-machine-code\n  homeboy release readiness show operation://release-readiness-123"
+)]
 struct ReleaseReadinessArgs {
     #[command(subcommand)]
     command: ReleaseReadinessCommand,
@@ -77,9 +83,15 @@ struct ReleaseReadinessArgs {
 #[derive(Subcommand)]
 enum ReleaseReadinessCommand {
     /// Show one retained readiness operation by operation:// reference or ID
-    Show { reference: String },
+    Show {
+        /// Readiness operation:// reference or operation ID
+        reference: String,
+    },
     /// List retained readiness operations for a component
-    List { component_id: String },
+    List {
+        /// Component whose retained readiness operations to list
+        component_id: String,
+    },
 }
 
 #[derive(Args)]
@@ -142,7 +154,7 @@ pub struct ReleaseExecuteArgs {
     ///
     /// The default is a bounded operator summary; `--output <path>` always
     /// writes the complete structured result.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub full: bool,
 
     /// Confirm risky release execution modes.
