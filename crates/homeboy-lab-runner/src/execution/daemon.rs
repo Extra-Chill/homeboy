@@ -232,16 +232,27 @@ pub(super) fn exec_via_daemon(
                 let store = lease_store
                     .as_ref()
                     .expect("lease store is opened whenever run_id is present");
-                if !store.claim_running_runner_exec_recovery_source(
-                    run_id,
-                    "foreground-runner-exec",
-                    &token,
-                    &job.id.to_string(),
-                )? {
+                let runner_job_id = job.id.to_string();
+                let claimed = if run_id_owns_generic_exec {
+                    store.bind_and_claim_running_runner_exec_source(
+                        run_id,
+                        "foreground-runner-exec",
+                        &token,
+                        &runner_job_id,
+                    )?
+                } else {
+                    store.claim_running_runner_exec_recovery_source(
+                        run_id,
+                        "foreground-runner-exec",
+                        &token,
+                        &runner_job_id,
+                    )?
+                };
+                if !claimed {
                     return Err(runner_exec_source_claim_error(
                         store,
                         run_id,
-                        &job.id.to_string(),
+                        &runner_job_id,
                     )?);
                 }
                 *foreground_source_lease.borrow_mut() = Some((run_id.to_string(), token));
