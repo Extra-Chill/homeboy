@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.9] - 2026-08-25
+
+### Changed
+- delegate source cache installs
+
 ## [3.38.8] - 2026-08-25
 
 ### Fixed
