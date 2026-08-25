@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.9] - 2026-08-25
+
+### Fixed
+- bind differential phases to CLI revision
+
 ## [2.15.8] - 2026-08-25
 
 ### Fixed
