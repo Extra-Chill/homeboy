@@ -7345,11 +7345,49 @@ fn restore_legacy_cook_provision(plan: &mut AgentTaskPlan) -> Result<()> {
 /// A pending lookup carries no provider path. Resolve the declared exact handle
 /// only after Cook's recipe and first run record exist, then persist that path
 /// before any provider can receive work.
+fn with_controller_pre_provider_heartbeat<T>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    detail: &str,
+    interval: Duration,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    agent_task_lifecycle::record_cook_progress_in_store(
+        lifecycle_store,
+        run_id,
+        phase,
+        1,
+        Some(detail),
+    )?;
+    let (stop, wait) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || loop {
+            match wait.recv_timeout(interval) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = agent_task_lifecycle::record_cook_progress_in_store(
+                        lifecycle_store,
+                        run_id,
+                        phase,
+                        1,
+                        Some(detail),
+                    );
+                }
+            }
+        });
+        let result = operation();
+        let _ = stop.send(());
+        result
+    })
+}
+
 fn materialize_pending_cook_workspace(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &mut AgentTaskCookServiceOptions,
     effective_lookup_timeout_ms: Option<u64>,
 ) -> Result<()> {
+    let initial_run_id = options.initial_run_id.clone();
     restore_legacy_cook_provision(&mut options.initial_plan)?;
     if options.task_base_sha.is_none() {
         options.task_base_sha = options
@@ -7393,17 +7431,24 @@ fn materialize_pending_cook_workspace(
         ),
     }
     };
-    let mut identity = match resolve(options) {
+    let mut identity = match with_controller_pre_provider_heartbeat(
+        lifecycle_store,
+        &initial_run_id,
+        "worktree_provider_lookup",
+        "resolving controller-owned provider workspace identity",
+        COOK_HEARTBEAT_INTERVAL,
+        || resolve(options),
+    ) {
         Ok(identity) => identity,
         Err(error) if error.details["worktree_provider_lookup"] == "not_found" => {
-            agent_task_lifecycle::record_cook_progress_in_store(
+            match with_controller_pre_provider_heartbeat(
                 lifecycle_store,
-                &options.initial_run_id,
+                &initial_run_id,
                 "worktree_provider_ensure",
-                1,
-                Some("starting controller-owned provider workspace materialization"),
-            )?;
-            match provision_pending_cook_workspace(lifecycle_store, options, &config) {
+                "materializing controller-owned provider workspace",
+                COOK_HEARTBEAT_INTERVAL,
+                || provision_pending_cook_workspace(lifecycle_store, options, &config),
+            ) {
                 Ok(provision) => {
                     // Pin the provider that performed the durable mutation. A later
                     // continuation re-resolves this exact destination through its owner.
@@ -7411,10 +7456,17 @@ fn materialize_pending_cook_workspace(
                         Value::String(provision.resolution.provider_id);
                     agent_task_lifecycle::persist_controller_plan_in_store(
                         lifecycle_store,
-                        &options.initial_run_id,
+                        &initial_run_id,
                         &options.initial_plan,
                     )?;
-                    resolve(options)?
+                    with_controller_pre_provider_heartbeat(
+                        lifecycle_store,
+                        &initial_run_id,
+                        "worktree_provider_lookup",
+                        "resolving materialized provider workspace identity",
+                        COOK_HEARTBEAT_INTERVAL,
+                        || resolve(options),
+                    )?
                 }
                 Err(ensure_error) if provider_ensure_timeout(&ensure_error) => {
                     // Ensure is a mutation and must never be retried after its
@@ -7436,7 +7488,14 @@ fn materialize_pending_cook_workspace(
                         &options.initial_run_id,
                         &options.initial_plan,
                     )?;
-                    match resolve(options) {
+                    match with_controller_pre_provider_heartbeat(
+                        lifecycle_store,
+                        &options.initial_run_id,
+                        "worktree_provider_lookup",
+                        "reconciling provider workspace identity after ensure timeout",
+                        COOK_HEARTBEAT_INTERVAL,
+                        || resolve(options),
+                    ) {
                         Ok(identity) => identity,
                         Err(resolve_error) if provider_resolve_timeout(&resolve_error) => {
                             return Err(resolve_error);

@@ -6341,6 +6341,56 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
     });
 }
 
+#[test]
+fn controller_pre_provider_heartbeat_renews_until_the_blocking_call_returns() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let lifecycle_store =
+            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let run_id = "slow-pre-provider-heartbeat";
+        let plan = AgentTaskPlan::new("slow-pre-provider-plan", Vec::new());
+        submit_plan_in_test_store(&lifecycle_store, &plan, Some(run_id)).expect("submitted plan");
+
+        with_controller_pre_provider_heartbeat(
+            &lifecycle_store,
+            run_id,
+            "worktree_provider_ensure",
+            "slow provider ensure remains active",
+            Duration::from_millis(5),
+            || {
+                let initial = lifecycle_store
+                    .read_record(run_id)
+                    .expect("initial progress record")
+                    .updated_at;
+                std::thread::sleep(Duration::from_millis(25));
+                let renewed = lifecycle_store
+                    .read_record(run_id)
+                    .expect("renewed progress record");
+                assert_ne!(renewed.updated_at, initial);
+                assert_eq!(
+                    renewed.metadata["cook_progress"]["phase"],
+                    "worktree_provider_ensure"
+                );
+                Ok(())
+            },
+        )
+        .expect("blocking provider call completes");
+
+        let stopped = lifecycle_store
+            .read_record(run_id)
+            .expect("stopped heartbeat record")
+            .updated_at;
+        std::thread::sleep(Duration::from_millis(15));
+        assert_eq!(
+            lifecycle_store
+                .read_record(run_id)
+                .expect("heartbeat remains stopped")
+                .updated_at,
+            stopped,
+            "heartbeat ownership ends when the provider call returns"
+        );
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation() {
