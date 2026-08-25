@@ -5839,6 +5839,23 @@ fn adoption_blocks_inherited_failure_when_candidate_package_artifact_differs_fro
             .artifacts[0]
             .sha256
             .is_some());
+
+        // An inconclusive baseline must say why. This one is inconclusive
+        // because the base cannot satisfy a package artifact the candidate
+        // introduced -- previously the replay error was discarded at the point
+        // it was produced, leaving an operator with "repair the gate baseline
+        // setup" and nothing naming the artifact at fault.
+        let diagnostic = promotion.deterministic_gates[0]
+            .baseline_comparison
+            .as_ref()
+            .unwrap()
+            .diagnostic
+            .as_deref()
+            .expect("an inconclusive baseline comparison carries its reason");
+        assert!(
+            diagnostic.contains("candidate-input") || diagnostic.contains("package artifact"),
+            "diagnostic should name the failing package artifact, got: {diagnostic}"
+        );
     });
 }
 
@@ -14629,6 +14646,7 @@ fn canonical_completion_accepts_green_and_recipe_authorized_inherited_gate_evide
             failure_fingerprint: "inherited".to_string(),
             matches_candidate_failure: true,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+            diagnostic: None,
         });
     assert!(canonical_finalization_eligible(&inherited, true, true));
     assert!(!canonical_finalization_eligible(&inherited, false, true));
@@ -15534,6 +15552,7 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
             failure_fingerprint: "inherited failure".to_string(),
             matches_candidate_failure: true,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+            diagnostic: None,
         });
     accepted.normalize_gate_outcome();
 
@@ -17958,6 +17977,7 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
                 failure_fingerprint: "inherited failure".to_string(),
                 matches_candidate_failure: true,
                 result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+                diagnostic: None,
             });
         adopted.operator_notification =
             crate::agent_task_promotion::AgentTaskPromotionNotification {
