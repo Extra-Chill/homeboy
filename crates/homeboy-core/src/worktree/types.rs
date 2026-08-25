@@ -1,6 +1,7 @@
 use crate::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
 use crate::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Canonical, portable identity for a managed task worktree. The registry
 /// handle and registered component identify the physical allocation; paths and
@@ -646,6 +647,20 @@ pub struct WorktreeQueueCreateRow {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WorktreeQueueCreateFailure>,
+}
+
+/// Lossless structured cause for a queue row that failed before creation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeQueueCreateFailure {
+    pub code: String,
+    pub classification: String,
+    pub phase: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    pub details: Value,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
