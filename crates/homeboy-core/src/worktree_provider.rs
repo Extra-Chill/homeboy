@@ -706,6 +706,41 @@ pub fn admit_worktree_provision_from_config(
     CommandWorktreeProvider::new(config).admit(handle, selected_provider)
 }
 
+/// Select the provider that will own a future ensure without invoking its
+/// mutation or requiring the optional read-only planning capability.
+pub fn select_worktree_provision_provider_from_config(
+    intent: &WorktreeProvisionIntent,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderIdentity> {
+    if configured_provisioning_declared(config) {
+        return worktree_providers::select_apply_enabled_worktree_provider_from_config(
+            intent, config,
+        )
+        .map(WorktreeProviderIdentity::Configured);
+    }
+    validate_native_provision_handle(intent)?;
+    Ok(WorktreeProviderIdentity::Native)
+}
+
+/// Whether a configured provider declares the complete owned lifecycle release
+/// staging historically requires: ensure plus terminal finalization.
+pub fn configured_lifecycle_provisioning_available(config: &HomeboyConfig) -> Result<bool> {
+    for (provider_id, provider) in &config.worktree_providers {
+        if provider.enabled
+            && provider.apply_enabled
+            && provider.commands.ensure.is_some()
+            && worktree_providers::worktree_provider_lifecycle_finalizer_argv_from_config(
+                provider_id,
+                config,
+            )?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Produce a non-mutating destination plan through the same provider selection
 /// execution will use. Configured creation remains preferred when declared;
 /// otherwise Homeboy's native task-worktree lifecycle is the provider.
@@ -981,6 +1016,11 @@ mod tests {
                 owner_run_ref: "native-plan-run".to_string(),
                 cleanup_policy: worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
             };
+            assert_eq!(
+                select_worktree_provision_provider_from_config(&intent, &HomeboyConfig::default())
+                    .expect("native provider selection"),
+                WorktreeProviderIdentity::Native
+            );
             let WorktreeProvisionPlan::Planned(planned) = NativeWorktreeProvider
                 .plan(&intent, &lifecycle)
                 .expect("native plan")
