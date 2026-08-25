@@ -665,6 +665,69 @@ pub fn resolve_worktree_provider_path_from_config(
     resolve_worktree_provider_path_with_policy_from_config(path, config, false, None, None)
 }
 
+/// Map a canonical local checkout path to the exact identity issued by its
+/// apply-enabled provider. Path lookup establishes ownership only; callers must
+/// attest the returned identity separately at their admission boundary.
+pub fn resolve_apply_enabled_worktree_provider_identity_by_path_from_config(
+    path: &std::path::Path,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeProviderExactIdentity>> {
+    let requested = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let mut provider_ids = config
+        .worktree_providers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    for provider_id in provider_ids {
+        let provider = &config.worktree_providers[&provider_id];
+        if !provider.enabled || !provider.apply_enabled {
+            continue;
+        }
+        let Some(command) = provider.commands.resolve_path.as_ref() else {
+            continue;
+        };
+        let worktree = targeted_path_result(
+            &provider_id,
+            run_provider_resolve_path_command(
+                &provider_id,
+                provider,
+                command,
+                requested.as_path(),
+            )?,
+            requested.as_path(),
+        )?;
+        let Some(worktree) = worktree else {
+            continue;
+        };
+        let identity = resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            &worktree.handle,
+            &provider_id,
+            config,
+        )?;
+        let identity_path = std::fs::canonicalize(&identity.path)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(identity.path.clone())))?;
+        if identity_path != requested
+            || identity.handle != worktree.handle
+            || identity.branch != worktree.branch
+        {
+            return Err(Error::validation_invalid_argument(
+                "cwd",
+                format!(
+                    "worktree provider `{provider_id}` path lookup disagrees with its exact identity"
+                ),
+                Some(requested.display().to_string()),
+                None,
+            ));
+        }
+        return Ok(Some(identity));
+    }
+    Ok(None)
+}
+
 /// Resolve an exact provider-owned checkout path for mutation while applying
 /// the same destination safety policy as handle-based promotion.
 pub fn resolve_apply_enabled_worktree_provider_path_from_config(
@@ -6170,6 +6233,47 @@ mod tests {
         assert_eq!(
             resolution.worktree.path,
             workspace.path().display().to_string()
+        );
+    }
+
+    #[test]
+    fn provider_path_maps_to_exact_handle_without_admitting_dirty_safety() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "fix/13421");
+        let script = fake_list_provider_script(json!({ "worktrees": [{
+            "handle": "fixture@fix-13421",
+            "path": workspace.path(),
+            "branch": "fix/13421",
+            "safety": { "dirty": true, "unpushed": false, "primary": false }
+        }]}));
+        let config = config_with_provider(WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve_path: Some(vec![script.clone(), "{path}".to_string()]),
+                resolve: Some(vec![script, "{handle}".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        });
+
+        let identity = resolve_apply_enabled_worktree_provider_identity_by_path_from_config(
+            workspace.path(),
+            &config,
+        )
+        .expect("path ownership resolves independently from safety")
+        .expect("provider owns path");
+
+        assert_eq!(identity.provider_id, "fixture");
+        assert_eq!(identity.handle, "fixture@fix-13421");
+        assert_eq!(identity.branch, "fix/13421");
+        assert_eq!(
+            std::fs::canonicalize(identity.path).unwrap(),
+            std::fs::canonicalize(workspace.path()).unwrap()
         );
     }
 

@@ -2213,6 +2213,104 @@ fn cook_cwd_matching_external_handle_never_invokes_a_sleeping_resolver() {
 
 #[cfg(unix)]
 #[test]
+fn cook_cwd_is_canonicalized_to_its_provider_handle_before_provisioning() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        let worktree_root = tempfile::tempdir().expect("worktree root");
+        let cwd = worktree_root.path().join("provider-owned-checkout");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/13421",
+                cwd.to_str().expect("worktree path"),
+                "HEAD",
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
+        let provider_dir = tempfile::tempdir().expect("provider directory");
+        let provider = provider_dir.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({ "worktrees": [{
+                    "handle": "homeboy@fix-13421",
+                    "path": cwd,
+                    "branch": "fix/13421",
+                    "safety": { "dirty": false, "unpushed": false, "primary": false }
+                }] })
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).unwrap();
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "dmc".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve_path: Some(vec![provider.display().to_string(), "{path}".to_string()]),
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "retain the candidate".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+            "--no-finalize".to_string(),
+        ]);
+
+        let args = super::super::run::resolve_cook_destination(args)
+            .expect("map provider path to canonical handle");
+        assert_eq!(args.to_worktree.as_deref(), Some("homeboy@fix-13421"));
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("provision the same canonical identity");
+        assert_eq!(provision["handle"], "homeboy@fix-13421");
+        assert_eq!(
+            provision["workspace_identity"]["handle"],
+            "homeboy@fix-13421"
+        );
+        assert_eq!(provision["workspace_safety"]["fresh"], true);
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn cook_cwd_rejects_a_mismatched_external_provider_handle_before_dispatch() {
     use std::os::unix::fs::PermissionsExt;
 

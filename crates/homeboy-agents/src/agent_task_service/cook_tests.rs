@@ -4479,6 +4479,7 @@ fn initial_cook_adopts_only_clean_issue_owned_unpushed_provider_worktree() {
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string()]),
+                    list: Some(vec![provider.display().to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -15181,6 +15182,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
                 lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy_core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string()]),
+                    resolve_path: Some(vec![provider.display().to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -15199,6 +15201,18 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         );
         homeboy_core::defaults::save_config(&config).expect("save provider config");
         crate::agent_task_candidate_baseline::register();
+
+        let mut legacy_path_recipe = options.clone();
+        legacy_path_recipe.to_worktree = target.display().to_string();
+        legacy_path_recipe.source_worktree_path = Some(target.clone());
+        canonicalize_cook_provider_workspace(&mut legacy_path_recipe)
+            .expect("legacy path identity remains recoverable through provider ownership");
+        assert_eq!(legacy_path_recipe.to_worktree, options.to_worktree);
+        assert_eq!(
+            legacy_path_recipe.initial_plan.metadata["cook_provision"]["workspace_identity"]
+                ["handle"],
+            options.to_worktree
+        );
 
         // Fanout coordinators re-resolve the destination from the identity
         // persisted when their child was admitted; they do not retain a CWD.
@@ -15420,6 +15434,13 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         assert!(
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "cancelled review-form attempts never authorize the bypass"
+        );
+        let preflight = preflight_cook_continuation_admission(&historical)
+            .expect_err("preflight rejects the same ineligible terminal review form");
+        assert_eq!(
+            preflight.details["continuation_admission"]["first_authoritative_denial"],
+            "terminal_review_form_eligibility",
+            "{preflight:?}"
         );
         let result = run_cook(CookContext {
             side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
