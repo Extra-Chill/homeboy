@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.10] - 2026-08-25
+
+### Fixed
+- name which side's evidence is invalid, and why
+
 ## [2.15.9] - 2026-08-25
 
 ### Fixed
