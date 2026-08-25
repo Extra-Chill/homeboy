@@ -537,7 +537,16 @@ fn unresolved_cook_backend_preview(
     }
 
     let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
-    let ready_backends = catalog
+    Ok(Some(missing_backend_preview_value(
+        args,
+        ready_cook_backends(&catalog),
+    )))
+}
+
+fn ready_cook_backends(
+    catalog: &homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog,
+) -> Vec<String> {
+    catalog
         .backends()
         .into_iter()
         .filter(|backend| {
@@ -553,30 +562,50 @@ fn unresolved_cook_backend_preview(
             })
             .is_ok()
         })
-        .collect::<Vec<_>>();
-
-    Ok(Some(missing_backend_preview_value(args, ready_backends)))
+        .collect()
 }
 
 fn is_missing_default_backend_policy_error(error: &homeboy::core::Error) -> bool {
     error.code == homeboy::core::ErrorCode::ValidationInvalidArgument
         && error.details["field"] == "backend"
-        && error.details["problem"]
-            .as_str()
-            .is_some_and(|problem| problem.starts_with("agent-task cook requires --backend because no default backend policy is configured"))
+        && error.details["selection_required"] == true
 }
 
-fn missing_backend_preview_value(args: &AgentTaskCookArgs, ready_backends: Vec<String>) -> Value {
-    let replay_backend = (ready_backends.len() == 1).then(|| ready_backends[0].clone());
+const MAX_READY_BACKEND_CHOICES: usize = 10;
+
+fn missing_backend_preview_value(
+    args: &AgentTaskCookArgs,
+    mut ready_backends: Vec<String>,
+) -> Value {
+    ready_backends.sort_unstable();
+    ready_backends.dedup();
+    let ready_backend_count = ready_backends.len();
+    let ready_backends_omitted = ready_backend_count.saturating_sub(MAX_READY_BACKEND_CHOICES);
+    let replay_backend = (ready_backend_count == 1).then(|| ready_backends[0].clone());
     let mut replay = cook_preview_replay_argv(args);
     if let Some(backend) = &replay_backend {
         replay
             .argv
             .extend(["--backend".to_string(), backend.clone()]);
     }
+    let ready_choices = ready_backends
+        .iter()
+        .take(MAX_READY_BACKEND_CHOICES)
+        .map(|backend| {
+            let mut argv = replay.argv.clone();
+            if replay_backend.is_none() {
+                argv.extend(["--backend".to_string(), backend.clone()]);
+            }
+            serde_json::json!({
+                "backend": backend,
+                "command": homeboy::core::engine::shell::quote_args(&argv),
+                "replay_argv": argv,
+            })
+        })
+        .collect::<Vec<_>>();
     let state = if replay_backend.is_some() {
         "ready_backend_unambiguous"
-    } else if ready_backends.is_empty() {
+    } else if ready_backend_count == 0 {
         "backend_required_no_ready_route"
     } else {
         "backend_required_multiple_ready_routes"
@@ -595,9 +624,12 @@ fn missing_backend_preview_value(args: &AgentTaskCookArgs, ready_backends: Vec<S
                 "backend": {
                     "state": state,
                     "default_policy": "missing",
-                    "ready_backends": ready_backends,
+                    "ready_backends": ready_backends.into_iter().take(MAX_READY_BACKEND_CHOICES).collect::<Vec<_>>(),
+                    "ready_backend_count": ready_backend_count,
+                    "ready_backends_omitted": ready_backends_omitted,
+                    "ready_choices": ready_choices,
                     "replay_backend": replay_backend,
-                    "next_command": "homeboy agent-task providers --validate-readiness",
+                    "readiness_command": "homeboy agent-task providers --validate-readiness",
                 },
             },
             "replay_argv": replay.argv,
@@ -990,6 +1022,36 @@ mod preview_tests {
     }
 
     #[test]
+    fn backend_preview_choices_exclude_declared_but_unready_backends() {
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let catalog = provider::AgentTaskProviderCatalog {
+            providers: vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "ready.agent-task-executor",
+                    "backend": "ready",
+                    "invocation": { "argv": ["true"] },
+                }))
+                .expect("ready provider"),
+                serde_json::from_value(serde_json::json!({
+                    "id": "declared.agent-task-executor",
+                    "backend": "declared",
+                    "invocation": { "argv": ["true"] },
+                    "provider_defaults": {
+                        "declared": {
+                            "secret_env": [required.clone()],
+                            "required_secret_env": [required],
+                        },
+                    },
+                }))
+                .expect("declared provider"),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(ready_cook_backends(&catalog), vec!["ready"]);
+    }
+
+    #[test]
     fn preview_reports_missing_backend_policy_before_prompt_validation() {
         crate::test_support::with_isolated_home(|_| {
             let (preview, exit_code) =
@@ -1059,6 +1121,33 @@ mod preview_tests {
             "backend_required_multiple_ready_routes"
         );
         assert!(preview["resolved"]["backend"]["replay_backend"].is_null());
+        let choices = preview["resolved"]["backend"]["ready_choices"]
+            .as_array()
+            .expect("ready choices");
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice["backend"].as_str().expect("backend choice"))
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        for choice in choices {
+            let argv = choice["replay_argv"]
+                .as_array()
+                .expect("choice replay argv")
+                .iter()
+                .map(|value| value.as_str().expect("argv string"))
+                .collect::<Vec<_>>();
+            assert!(argv
+                .windows(2)
+                .any(|pair| pair == ["--backend", choice["backend"].as_str().unwrap()]));
+            Cli::try_parse_from(&argv).expect("choice replay parses as Cook");
+            assert_eq!(
+                shlex::split(choice["command"].as_str().expect("choice command"))
+                    .expect("choice command parses"),
+                argv
+            );
+        }
         assert!(preview["replay_requires"]
             .as_array()
             .expect("replay requirements")
@@ -1067,6 +1156,42 @@ mod preview_tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("multiple eligible routes")));
+    }
+
+    #[test]
+    fn missing_backend_preview_bounds_and_sorts_ready_choices() {
+        let ready_backends = (0..=MAX_READY_BACKEND_CHOICES)
+            .rev()
+            .map(|index| format!("backend-{index:02}"))
+            .chain(std::iter::once("backend-00".to_string()))
+            .collect();
+        let preview = missing_backend_preview_value(
+            &cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--prompt",
+                "implement the issue",
+            ]),
+            ready_backends,
+        );
+        let backend = &preview["resolved"]["backend"];
+
+        assert_eq!(
+            backend["ready_backend_count"],
+            MAX_READY_BACKEND_CHOICES + 1
+        );
+        assert_eq!(backend["ready_backends_omitted"], 1);
+        assert_eq!(
+            backend["ready_backends"].as_array().map(Vec::len),
+            Some(MAX_READY_BACKEND_CHOICES)
+        );
+        assert_eq!(backend["ready_backends"][0], "backend-00");
+        assert_eq!(
+            backend["ready_choices"].as_array().map(Vec::len),
+            Some(MAX_READY_BACKEND_CHOICES)
+        );
     }
 
     #[cfg(unix)]

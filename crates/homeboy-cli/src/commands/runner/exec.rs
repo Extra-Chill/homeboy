@@ -403,7 +403,7 @@ pub(super) fn exec_workspace_context(
         runner_id,
         Path::new(&synced.local_path),
         Some(&synced.remote_path),
-        synced.sync_mode.label(),
+        synced.sync_mode.as_str(),
     );
 
     Ok((Some(synced.remote_path), Some(source_snapshot)))
