@@ -2,19 +2,29 @@
 #
 # Main-branch gate contract validator.
 #
+# ── One policy declaration (#13125) ──
+#
+# Everything this script checks derives from one versioned manifest,
+# `.github/required-gates-manifest.json`. The manifest declares each gate's
+# logical identity, emitted GitHub context, workflow/job producer, aggregation
+# semantics, live-ruleset requirement, and the first-class zero-required-check
+# policy. The generated ruleset payload and the documentation table are derived
+# from it by `.github/generate-required-gates-artifacts.sh`; this script fails
+# closed when any of them has drifted from the manifest.
+#
 # ── Two claims, not one (#11084) ──
 #
 # This script can answer two questions, and they are NOT the same question:
 #
-#   declaration - every context named by the versioned payload is emitted by
-#                 `.github/workflows/ci.yml` on every pull request, and every
-#                 skippable gate job is wired into the terminal execution gate.
-#                 This is repository content, so a PR can both break it and fix
-#                 it, and it is checked from the checkout with no network.
+#   declaration - every gate declared by the manifest is emitted by its declared
+#                 producer in `.github/workflows/ci.yml`, every skippable gate
+#                 job is wired into the terminal execution gate, and the
+#                 generated artifacts match the manifest. This is repository
+#                 content, so a PR can both break it and fix it, and it is
+#                 checked from the checkout with no network.
 #   enforcement - GitHub actually *requires* those contexts before `main` can be
 #                 updated. This is repository STATE. A pull request cannot
-#                 change it and, until #10795's payload is installed by an
-#                 administrator, it can be false while the declaration is
+#                 change it and it can be false while the declaration is
 #                 perfect.
 #
 # There is a THIRD question neither half can answer, because both are evaluated
@@ -60,15 +70,20 @@
 #   bypassable  as `enforced`, but actors can bypass the ruleset.
 #   divergent   a required-status-checks rule exists and disagrees.
 #   unenforced  live state is readable and requires NO checks. A measured zero.
+#   not-required  the manifest declares zero status checks (its first-class
+#             zero-context policy); live state agreeing is success, not absence.
 #   unverified  live state could not be read. NEVER reported as enforced.
 #
 # ── Fixture hooks ──
 #
-# REQUIRED_GATES_CONFIG / REQUIRED_GATES_WORKFLOW override the declaration
-# inputs; REQUIRED_GATES_LIVE_RULES / REQUIRED_GATES_LIVE_RULESET substitute a
-# JSON file for the two live API reads; REQUIRED_GATES_HEAD_SHA pins the
-# recorded head. `tests/required_gates_policy_test.rs` uses them to pin every
-# outcome above without a network or a token.
+# REQUIRED_GATES_MANIFEST / REQUIRED_GATES_WORKFLOW override the declaration
+# inputs; REQUIRED_GATES_RULESET_OUTPUT / REQUIRED_GATES_DOCS_OUTPUT override
+# where the generator expects the derived artifacts (so tests can validate a
+# mutated manifest against consistently regenerated scratch artifacts);
+# REQUIRED_GATES_LIVE_RULES / REQUIRED_GATES_LIVE_RULESET substitute a JSON file
+# for the two live API reads; REQUIRED_GATES_HEAD_SHA pins the recorded head.
+# `tests/required_gates_policy_test.rs` uses these to pin every outcome above
+# without a network or a token.
 
 set -euo pipefail
 
@@ -82,66 +97,93 @@ case "${mode}" in
     ;;
 esac
 
-config="${REQUIRED_GATES_CONFIG:-.github/required-gates-ruleset.json}"
+manifest="${REQUIRED_GATES_MANIFEST:-.github/required-gates-manifest.json}"
 ci_workflow="${REQUIRED_GATES_WORKFLOW:-.github/workflows/ci.yml}"
+gate_condition="if: \${{ needs.pr-state.outputs.active == 'true' }}"
 
-if [ ! -f "${config}" ] || [ ! -f "${ci_workflow}" ]; then
+if [ ! -f "${manifest}" ] || [ ! -f "${ci_workflow}" ]; then
   echo "required-gates validation must run from the repository root" >&2
   exit 1
 fi
 
+# The whole body of a top-level job's YAML, keyed by job id.
+job_section() {
+  awk -v key="  ${1}:" '
+    $0 == key { inside = 1; next }
+    inside && /^  [A-Za-z0-9_-]+:$/ { inside = 0 }
+    inside { print }
+  ' "${ci_workflow}"
+}
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
+# ── Claim 0: the derived artifacts match the manifest ────────────────────────
+#
+# The ruleset payload and the documentation table are GENERATED. A PR that
+# edits any of them — or a gate anywhere but the manifest — must fail here with
+# regeneration instructions, not silently redefine policy at the leaves.
+
+bash .github/generate-required-gates-artifacts.sh --check \
+  || fail "required-gates declaration rejected: the manifest and its generated artifacts disagree"
+
 # ── Claim 1: declaration ─────────────────────────────────────────────────────
 
-contexts=()
-while IFS= read -r context; do
-  contexts+=("${context}")
-done < <(jq -r '
-  .rules[]
-  | select(.type == "required_status_checks")
-  | .parameters.required_status_checks[]?.context
-' "${config}")
+required_count="$(jq '[.gates[] | select(.required_status_check == true)] | length' "${manifest}")"
 
-if [ "${#contexts[@]}" -gt 0 ]; then
-  if [ "$(printf '%s\n' "${contexts[@]}" | sort -u | wc -l | tr -d ' ')" -ne "${#contexts[@]}" ]; then
-    echo "required-gates policy declares duplicate check contexts" >&2
-    exit 1
+while IFS= read -r gate; do
+  gate_id="$(jq -r '.id' <<< "${gate}")"
+  context="$(jq -r '.context' <<< "${gate}")"
+  producer_job="$(jq -r '.producer.job' <<< "${gate}")"
+  emission="$(jq -r '.producer.emission' <<< "${gate}")"
+
+  section="$(job_section "${producer_job}")"
+  if [ -z "${section}" ]; then
+    fail "manifest gate '${gate_id}' declares producer job '${producer_job}', but ${ci_workflow} declares no such job"
   fi
 
-  for context in "${contexts[@]}"; do
-    if grep -Fq "name: ${context}" "${ci_workflow}"; then
-      continue
-    fi
+  case "${emission}" in
+    job_name)
+      # Scoped to the declared producer's own YAML block. The old global
+      # substring grep accepted an unrelated `comment-section-title: Test` as
+      # proof that `homeboy / Test` was emitted (#10997); a scoped exact
+      # `name:` line cannot be satisfied vacuously.
+      printf '%s\n' "${section}" | grep -Fq "name: ${context}" \
+        || fail "required check '${context}' is not emitted by producer job '${producer_job}' in ${ci_workflow}"
+      ;;
+    matrix_title)
+      title="$(jq -r '.producer.matrix_title' <<< "${gate}")"
+      if ! printf '%s\n' "${section}" | grep -Fq 'name: homeboy / ${{ matrix.title }}' \
+        || ! printf '%s\n' "${section}" | grep -Eq "^[[:space:]]+title: ${title}[[:space:]]*$"; then
+        fail "required check '${context}' is not emitted by the '${producer_job}' matrix (no leg titled '${title}') in ${ci_workflow}"
+      fi
+      ;;
+    reusable_workflow_call)
+      called_workflow="$(jq -r '.producer.called_workflow' <<< "${gate}")"
+      # At a floating major OR a pinned commit SHA; annotated tags cannot be
+      # resolved by `uses:` at all (#12153).
+      printf '%s\n' "${section}" | grep -Eq "uses: ${called_workflow}@(v[0-9]+|[0-9a-f]{40})" \
+        || fail "required check '${context}' is not emitted by the reusable workflow call in producer job '${producer_job}' in ${ci_workflow}"
+      ;;
+    *)
+      fail "manifest gate '${gate_id}' declares unknown emission kind '${emission}'"
+      ;;
+  esac
 
-    # Anchored: an unanchored `title: ${title}` is a SUBSTRING match, and
-    # `comment-section-title: Test` satisfied it. That made the declaration check
-    # for `homeboy / Test` vacuous — it passed with the Test job repointed at a
-    # foreign workflow and no longer running `review test` at all (#10997).
-    title="${context#homeboy / }"
-    if grep -Fq 'name: homeboy / ${{ matrix.title }}' "${ci_workflow}" \
-      && grep -Eq "^[[:space:]]+title: ${title}[[:space:]]*$" "${ci_workflow}"; then
-      continue
-    fi
+  admission="$(jq -r '.admission_gate // empty' <<< "${gate}")"
+  # The terminal gate is deliberately NOT pr-state conditional: it runs under
+  # `always()` so a skipped run cannot skip its own verdict (#12573).
+  if [ "${admission}" = "pr_state_active" ] && [ "$(jq -r '.terminal // false' <<< "${gate}")" != "true" ]; then
+    printf '%s\n' "${section}" | grep -Fq "${gate_condition}" \
+      || fail "manifest gate '${gate_id}' declares pr-state admission, but producer job '${producer_job}' does not carry the PR-state condition in ${ci_workflow}"
+  fi
+done < <(jq -c '.gates[]' "${manifest}")
 
-    # `homeboy / Test` is the caller job name plus the called reconciliation job
-    # name, so no literal `name: homeboy / Test` exists to match. Accept the
-    # reusable-workflow call instead — at a floating major OR a pinned commit SHA.
-    if [ "${context}" = "homeboy / Test" ] \
-      && grep -Eq 'uses: Extra-Chill/homeboy-action/\.github/workflows/ci\.yml@(v[0-9]+|[0-9a-f]{40})' "${ci_workflow}" \
-      && grep -Fq 'commands: review test' "${ci_workflow}"; then
-      continue
-    fi
-
-    echo "required check '${context}' is not emitted by ${ci_workflow}" >&2
-    exit 1
-  done
-
-  if ! jq -e '
-    .rules[]
-    | select(.type == "required_status_checks")
-    | .parameters.strict_required_status_checks_policy == true
-  ' "${config}" >/dev/null; then
-    echo "required-gates policy must require checks on the current PR head" >&2
-    exit 1
+if [ "${required_count}" -gt 0 ]; then
+  if ! jq -e '.status_checks.strict_required_status_checks_policy == true' "${manifest}" >/dev/null; then
+    fail "required-gates policy must require checks on the current PR head"
   fi
 fi
 
@@ -149,32 +191,29 @@ fi
 #
 # Emitting a context is not running it. Every gate in `ci.yml` is conditional on
 # `pr-state`, and a `skipped` needs-dependency does not fail a run, so a run that
-# skipped all seven declared gates concluded `success` with this check green in
-# the run before it and skipped in the run itself. The end-of-run assertion lives
+# skipped every declared gate concluded `success` with this check green in the
+# run before it and skipped in the run itself. The end-of-run assertion lives
 # in `.github/ci-required-gates-executed.sh`; the part a pull request can break
 # is its WIRING, so that is verified here from the checkout with no network.
-#
-# The terminal job must exist, must run under `always()` (a gate that skips
-# alongside the gates it guards is not a gate), must invoke the execution
-# assertion, and must depend on EVERY skippable gate job — otherwise a newly
-# added gate could be skipped with nothing left to notice.
 
-terminal_job='required-gates-executed'
-terminal_section="$(awk -v key="  ${terminal_job}:" '
-  $0 == key { inside = 1; next }
-  inside && /^  [A-Za-z0-9_-]+:$/ { inside = 0 }
-  inside { print }
-' "${ci_workflow}")"
+terminal_gate="$(jq -c '[.gates[] | select(.terminal == true)] | if length == 1 then .[0] else empty end' "${manifest}")"
+if [ -z "${terminal_gate}" ]; then
+  fail "the manifest declares exactly zero or multiple terminal gates, so a run that skips every required gate could still conclude success"
+fi
 
+terminal_script="$(jq -r '.execution_evidence.terminal_script' "${manifest}")"
+terminal_job="$(jq -r '.producer.job' <<< "${terminal_gate}")"
+terminal_context="$(jq -r '.context' <<< "${terminal_gate}")"
+
+terminal_section="$(job_section "${terminal_job}")"
 if [ -z "${terminal_section}" ]; then
-  echo "${ci_workflow} declares no '${terminal_job}' job, so a run that skips every required gate can still conclude success" >&2
-  exit 1
+  fail "${ci_workflow} declares no '${terminal_job}' job, so a run that skips every required gate can still conclude success"
 fi
 
 for marker in \
-  'name: homeboy / Required Gates Executed' \
+  "name: ${terminal_context}" \
   'if: ${{ always() }}' \
-  'bash .github/ci-required-gates-executed.sh'; do
+  "bash ${terminal_script}"; do
   if ! printf '%s\n' "${terminal_section}" | grep -Fq "${marker}"; then
     echo "the '${terminal_job}' job must contain '${marker}' to be a terminal gate" >&2
     exit 1
@@ -195,25 +234,37 @@ fi
 # A job is skippable exactly when it carries the PR-state condition. Deriving the
 # set from the workflow rather than hardcoding it is what makes this survive a
 # gate being added: the new gate is covered the moment it is written.
-gate_condition="if: \${{ needs.pr-state.outputs.active == 'true' }}"
-gate_jobs="$(awk -v cond="${gate_condition}" '
+skippable_jobs="$(awk -v cond="${gate_condition}" '
   /^  [A-Za-z0-9_-]+:$/ { job = substr($0, 3, length($0) - 3); next }
   job != "" && index($0, cond) { print job; job = "" }
 ' "${ci_workflow}")"
 
-if [ -z "${gate_jobs}" ]; then
+if [ -z "${skippable_jobs}" ]; then
   echo "${ci_workflow} declares no PR-state-conditional gate jobs, which contradicts the required-gates policy" >&2
   exit 1
 fi
 
-for gate_job in ${gate_jobs}; do
+for skippable in ${skippable_jobs}; do
   case " ${terminal_needs} " in
-    *" ${gate_job} "*) continue ;;
+    *" ${skippable} "*) continue ;;
   esac
 
-  echo "gate job '${gate_job}' is skippable but is not a dependency of '${terminal_job}', so skipping it would still conclude success" >&2
+  echo "gate job '${skippable}' is skippable but is not a dependency of '${terminal_job}', so skipping it would still conclude success" >&2
   exit 1
 done
+
+# And conversely: every non-terminal gate the manifest declares must already be
+# among the terminal job's dependencies, keyed by the SAME producer job id the
+# terminal gate consumes typed needs results through.
+while IFS= read -r gate; do
+  jq -e '.terminal != true' >/dev/null 2>&1 <<< "${gate}" || continue
+  producer_job="$(jq -r '.producer.job' <<< "${gate}")"
+  case " ${terminal_needs} " in
+    *" ${producer_job} "*) continue ;;
+  esac
+  echo "manifest gate '$(jq -r '.id' <<< "${gate}")' producer job '${producer_job}' is not a dependency of '${terminal_job}'" >&2
+  exit 1
+done < <(jq -c '.gates[]' "${manifest}")
 
 if [ "${mode}" = "--local" ]; then
   exit 0
@@ -293,10 +344,10 @@ read_live_ruleset() {
 }
 
 declared_contexts="$(jq -c '
-  [.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context]
+  [.gates[] | select(.required_status_check == true) | .context]
   | sort
-' "${config}")"
-declared_count="${#contexts[@]}"
+' "${manifest}")"
+zero_outcome="$(jq -r '.status_checks.zero_context_policy.enforcement_outcome' "${manifest}")"
 
 # Every live field starts at `unknown`, not at a plausible-looking zero. A
 # report that cannot read GitHub must not print `live=0 strict=false`, which a
@@ -328,8 +379,11 @@ if read_live_rules; then
   fi
 
   if [ "${live_rule_count}" -eq 0 ]; then
-    if [ "${declared_count}" -eq 0 ]; then
-      outcome='not-required'
+    if [ "${required_count}" -eq 0 ]; then
+      # The manifest's first-class zero-context policy: a measured live zero
+      # agrees with a declared zero. The outcome label itself comes from the
+      # manifest, so even this verdict has no parallel literal.
+      outcome="${zero_outcome}"
     else
       outcome='unenforced'
     fi
@@ -347,21 +401,21 @@ fi
 # a verified enforcement from an unverified one without inferring it from the
 # exit code — the same reason `release-quality-policy.sh` emits its measurement
 # line before its verdict.
-echo "::notice::required-gates enforcement basis=live-branch-rules repo=${repo} branch=${branch} ruleset=${ruleset_id} head=${head_sha} declared=${declared_count} live=${live_count} rules=${live_rule_count} strict=${live_strict} bypass_actors=${bypass_count} current_user_can_bypass=${bypass_current_user} outcome=${outcome}"
+echo "::notice::required-gates enforcement basis=live-branch-rules repo=${repo} branch=${branch} ruleset=${ruleset_id} head=${head_sha} declared=${required_count} live=${live_count} rules=${live_rule_count} strict=${live_strict} bypass_actors=${bypass_count} current_user_can_bypass=${bypass_current_user} outcome=${outcome}"
 
 apply_hint="Use the approved Required Gates Ruleset workflow from current main after its exact SHA has a successful homeboy / Test check, then verify with 'bash .github/validate-required-gates.sh --github'. See docs/operations/required-ci-gates.md."
 
 case "${outcome}" in
-  not-required)
+  "${zero_outcome}")
     headline="The canonical policy and live rules require no status checks on ${branch}. CI remains reporting-only."
     echo "::notice::required-gates: ${headline}"
     ;;
   enforced)
-    headline="GitHub requires all ${declared_count} declared contexts on ${branch}."
+    headline="GitHub requires all ${required_count} declared contexts on ${branch}."
     echo "::notice::required-gates: ${headline}"
     ;;
   bypassable)
-    headline="GitHub requires all ${declared_count} declared contexts on ${branch}, but the ruleset can be BYPASSED (bypass_actors=${bypass_count}, current_user_can_bypass=${bypass_current_user}). A merge by a bypass actor is not gated by these checks."
+    headline="GitHub requires all ${required_count} declared contexts on ${branch}, but the ruleset can be BYPASSED (bypass_actors=${bypass_count}, current_user_can_bypass=${bypass_current_user}). A merge by a bypass actor is not gated by these checks."
     echo "::warning::required-gates: ${headline}"
     ;;
   divergent)
@@ -369,12 +423,15 @@ case "${outcome}" in
     echo "::warning::required-gates: ${headline}"
     ;;
   unenforced)
-    headline="GitHub requires NO status checks on ${branch}. The ${declared_count} contexts in .github/required-gates-ruleset.json are declared but NOT enforced: a pull request can merge before any of them reports, exactly as PR #11069 did (#11084). This check verified the declaration only. ${apply_hint}"
+    headline="GitHub requires NO status checks on ${branch}. The ${required_count} contexts declared by .github/required-gates-manifest.json are declared but NOT enforced: a pull request can merge before any of them reports, exactly as PR #11069 did (#11084). This check verified the declaration only. ${apply_hint}"
     echo "::warning::required-gates: ${headline}"
     ;;
   unverified)
     headline="Live enforcement on ${branch} could NOT be verified (${probe_error}). This check verified the declaration only; treat enforcement as unproven, not as present. Re-run with a token that can read repository rules."
     echo "::warning::required-gates: ${headline}"
+    ;;
+  *)
+    fail "internal error: unknown enforcement outcome '${outcome}'"
     ;;
 esac
 
@@ -401,6 +458,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo
     echo "| evidence | value |"
     echo "| --- | --- |"
+    echo "| manifest | \`${manifest}\` |"
     echo "| repository | \`${repo}\` |"
     echo "| target branch | \`${branch}\` |"
     echo "| ruleset id | \`${ruleset_id}\` |"
@@ -421,7 +479,7 @@ if [ "${mode}" = "--report" ]; then
 fi
 
 case "${outcome}" in
-  enforced | not-required)
+  enforced | "${zero_outcome}")
     exit 0
     ;;
   *)
