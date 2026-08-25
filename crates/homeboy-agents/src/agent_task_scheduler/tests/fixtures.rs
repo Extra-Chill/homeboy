@@ -20,6 +20,11 @@ pub(super) struct RetryOnceExecutor {
 }
 
 #[derive(Default)]
+pub(super) struct TimeoutOnceExecutor {
+    pub(super) attempts: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
 pub(super) struct RetryTwiceExecutor {
     pub(super) attempts: Arc<AtomicUsize>,
 }
@@ -61,6 +66,28 @@ impl AgentTaskExecutorAdapter for RetryOnceExecutor {
         };
 
         outcome(request.task_id, status)
+    }
+}
+
+impl AgentTaskExecutorAdapter for TimeoutOnceExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut result = outcome(
+            request.task_id,
+            if attempt == 1 {
+                AgentTaskOutcomeStatus::Timeout
+            } else {
+                AgentTaskOutcomeStatus::Succeeded
+            },
+        );
+        if attempt == 1 {
+            result.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+        }
+        result
     }
 }
 

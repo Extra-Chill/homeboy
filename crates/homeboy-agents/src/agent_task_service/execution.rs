@@ -10,7 +10,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::agent_task::{AgentTaskRequest, AgentTaskWorkspaceMode};
+use crate::agent_task::{
+    AgentTaskFailureClassification, AgentTaskOutcomeStatus, AgentTaskRequest,
+    AgentTaskWorkspaceMode,
+};
 use crate::agent_task_lifecycle::{
     self, AgentTaskRunArtifacts, AgentTaskRunLog, AgentTaskRunRecord, AgentTaskRunStatus,
 };
@@ -18,7 +21,8 @@ use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskPlan, AgentTaskScheduler, SharedAgentTaskExecutor,
+    AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskScheduler,
+    SharedAgentTaskExecutor,
 };
 use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
@@ -1100,7 +1104,7 @@ pub fn retry(
     run: bool,
     force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
-    retry_with_preflight(run_id, new_run_id, run, force, |plan| {
+    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, |plan| {
         if plan.metadata.get("generic_lab_command_replay").is_some() {
             return Err(Error::validation_invalid_argument(
                 "generic_lab_command_replay",
@@ -1111,6 +1115,53 @@ pub fn retry(
         }
         Ok(())
     })
+}
+
+/// Reserve a new Cook attempt with an explicit operator-approved provider
+/// timeout increase. Unlike the generic run-time override, this is persisted in
+/// the append-only Cook recipe before the provider can be dispatched.
+pub fn retry_with_timeout_override(
+    run_id: &str,
+    timeout_ms: u64,
+) -> Result<AgentTaskRetryServiceResult> {
+    retry_with_preflight_and_timeout(run_id, None, false, false, Some(timeout_ms), |plan| {
+        if plan.metadata.get("generic_lab_command_replay").is_some() {
+            return Err(Error::validation_invalid_argument(
+                "generic_lab_command_replay",
+                "generic Lab replay requires controller workspace preflight",
+                Some(plan.plan_id.clone()),
+                None,
+            ));
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn deferred_cleanup_receipt_is_terminal(
+    outcome: &crate::agent_task::AgentTaskOutcome,
+    run_id: &str,
+) -> bool {
+    outcome
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "cleanup_action")
+        .and_then(|artifact| artifact.path.as_deref().map(|path| (artifact, path)))
+        .and_then(|(artifact, path)| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .map(|receipt| (artifact, receipt))
+        })
+        .is_some_and(|(artifact, receipt)| {
+            receipt["schema"] == "homeboy/agent-task-deferred-cleanup/v1"
+                && receipt["run_id"] == run_id
+                && receipt["task_id"] == outcome.task_id
+                && receipt["attempt"] == artifact.metadata["attempt"]
+                && matches!(
+                    receipt["status"].as_str(),
+                    Some("completed" | "completed_no_candidate" | "candidate_recovered" | "failed")
+                )
+        })
 }
 
 /// Reserve a retry only after the caller has revalidated the persisted action.
@@ -1124,6 +1175,20 @@ pub fn retry_with_preflight<F>(
     new_run_id: Option<&str>,
     run: bool,
     force: bool,
+    preflight: F,
+) -> Result<AgentTaskRetryServiceResult>
+where
+    F: Fn(&AgentTaskPlan) -> Result<()>,
+{
+    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, preflight)
+}
+
+fn retry_with_preflight_and_timeout<F>(
+    run_id: &str,
+    new_run_id: Option<&str>,
+    run: bool,
+    force: bool,
+    timeout_override_ms: Option<u64>,
     preflight: F,
 ) -> Result<AgentTaskRetryServiceResult>
 where
@@ -1144,9 +1209,12 @@ where
         agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
     preflight(&source_plan)?;
     let recovered_replacement = config::with_config_lock(|| {
-        let Some(cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
+        let Some(mut cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
             return Ok(None);
         };
+        if let Some(timeout_ms) = timeout_override_ms {
+            apply_cook_timeout_override(&lifecycle_store, &source, &mut cook_retry, timeout_ms)?;
+        }
         if !cook_retry.recipe_replacement {
             return Ok(None);
         }
@@ -1204,7 +1272,10 @@ where
             created: false,
         });
     }
-    let cook_retry = retry_admission_in_store(&lifecycle_store, &source, false)?;
+    let mut cook_retry = retry_admission_in_store(&lifecycle_store, &source, false)?;
+    if let (Some(cook_retry), Some(timeout_ms)) = (&mut cook_retry, timeout_override_ms) {
+        apply_cook_timeout_override(&lifecycle_store, &source, cook_retry, timeout_ms)?;
+    }
     let record = match cook_retry {
         Some(cook_retry) => {
             let discovered_run_id =
@@ -1334,6 +1405,252 @@ where
         run,
         created: false,
     })
+}
+
+fn apply_cook_timeout_override(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    source: &agent_task_lifecycle::AgentTaskRunRecord,
+    retry: &mut CookRetryAttempt,
+    timeout_ms: u64,
+) -> Result<()> {
+    let aggregate = lifecycle_store.read_aggregate(&source.run_id)?;
+    let timeout_outcome = aggregate.outcomes.iter().find(|outcome| {
+        outcome.status == AgentTaskOutcomeStatus::Timeout
+            || outcome.failure_classification == Some(AgentTaskFailureClassification::Timeout)
+            || outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+    });
+    let Some(timeout_outcome) = timeout_outcome else {
+        return Err(Error::validation_invalid_argument(
+            "timeout-ms",
+            "Cook timeout override requires a terminal provider timeout",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    };
+    if agent_task_lifecycle::has_active_provider_execution_in_store(
+        lifecycle_store,
+        &source.run_id,
+    )? {
+        return Err(Error::validation_invalid_argument(
+            "timeout-ms",
+            "timed-out provider or its deferred cleanup still owns the execution; wait for durable terminal ownership before retrying",
+            Some(source.run_id.clone()),
+            Some(vec![format!(
+                "homeboy agent-task status {} --exact --full",
+                source.run_id
+            )]),
+        ));
+    }
+    if timeout_outcome.metadata["deferred_cleanup_pending"] == Value::Bool(true)
+        && !deferred_cleanup_receipt_is_terminal(timeout_outcome, &source.run_id)
+    {
+        return Err(Error::validation_invalid_argument(
+            "timeout-ms",
+            "timed-out provider still owns deferred cleanup; wait for its cleanup receipt before retrying",
+            Some(source.run_id.clone()),
+            Some(vec![format!(
+                "homeboy agent-task status {} --exact --full",
+                source.run_id
+            )]),
+        ));
+    }
+
+    if let Some(existing) = retry.plan.metadata["cook_timeout_overrides"]
+        .as_array()
+        .and_then(|overrides| {
+            overrides
+                .iter()
+                .rev()
+                .find(|entry| entry["source_run_id"] == source.run_id)
+        })
+    {
+        if existing["timeout_ms"].as_u64() == Some(timeout_ms) {
+            return Ok(());
+        }
+        return Err(Error::validation_invalid_argument(
+            "timeout-ms",
+            "this Cook retry already has a different durable timeout override",
+            Some(existing["timeout_ms"].to_string()),
+            None,
+        ));
+    }
+
+    let diagnostic_timeout_ms = timeout_outcome
+        .diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.data["timeout_ms"].as_u64())
+        .max();
+    let previous_timeout_ms = retry
+        .plan
+        .tasks
+        .iter()
+        .map(|task| {
+            crate::agent_task_timeout::effective_provider_timeout_ms(
+                task.limits.timeout_ms.or(retry.plan.options.timeout_ms),
+                task.limits.max_runtime_ms,
+            )
+        })
+        .chain(diagnostic_timeout_ms)
+        .max()
+        .unwrap_or(crate::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS);
+    if timeout_ms <= previous_timeout_ms {
+        return Err(Error::validation_invalid_argument(
+            "timeout-ms",
+            format!(
+                "Cook timeout override must increase the prior provider timeout of {previous_timeout_ms}ms"
+            ),
+            Some(timeout_ms.to_string()),
+            None,
+        ));
+    }
+
+    let recipe = super::load_recipe(&retry.cook_id)?;
+    let budget: AgentTaskExecutionBudget = serde_json::from_value(
+        recipe.retry_budget["execution_budget"].clone(),
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "cook_recipe.retry_budget.execution_budget",
+            format!("durable Cook execution budget is invalid: {error}"),
+            Some(retry.cook_id.clone()),
+            None,
+        )
+    })?;
+    if budget.remaining_deadline_ms(crate::agent_task_timeout::now_unix_ms()) == Some(0) {
+        return Err(Error::validation_invalid_argument(
+            "timeout-ms",
+            "Cook timeout override cannot extend an expired durable execution deadline",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    let mut executions_used = 0u32;
+    let mut scheduler_retries_used = 0u32;
+    let mut provider_rotations_used = 0u32;
+    let mut semantic_attempts = std::collections::BTreeSet::new();
+    for attempt in &recipe.attempts {
+        semantic_attempts.insert(attempt.attempt);
+        if let Ok(record) = lifecycle_store.read_record(&attempt.run_id) {
+            executions_used = executions_used.saturating_add(
+                record.metadata["provider_executions_consumed"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(0),
+            );
+        }
+        if let Ok(aggregate) = lifecycle_store.read_aggregate(&attempt.run_id) {
+            scheduler_retries_used = scheduler_retries_used.saturating_add(
+                aggregate
+                    .outcomes
+                    .iter()
+                    .flat_map(|outcome| &outcome.diagnostics)
+                    .filter(|diagnostic| diagnostic.class == "agent_task.retry_attempt")
+                    .count()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            );
+            provider_rotations_used = provider_rotations_used.saturating_add(
+                aggregate
+                    .outcomes
+                    .iter()
+                    .filter_map(super::cook_pre_execution::provider_rotation_attempts)
+                    .map(|attempts| attempts.len().saturating_sub(1) as u32)
+                    .fold(0, u32::saturating_add),
+            );
+        }
+    }
+    let semantic_retries_used = semantic_attempts.len().saturating_sub(1) as u32;
+    let same_provider_retries_used = scheduler_retries_used.saturating_add(semantic_retries_used);
+    let remaining_executions = budget
+        .max_provider_executions
+        .saturating_sub(executions_used);
+    let remaining_retries = budget
+        .max_same_provider_retries
+        .saturating_sub(same_provider_retries_used);
+    let remaining_rotations = budget
+        .max_provider_rotations
+        .saturating_sub(provider_rotations_used);
+    if remaining_executions == 0 || remaining_retries == 0 {
+        return Err(Error::validation_invalid_argument(
+            "timeout-ms",
+            "Cook timeout override cannot exceed the durable provider retry budget",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+
+    apply_timeout_override_to_plan(
+        &mut retry.plan,
+        &source.run_id,
+        previous_timeout_ms,
+        timeout_ms,
+        remaining_executions,
+        remaining_retries,
+        remaining_rotations,
+    )?;
+    Ok(())
+}
+
+fn apply_timeout_override_to_plan(
+    plan: &mut AgentTaskPlan,
+    source_run_id: &str,
+    previous_timeout_ms: u64,
+    timeout_ms: u64,
+    remaining_executions: u32,
+    remaining_retries: u32,
+    remaining_rotations: u32,
+) -> Result<()> {
+    if !plan.metadata.is_null() && !plan.metadata.is_object() {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata",
+            "durable Cook plan metadata must be an object before recording a timeout override",
+            Some(source_run_id.to_string()),
+            None,
+        ));
+    }
+    if plan.metadata["cook_timeout_overrides"] != Value::Null
+        && !plan.metadata["cook_timeout_overrides"].is_array()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata.cook_timeout_overrides",
+            "durable Cook timeout override history must be an array",
+            Some(source_run_id.to_string()),
+            None,
+        ));
+    }
+    plan.options.timeout_ms = Some(timeout_ms);
+    plan.options.execution_budget.max_provider_executions = remaining_executions;
+    plan.options.execution_budget.max_same_provider_retries = remaining_retries.saturating_sub(1);
+    plan.options.execution_budget.max_provider_rotations = remaining_rotations;
+    for task in &mut plan.tasks {
+        task.limits.timeout_ms = Some(timeout_ms);
+    }
+    let timeout_override = json!({
+        "schema": "homeboy/agent-task-cook-timeout-override/v1",
+        "source_run_id": source_run_id,
+        "previous_timeout_ms": previous_timeout_ms,
+        "timeout_ms": timeout_ms,
+        "authority": "operator --timeout-ms",
+        "remaining_provider_executions": remaining_executions,
+        "remaining_same_provider_retries_after_reservation": remaining_retries.saturating_sub(1),
+        "remaining_provider_rotations": remaining_rotations,
+    });
+    if plan.metadata.is_null() {
+        plan.metadata = json!({});
+    }
+    plan.metadata
+        .as_object_mut()
+        .expect("plan metadata is an object")
+        .entry("cook_timeout_overrides")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .expect("cook_timeout_overrides is an array")
+        .push(timeout_override);
+    plan.rebuild_homeboy_plan();
+    Ok(())
 }
 
 struct CookRetryReservation {
@@ -2335,6 +2652,59 @@ mod tests {
             AgentTaskPlanValidationKind::InvalidInput
         );
         assert_eq!(report.failures[0].code, "validation.invalid_argument");
+    }
+
+    #[test]
+    fn timeout_override_changes_only_effective_timeouts_and_appends_history() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut plan = one_task_plan("timeout-override", workspace.path());
+        plan.options.timeout_ms = Some(100);
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(4, 3, 2);
+        let mut second = plan.tasks[0].clone();
+        second.task_id = "second-task".to_string();
+        second.limits.timeout_ms = Some(200);
+        plan.tasks.push(second);
+        plan.metadata["cook_timeout_overrides"] = json!([{
+            "schema": "homeboy/agent-task-cook-timeout-override/v1",
+            "source_run_id": "older-run",
+            "previous_timeout_ms": 50,
+            "timeout_ms": 100,
+            "authority": "operator --timeout-ms"
+        }]);
+        let original_budget = plan.options.execution_budget.clone();
+
+        apply_timeout_override_to_plan(&mut plan, "timed-out-run", 200, 400, 3, 2, 1)
+            .expect("apply timeout override");
+
+        assert_eq!(plan.options.timeout_ms, Some(400));
+        assert!(plan
+            .tasks
+            .iter()
+            .all(|task| task.limits.timeout_ms == Some(400)));
+        assert_ne!(plan.options.execution_budget, original_budget);
+        assert_eq!(
+            plan.options.execution_budget,
+            AgentTaskExecutionBudget::new(3, 1, 1)
+        );
+        let history = plan.metadata["cook_timeout_overrides"]
+            .as_array()
+            .expect("timeout history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["source_run_id"], "older-run");
+        assert_eq!(history[1]["source_run_id"], "timed-out-run");
+        assert_eq!(history[1]["previous_timeout_ms"], 200);
+        assert_eq!(history[1]["timeout_ms"], 400);
+        assert_eq!(history[1]["remaining_provider_executions"], 3);
+        assert_eq!(
+            history[1]["remaining_same_provider_retries_after_reservation"],
+            1
+        );
+        assert_eq!(history[1]["remaining_provider_rotations"], 1);
+        assert_eq!(
+            plan.homeboy_plan,
+            plan.clone().canonicalize().homeboy_plan,
+            "the portable plan projection is rebuilt with the override"
+        );
     }
 
     #[test]

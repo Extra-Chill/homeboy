@@ -2477,6 +2477,28 @@ where
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
+    if args.timeout_ms.is_some() && !record.state.is_terminal() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "timeout-ms",
+            "Cook timeout override requires a terminal provider timeout",
+            Some(run_id),
+            None,
+        ));
+    }
+    if let Some(timeout_ms) = args.timeout_ms {
+        let retry = agent_task_service::retry_with_timeout_override(&run_id, timeout_ms)?;
+        let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
+        if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
+            return dispatch_queued_cook_retry(
+                &recipe,
+                &retry.record.run_id,
+                args.full,
+                executor,
+                reconstruct_dispatcher,
+            );
+        }
+        return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
+    }
     if execute_queued_attempt && record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
         return dispatch_queued_cook_retry(
             &recipe,
@@ -7656,6 +7678,7 @@ where
                     preflight: false,
                     rearm: false,
                     artifact_id: None,
+                    timeout_ms: None,
                     full: false,
                 },
                 executor,
@@ -7952,6 +7975,7 @@ mod tests {
                 preflight: true,
                 rearm: false,
                 artifact_id: None,
+                timeout_ms: None,
                 full: false,
             })
             .expect("preflight returns a machine-readable rejection");
