@@ -75,6 +75,7 @@ const MAX_STRUCTURED_OUTPUT_BYTES = 64 * 1024;
 const MAX_STRUCTURED_ANSWER_BYTES = MAX_STRUCTURED_OUTPUT_BYTES + 16 * 1024;
 const OPENCODE_SESSION_EXPORT_TIMEOUT_MS = 2_000;
 const OPENCODE_SESSION_EXPORT_MAX_BYTES = 1024 * 1024;
+const OPENCODE_SESSION_EXPORT_ATTEMPTS = 2;
 
 const OPENCODE_CAPABILITIES = [
 	'cli_runtime',
@@ -1072,30 +1073,31 @@ function sessionMetadata(context = {}) {
 		return context.sessionMetadata;
 	}
 	const [sessionId] = sessionIds;
-	const output = captureOpenCodeSessionExport(context, sessionId);
-	if (!output) {
-		context.sessionMetadata = {
-			status: 'unavailable',
-			session_id: sessionId,
-			reason: 'OpenCode did not return a readable completed-session export.',
-		};
-		return context.sessionMetadata;
-	}
-	const exported = parseOpenCodeExport(output);
-	const provider = stringValue(exported?.info?.model?.providerID);
-	const model = stringValue(exported?.info?.model?.id);
-	if (!provider || !model) {
-		context.sessionMetadata = {
-			status: 'unavailable',
-			session_id: sessionId,
-			reason: 'OpenCode session export did not contain a concrete provider and model.',
-		};
-		return context.sessionMetadata;
+	let readableExport = false;
+	for (let attempt = 0; attempt < OPENCODE_SESSION_EXPORT_ATTEMPTS; attempt += 1) {
+		const output = captureOpenCodeSessionExport(context, sessionId);
+		if (!output) {
+			continue;
+		}
+		readableExport = true;
+		const exported = parseOpenCodeExport(output);
+		const provider = stringValue(exported?.info?.model?.providerID);
+		const model = stringValue(exported?.info?.model?.id);
+		if (provider && model) {
+			context.sessionMetadata = {
+				status: 'captured',
+				session_id: sessionId,
+				model: `${provider}/${model}`,
+			};
+			return context.sessionMetadata;
+		}
 	}
 	context.sessionMetadata = {
-		status: 'captured',
+		status: 'unavailable',
 		session_id: sessionId,
-		model: `${provider}/${model}`,
+		reason: readableExport
+			? 'OpenCode session export did not contain a concrete provider and model.'
+			: 'OpenCode did not return a readable completed-session export.',
 	};
 	return context.sessionMetadata;
 }
