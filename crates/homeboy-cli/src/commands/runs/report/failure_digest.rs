@@ -176,8 +176,40 @@ mod detail {
         commands
     }
 
+    /// The filename stem a command's result artifact is written under.
+    ///
+    /// The command name is the identity (`review test`); the filename is a
+    /// rendering of it (`review-test`). Interpolating the identity directly
+    /// produced `review test.json`, which nothing writes, so every multi-word
+    /// command's digest reported `head artifact unavailable` with an `os
+    /// error 2` while the artifact sat beside it under the hyphenated name.
+    ///
+    /// This must stay byte-for-byte identical to the writer's rule — the
+    /// action's `output_stem` in `apply-differential-gate.py` and
+    /// `command_result_filename` in `generate-failure-digest.sh`. It is a
+    /// cross-repository wire contract, so it is pinned by
+    /// `command_result_stem_matches_the_written_artifact_name`.
+    pub(crate) fn command_result_stem(command: &str) -> String {
+        let stem: String = command
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let stem = stem.trim_matches('-').to_string();
+        if stem.is_empty() {
+            "homeboy-output".to_string()
+        } else {
+            stem
+        }
+    }
+
     pub(crate) fn read_command_json(output_dir: &Path, command: &str) -> Option<Value> {
-        let path = output_dir.join(format!("{command}.json"));
+        let path = output_dir.join(format!("{}.json", command_result_stem(command)));
         homeboy::core::config::try_read_json_file(&path)
     }
 
@@ -440,7 +472,9 @@ mod detail {
 
         out.push_str("### Failure origin classification\n");
         for command in failed {
-            let head_path = context.output_dir.join(format!("{command}.json"));
+            let head_path = context
+                .output_dir
+                .join(format!("{}.json", command_result_stem(&command)));
             let head = match read_json_file(&head_path) {
                 Ok(value) => value,
                 Err(error) => {
@@ -508,10 +542,11 @@ mod detail {
     }
 
     fn baseline_command_paths(output_dir: &Path, command: &str) -> Vec<PathBuf> {
+        let stem = command_result_stem(command);
         vec![
-            output_dir.join(format!("baseline-{command}.json")),
-            output_dir.join(format!("{command}-baseline.json")),
-            output_dir.join("baseline").join(format!("{command}.json")),
+            output_dir.join(format!("baseline-{stem}.json")),
+            output_dir.join(format!("{stem}-baseline.json")),
+            output_dir.join("baseline").join(format!("{stem}.json")),
         ]
     }
 
@@ -958,5 +993,57 @@ mod tests {
             autofix_commands_csv: String::new(),
         };
         assert!(render_failure_digest(&context).contains("### Bench: unknown"));
+    }
+
+    /// The digest reads a command's result artifact by rendering the command
+    /// name as a filename. That rendering is a cross-repository contract with
+    /// the writers in homeboy-action (`output_stem` in
+    /// `apply-differential-gate.py`, `command_result_filename` in
+    /// `generate-failure-digest.sh`), and the two disagreed: the writer emits
+    /// `review-test.json`, the reader asked for `review test.json`, and every
+    /// multi-word command's digest reported `head artifact unavailable` with an
+    /// `os error 2` (#13436).
+    #[test]
+    fn command_result_stem_matches_the_written_artifact_name() {
+        assert_eq!(command_result_stem("review test"), "review-test");
+        assert_eq!(command_result_stem("review audit"), "review-audit");
+        assert_eq!(command_result_stem("review lint"), "review-lint");
+        // Single-word commands were already correct and must stay byte-identical.
+        assert_eq!(command_result_stem("test"), "test");
+        assert_eq!(command_result_stem("bench"), "bench");
+    }
+
+    /// Mirrors the writer's rule rather than just its common cases: any
+    /// character outside `[A-Za-z0-9._-]` becomes `-`, leading and trailing
+    /// `-` are trimmed, and an otherwise-empty stem falls back rather than
+    /// producing a dotfile named `.json`.
+    #[test]
+    fn command_result_stem_mirrors_the_writers_full_rule() {
+        assert_eq!(command_result_stem("review/test"), "review-test");
+        assert_eq!(command_result_stem("a.b_c-d"), "a.b_c-d");
+        assert_eq!(command_result_stem("  spaced  "), "spaced");
+        assert_eq!(command_result_stem("   "), "homeboy-output");
+        assert_eq!(command_result_stem(""), "homeboy-output");
+    }
+
+    /// The reader must find what the writer wrote. This is the end-to-end
+    /// version of the bug: a file on disk under the hyphenated name, read back
+    /// through the command identity.
+    #[test]
+    fn a_multi_word_command_reads_back_the_artifact_it_wrote() {
+        let dir = std::env::temp_dir().join(format!("homeboy-digest-stem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("review-test.json");
+        std::fs::write(&path, r#"{"status":"failed"}"#).expect("write artifact");
+
+        let value = read_command_json(&dir, "review test");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+
+        assert_eq!(
+            value.and_then(|v| v.get("status").cloned()),
+            Some(Value::String("failed".to_string())),
+        );
     }
 }
