@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.360.3] - 2026-08-25
+
+### Fixed
+- stop memoizing a digest the filesystem clock cannot vouch for
+
 ## [0.360.2] - 2026-08-25
 
 ### Changed
