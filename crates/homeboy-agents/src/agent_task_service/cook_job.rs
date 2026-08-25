@@ -220,6 +220,7 @@ impl AgentTaskCookJob {
             "idempotency_key": self.idempotency_key,
             "phase": self.phase,
             "cook_id": self.request.cook_id,
+            "durable_run_id": self.request.cook_id,
             "run_id": self.run_id,
             "terminal_state": self.terminal_state,
         })
@@ -436,6 +437,7 @@ impl AgentTaskCookJob {
         json!({
             "phase": self.phase,
             "cook_id": self.request.cook_id,
+            "durable_run_id": self.request.cook_id,
             "run_id": self.run_id,
         })
     }

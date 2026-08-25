@@ -2599,6 +2599,16 @@ where
             .expect("submission metadata is an object")
             .extend(submission_metadata);
     }
+    if let Ok(job_id) = std::env::var("HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID") {
+        if !job_id.trim().is_empty() {
+            metadata["local_cook_supervisor"] = json!({
+                "state": "supervising",
+                "job_id": job_id,
+                "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+                "pinned_run_id": run_id,
+            });
+        }
+    }
 
     let mut record = AgentTaskRunRecord {
         schema: schemas::RUN.to_string(),
