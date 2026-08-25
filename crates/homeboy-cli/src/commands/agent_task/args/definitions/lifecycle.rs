@@ -570,6 +570,11 @@ pub struct PromoteArgs {
     /// Include complete promotion and gate evidence.
     #[arg(long)]
     pub full: bool,
+    /// Replay the exact gate policy from the source run's durable Cook recipe.
+    /// Homeboy-generated review commands use this reference so private gate
+    /// programs remain outside reviewer-facing command output.
+    #[arg(long = "gates-from-cook-recipe")]
+    pub gates_from_cook_recipe: bool,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
 }
