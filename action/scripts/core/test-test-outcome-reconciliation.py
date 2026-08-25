@@ -49,6 +49,11 @@ def main() -> None:
         install_pair(baseline, "13290-baseline")
         assert gate(current, baseline) == {COMMAND: "fail"}, "#13290 nondeterministic identity must block"
 
+        payload = json.loads((baseline / f"{STEM}.test-outcomes.json").read_text(encoding="utf-8"))
+        payload["failed_test_ids"] = ["nondeterministic", "stable"]
+        (baseline / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert gate(current, baseline) == {COMMAND: "baseline_red"}, "#435 equivalent failures must reconcile"
+
         for path in current.iterdir():
             path.unlink()
         for path in baseline.iterdir():
