@@ -267,6 +267,9 @@ pub(crate) fn route_after_parse_with_provenance(
     ) {
         return Err(error);
     }
+    if cli.placement == homeboy::cli_surface::Placement::Lab && inferred_runner_id.is_none() {
+        return Err(required_lab_runner_unavailable_error(lab_readiness));
+    }
 
     // Cooks must resolve provider ownership before the launcher can acknowledge
     // or observe them. Auto without a runner is a local provider placement and
@@ -442,18 +445,6 @@ pub(crate) fn route_after_parse_with_provenance(
         .and_then(|plan| plan.tasks.first())
         .map(|task| task.task_id.as_str())
         .unwrap_or("command");
-    if preflight.placement.required
-        == homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab
-        && preflight.placement.selected
-            == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
-    {
-        return Err(Error::validation_invalid_argument(
-            "placement",
-            "required Lab placement has no selected ready runner",
-            Some("lab".to_string()),
-            None,
-        ));
-    }
     let placement_decision = preflight
         .placement
         .finalize(materialized_placement_identity(
@@ -2079,11 +2070,35 @@ fn split_placement_lab_runner_unavailable_error(
     Some(Error::validation_invalid_argument(
         "placement",
         format!(
-            "{label} accepts `--placement lab` but requires an eligible Lab runner; none could be selected (readiness: {state}), so no provider attempt was dispatched"
+            "{label} accepts `--placement lab` but requires an eligible Lab runner; none could be selected (readiness: {state}), so controller-owned target preparation did not start and no provider attempt was dispatched"
         ),
         Some("lab".to_string()),
         Some(hints),
     ))
+}
+
+fn required_lab_runner_unavailable_error(
+    readiness: Option<&homeboy::core::parsed_command_preflight::LabReadinessSnapshot>,
+) -> Error {
+    let state = readiness
+        .map(|readiness| readiness.state.as_str())
+        .unwrap_or("unknown");
+    let mut hints = readiness
+        .into_iter()
+        .flat_map(|readiness| readiness.remediation_commands.iter().cloned())
+        .collect::<Vec<_>>();
+    hints.push(
+        "Wait for an eligible runner, or use `--runner <runner-id>` to pin one that is ready."
+            .to_string(),
+    );
+    Error::validation_invalid_argument(
+        "placement",
+        format!(
+            "required Lab placement has no selected ready runner (readiness: {state}); controller-side source preparation did not start and no workload executed locally"
+        ),
+        Some("lab".to_string()),
+        Some(hints),
+    )
 }
 
 /// Fanout keeps durable batch state, worktree ownership, artifact ingestion,
@@ -2287,7 +2302,9 @@ fn run_split_placement_cook_with_runtime(
     };
 
     renew_unmaterialized_replay_claim_before_materialization()?;
-    let plan = materialize_agent_task_cook_plan(cli, provenance)?.expect("cook plan");
+    let plan = materialize_agent_task_cook_plan(cli, provenance)
+        .map_err(|error| annotate_cook_controller_preparation_error(error, runner_id))?
+        .expect("cook plan");
     let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
         Error::internal_json(
             error.to_string(),
@@ -3008,6 +3025,22 @@ fn materialize_agent_task_cook_plan(
         crate::commands::agent_task::run::record_cook_argument_provenance(&mut plan, provenance);
     }
     Ok(Some(plan))
+}
+
+fn annotate_cook_controller_preparation_error(mut error: Error, runner_id: &str) -> Error {
+    let cause = error.message.clone();
+    error.message = format!(
+        "agent-task cook failed during controller-owned target preparation before its Lab provider attempt was dispatched: {cause}"
+    );
+    if !error.details.is_object() {
+        error.details = serde_json::json!({ "cause": error.details });
+    }
+    error.details["cook_phase"] = serde_json::json!("controller_target_preparation");
+    error.details["provider_execution_placement"] = serde_json::json!("lab");
+    error.details["selected_runner_id"] = serde_json::json!(runner_id);
+    error.with_hint(
+        "The controller must resolve and provision the managed target before portable provider execution can start; repair this controller preparation failure and retry the same Lab placement.",
+    )
 }
 
 fn inline_portable_settings_profiles(

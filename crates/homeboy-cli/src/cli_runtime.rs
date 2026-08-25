@@ -2755,12 +2755,15 @@ fn preflight_hot_command_with_input(
                 lab_readiness.as_ref(),
                 cli.placement,
             );
-            let explicit_runner_placement = explicit_runner_placement(cli, hot_command);
-            // An explicit runner resolves workload placement before resource
-            // guidance. Controller pressure still matters for handoff overhead,
-            // but it must not be presented as a local workload warning.
-            let warning = explicit_runner_placement
-                .is_none()
+            let required_lab_placement = required_lab_placement(cli, hot_command);
+            let required_lab_runner = required_lab_placement
+                .then_some(selected_lab_runner)
+                .flatten();
+            // Required Lab placement resolves workload ownership before resource
+            // guidance, whether policy selected the runner or the operator pinned
+            // it. Controller pressure still matters for preparation and transport,
+            // but it must not be presented as local provider execution.
+            let warning = (!required_lab_placement)
                 .then(|| {
                     resource_policy::evaluate_with_runner_hint(
                         hot_command,
@@ -2770,8 +2773,8 @@ fn preflight_hot_command_with_input(
                 })
                 .flatten();
             let runner_hosted = resource_policy::is_runner_hosted_exec();
-            if let Some(runner_id) = explicit_runner_placement {
-                if let Some(notice) = resource_policy::explicit_runner_controller_notice(
+            if let Some(runner_id) = required_lab_runner {
+                if let Some(notice) = resource_policy::lab_routed_controller_notice_message(
                     hot_command,
                     &resources,
                     runner_id,
@@ -3093,11 +3096,9 @@ fn resource_policy_runner_hint<'a>(
     cli.runner.as_deref().or(default_runner)
 }
 
-fn explicit_runner_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> Option<&str> {
-    cli.runner.as_deref().filter(|_| {
-        hot_command.lab_offload_supported
-            && !matches!(cli.placement, crate::cli_surface::Placement::Local)
-    })
+fn required_lab_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> bool {
+    hot_command.lab_offload_supported
+        && (cli.runner.is_some() || cli.placement == crate::cli_surface::Placement::Lab)
 }
 
 fn run_startup_update_checks(command: &Commands) {
@@ -3637,6 +3638,40 @@ mod tests {
                 .unwrap_or_default(),
             reasons: Vec::new(),
             remediation_commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_lab_placement_resolves_only_a_ready_policy_runner() {
+        use crate::runner::runners::LabRunnerReadinessState;
+
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--placement",
+            "lab",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "route the provider attempt",
+            "--to-worktree",
+            "fixture@lab-placement",
+            "--verify",
+            "true",
+        ]);
+        let command = resource_policy::hot_command(&cli.command).expect("verified Cook is hot");
+        assert!(required_lab_placement(&cli, command));
+        assert_eq!(cli.runner, None);
+
+        for (state, expected) in [
+            (LabRunnerReadinessState::ConnectedReady, Some("lab-a")),
+            (LabRunnerReadinessState::Stale, None),
+            (LabRunnerReadinessState::Disconnected, None),
+            (LabRunnerReadinessState::CapacityBlocked, None),
+        ] {
+            let readiness = lab_readiness(state);
+            let selected =
+                resource_policy_runner_hint(&cli, readiness.selected_runner_id.as_deref());
+            assert_eq!(selected, expected, "{state:?}");
         }
     }
 
@@ -5091,9 +5126,8 @@ mod tests {
 
             assert!(hot_command.lab_offload_supported);
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-            assert_eq!(
-                explicit_runner_placement(&cli, hot_command),
-                Some("homeboy-lab"),
+            assert!(
+                required_lab_placement(&cli, hot_command),
                 "resource preflight resolves explicit runner placement before warning"
             );
         }

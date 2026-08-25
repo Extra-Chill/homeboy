@@ -56,7 +56,8 @@ pub struct Cli {
     pub notification_route: Option<String>,
 
     /// Select where eligible work executes. `auto` (default) follows command
-    /// policy; `local` is an explicit authorized override.
+    /// policy; `lab` selects an eligible ready runner; `local` is an explicit
+    /// authorized override. Use `--runner <id>` instead to pin one runner.
     #[arg(
         long,
         global = true,
@@ -1127,6 +1128,20 @@ mod tests {
         }
         assert!(help.contains("without pinning a runner"));
         assert!(help.contains("This implies Lab placement"));
+    }
+
+    #[test]
+    fn compact_cook_help_explains_lab_selection_without_a_runner_pin() {
+        let help = scoped_help(&["agent-task", "cook"]);
+
+        assert!(
+            help.contains("`lab` selects an eligible ready runner"),
+            "{help}"
+        );
+        assert!(
+            help.contains("Use `--runner <id>` instead to pin one runner"),
+            "{help}"
+        );
     }
 
     #[test]
