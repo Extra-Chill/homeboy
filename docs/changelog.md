@@ -4,6 +4,44 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.1] - 2026-08-25
+
+### Changed
+- emit line tables instead of full DWARF in dev and test builds
+- default 89 test-side AgentTaskOutcome literals
+- derive required-gate policy from one manifest
+- bump the Homeboy Action and extension pins so Test evidence is attributable
+
+### Fixed
+- isolate worktree patch preservation
+- normalize statvfs byte arithmetic
+- use generic bounded hydration
+- canonicalize provider worktrees
+- construct WorktreeQueueCreateRow with its new failure field
+- recover provider timeouts
+- preserve Cook lifecycle metadata
+- persist declared output runs
+- make self doctor inspect composed registry
+- preserve generated mutations through packaging
+- bound default list projection
+- preserve complete timeout candidate
+- isolate timeout harvest index
+- refresh stale admission state
+- harden composer hydration
+- preserve self-repair publication contract
+- infer fanout default branch
+- re-resolve recovered fanout worktrees
+- compact blocked worktree evidence
+- redact retained private gates
+- align preview destination resolution
+- bound composer hydration
+- read command result artifacts under the name the writer emits
+- bootstrap provider-owned self-repairs
+- report worktree-provider effects and collapse repeated blockers
+- resolve explicit Lab placement before Cook prep
+- expose dangling-link repairs
+- restore composed help fast path
+
 ## [0.361.0] - 2026-08-25
 
 ### Added
