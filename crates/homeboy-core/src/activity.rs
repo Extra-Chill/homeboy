@@ -424,6 +424,8 @@ fn counts_for_items(items: &[ActivityItem]) -> ActivityCounts {
             ActivityState::Queued => counts.queued += 1,
             ActivityState::Running => counts.running += 1,
             ActivityState::Succeeded => counts.succeeded += 1,
+            ActivityState::CandidateRecoverable => counts.candidate_recoverable += 1,
+            ActivityState::PartialRecoverable => counts.partial_recoverable += 1,
             ActivityState::PartialFailure => counts.partial_failure += 1,
             ActivityState::Failed => counts.failed += 1,
             ActivityState::Cancelled => counts.cancelled += 1,
@@ -808,7 +810,11 @@ mod tests {
 
     #[test]
     fn activity_policy_preserves_active_and_failure_sets() {
-        for case in "unknown:01,queued:10,running:10,succeeded:00,partial_failure:01,failed:01,cancelled:00,timed_out:01,stale:01".split(',') {
+        // `candidate_recoverable` and `partial_recoverable` reached this
+        // classifier as `partial_failure` before #6761. They keep exactly its
+        // flags (inactive, failure) so splitting the projection changed what
+        // an operator can *see*, not how activity classifies the run.
+        for case in "unknown:01,queued:10,running:10,succeeded:00,candidate_recoverable:01,partial_recoverable:01,partial_failure:01,failed:01,cancelled:00,timed_out:01,stale:01".split(',') {
             let (label, flags) = case.split_once(':').expect("policy case");
             let state: ActivityState = serde_json::from_value(label.into()).unwrap();
             let (active, failure) = (flags.starts_with('1'), flags.ends_with('1'));
