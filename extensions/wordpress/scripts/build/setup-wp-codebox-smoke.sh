@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TMPDIR="$(mktemp -d)"
+TMPDIR="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

@@ -144,6 +144,8 @@ fi
 echo "Fetching WP Codebox ref: $REQUESTED_REF"
 git -C "$CANDIDATE_DIR" fetch --quiet --tags origin "$REQUESTED_REF" || fail "failed to fetch ref '$REQUESTED_REF' from $SOURCE"
 git -C "$CANDIDATE_DIR" reset --hard --quiet FETCH_HEAD || fail "failed to reset staged cache checkout to FETCH_HEAD"
+SHA="$(git -C "$CANDIDATE_DIR" rev-parse HEAD)" || fail "failed to read staged WP Codebox SHA"
+export WP_CODEBOX_SOURCE_REF="$REQUESTED_REF" WP_CODEBOX_SOURCE_SHA="$SHA"
 git -C "$CANDIDATE_DIR" clean -ffdx --quiet || fail "failed to clean untracked build residue from staged WP Codebox cache checkout"
 
 [ -f "$CANDIDATE_DIR/package-lock.json" ] || [ -f "$CANDIDATE_DIR/npm-shrinkwrap.json" ] || fail "WP Codebox source cache requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: $SOURCE"
@@ -154,7 +156,6 @@ echo "Installing WP Codebox dependencies..."
 echo "Building WP Codebox packages..."
 "$NPM_BIN" --prefix "$CANDIDATE_DIR" run build || fail "npm run build failed in $CANDIDATE_DIR"
 
-SHA="$(git -C "$CANDIDATE_DIR" rev-parse HEAD)" || fail "failed to read resulting WP Codebox SHA"
 CLI="$CANDIDATE_DIR/packages/cli/dist/index.js"
 [ -x "$CLI" ] || fail "WP Codebox build did not produce executable CLI: $CLI"
 VERSION="$($CLI --version 2>&1)" || fail "built WP Codebox CLI version probe failed: $CLI. Rebuild the requested ref with a compatible WP Codebox CLI."
