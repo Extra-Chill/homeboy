@@ -990,10 +990,10 @@ fn run_materialized_provider_command_once_contained(
         let _ = Write::write_all(&mut stdin, &input);
     }
 
-    let liveness_timeout = request
-        .limits
-        .liveness_timeout_ms
-        .map(Duration::from_millis);
+    let liveness_timeout_ms = crate::agent_task_timeout::effective_provider_liveness_timeout_ms(
+        request.limits.liveness_timeout_ms,
+    );
+    let liveness_timeout = Duration::from_millis(liveness_timeout_ms);
     let (status, killed_for_liveness, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (Some(status), false, false),
@@ -1002,24 +1002,20 @@ fn run_materialized_provider_command_once_contained(
                 if elapsed >= process_timeout {
                     break (None, false, true);
                 }
-                if let Some(liveness) = liveness_timeout {
-                    let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
-                        last_progress_ms.load(Ordering::SeqCst),
-                    ));
-                    if progress_age >= liveness {
-                        break (None, true, false);
-                    }
-                    // Wake up at the earlier of process timeout and liveness deadline.
-                    let remaining_liveness = liveness.saturating_sub(progress_age);
-                    let sleep_for = remaining_liveness
-                        .min(process_timeout - elapsed)
-                        .min(Duration::from_millis(50));
-                    if sleep_for > Duration::ZERO {
-                        std::thread::sleep(sleep_for);
-                    }
-                    continue;
+                let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
+                    last_progress_ms.load(Ordering::SeqCst),
+                ));
+                if progress_age >= liveness_timeout {
+                    break (None, true, false);
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                // Wake up at the earlier of process timeout and liveness deadline.
+                let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
+                let sleep_for = remaining_liveness
+                    .min(process_timeout - elapsed)
+                    .min(Duration::from_millis(50));
+                if sleep_for > Duration::ZERO {
+                    std::thread::sleep(sleep_for);
+                }
             }
             Err(_) => break (None, false, false),
         }
@@ -1059,9 +1055,7 @@ fn run_materialized_provider_command_once_contained(
             &stdout,
             &stderr,
             &provider.id,
-            liveness_timeout
-                .expect("liveness kill requires a configured liveness deadline")
-                .as_millis(),
+            liveness_timeout.as_millis(),
         );
         return failure_outcome(
             request,
@@ -1075,7 +1069,7 @@ fn run_materialized_provider_command_once_contained(
                 "deadline": "liveness",
                 "timeout_ms": requested_timeout_ms,
                 "process_timeout_ms": process_timeout.as_millis(),
-                "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+                "liveness_timeout_ms": liveness_timeout_ms,
                 "stdout_bytes": stdout_capture.total_bytes,
                 "stderr_bytes": stderr_capture.total_bytes,
             }),
@@ -1106,6 +1100,7 @@ fn run_materialized_provider_command_once_contained(
                 run_id,
                 requested_timeout_ms,
                 process_timeout.as_millis(),
+                liveness_timeout_ms,
                 cancellation_acknowledged,
                 &stdout_capture,
                 &stderr_capture,
@@ -1143,7 +1138,7 @@ fn run_materialized_provider_command_once_contained(
                     elapsed_ms: started.elapsed().as_millis(),
                     requested_timeout_ms,
                     process_timeout_ms: process_timeout.as_millis(),
-                    liveness_timeout_ms: request.limits.liveness_timeout_ms,
+                    liveness_timeout_ms: Some(liveness_timeout_ms),
                     execution_deadline_unix_ms: request.limits.execution_deadline_unix_ms,
                 },
             );
@@ -1616,6 +1611,7 @@ fn provider_timeout_diagnostic_data(
     run_id: Option<&str>,
     timeout_ms: u64,
     process_timeout_ms: u128,
+    liveness_timeout_ms: u64,
     cancellation_acknowledged: bool,
     stdout: &ProviderOutputCapture,
     stderr: &ProviderOutputCapture,
@@ -1652,7 +1648,7 @@ fn provider_timeout_diagnostic_data(
         "deadline": "wall_clock",
         "timeout_ms": timeout_ms,
         "process_timeout_ms": process_timeout_ms,
-        "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+        "liveness_timeout_ms": liveness_timeout_ms,
         "output_event_count": stdout.events.saturating_add(stderr.events),
         "stdout_bytes": stdout.total_bytes,
         "stderr_bytes": stderr.total_bytes,
