@@ -20,6 +20,13 @@ SETUP="${EXTENSION_ROOT}/scripts/build/setup.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TMP_ROOT}"' EXIT
 
+ISOLATED_BIN="${TMP_ROOT}/bin"
+mkdir -p "${ISOLATED_BIN}" "${TMP_ROOT}/home"
+for tool in bash dirname head jq node; do
+    tool_path="$(command -v "${tool}")"
+    ln -s "${tool_path}" "${ISOLATED_BIN}/${tool}"
+done
+
 failures=0
 
 fail() {
@@ -56,13 +63,32 @@ exec node "${INCOMPLETE_CACHE}/source/packages/cli/dist/index.js" "\$@"
 EOF
 chmod +x "${STALE_BIN_DIR}/wp-codebox"
 
-# --- 1. a stale PATH wrapper is never handed back as a usable CLI -----------
+# --- 1. no ambient candidate is inherited from the host --------------------
+
+set +e
+env -i \
+    PATH="${ISOLATED_BIN}" \
+    HOME="${TMP_ROOT}/home" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMP_ROOT}/empty-cache" \
+    bash -c 'source "$1" && homeboy_wp_codebox_resolve_bin ""' \
+    wp-codebox-no-candidate "${PATHS_LIB}" \
+    > "${TMP_ROOT}/no-candidate.out" 2> "${TMP_ROOT}/no-candidate.err"
+no_candidate_status=$?
+set -e
+
+if [ "${no_candidate_status}" -ne 0 ] && grep -q 'wp-codebox not found' "${TMP_ROOT}/no-candidate.err"; then
+    pass "resolver reports no candidate in an isolated environment"
+else
+    fail "resolver inherited an ambient candidate: $(cat "${TMP_ROOT}/no-candidate.out" "${TMP_ROOT}/no-candidate.err")"
+fi
+
+# --- 2. a stale PATH wrapper is never handed back as a usable CLI -----------
 
 resolution_stderr="${TMP_ROOT}/resolution.err"
 resolution_stdout="${TMP_ROOT}/resolution.out"
 set +e
 env -i \
-    PATH="${STALE_BIN_DIR}:/usr/bin:/bin" \
+    PATH="${STALE_BIN_DIR}:${ISOLATED_BIN}" \
     HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${INCOMPLETE_CACHE}" \
     bash -c 'source "$1" && homeboy_wp_codebox_resolve_bin ""' \
@@ -89,9 +115,9 @@ else
     pass "resolver does not leak a raw Node module error"
 fi
 
-# --- 2. an incomplete managed cache is reported as incomplete ---------------
+# --- 3. an incomplete managed cache is reported as incomplete ---------------
 
-if env -i PATH="/usr/bin:/bin" HOME="${TMP_ROOT}/home" \
+if env -i PATH="${ISOLATED_BIN}" HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${INCOMPLETE_CACHE}" \
     bash -c 'source "$1" && homeboy_wp_codebox_managed_cache_is_incomplete' \
     wp-codebox-cache "${PATHS_LIB}"; then
@@ -100,7 +126,7 @@ else
     fail "an unbuilt managed source cache was not classified incomplete"
 fi
 
-if env -i PATH="/usr/bin:/bin" HOME="${TMP_ROOT}/home" \
+if env -i PATH="${ISOLATED_BIN}" HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COMPLETE_CACHE}" \
     bash -c 'source "$1" && homeboy_wp_codebox_managed_cache_is_incomplete' \
     wp-codebox-cache "${PATHS_LIB}"; then
@@ -109,10 +135,10 @@ else
     pass "a built managed source cache is not classified incomplete"
 fi
 
-# --- 3. the exported argv prefixes node for a .js entrypoint ----------------
+# --- 4. managed selection and invocation are deterministic ------------------
 
 command_json="$(env -i \
-    PATH="/usr/bin:/bin" \
+    PATH="${ISOLATED_BIN}" \
     HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COMPLETE_CACHE}" \
     bash -c 'source "$1" && homeboy_wp_codebox_export_command "" && printf "%s" "$HOMEBOY_WP_CODEBOX_COMMAND_JSON"' \
@@ -125,7 +151,25 @@ else
     fail "exported argv is ${command_json}, expected ${expected_json}"
 fi
 
-# --- 4. a validated explicit override outranks the managed cache ------------
+MACHINE_CACHE="${TMP_ROOT}/machine-cache"
+MACHINE_BIN="${MACHINE_CACHE}/source/packages/cli/dist/index.js"
+mkdir -p "$(dirname "${MACHINE_BIN}")"
+cp "${COMPLETE_CACHE}/source/packages/cli/dist/index.js" "${MACHINE_BIN}"
+printf '{"wp_codebox_bin":"%s"}\n' "${MACHINE_BIN}" > "${MACHINE_CACHE}/wp-codebox-overrides.json"
+
+machine_selected_bin="$(env -i \
+    PATH="${ISOLATED_BIN}" \
+    HOME="${TMP_ROOT}/home" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${MACHINE_CACHE}" \
+    bash -c 'source "$1" && homeboy_wp_codebox_resolve_bin ""' \
+    wp-codebox-machine-selection "${PATHS_LIB}")"
+if [ "${machine_selected_bin}" = "${MACHINE_BIN}" ]; then
+    pass "machine-selected managed CLI outranks managed source fallback"
+else
+    fail "machine selection produced ${machine_selected_bin}, expected ${MACHINE_BIN}"
+fi
+
+# --- 5. a validated explicit override outranks the managed cache ------------
 
 OVERRIDE_BIN="${TMP_ROOT}/override-wp-codebox"
 cat > "${OVERRIDE_BIN}" <<'SH'
@@ -138,7 +182,7 @@ chmod +x "${OVERRIDE_BIN}"
 # not be masked by a lower-precedence valid pin.
 set +e
 env -i \
-    PATH="/usr/bin:/bin" \
+    PATH="${ISOLATED_BIN}" \
     HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_BIN="${TMP_ROOT}/does-not-exist/highest" \
     WP_CODEBOX_BIN="${OVERRIDE_BIN}" \
@@ -154,7 +198,7 @@ else
 fi
 
 override_json="$(env -i \
-    PATH="/usr/bin:/bin" \
+    PATH="${ISOLATED_BIN}" \
     HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COMPLETE_CACHE}" \
     HOMEBOY_WP_CODEBOX_BIN="${OVERRIDE_BIN}" \
@@ -171,7 +215,7 @@ fi
 # hand it to the runtime.
 set +e
 env -i \
-    PATH="/usr/bin:/bin" \
+    PATH="${ISOLATED_BIN}" \
     HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COMPLETE_CACHE}" \
     HOMEBOY_WP_CODEBOX_BIN="${TMP_ROOT}/does-not-exist/wp-codebox" \
@@ -197,7 +241,7 @@ SH
 chmod +x "${NONPROBING_OVERRIDE}"
 
 nonprobing_json="$(env -i \
-    PATH="/usr/bin:/bin" \
+    PATH="${ISOLATED_BIN}" \
     HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COMPLETE_CACHE}" \
     HOMEBOY_WP_CODEBOX_BIN="${NONPROBING_OVERRIDE}" \
@@ -214,7 +258,7 @@ fi
 # fail-closed behavior as HOMEBOY_WP_CODEBOX_BIN.
 set +e
 env -i \
-    PATH="${STALE_BIN_DIR}:/usr/bin:/bin" \
+    PATH="${STALE_BIN_DIR}:${ISOLATED_BIN}" \
     HOME="${TMP_ROOT}/home" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${COMPLETE_CACHE}" \
     WP_CODEBOX_BIN="${TMP_ROOT}/does-not-exist/wp-codebox" \
@@ -229,7 +273,7 @@ else
     fail "dangling WP_CODEBOX_BIN did not fail closed: $(cat "${TMP_ROOT}/legacy-dangling-override.err")"
 fi
 
-# --- 5. the adapter consumes the resolved argv, never a bare CLI string -----
+# --- 6. the adapter consumes the resolved argv, never a bare CLI string -----
 
 if grep -q "HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox'" "${ADAPTER}"; then
     fail "the adapter still resolves the CLI inline instead of using the shared seam"
@@ -262,7 +306,7 @@ else
     fail "the adapter does not preflight the exported argv directly"
 fi
 
-# --- 6. setup prunes a stale wrapper whose target is gone -------------------
+# --- 7. setup prunes a stale wrapper whose target is gone -------------------
 
 PRUNE_BIN_DIR="${TMP_ROOT}/prune-bin"
 mkdir -p "${PRUNE_BIN_DIR}"

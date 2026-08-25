@@ -10,6 +10,18 @@ source "$WP_CODEBOX_HELPER"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-recipe-helper.XXXXXX")"
 trap 'rm -rf "$fixture"' EXIT
 
+isolated_bin="${fixture}/bin"
+isolated_home="${fixture}/home"
+mkdir -p "$isolated_bin" "$isolated_home"
+for tool in bash cat chmod cp dirname git grep head jq mkdir node rm sh; do
+    tool_path="$(command -v "$tool")"
+    ln -s "$tool_path" "${isolated_bin}/${tool}"
+done
+export HOME="$isolated_home"
+export PATH="$isolated_bin"
+unset HOMEBOY_GLOBAL_NODE_MODULE_ROOT HOMEBOY_SETTINGS_JSON HOMEBOY_SETTINGS_WP_CODEBOX_BIN \
+    HOMEBOY_WP_CODEBOX_BIN HOMEBOY_WP_CODEBOX_INSTALL_DIR NODE_PATH WP_CODEBOX_BIN
+
 fake_wp_codebox="${fixture}/wp-codebox.cjs"
 managed_source="${fixture}/managed/source"
 managed_wp_codebox="${managed_source}/packages/cli/dist/index.js"
@@ -74,7 +86,7 @@ if ! homeboy_wp_codebox_bin_is_runnable "$js_bin"; then
     exit 1
 fi
 
-resolved_bin=$(HOMEBOY_WP_CODEBOX_INSTALL_DIR="${fixture}/empty-managed" PATH="${stale_path}:${valid_path}:${PATH}" homeboy_wp_codebox_resolve_bin '{}')
+resolved_bin=$(HOMEBOY_WP_CODEBOX_INSTALL_DIR="${fixture}/empty-managed" PATH="${stale_path}:${valid_path}:${isolated_bin}" homeboy_wp_codebox_resolve_bin '{}')
 if [ "$resolved_bin" != "${valid_path}/wp-codebox" ]; then
     echo "Expected resolver to skip stale wp-codebox wrapper and select working binary" >&2
     echo "Resolved: ${resolved_bin}" >&2

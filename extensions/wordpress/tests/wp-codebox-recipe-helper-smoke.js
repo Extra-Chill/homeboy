@@ -23,6 +23,20 @@ const outputFile = path.join(root, 'output', 'wp-codebox-output.json');
 const managedInstall = path.join(root, 'managed');
 const managedSource = path.join(managedInstall, 'source');
 const managedBin = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');
+const isolatedBin = path.join(root, 'bin');
+const isolatedHome = path.join(root, 'home');
+const gitBin = require('node:child_process').spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+
+fs.mkdirSync(isolatedBin, { recursive: true });
+fs.mkdirSync(isolatedHome, { recursive: true });
+fs.symlinkSync(process.execPath, path.join(isolatedBin, 'node'));
+fs.symlinkSync(gitBin, path.join(isolatedBin, 'git'));
+process.env.HOME = isolatedHome;
+process.env.PATH = isolatedBin;
+for (const name of ['HOMEBOY_WP_CODEBOX_BIN', 'WP_CODEBOX_BIN', 'HOMEBOY_SETTINGS_WP_CODEBOX_BIN', 'HOMEBOY_SETTINGS_JSON', 'HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT', 'WP_CODEBOX_RUNTIME_COMPONENT', 'NODE_PATH']) {
+  delete process.env[name];
+}
+process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR = path.join(root, 'empty-managed');
 
 fs.writeFileSync(recipeFile, JSON.stringify({ schema: 'wp-codebox/workspace-recipe/v1' }));
 fs.writeFileSync(fixtureBin, `#!/usr/bin/env node
@@ -85,9 +99,7 @@ async function waitForReaped(pids, timeoutMs = 5000) {
   assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_BIN: '/env/wp-codebox', HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: fixtureBin }) } }), '/env/wp-codebox');
   assert.deepEqual(homeboySettings({ HOMEBOY_SETTINGS_JSON: '{"wp_codebox_bin":"/bin/wp-codebox"}' }), { wp_codebox_bin: '/bin/wp-codebox' });
   assert.deepEqual(homeboySettings({ HOMEBOY_SETTINGS_JSON: 'not json' }), {});
-  // Canonical selection may supply an installed runtime when no explicit pin is
-  // present; execution still performs the exact-command preflight below.
-  assert.equal(typeof wpCodeboxBin({ env: {} }), 'string');
+  assert.throws(() => wpCodeboxBin({ env: process.env }), /WP Codebox binary is not configured/);
   assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.cjs'), { command: process.execPath, args: ['/tmp/wp-codebox.cjs'] });
   assert.deepEqual(wpCodeboxCommand('wp-codebox'), { command: 'wp-codebox', args: [] });
   assert.deepEqual(
@@ -258,5 +270,7 @@ async function waitForReaped(pids, timeoutMs = 5000) {
   console.log('wp-codebox recipe helper smoke passed');
 })().catch((error) => {
   console.error(error);
-  process.exit(1);
+  process.exitCode = 1;
+}).finally(() => {
+  fs.rmSync(root, { recursive: true, force: true });
 });
