@@ -30,7 +30,7 @@ use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationConte
 pub use action::execute_action;
 pub use homeboy_core::extension_readiness::{
     extension_ready_status, extension_ready_status_with, is_extension_compatible,
-    ExtensionReadinessMode, ExtensionReadyStatus,
+    ExtensionReadinessMode, ExtensionReadinessState, ExtensionReadyStatus,
 };
 use settings::serialize_settings;
 pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
@@ -237,7 +237,7 @@ pub fn run_deployment_provider(
             None,
         ))?;
     let readiness = extension_ready_status(&extension);
-    if !readiness.ready {
+    if readiness.ready != Some(true) {
         return Err(Error::validation_invalid_argument(
             "deployment_provider.extension",
             format!("Deployment extension '{extension_id}' is not ready"),
