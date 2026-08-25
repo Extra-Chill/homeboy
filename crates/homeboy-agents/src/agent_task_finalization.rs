@@ -1171,10 +1171,19 @@ fn validate_durable_publication_eligibility(
             .iter()
             .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded)
         && (lifecycle.execution.state == RunExecutionState::Succeeded
-            || (lifecycle.execution.state == RunExecutionState::PartialFailure
-                && lifecycle.provider_runtime.iter().all(|runtime| {
-                    runtime.metadata["evidence_source"] == "durable_provider_execution"
-                })))
+            // `CandidateRecoverable` and `PartialRecoverable` were folded into
+            // `PartialFailure` before #6761, so they reached this check as
+            // `PartialFailure` and were eligible. They are listed explicitly
+            // now to keep that behavior — splitting the projection must not
+            // quietly narrow durable-publication eligibility.
+            || (matches!(
+                lifecycle.execution.state,
+                RunExecutionState::PartialFailure
+                    | RunExecutionState::CandidateRecoverable
+                    | RunExecutionState::PartialRecoverable
+            ) && lifecycle.provider_runtime.iter().all(|runtime| {
+                runtime.metadata["evidence_source"] == "durable_provider_execution"
+            })))
     {
         return Ok(DurablePublicationEligibility::ProviderRun);
     }

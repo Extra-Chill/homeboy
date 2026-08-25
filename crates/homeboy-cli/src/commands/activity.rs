@@ -936,6 +936,8 @@ mod tests {
             ActivityState::Queued,
             ActivityState::Running,
             ActivityState::Succeeded,
+            ActivityState::CandidateRecoverable,
+            ActivityState::PartialRecoverable,
             ActivityState::PartialFailure,
             ActivityState::Failed,
             ActivityState::Cancelled,
