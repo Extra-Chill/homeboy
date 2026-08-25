@@ -385,7 +385,13 @@ pub struct AgentTaskGateSetupEvidence {
     pub package_root: String,
     pub lock_identity: String,
     pub setup_capability: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub reason: String,
     pub duration_ms: u128,
+    #[serde(default)]
+    pub termination: String,
     pub status: String,
     pub output: String,
 }
@@ -396,10 +402,56 @@ const MAX_GATE_DEPENDENCY_ROOTS: usize = 64;
 /// dependency root merely because it exists: it must declare a supported,
 /// content-addressed manifest or lock source. Provider resolution,
 /// package-manager detection, and install commands remain outside Homeboy core.
+#[cfg(test)]
 pub(crate) fn hydrate_gate_dependency_roots(
     checkout: &Path,
     enabled: bool,
     workspace: &str,
+) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+    hydrate_gate_dependency_roots_with_policy(checkout, enabled, workspace, None)
+}
+
+struct DependencyRoot {
+    path: PathBuf,
+    lock_identity: String,
+}
+
+struct HydratedDependencyRoot {
+    root: PathBuf,
+    lock_identity: String,
+    command: String,
+    reason: String,
+    duration_ms: u128,
+    termination: String,
+    status: String,
+    output: String,
+}
+
+pub(crate) fn hydrate_gate_dependency_roots_with_timeouts(
+    checkout: &Path,
+    enabled: bool,
+    workspace: &str,
+    timeout: Duration,
+    no_progress_timeout: Duration,
+    heartbeat_interval: Duration,
+) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+    hydrate_gate_dependency_roots_with_policy(
+        checkout,
+        enabled,
+        workspace,
+        Some(ComposerHydrationPolicy {
+            timeout,
+            no_progress_timeout,
+            heartbeat_interval,
+        }),
+    )
+}
+
+fn hydrate_gate_dependency_roots_with_policy(
+    checkout: &Path,
+    enabled: bool,
+    workspace: &str,
+    composer_policy: Option<ComposerHydrationPolicy>,
 ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
     if !enabled {
         return Ok(Vec::new());
@@ -436,16 +488,7 @@ pub(crate) fn hydrate_gate_dependency_roots(
     for candidate in candidates {
         let relative = dependency_root_relative(checkout, &candidate);
         let Some(lock_identity) = dependency_root_identity(&candidate)? else {
-            evidence.push(AgentTaskGateSetupEvidence {
-                schema: "homeboy/agent-task-gate-setup/v1".to_string(),
-                workspace: workspace.to_string(),
-                package_root: relative,
-                lock_identity: "none".to_string(),
-                setup_capability: "dependency.discovery".to_string(),
-                duration_ms: 0,
-                status: "skipped".to_string(),
-                output: "skipped: no supported dependency manifest with a deterministic lock/source identity".to_string(),
-            });
+            evidence.push(discovery_setup_evidence(workspace, relative));
             continue;
         };
         roots.push(DependencyRoot {
@@ -454,19 +497,28 @@ pub(crate) fn hydrate_gate_dependency_roots(
         });
     }
     if roots.len() > MAX_GATE_DEPENDENCY_ROOTS {
-        return Err(Error::validation_invalid_argument(
-            "promotion.gate_setup",
-            format!(
-                "candidate declares more than {MAX_GATE_DEPENDENCY_ROOTS} dependency roots at the supported depth"
-            ),
-            Some(checkout.display().to_string()),
-            None,
-        ));
+        return Err(Error::validation_invalid_argument("promotion.gate_setup", format!("candidate declares more than {MAX_GATE_DEPENDENCY_ROOTS} dependency roots at the supported depth"), Some(checkout.display().to_string()), None));
+    }
+
+    // Composer setup has an explicit lock/vendor reuse contract and must be
+    // bounded. Keep provider-declared setup parallel and unchanged otherwise.
+    let mut generic_roots = Vec::new();
+    for root in roots {
+        if composer_vendor_matches_lock(&root.path)? {
+            evidence.push(composer_reuse_setup_evidence(workspace, checkout, root));
+        } else if is_composer_root(&root.path) {
+            let policy = composer_policy.unwrap_or_default();
+            let setup = hydrate_dependency_root(root, Some(policy))?
+                .expect("Composer setup always reports evidence");
+            evidence.push(hydrated_setup_evidence(workspace, checkout, setup));
+        } else {
+            generic_roots.push(root);
+        }
     }
     let hydrated = std::thread::scope(|scope| {
-        roots
+        generic_roots
             .into_iter()
-            .map(|root| scope.spawn(move || hydrate_dependency_root(root)))
+            .map(|root| scope.spawn(move || hydrate_dependency_root(root, None)))
             .collect::<Vec<_>>()
             .into_iter()
             .map(|worker| {
@@ -477,36 +529,121 @@ pub(crate) fn hydrate_gate_dependency_roots(
             .collect::<Result<Vec<_>>>()
     })?;
     for setup in hydrated.into_iter().flatten() {
-        evidence.push(AgentTaskGateSetupEvidence {
-            schema: "homeboy/agent-task-gate-setup/v1".to_string(),
-            workspace: workspace.to_string(),
-            package_root: dependency_root_relative(checkout, &setup.root),
-            lock_identity: setup.lock_identity,
-            setup_capability: "dependency.install".to_string(),
-            duration_ms: setup.duration_ms,
-            status: "succeeded".to_string(),
-            output: "provider-declared dependency setup completed".to_string(),
-        });
+        evidence.push(hydrated_setup_evidence(workspace, checkout, setup));
     }
     evidence.sort_by(|left, right| left.package_root.cmp(&right.package_root));
     Ok(evidence)
 }
 
-struct DependencyRoot {
-    path: PathBuf,
-    lock_identity: String,
+#[derive(Clone, Copy)]
+struct ComposerHydrationPolicy {
+    timeout: Duration,
+    no_progress_timeout: Duration,
+    heartbeat_interval: Duration,
 }
 
-struct HydratedDependencyRoot {
-    root: PathBuf,
-    lock_identity: String,
-    duration_ms: u128,
+impl Default for ComposerHydrationPolicy {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30 * 60),
+            no_progress_timeout: Duration::from_secs(5 * 60),
+            heartbeat_interval: Duration::from_secs(5),
+        }
+    }
 }
 
-fn hydrate_dependency_root(root: DependencyRoot) -> Result<Option<HydratedDependencyRoot>> {
+fn hydrate_dependency_root(
+    root: DependencyRoot,
+    composer_policy: Option<ComposerHydrationPolicy>,
+) -> Result<Option<HydratedDependencyRoot>> {
     // The identity is an input to setup, not a post-setup cache key. A provider
     // that rewrites it has not verified the declared candidate.
     let started = std::time::Instant::now();
+    if let Some(policy) = composer_policy {
+        let composer =
+            resolve_program_on_path("composer").unwrap_or_else(|| "composer".to_string());
+        let command = format!(
+            "printf 'HOMEBOY_PROGRESS {{\"phase\":\"composer_install\",\"current\":\"started\"}}\\n'; exec {} install --no-interaction --prefer-dist --no-progress",
+            shell_quote(&composer),
+        );
+        crate::agent_task_promotion::emit_promotion_progress(
+            "hydration",
+            None,
+            Some("starting composer install: lock/vendor evidence differs".to_string()),
+        );
+        let supervision = GateSupervision {
+            timeout: policy.timeout,
+            no_progress_timeout: policy.no_progress_timeout,
+            heartbeat_interval: policy.heartbeat_interval,
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new(|status| {
+                crate::agent_task_promotion::emit_promotion_progress(
+                    "hydration",
+                    None,
+                    status
+                        .progress
+                        .as_ref()
+                        .map(|progress| {
+                            progress
+                                .current
+                                .clone()
+                                .unwrap_or_else(|| progress.phase.clone())
+                        })
+                        .or_else(|| Some(status.output_tail.clone())),
+                );
+                Ok(())
+            }),
+            is_cancelled: Arc::new(|| false),
+        };
+        let report = run_gate_command_with_supervision(
+            &root.path,
+            0,
+            &command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )?;
+        if report.status != AgentTaskGateStatus::Succeeded {
+            return Err(Error::dependency_step_failed(
+                "promotion.gate_setup",
+                "composer",
+                Some(report.exit_code),
+                Vec::new(),
+                Vec::new(),
+                Some(command.to_string()),
+                Some(
+                    json!({ "termination": report.termination, "stdout": text_tail(&report.stdout, 20), "stderr": text_tail(&report.stderr, 20) }),
+                ),
+            ));
+        }
+        if !composer_vendor_matches_lock(&root.path)? {
+            return Err(Error::dependency_step_failed(
+                "promotion.gate_setup",
+                "composer",
+                Some(report.exit_code),
+                Vec::new(),
+                Vec::new(),
+                Some(command.to_string()),
+                Some(json!({
+                    "termination": report.termination,
+                    "reason": "composer_lock_vendor_mismatch_after_install",
+                })),
+            ));
+        }
+        return Ok(Some(HydratedDependencyRoot {
+            root: root.path,
+            lock_identity: root.lock_identity,
+            command: command.to_string(),
+            reason: "composer_lock_vendor_mismatch".to_string(),
+            duration_ms: started.elapsed().as_millis(),
+            termination: "completed".to_string(),
+            status: "succeeded".to_string(),
+            output: "Composer dependencies installed for the declared lock identity".to_string(),
+        }));
+    }
     if !homeboy_core::hygiene::materialize_worktree_dependencies(&root.path)? {
         return Ok(None);
     }
@@ -521,8 +658,137 @@ fn hydrate_dependency_root(root: DependencyRoot) -> Result<Option<HydratedDepend
     Ok(Some(HydratedDependencyRoot {
         root: root.path,
         lock_identity: root.lock_identity,
+        command: "provider-declared dependency install".to_string(),
+        reason: "provider_declared".to_string(),
         duration_ms: started.elapsed().as_millis(),
+        termination: "completed".to_string(),
+        status: "succeeded".to_string(),
+        output: "provider-declared dependency setup completed".to_string(),
     }))
+}
+
+fn resolve_program_on_path(program: &str) -> Option<String> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(program))
+            .find(|candidate| candidate.is_file())
+            .map(|candidate| candidate.display().to_string())
+    })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+}
+
+fn discovery_setup_evidence(workspace: &str, package_root: String) -> AgentTaskGateSetupEvidence {
+    AgentTaskGateSetupEvidence {
+        schema: "homeboy/agent-task-gate-setup/v1".to_string(),
+        workspace: workspace.to_string(),
+        package_root,
+        lock_identity: "none".to_string(),
+        setup_capability: "dependency.discovery".to_string(),
+        command: String::new(),
+        reason: "no_supported_dependency_identity".to_string(),
+        duration_ms: 0,
+        termination: "not_started".to_string(),
+        status: "skipped".to_string(),
+        output:
+            "skipped: no supported dependency manifest with a deterministic lock/source identity"
+                .to_string(),
+    }
+}
+
+fn hydrated_setup_evidence(
+    workspace: &str,
+    checkout: &Path,
+    setup: HydratedDependencyRoot,
+) -> AgentTaskGateSetupEvidence {
+    AgentTaskGateSetupEvidence {
+        schema: "homeboy/agent-task-gate-setup/v1".to_string(),
+        workspace: workspace.to_string(),
+        package_root: dependency_root_relative(checkout, &setup.root),
+        lock_identity: setup.lock_identity,
+        setup_capability: "dependency.install".to_string(),
+        command: setup.command,
+        reason: setup.reason,
+        duration_ms: setup.duration_ms,
+        termination: setup.termination,
+        status: setup.status,
+        output: setup.output,
+    }
+}
+
+fn composer_reuse_setup_evidence(
+    workspace: &str,
+    checkout: &Path,
+    root: DependencyRoot,
+) -> AgentTaskGateSetupEvidence {
+    AgentTaskGateSetupEvidence {
+        schema: "homeboy/agent-task-gate-setup/v1".to_string(),
+        workspace: workspace.to_string(),
+        package_root: dependency_root_relative(checkout, &root.path),
+        lock_identity: root.lock_identity,
+        setup_capability: "dependency.install".to_string(),
+        command: "composer install --no-interaction --prefer-dist --no-progress".to_string(),
+        reason: "composer_lock_matches_vendor".to_string(),
+        duration_ms: 0,
+        termination: "not_started".to_string(),
+        status: "reused".to_string(),
+        output: "reused: composer.lock package identities match vendor/composer/installed.json"
+            .to_string(),
+    }
+}
+
+fn is_composer_root(root: &Path) -> bool {
+    root.join("composer.json").is_file() && root.join("composer.lock").is_file()
+}
+
+fn composer_vendor_matches_lock(root: &Path) -> Result<bool> {
+    if !is_composer_root(root) {
+        return Ok(false);
+    }
+    if !root.join("vendor/autoload.php").is_file() {
+        return Ok(false);
+    }
+    let lock = fs::read(root.join("composer.lock")).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(root.join("composer.lock").display().to_string()),
+        )
+    })?;
+    let installed = match fs::read(root.join("vendor/composer/installed.json")) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    let lock: serde_json::Value = match serde_json::from_slice(&lock) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    let installed: serde_json::Value = match serde_json::from_slice(&installed) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    let identities = |value: &serde_json::Value, fields: &[&str]| -> BTreeMap<String, String> {
+        fields
+            .iter()
+            .flat_map(|field| {
+                value
+                    .get(field)
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(|package| {
+                Some((
+                    package.get("name")?.as_str()?.to_string(),
+                    package.get("version")?.as_str()?.to_string(),
+                ))
+            })
+            .collect()
+    };
+    let expected = identities(&lock, &["packages", "packages-dev"]);
+    let actual = identities(&installed, &["packages"]);
+    Ok(expected == actual)
 }
 
 fn dependency_root_relative(checkout: &Path, root: &Path) -> String {
@@ -4453,6 +4719,128 @@ mod tests {
                 .filter(|setup| setup.status == "skipped")
                 .all(|setup| setup.setup_capability == "dependency.discovery"));
         });
+    }
+
+    fn write_composer_fixture(root: &Path, installed_version: &str) {
+        fs::write(root.join("composer.json"), "{}\n").expect("composer manifest");
+        fs::write(
+            root.join("composer.lock"),
+            r#"{"packages":[{"name":"acme/package","version":"1.0.0"}],"packages-dev":[]}"#,
+        )
+        .expect("composer lock");
+        fs::create_dir_all(root.join("vendor/composer")).expect("composer vendor directory");
+        fs::write(root.join("vendor/autoload.php"), "<?php\n").expect("composer autoload");
+        fs::write(
+            root.join("vendor/composer/installed.json"),
+            format!(
+                r#"{{"packages":[{{"name":"acme/package","version":"{installed_version}"}}]}}"#
+            ),
+        )
+        .expect("composer installed metadata");
+    }
+
+    #[test]
+    fn composer_lock_matching_vendor_is_reused_without_installing() {
+        let checkout = tempfile::tempdir().expect("checkout");
+        write_composer_fixture(checkout.path(), "1.0.0");
+
+        let evidence = hydrate_gate_dependency_roots(checkout.path(), true, "fixture")
+            .expect("matching Composer vendor is reusable");
+        let composer = evidence
+            .iter()
+            .find(|setup| setup.package_root == ".")
+            .expect("Composer setup evidence");
+        assert_eq!(composer.status, "reused");
+        assert_eq!(composer.reason, "composer_lock_matches_vendor");
+        assert_eq!(composer.termination, "not_started");
+        assert!(composer.command.contains("composer") && composer.command.contains("install"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_composer_vendor_runs_bounded_install_and_records_command_reason_and_timing() {
+        let _lock = env_mutex();
+        let checkout = tempfile::tempdir().expect("checkout");
+        let tools = tempfile::tempdir().expect("tools");
+        write_composer_fixture(checkout.path(), "0.9.0");
+        fs::write(
+            tools.path().join("composer"),
+            "#!/bin/sh\nprintf '%s' \"$*\" > composer-command\nprintf '{\"packages\":[{\"name\":\"acme/package\",\"version\":\"1.0.0\"}]}' > vendor/composer/installed.json\nprintf 'HOMEBOY_PROGRESS {\"phase\":\"composer_install\",\"current\":\"finished\"}\\n'\n",
+        )
+        .expect("composer shim");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            tools.path().join("composer"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("composer shim permissions");
+        let path = format!(
+            "{}:{}",
+            tools.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path = EnvVarGuard::set(&[("PATH", Path::new(&path))]);
+
+        let evidence = hydrate_gate_dependency_roots_with_timeouts(
+            checkout.path(),
+            true,
+            "fixture",
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+        )
+        .expect("changed Composer vendor installs");
+        let composer = evidence
+            .iter()
+            .find(|setup| setup.package_root == ".")
+            .expect("Composer evidence");
+        assert_eq!(composer.status, "succeeded");
+        assert_eq!(composer.reason, "composer_lock_vendor_mismatch");
+        assert_eq!(composer.termination, "completed");
+        assert!(composer.duration_ms <= 1_000);
+        assert!(composer.command.contains("composer") && composer.command.contains("install"));
+        assert_eq!(
+            fs::read_to_string(checkout.path().join("composer-command")).expect("composer command"),
+            "install --no-interaction --prefer-dist --no-progress"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_composer_hydration_stops_at_the_no_progress_deadline() {
+        let _lock = env_mutex();
+        let checkout = tempfile::tempdir().expect("checkout");
+        let tools = tempfile::tempdir().expect("tools");
+        write_composer_fixture(checkout.path(), "0.9.0");
+        fs::write(tools.path().join("composer"), "#!/bin/sh\nsleep 1\n").expect("composer shim");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            tools.path().join("composer"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("composer shim permissions");
+        let path = format!(
+            "{}:{}",
+            tools.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path = EnvVarGuard::set(&[("PATH", Path::new(&path))]);
+
+        let started = Instant::now();
+        let error = hydrate_gate_dependency_roots_with_timeouts(
+            checkout.path(),
+            true,
+            "fixture",
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        )
+        .expect_err("stalled Composer install is bounded");
+        assert_eq!(error.code.as_str(), "dependency_step_failed");
+        assert!(error.details["cause"]["termination"]
+            .to_string()
+            .contains("no_progress"));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[cfg(unix)]

@@ -1869,10 +1869,13 @@ fn run_promotion_gates(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| gate_workspace_path(options, worktree_path));
     let destination_gate_setup = if gate_workspace.is_dir() {
-        crate::agent_task_gate::hydrate_gate_dependency_roots(
+        crate::agent_task_gate::hydrate_gate_dependency_roots_with_timeouts(
             &gate_workspace,
             options.gates.hydrate_dependencies,
             "destination_gate_workspace",
+            options.gates.gate_timeout(),
+            options.gates.gate_no_progress_timeout(),
+            options.gates.gate_heartbeat_interval(),
         )
         .map_err(|error| {
             gate_setup_failure(
