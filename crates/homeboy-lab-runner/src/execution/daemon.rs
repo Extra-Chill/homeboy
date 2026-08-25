@@ -2074,7 +2074,7 @@ pub(super) fn lab_terminal_result_transport_error(
         format!(
             "Lab offload runner `{}` daemon job `{job_id}` finished with status `{}`, but Homeboy could not retrieve or parse the daemon result report: {}. This is a Lab transport/reporting failure, not a remote command failure.",
             runner.id,
-            job.status.daemon_status_label(),
+            job.status.as_str(),
             err.message
         ),
         json!({
@@ -2083,7 +2083,7 @@ pub(super) fn lab_terminal_result_transport_error(
             "persisted_run_id": run_id,
             "remote_cwd": cwd,
             "command": redact_argv(command),
-            "job_status": job.status.daemon_status_label(),
+            "job_status": job.status.as_str(),
             "source": err.details,
         }),
     );

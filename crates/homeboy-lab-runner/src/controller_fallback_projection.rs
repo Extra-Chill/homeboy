@@ -243,10 +243,7 @@ impl ControllerFallbackProjectionStore {
                     self.record_observation(
                         &mission_id,
                         "pending",
-                        format!(
-                            "runner job remains {}",
-                            snapshot.job.status.daemon_status_label()
-                        ),
+                        format!("runner job remains {}", snapshot.job.status.as_str()),
                     )?;
                     continue;
                 }
@@ -278,7 +275,7 @@ impl ControllerFallbackProjectionStore {
                 &mut state,
                 &mission_id,
                 RunnerTerminalEvidence {
-                    outcome: snapshot.job.status.daemon_status_label().to_string(),
+                    outcome: snapshot.job.status.as_str().to_string(),
                     artifacts: receipt.runner_receipt.artifacts,
                 },
             )?;

@@ -3735,7 +3735,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             run_id: request.recipe.run_id.clone(),
             runner_id: request.recipe.runner_id.clone(),
             runner_job_id: runner_job_id.to_string(),
-            status: observed.job.status.daemon_status_label().to_string(),
+            status: observed.job.status.as_str().to_string(),
         };
         receipt.validate(request, checkpoint)?;
         homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
@@ -3795,7 +3795,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             if observed.job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
                 return Err(Error::internal_unexpected(format!(
                     "Lab staging child cancellation for runner job `{job_id}` was not authoritative: observed `{}`",
-                    observed.job.status.daemon_status_label(),
+                    observed.job.status.as_str(),
                 )));
             }
         }
@@ -3826,7 +3826,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         if observed.job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
             return Err(Error::internal_unexpected(format!(
                 "Lab staging cancellation for runner job `{runner_job_id}` was not authoritative: observed `{}`",
-                observed.job.status.daemon_status_label(),
+                observed.job.status.as_str(),
             )));
         }
         homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(

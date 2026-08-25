@@ -1601,7 +1601,7 @@ pub(super) fn fire_runner_direct_notification(
     let Some(route) = notification_route else {
         return;
     };
-    let status = job.status.daemon_status_label();
+    let status = job.status.as_str();
     let store = match homeboy_core::observation::ObservationStore::open_initialized() {
         Ok(store) => store,
         Err(_) => return,
