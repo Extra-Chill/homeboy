@@ -535,6 +535,40 @@ pub(crate) fn classify_runner_homeboy_version_drift(
     }
 }
 
+/// Whether the status-level daemon warning blocks Lab admission under the
+/// runner's configured version policy. A patch-only controller/version warning
+/// is compatible unless exact matching was explicitly requested; every other
+/// proven daemon mismatch remains blocking.
+pub(crate) fn lab_runner_homeboy_has_blocking_status_drift(
+    status: &RunnerStatusReport,
+    require_exact: bool,
+) -> bool {
+    status
+        .admission_blocking_stale_daemon()
+        .is_some_and(|warning| {
+            require_exact
+                || warning.compatibility_reason != Some("controller_configured_version_skew")
+                || classify_runner_homeboy_version_drift(status)
+                    != RunnerHomeboyVersionDrift::CompatiblePatch
+        })
+}
+
+pub(crate) fn lab_runner_daemon_fresh_for_admission(
+    status: &RunnerStatusReport,
+    require_exact: bool,
+) -> bool {
+    if lab_runner_homeboy_has_blocking_status_drift(status, require_exact) {
+        return false;
+    }
+    status.daemon_fresh()
+        || status.daemon_freshness.as_ref().is_some_and(|freshness| {
+            freshness.stale_reason_code
+                == Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch)
+                && classify_runner_homeboy_version_drift(status)
+                    == RunnerHomeboyVersionDrift::CompatiblePatch
+        })
+}
+
 /// Direct SSH runners execute jobs with their configured executable rather
 /// than the controller binary. When that executable's immutable identity is
 /// available, it is the authoritative admission comparison for the active
@@ -571,7 +605,7 @@ pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
     // observed no drift, and this branch is exactly where every reverse runner
     // now lands (#11106) — blocking on it would take the whole class out of
     // service on the strength of a gap rather than a mismatch.
-    if status.admission_blocking_stale_daemon().is_some() {
+    if lab_runner_homeboy_has_blocking_status_drift(status, require_exact) {
         return true;
     }
     match classify_runner_homeboy_version_drift(status) {

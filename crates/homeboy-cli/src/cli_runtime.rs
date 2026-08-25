@@ -2354,6 +2354,7 @@ struct LabInventoryAdmissionDiagnostic {
     terminal_reason: &'static str,
     refresh_error_code: Option<String>,
     refresh_error: Option<String>,
+    refresh_error_details: Option<serde_json::Value>,
 }
 
 /// Resolve the inventory used by a terminal resource-policy placement decision.
@@ -2387,6 +2388,7 @@ where
                 terminal_reason: "no_ready_capacity",
                 refresh_error_code: None,
                 refresh_error: None,
+                refresh_error_details: None,
             },
         );
     }
@@ -2413,14 +2415,25 @@ where
                     terminal_reason,
                     refresh_error_code: None,
                     refresh_error: None,
+                    refresh_error_details: None,
                 },
             )
         }
         Err(error) => {
             let timed_out = error.code == crate::core::ErrorCode::RemoteCommandTimeout;
             let refresh_error_code = error.code.as_str().to_string();
+            let mut resolved = observed;
+            resolved.reasons.insert(
+                0,
+                if timed_out {
+                    "bounded_admission_refresh_timeout"
+                } else {
+                    "bounded_admission_refresh_failed"
+                }
+                .to_string(),
+            );
             (
-                observed,
+                resolved,
                 LabInventoryAdmissionDiagnostic {
                     observed_state,
                     observed_at_ms,
@@ -2435,6 +2448,7 @@ where
                     },
                     refresh_error_code: Some(refresh_error_code),
                     refresh_error: Some(error.message),
+                    refresh_error_details: Some(error.details),
                 },
             )
         }
@@ -4116,14 +4130,14 @@ mod tests {
     #[test]
     fn fresh_empty_inventory_does_not_open_a_refresh_probe() {
         let (resolved, diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Absent),
             100,
             || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
         );
 
         assert_eq!(
             resolved.state,
-            crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
+            crate::runner::runners::LabRunnerReadinessState::Absent
         );
         assert!(!diagnostic.refresh_attempted);
         assert_eq!(diagnostic.observed_at_ms, 100);
@@ -4194,7 +4208,7 @@ mod tests {
             },
         );
         let (fresh_empty, fresh_diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Absent),
             300,
             || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
         );
