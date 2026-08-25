@@ -487,29 +487,30 @@ impl Default for VerifyGateOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskGateSetupEvidence {
-    pub schema: String,
-    /// The workspace whose dependency state this setup evidence describes.
-    pub workspace: String,
-    pub package_root: String,
-    pub lock_identity: String,
-    pub setup_capability: String,
-    pub duration_ms: u128,
-    pub status: String,
-    pub output: String,
-}
+pub type AgentTaskGateSetupEvidence = homeboy_core::deps::DependencyHydrationOutcome;
 
-const MAX_GATE_DEPENDENCY_ROOTS: usize = 64;
-
-/// Discover only the checkout root and direct child roots. A directory is not a
-/// dependency root merely because it exists: it must declare a supported,
-/// content-addressed manifest or lock source. Provider resolution,
-/// package-manager detection, and install commands remain outside Homeboy core.
+/// Ask the generic dependency-provider resolver about the checkout root and its
+/// direct children. This layer does not inspect manifests, infer ecosystems, or
+/// construct install commands.
+#[cfg(test)]
 pub(crate) fn hydrate_gate_dependency_roots(
     checkout: &Path,
     enabled: bool,
     workspace: &str,
+) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+    hydrate_gate_dependency_roots_with_policy(
+        checkout,
+        enabled,
+        workspace,
+        &homeboy_core::deps::DependencyHydrationPolicy::default(),
+    )
+}
+
+pub(crate) fn hydrate_gate_dependency_roots_with_policy(
+    checkout: &Path,
+    enabled: bool,
+    workspace: &str,
+    policy: &homeboy_core::deps::DependencyHydrationPolicy,
 ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
     if !enabled {
         return Ok(Vec::new());
@@ -541,168 +542,31 @@ pub(crate) fn hydrate_gate_dependency_roots(
         }
     }
     candidates.sort();
-    let mut roots = Vec::new();
     let mut evidence = Vec::new();
     for candidate in candidates {
-        let relative = dependency_root_relative(checkout, &candidate);
-        let Some(lock_identity) = dependency_root_identity(&candidate)? else {
-            evidence.push(AgentTaskGateSetupEvidence {
-                schema: "homeboy/agent-task-gate-setup/v1".to_string(),
-                workspace: workspace.to_string(),
-                package_root: relative,
-                lock_identity: "none".to_string(),
-                setup_capability: "dependency.discovery".to_string(),
-                duration_ms: 0,
-                status: "skipped".to_string(),
-                output: "skipped: no supported dependency manifest with a deterministic lock/source identity".to_string(),
-            });
-            continue;
-        };
-        roots.push(DependencyRoot {
-            path: candidate,
-            lock_identity,
-        });
-    }
-    if roots.len() > MAX_GATE_DEPENDENCY_ROOTS {
-        return Err(Error::validation_invalid_argument(
-            "promotion.gate_setup",
-            format!(
-                "candidate declares more than {MAX_GATE_DEPENDENCY_ROOTS} dependency roots at the supported depth"
-            ),
-            Some(checkout.display().to_string()),
-            None,
-        ));
-    }
-    let hydrated = std::thread::scope(|scope| {
-        roots
-            .into_iter()
-            .map(|root| scope.spawn(move || hydrate_dependency_root(root)))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|worker| {
-                worker.join().map_err(|_| {
-                    Error::internal_unexpected("dependency root hydration worker panicked")
-                })?
-            })
-            .collect::<Result<Vec<_>>>()
-    })?;
-    for setup in hydrated.into_iter().flatten() {
-        evidence.push(AgentTaskGateSetupEvidence {
-            schema: "homeboy/agent-task-gate-setup/v1".to_string(),
-            workspace: workspace.to_string(),
-            package_root: dependency_root_relative(checkout, &setup.root),
-            lock_identity: setup.lock_identity,
-            setup_capability: "dependency.install".to_string(),
-            duration_ms: setup.duration_ms,
-            status: "succeeded".to_string(),
-            output: "provider-declared dependency setup completed".to_string(),
-        });
-    }
-    evidence.sort_by(|left, right| left.package_root.cmp(&right.package_root));
-    Ok(evidence)
-}
-
-struct DependencyRoot {
-    path: PathBuf,
-    lock_identity: String,
-}
-
-struct HydratedDependencyRoot {
-    root: PathBuf,
-    lock_identity: String,
-    duration_ms: u128,
-}
-
-fn hydrate_dependency_root(root: DependencyRoot) -> Result<Option<HydratedDependencyRoot>> {
-    // The identity is an input to setup, not a post-setup cache key. A provider
-    // that rewrites it has not verified the declared candidate.
-    let started = std::time::Instant::now();
-    if !homeboy_core::hygiene::materialize_worktree_dependencies(&root.path)? {
-        return Ok(None);
-    }
-    if dependency_root_identity(&root.path)?.as_deref() != Some(&root.lock_identity) {
-        return Err(Error::validation_invalid_argument(
-            "promotion.gate_setup",
-            "dependency setup changed its declared lock identity",
-            Some(root.path.display().to_string()),
-            None,
-        ));
-    }
-    Ok(Some(HydratedDependencyRoot {
-        root: root.path,
-        lock_identity: root.lock_identity,
-        duration_ms: started.elapsed().as_millis(),
-    }))
-}
-
-fn dependency_root_relative(checkout: &Path, root: &Path) -> String {
-    let relative = root
-        .strip_prefix(checkout)
-        .unwrap_or(root)
-        .display()
-        .to_string();
-    if relative.is_empty() {
-        ".".to_string()
-    } else {
-        relative
-    }
-}
-
-fn dependency_root_identity(root: &Path) -> Result<Option<String>> {
-    const SOURCE_FILES: &[&str] = &[
-        "homeboy.json",
-        "homeboy-deps.json",
-        "package.json",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb",
-    ];
-    let has_node_lock = [
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb",
-    ]
-    .iter()
-    .any(|name| root.join(name).is_file());
-    let has_homeboy_manifest = ["homeboy.json", "homeboy-deps.json"]
-        .iter()
-        .any(|name| root.join(name).is_file());
-    let has_cargo_root = root.join("Cargo.toml").is_file() && root.join("Cargo.lock").is_file();
-    let has_composer_root =
-        root.join("composer.json").is_file() && root.join("composer.lock").is_file();
-    if !has_node_lock && !has_homeboy_manifest && !has_cargo_root && !has_composer_root {
-        return Ok(None);
-    }
-
-    let mut inputs = Vec::new();
-    for name in SOURCE_FILES.iter().copied().chain([
-        "Cargo.toml",
-        "Cargo.lock",
-        "composer.json",
-        "composer.lock",
-    ]) {
-        let path = root.join(name);
-        if path.is_file() {
-            inputs.push((
-                name.to_string(),
-                fs::read(&path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                })?,
-            ));
+        let relative = candidate
+            .strip_prefix(checkout)
+            .unwrap_or(&candidate)
+            .display()
+            .to_string();
+        let relative = if relative.is_empty() { "." } else { &relative };
+        let mut outcomes = homeboy_core::deps::hydrate_declared_dependencies(
+            &candidate, workspace, relative, policy,
+        )?;
+        let failed = outcomes
+            .iter()
+            .any(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed);
+        evidence.append(&mut outcomes);
+        if failed {
+            break;
         }
     }
-    inputs.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut hasher = Sha256::new();
-    for (name, bytes) in inputs {
-        hasher.update(name.as_bytes());
-        hasher.update([0]);
-        hasher.update(bytes);
-    }
-    Ok(Some(format!("sha256:{:x}", hasher.finalize())))
+    evidence.sort_by(|left, right| {
+        left.package_root
+            .cmp(&right.package_root)
+            .then_with(|| left.provider_id.cmp(&right.provider_id))
+    });
+    Ok(evidence)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4514,18 +4378,10 @@ mod tests {
     }
 
     #[test]
-    fn root_package_lock_hydrates_once_and_skips_unrelated_directories() {
+    fn root_declared_provider_hydrates_once_and_skips_unrelated_directories() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let checkout = tempfile::tempdir().expect("checkout");
             let root = checkout.path();
-            fs::write(root.join("package-lock.json"), "{\"lockfileVersion\":3}\n")
-                .expect("package lock");
-            assert!(
-                dependency_root_identity(root)
-                    .expect("package-lock identity")
-                    .is_some(),
-                "a package lock is a deterministic Node dependency source"
-            );
             fs::write(
                 root.join("homeboy-deps.json"),
                 r#"{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}"#,
@@ -4539,30 +4395,55 @@ mod tests {
                 hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
             let succeeded = evidence
                 .iter()
-                .filter(|setup| setup.status == "succeeded")
+                .filter(|setup| {
+                    setup.status == homeboy_core::deps::DependencyHydrationStatus::Succeeded
+                })
                 .collect::<Vec<_>>();
             assert_eq!(succeeded.len(), 1);
             assert_eq!(succeeded[0].package_root, ".");
-            assert_ne!(succeeded[0].lock_identity, "none");
             assert_eq!(
                 fs::read_to_string(root.join("hydration-count")).unwrap(),
                 "hydrated"
             );
-
-            let skipped = evidence
-                .iter()
-                .filter(|setup| setup.status == "skipped")
-                .map(|setup| setup.package_root.as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                skipped,
-                vec![".claude", "docs", "packages", "scripts", "tests"]
-            );
-            assert!(evidence
-                .iter()
-                .filter(|setup| setup.status == "skipped")
-                .all(|setup| setup.setup_capability == "dependency.discovery"));
+            assert_eq!(evidence.len(), 1);
         });
+    }
+
+    #[test]
+    fn promotion_hydration_contains_no_ecosystem_specific_knowledge() {
+        let gate_source = include_str!("agent_task_gate.rs").to_ascii_lowercase();
+        let gate_hydration = gate_source
+            .split("pub type agenttaskgatesetupevidence")
+            .nth(1)
+            .expect("gate hydration start")
+            .split("pub struct agenttaskgatereport")
+            .next()
+            .expect("gate hydration end");
+        let promotion_source = include_str!("agent_task_promotion/promote.rs").to_ascii_lowercase();
+        let promotion_hydration = promotion_source
+            .split("let destination_gate_setup")
+            .nth(1)
+            .expect("promotion hydration start")
+            .split("let declared_gates")
+            .next()
+            .expect("promotion hydration end");
+        let forbidden = [
+            ["com", "poser"].concat(),
+            ["n", "pm"].concat(),
+            ["car", "go"].concat(),
+            ["no", "de"].concat(),
+            ["package", ".json"].concat(),
+            ["vendor", "/autoload"].concat(),
+            ["installed", ".json"].concat(),
+        ];
+        for source in [gate_hydration, promotion_hydration] {
+            for term in &forbidden {
+                assert!(
+                    !source.contains(term),
+                    "promotion hydration must not contain ecosystem term `{term}`"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
