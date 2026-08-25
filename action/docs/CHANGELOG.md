@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.12] - 2026-08-25
+
+### Changed
+- cover equivalent failed test evidence
+
 ## [2.15.11] - 2026-08-25
 
 ### Fixed
