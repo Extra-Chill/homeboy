@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.0] - 2026-08-25
+
+### Added
+- adopt provider worktree tracker ownership
+
+### Changed
+- read durable aggregate through store
+
+### Fixed
+- restore Unix digest memo boundary
+- surface causal provider failures
+- converge initial lifecycle admission
+- retain Cook gates in review promotion
+- compose inspection flags and targets
+- preserve preacceptance transport evidence
+
 ## [0.360.5] - 2026-08-25
 
 ### Changed
