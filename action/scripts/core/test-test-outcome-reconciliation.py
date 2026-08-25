@@ -19,14 +19,17 @@ STEM = "review-test"
 BASELINE_STATUS = {COMMAND: {"status": "fail", "exit_code": 1, "structured_output": True}}
 
 
-def gate(current: Path, baseline: Path, command: str = COMMAND) -> dict:
-    completed = subprocess.run(
+def run_gate(current: Path, baseline: Path, command: str = COMMAND) -> subprocess.CompletedProcess:
+    return subprocess.run(
         ["python3", str(GATE), json.dumps({command: "fail"}), str(current), str(baseline)],
         check=True,
         text=True,
         capture_output=True,
     )
-    return json.loads(completed.stdout)
+
+
+def gate(current: Path, baseline: Path, command: str = COMMAND) -> dict:
+    return json.loads(run_gate(current, baseline, command).stdout)
 
 
 def install_pair(directory: Path, prefix: str) -> None:
@@ -108,6 +111,36 @@ def main() -> None:
             json.dumps({bare_suffixed: BASELINE_STATUS[COMMAND]}), encoding="utf-8"
         )
         assert gate(current, baseline, bare_suffixed) == {bare_suffixed: "fail"}, "bare suffixed Test uses canonical sidecar identity"
+
+        # A producer that could not produce evidence says why, in the sidecar it
+        # writes instead. The gate must repeat that reason: rejecting a PR with
+        # "the sidecars are malformed" and nothing else is what made
+        # Extra-Chill/extrachill-users#377 unactionable across two rerun cycles.
+        # Extra-Chill/homeboy#13494.
+        for path in current.iterdir():
+            path.unlink()
+        for path in baseline.iterdir():
+            if path.name != "baseline-status.json":
+                path.unlink()
+        install_pair(current, "13290-candidate")
+        install_pair(baseline, "13290-baseline")
+        (baseline / "baseline-status.json").write_text(
+            json.dumps(BASELINE_STATUS), encoding="utf-8"
+        )
+        reason = "internal runtime inventory producer emitted invalid evidence: test inventory workspace provenance did not match the bound workspace"
+        for kind, schema in (("outcomes", "homeboy/test-outcomes/v1"), ("inventory", "homeboy/test-inventory/v1")):
+            (current / f"{STEM}.test-{kind}.json").write_text(
+                json.dumps({
+                    "schema": schema,
+                    "command": COMMAND,
+                    "invalid_evidence": {"type": "invalid_evidence", "reason": reason},
+                }),
+                encoding="utf-8",
+            )
+        completed = run_gate(current, baseline)
+        assert json.loads(completed.stdout) == {COMMAND: "invalid_evidence"}, "declared invalid evidence must fail closed"
+        assert "candidate: " + reason in completed.stderr, completed.stderr
+        assert "baseline" not in completed.stderr.split("provenance-mismatched")[1], completed.stderr
 
     print("PASS: Test outcome/inventory reconciliation fixtures")
 
