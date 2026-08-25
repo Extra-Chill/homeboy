@@ -118,6 +118,7 @@ pub struct DependencyHydrationOutcome {
 pub struct DependencyHydrationProgress {
     pub provider_id: String,
     pub phase: String,
+    pub current: Option<String>,
     pub elapsed_ms: u128,
     pub last_progress_ms_ago: Option<u128>,
 }
@@ -172,6 +173,7 @@ pub fn hydrate_declared_dependencies(
         (policy.on_progress)(&DependencyHydrationProgress {
             provider_id: provider_id.clone(),
             phase: "assessing_reusable_state".to_string(),
+            current: None,
             elapsed_ms: 0,
             last_progress_ms_ago: None,
         });
@@ -240,6 +242,7 @@ pub fn hydrate_declared_dependencies(
         (policy.on_progress)(&DependencyHydrationProgress {
             provider_id: provider_id.clone(),
             phase: "installing".to_string(),
+            current: None,
             elapsed_ms: started.elapsed().as_millis(),
             last_progress_ms_ago: None,
         });
@@ -348,14 +351,7 @@ fn run_hydration_command(
             policy.heartbeat_interval.max(Duration::from_millis(1)),
             move || cancellation(),
             |heartbeat| {
-                progress(&DependencyHydrationProgress {
-                    provider_id: provider_id.to_string(),
-                    phase: phase.to_string(),
-                    elapsed_ms: heartbeat.elapsed.as_millis(),
-                    last_progress_ms_ago: heartbeat
-                        .last_progress_elapsed
-                        .map(|value| value.as_millis()),
-                });
+                progress(&hydration_progress(provider_id, phase, &heartbeat));
                 Ok(())
             },
         )
@@ -368,6 +364,27 @@ fn run_hydration_command(
         SupervisedCommandTermination::Cancelled => Err(DependencyHydrationTermination::Cancelled),
         SupervisedCommandTermination::TimedOut => Err(DependencyHydrationTermination::TimedOut),
         SupervisedCommandTermination::NoProgress => Err(DependencyHydrationTermination::NoProgress),
+    }
+}
+
+fn hydration_progress(
+    provider_id: &str,
+    fallback_phase: &str,
+    heartbeat: &homeboy_engine_primitives::command::SupervisedCommandHeartbeat,
+) -> DependencyHydrationProgress {
+    let command_progress = heartbeat.progress.as_ref();
+    DependencyHydrationProgress {
+        provider_id: provider_id.to_string(),
+        phase: command_progress
+            .map(|progress| progress.phase.clone())
+            .unwrap_or_else(|| fallback_phase.to_string()),
+        current: command_progress
+            .and_then(|progress| progress.current.as_deref())
+            .map(crate::redaction::redact_string),
+        elapsed_ms: heartbeat.elapsed.as_millis(),
+        last_progress_ms_ago: heartbeat
+            .last_progress_elapsed
+            .map(|value| value.as_millis()),
     }
 }
 
@@ -1010,6 +1027,27 @@ mod tests {
                 progress.lock().unwrap().push(event.phase.clone());
             }),
         }
+    }
+
+    #[test]
+    fn hydration_heartbeat_preserves_generic_child_phase_and_current() {
+        let heartbeat = homeboy_engine_primitives::command::SupervisedCommandHeartbeat {
+            elapsed: Duration::from_millis(4_200),
+            last_progress_elapsed: Some(Duration::from_millis(175)),
+            progress: Some(homeboy_engine_primitives::command::CommandProgress {
+                phase: "building".to_string(),
+                current: Some("shared-component".to_string()),
+            }),
+            output_tail: String::new(),
+        };
+
+        let progress = hydration_progress("fixture-provider", "installing", &heartbeat);
+
+        assert_eq!(progress.provider_id, "fixture-provider");
+        assert_eq!(progress.phase, "building");
+        assert_eq!(progress.current.as_deref(), Some("shared-component"));
+        assert_eq!(progress.elapsed_ms, 4_200);
+        assert_eq!(progress.last_progress_ms_ago, Some(175));
     }
 
     #[test]
