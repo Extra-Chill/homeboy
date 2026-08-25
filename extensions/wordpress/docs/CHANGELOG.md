@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.7] - 2026-08-25
+
+### Changed
+- isolate WP Codebox resolver smokes
+
 ## [3.38.6] - 2026-08-24
 
 ### Fixed
