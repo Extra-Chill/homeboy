@@ -4131,7 +4131,7 @@ fn preview_destination_blocker(handle: &str, problem: &str) -> homeboy::core::Er
 }
 
 #[derive(Debug, Clone)]
-struct CookRepositoryIdentity {
+pub(super) struct CookRepositoryIdentity {
     repository_name: String,
     slug: String,
     aliases: Vec<String>,
@@ -4155,7 +4155,8 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
         let Some(value) = value else {
             continue;
         };
-        let resolved = cook_repository_identities_for_workspace(flag, value)?;
+        let resolved =
+            cook_repository_identities_for_workspace(flag, value, args.dispatch.repo.as_deref())?;
         source_identities.push((flag, resolved.clone()));
         identities.extend(resolved);
     }
@@ -4383,9 +4384,10 @@ fn require_explicit_cook_repo(args: &AgentTaskCookArgs, reason: &str) -> homeboy
     ]))
 }
 
-fn cook_repository_identities_for_workspace(
+pub(super) fn cook_repository_identities_for_workspace(
     flag: &str,
     value: &str,
+    requested_repository: Option<&str>,
 ) -> homeboy::core::Result<Vec<CookRepositoryIdentity>> {
     let path = Path::new(value);
     let workspace_path = if path.is_dir() {
@@ -4409,7 +4411,10 @@ fn cook_repository_identities_for_workspace(
             homeboy::core::git::remote_url(&git_root, remote).map(|url| (remote.to_string(), url))
         })
         .collect::<Vec<_>>();
-    let configured = homeboy::core::component::registered()?;
+    let configured = match requested_repository {
+        Some(repository) => cook_components_for_repository_name(repository)?,
+        None => homeboy::core::component::registered()?,
+    };
     let mut identities = Vec::new();
     for (remote_name, remote_url) in remotes {
         let Some(remote_identity) = canonical_remote_identity(&remote_url) else {
