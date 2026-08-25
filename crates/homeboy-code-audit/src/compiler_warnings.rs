@@ -11,7 +11,7 @@ use super::compiler_warning_provider::AuditCompilerWarning;
 use super::{AuditFinding, Finding, Severity};
 
 /// Run compiler checks and return findings for any warnings detected.
-pub fn run(root: &Path) -> Vec<Finding> {
+pub(crate) fn run(root: &Path) -> Vec<Finding> {
     warnings_to_findings(super::compiler_warning_provider::compiler_warnings_for_root(root))
 }
 

@@ -5,7 +5,7 @@ use super::fingerprint::FileFingerprint;
 use homeboy_audit_contract::TestMappingConfig;
 
 /// Partition fingerprints into source files and test files based on the config.
-pub fn partition_fingerprints<'a>(
+pub(crate) fn partition_fingerprints<'a>(
     fingerprints: &[&'a FileFingerprint],
     config: &TestMappingConfig,
 ) -> (Vec<&'a FileFingerprint>, Vec<&'a FileFingerprint>) {
@@ -24,7 +24,9 @@ pub fn partition_fingerprints<'a>(
 }
 
 /// Build a class/stem name → source file path index from source fingerprints.
-pub fn build_source_name_index<'a>(source_fps: &[&'a FileFingerprint]) -> HashMap<String, &'a str> {
+pub(crate) fn build_source_name_index<'a>(
+    source_fps: &[&'a FileFingerprint],
+) -> HashMap<String, &'a str> {
     let mut index = HashMap::new();
     for fp in source_fps {
         if let Some(stem) = extract_file_stem(&fp.relative_path) {
@@ -35,7 +37,7 @@ pub fn build_source_name_index<'a>(source_fps: &[&'a FileFingerprint]) -> HashMa
 }
 
 /// Discover a source file for a test file by class name, falling back from template matching.
-pub fn discover_source_file<'a>(
+pub(crate) fn discover_source_file<'a>(
     test_path: &str,
     config: &TestMappingConfig,
     source_name_index: &HashMap<String, &'a str>,
@@ -86,7 +88,7 @@ pub(crate) fn is_test_file(path: &str, config: &TestMappingConfig) -> bool {
 /// Convert a source file path to its expected test file path using the template.
 ///
 /// Template variables: `{dir}` (relative dir within source_dir), `{name}` (stem), `{ext}` (extension).
-pub fn source_to_test_path(source_path: &str, config: &TestMappingConfig) -> Option<String> {
+pub(crate) fn source_to_test_path(source_path: &str, config: &TestMappingConfig) -> Option<String> {
     let source_dir = config
         .source_dirs
         .iter()
@@ -113,7 +115,7 @@ pub fn source_to_test_path(source_path: &str, config: &TestMappingConfig) -> Opt
 }
 
 /// Convert a test file path back to its expected source file path.
-pub fn test_to_source_path(test_path: &str, config: &TestMappingConfig) -> Option<String> {
+pub(crate) fn test_to_source_path(test_path: &str, config: &TestMappingConfig) -> Option<String> {
     let pattern = &config.test_file_pattern;
     let test_dir = config.test_dirs.first()?;
 

@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 /// Types of claims that can be extracted from documentation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClaimType {
+pub(crate) enum ClaimType {
     /// File path reference (e.g., `src/main.rs`, `/inc/foo/bar.php`)
     FilePath,
     /// Directory path reference (e.g., `src/core/`, `/inc/Engine/`)
@@ -26,7 +26,7 @@ pub enum ClaimType {
 /// How confident we are that a claim is a real reference vs. a placeholder/example.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClaimConfidence {
+pub(crate) enum ClaimConfidence {
     /// Real reference — expected to resolve against codebase
     Real,
     /// Likely a placeholder or example (inside code block, generic names)
@@ -37,7 +37,7 @@ pub enum ClaimConfidence {
 
 /// A claim extracted from documentation.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct Claim {
+pub(crate) struct Claim {
     pub claim_type: ClaimType,
     pub value: String,
     pub doc_file: String,
@@ -208,7 +208,11 @@ fn classify_class_confidence(value: &str, line: &str, in_code_block: bool) -> Cl
 ///
 /// The `ignore_patterns` parameter allows components to filter out platform-specific
 /// patterns (e.g., `/wp-json/*` for WordPress) without hardcoding them in core.
-pub fn extract_claims(content: &str, doc_file: &str, ignore_patterns: &[String]) -> Vec<Claim> {
+pub(crate) fn extract_claims(
+    content: &str,
+    doc_file: &str,
+    ignore_patterns: &[String],
+) -> Vec<Claim> {
     let mut claims = Vec::new();
 
     // Track which positions we've already claimed to avoid duplicates

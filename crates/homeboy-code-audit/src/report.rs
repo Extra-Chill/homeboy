@@ -264,7 +264,7 @@ pub struct FixabilityKindBreakdown {
 }
 
 /// Build an audit summary from a result and exit code.
-pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSummaryOutput {
+pub(crate) fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSummaryOutput {
     let warnings = result
         .findings
         .iter()
@@ -309,13 +309,13 @@ pub fn build_audit_summary(result: &CodeAuditResult, exit_code: i32) -> AuditSum
     }
 }
 
-pub fn build_unbaselined_finding_summary(
+pub(crate) fn build_unbaselined_finding_summary(
     comparison: &baseline::BaselineComparison,
 ) -> Vec<baseline::NewFinding> {
     comparison.new_items.iter().take(20).cloned().collect()
 }
 
-pub fn build_baseline_filtering_summary(
+pub(crate) fn build_baseline_filtering_summary(
     result: &CodeAuditResult,
     comparison: &baseline::BaselineComparison,
     baseline: &baseline::AuditBaseline,
@@ -387,7 +387,7 @@ fn build_finding_groups(result: &CodeAuditResult) -> Vec<AuditSummaryGroup> {
     grouped
 }
 
-pub fn build_changed_since_summary(
+pub(crate) fn build_changed_since_summary(
     result: &CodeAuditResult,
     comparison: &baseline::BaselineComparison,
 ) -> AuditChangedSinceSummary {

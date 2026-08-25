@@ -5,20 +5,11 @@
 
 use std::path::Path;
 
-use super::detectors::source_policy;
 use super::engine::{audit_internal, AuditExecution};
 use super::execution_plan::AuditExecutionPlan;
-use super::findings::Finding;
 use super::types::{AuditWithAnalysis, CodeAuditResult};
-use super::{fingerprint, walker};
 use homeboy_audit_contract::AuditConfig;
 use homeboy_error::Result;
-
-/// Audit a registered component by ID.
-pub fn audit_component(component_id: &str) -> Result<CodeAuditResult> {
-    let comp = super::component_provider::resolve_effective(component_id)?;
-    audit_path_with_id(component_id, &comp.local_path)
-}
 
 /// Read reference dependency paths from HOMEBOY_AUDIT_REFERENCE_PATHS env var.
 ///
@@ -37,7 +28,11 @@ fn read_reference_paths_from_env() -> Vec<String> {
 }
 
 /// Audit a filesystem path directly (no registered component needed).
-pub fn audit_path(path: &str) -> Result<CodeAuditResult> {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by this crate's tests"
+)]
+pub(crate) fn audit_path(path: &str) -> Result<CodeAuditResult> {
     let p = Path::new(path);
     if !p.is_dir() {
         return Err(homeboy_error::Error::validation_invalid_argument(
@@ -74,37 +69,6 @@ pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeA
         },
     )
     .map(|audit| audit.result)
-}
-
-/// Run only configured source policies for a component path.
-pub fn source_policy_findings_for_path(
-    component_id: &str,
-    source_path: &str,
-) -> Result<Vec<Finding>> {
-    let root = Path::new(source_path);
-    if !root.is_dir() {
-        return Err(homeboy_error::Error::validation_invalid_argument(
-            "path",
-            format!("Not a directory: {source_path}"),
-            None,
-            None,
-        ));
-    }
-
-    let audit_config = audit_config_for(component_id, root, &[]);
-    let snapshot = walker::walk_all_source_files_snapshot(root);
-    let fingerprints = snapshot
-        .iter()
-        .filter_map(|(path, content)| fingerprint::fingerprint_content(path, root, content))
-        .collect::<Vec<_>>();
-    let fingerprint_refs = fingerprints.iter().collect::<Vec<_>>();
-
-    source_policy::validate_source_roots(&fingerprint_refs, &audit_config.source_policies)?;
-
-    Ok(source_policy::run(
-        &fingerprint_refs,
-        &audit_config.source_policies,
-    ))
 }
 
 pub(crate) fn audit_path_with_id_with_plan_and_analysis(

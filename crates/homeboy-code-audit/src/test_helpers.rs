@@ -10,7 +10,11 @@ use super::{AuditFinding, AuditSummary, CodeAuditResult, ConventionReport, Findi
 ///
 /// Sets `status` to `Clean`, `total_files` to 3, `confidence` to 1.0,
 /// and leaves `conforming`, `outliers`, and optional fields empty.
-pub fn make_convention(
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by this crate's tests"
+)]
+pub(crate) fn make_convention(
     name: &str,
     glob: &str,
     methods: &[&str],
@@ -53,7 +57,11 @@ pub fn empty_result() -> CodeAuditResult {
 }
 
 /// Build a `Finding` with the given severity for testing.
-pub fn make_finding(severity: Severity) -> Finding {
+#[allow(
+    dead_code,
+    reason = "no production caller; exercised by this crate's tests"
+)]
+pub(crate) fn make_finding(severity: Severity) -> Finding {
     Finding {
         convention: "TestConvention".to_string(),
         severity,

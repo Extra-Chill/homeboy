@@ -62,7 +62,7 @@ use self::hash::{normalize_whitespace, replace_string_literals};
 ///
 /// This is the core replacement for extension fingerprint scripts.
 /// Returns None if the grammar doesn't support the minimum required patterns.
-pub fn fingerprint_from_grammar(
+pub(crate) fn fingerprint_from_grammar(
     content: &str,
     grammar: &Grammar,
     relative_path: &str,

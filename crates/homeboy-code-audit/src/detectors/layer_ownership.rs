@@ -17,13 +17,13 @@ use super::findings::{Finding, Severity};
 mod layer_ownership_test;
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct AuditRulesConfig {
+pub(crate) struct AuditRulesConfig {
     #[serde(default)]
     pub layer_rules: Vec<LayerRule>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct LayerRule {
+pub(crate) struct LayerRule {
     pub name: String,
     pub forbid: LayerForbid,
     #[serde(default)]
@@ -31,14 +31,14 @@ pub struct LayerRule {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct LayerForbid {
+pub(crate) struct LayerForbid {
     pub glob: String,
     #[serde(default)]
     pub patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct LayerAllow {
+pub(crate) struct LayerAllow {
     pub glob: String,
 }
 

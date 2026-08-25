@@ -21,14 +21,14 @@ use super::fingerprint::FileFingerprint;
 
 /// Configuration for wrapper inference rules, loaded from homeboy.json.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct WrapperInferenceConfig {
+pub(crate) struct WrapperInferenceConfig {
     #[serde(default)]
     pub wrapper_rules: Vec<WrapperRule>,
 }
 
 /// A single wrapper inference rule.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct WrapperRule {
+pub(crate) struct WrapperRule {
     /// Human-readable rule name (e.g., "tool_ability_link").
     pub name: String,
 

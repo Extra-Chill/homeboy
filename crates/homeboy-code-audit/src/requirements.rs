@@ -30,31 +30,31 @@ use homeboy_audit_contract::{
 /// Symbols guaranteed to be defined at runtime given the plugin's declared
 /// requirements and its explicit bootstrap wiring.
 #[derive(Debug, Default, Clone)]
-pub struct KnownSymbols {
+pub(crate) struct KnownSymbols {
     pub functions: HashSet<String>,
     pub classes: HashSet<String>,
     pub constants: HashSet<String>,
 }
 
 impl KnownSymbols {
-    pub fn has_function(&self, name: &str) -> bool {
+    pub(crate) fn has_function(&self, name: &str) -> bool {
         self.functions.contains(name)
     }
 
-    pub fn has_class(&self, name: &str) -> bool {
+    pub(crate) fn has_class(&self, name: &str) -> bool {
         // Case-insensitive lookup: type/class identifiers in several ecosystems
         // are case-insensitive, so normalize before comparing.
         let lower = name.to_ascii_lowercase();
         self.classes.iter().any(|c| c.to_ascii_lowercase() == lower)
     }
 
-    pub fn has_constant(&self, name: &str) -> bool {
+    pub(crate) fn has_constant(&self, name: &str) -> bool {
         self.constants.contains(name)
     }
 }
 
 /// Entry point: inspect a plugin root and return the set of guaranteed symbols.
-pub fn known_available_symbols(root: &Path, audit_config: &AuditConfig) -> KnownSymbols {
+pub(crate) fn known_available_symbols(root: &Path, audit_config: &AuditConfig) -> KnownSymbols {
     let mut symbols = KnownSymbols::default();
     let providers = &audit_config.known_symbols;
     let entry_file_extensions = entry_file_extensions(audit_config);
@@ -113,7 +113,7 @@ fn find_bootstrap_files(
 /// Locate a root-level entry file whose header contains an extension-owned
 /// marker. Only files matching an extension-declared entry-file extension are
 /// considered; with no declared extensions, nothing matches.
-pub fn find_file_with_marker(
+pub(crate) fn find_file_with_marker(
     root: &Path,
     marker: &str,
     entry_file_extensions: &[String],
@@ -138,7 +138,7 @@ pub fn find_file_with_marker(
     None
 }
 
-pub fn parse_header_version(main_file: &Path, header: &str) -> Option<u32> {
+pub(crate) fn parse_header_version(main_file: &Path, header: &str) -> Option<u32> {
     let content = std::fs::read_to_string(main_file).ok()?;
     for line in content.lines().take(80) {
         if let Some(rest) = line.split_once(header) {
@@ -200,7 +200,7 @@ fn insert_symbol(symbols: &mut KnownSymbols, name: &str, kind: &KnownSymbolKind)
 /// hardcode any single language's syntax. "Unconditional" means: not inside an
 /// `if (...) {` block whose opening line mentions one of the configured guard
 /// markers.
-pub fn parse_bootstrap_requires(
+pub(crate) fn parse_bootstrap_requires(
     main_file: &Path,
     root: &Path,
     scan: &KnownSymbolSourceScanConfig,

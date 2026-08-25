@@ -7,11 +7,11 @@ use super::conventions::{Convention, Outlier};
 
 // `CheckStatus` now lives in the shared audit contract; re-exported so existing
 // `crate::checks::CheckStatus` and `crate::CheckStatus` paths resolve.
-pub use homeboy_audit_contract::CheckStatus;
+pub(crate) use homeboy_audit_contract::CheckStatus;
 
 /// Result of checking a set of conventions.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct CheckResult {
+pub(crate) struct CheckResult {
     /// The convention that was checked.
     pub convention_name: String,
     /// Whether the convention is healthy (no outliers).
@@ -25,7 +25,7 @@ pub struct CheckResult {
 }
 
 /// Run checks on all discovered conventions.
-pub fn check_conventions(conventions: &[Convention]) -> Vec<CheckResult> {
+pub(crate) fn check_conventions(conventions: &[Convention]) -> Vec<CheckResult> {
     conventions
         .iter()
         .map(|conv| {
