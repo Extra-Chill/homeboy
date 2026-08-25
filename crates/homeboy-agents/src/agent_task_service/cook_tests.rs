@@ -11600,6 +11600,47 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
 }
 
 #[test]
+fn transport_retry_continuation_keeps_timeout_retry_budget_on_the_typed_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-lab-timeout-continuation";
+        let run_id = "cook-lab-timeout-continuation-attempt-1-transport-retry";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.max_attempts = 2;
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize controller-owned transport retry");
+
+        let accepted = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("accepted Lab attempt returns");
+        assert_eq!(accepted.value.status, "in_flight");
+        assert_eq!(accepted.value.attempts[0].run_id, run_id);
+        assert_eq!(
+            super::super::resolve_cook_continuation_run_id(run_id)
+                .expect("printed continuation resolves exact attempt"),
+            run_id
+        );
+
+        seed_timeout_review_form_aggregate(run_id, &options.initial_plan);
+        let timed_out =
+            agent_task_lifecycle::status(run_id).expect("typed timeout remains readable");
+        assert_eq!(
+            timed_out.state,
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+
+        let retry = crate::agent_task_service::retry(run_id, None, false, false)
+            .expect("remaining Cook retry budget is consumable");
+        let recipe = super::super::load_recipe(cook_id).expect("updated Cook recipe");
+        assert_eq!(retry.record.metadata["retry_of"], run_id);
+        assert_eq!(retry.record.metadata["cook_id"], cook_id);
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].attempt, 2);
+        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
+    });
+}
+
+#[test]
 fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-orphan-recovery";

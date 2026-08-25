@@ -34,7 +34,8 @@ use super::detail::{
 use super::download::{content_disposition_filename, download_remote_artifact, resolve_placement};
 use super::mirror::{
     bounded_remote_events, controller_artifact_metadata, import_mirrored_artifact_with_downloader,
-    mirror_daemon_evidence, mirror_job_run, mirror_remote_observation_runs_by_id_with,
+    mirror_daemon_evidence, mirror_job_run, mirror_job_run_request,
+    mirror_remote_observation_runs_by_id_with,
     mirror_remote_observation_runs_by_id_with_downloader, mirror_reverse_broker_evidence,
     mirror_terminal_job_artifacts_with, mirrored_patch_result, primary_mirrored_run,
     refresh_mirrored_daemon_evidence, refresh_mirrored_daemon_evidence_with, MirrorEvidenceRequest,
@@ -958,90 +959,176 @@ fn runner_exec_explicit_run_id_overrides_inferred_name() {
 
 #[test]
 fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
-    let lifecycle_store =
-        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
-    let command = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-    ];
-    lifecycle_store
-        .record_lab_offload_planned(homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
-            run_id: "agent-task-lab-mirror",
-            runner_id: "lab",
-            remote_workspace: "/srv/homeboy/project",
-            remote_command: &command,
-            durable_plan: None,
-        })
-        .expect("planned controller proxy");
-    let job_id = Uuid::new_v4();
-    let job = Job {
-        id: job_id,
-        operation: "exec".to_string(),
-        status: JobStatus::Running,
-        created_at_ms: 1_700_000_000_000,
-        updated_at_ms: 1_700_000_001_000,
-        started_at_ms: Some(1_700_000_000_000),
-        finished_at_ms: None,
-        event_count: 0,
-        source_snapshot: None,
-        path_materialization_plan: None,
-        stale_reason: None,
-        daemon_lease_id: None,
-        target_runner_id: None,
-        target_project_id: None,
-        claim_id: None,
-        claimed_by_runner_id: None,
-        claimed_at_ms: None,
-        claim_expires_at_ms: None,
-        artifacts: Vec::new(),
-        runner_job_projection: None,
-    };
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let lifecycle_store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        lifecycle_store
+            .record_lab_offload_planned(homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id: "agent-task-lab-mirror",
+                runner_id: "lab",
+                remote_workspace: "/srv/homeboy/project",
+                remote_command: &command,
+                durable_plan: None,
+            })
+            .expect("planned controller proxy");
+        let job_id = Uuid::new_v4();
+        let job = Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status: JobStatus::Running,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        };
 
-    mirror_job_run(
-        &store,
-        &ssh_runner(),
-        "/srv/homeboy/project",
-        &command,
-        &job,
-        &[],
-        &json!({}),
-        Some("agent-task-lab-mirror"),
-        None,
-    )
-    .expect("mirror Lab job");
-    let terminal_job = Job {
-        status: JobStatus::Succeeded,
-        finished_at_ms: Some(1_700_000_002_000),
-        ..job.clone()
-    };
-    let run = mirror_job_run(
-        &store,
-        &ssh_runner(),
-        "/srv/homeboy/project",
-        &command,
-        &terminal_job,
-        &[],
-        &json!({"exit_code": 0}),
-        Some("agent-task-lab-mirror"),
-        None,
-    )
-    .expect("mirror terminal Lab job");
-    let lifecycle = lifecycle_store
-        .read_record("agent-task-lab-mirror")
-        .expect("typed lifecycle remains readable");
+        mirror_job_run(
+            &store,
+            &ssh_runner(),
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            Some("agent-task-lab-mirror"),
+            None,
+        )
+        .expect("mirror Lab job");
+        let terminal_job = Job {
+            status: JobStatus::Succeeded,
+            finished_at_ms: Some(1_700_000_002_000),
+            ..job.clone()
+        };
+        let run = mirror_job_run(
+            &store,
+            &ssh_runner(),
+            "/srv/homeboy/project",
+            &command,
+            &terminal_job,
+            &[],
+            &json!({"exit_code": 0}),
+            Some("agent-task-lab-mirror"),
+            None,
+        )
+        .expect("mirror terminal Lab job");
+        let lifecycle = lifecycle_store
+            .read_record("agent-task-lab-mirror")
+            .expect("typed lifecycle remains readable");
 
-    assert_eq!(run.kind, "agent-task");
-    assert!(run.metadata_json.get("agent_task_run").is_some());
-    assert_eq!(lifecycle.metadata["runner_id"], "lab");
-    assert_eq!(lifecycle.metadata["runner_job_id"], job_id.to_string());
-    assert_eq!(
-        run.metadata_json["lab"]["remote_job"]["id"],
-        job_id.to_string()
-    );
+        assert_eq!(run.kind, "agent-task");
+        assert!(run.metadata_json.get("agent_task_run").is_some());
+        assert_eq!(lifecycle.metadata["runner_id"], "lab");
+        assert_eq!(lifecycle.metadata["runner_job_id"], job_id.to_string());
+        assert_eq!(
+            run.metadata_json["lab"]["remote_job"]["id"],
+            job_id.to_string()
+        );
+    });
+}
+
+#[test]
+fn transport_retry_lab_mirror_requires_and_preserves_the_controller_agent_task() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let lifecycle_store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let run_id = "agent-task-cook-attempt-1-transport-retry";
+        let runner = ssh_runner();
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--attempt-run-id".to_string(),
+            run_id.to_string(),
+        ];
+        let job_id = Uuid::new_v4();
+        let job = Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status: JobStatus::Running,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        };
+        let result = json!({});
+
+        let missing_proxy = MirrorEvidenceRequest::new(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            &[],
+            &result,
+            Some(run_id),
+            None,
+        )
+        .with_agent_task_run();
+        let error = mirror_job_run_request(&store, missing_proxy).unwrap_err();
+        assert!(error.message.contains("controller-owned agent-task run"));
+        assert!(store.get_run(run_id).expect("read run").is_none());
+
+        lifecycle_store
+            .record_lab_offload_planned(homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id,
+                runner_id: "lab",
+                remote_workspace: "/srv/homeboy/project",
+                remote_command: &command,
+                durable_plan: None,
+            })
+            .expect("planned controller proxy");
+        let accepted = MirrorEvidenceRequest::new(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            &[],
+            &result,
+            Some(run_id),
+            None,
+        )
+        .with_agent_task_run();
+        let mirrored = mirror_job_run_request(&store, accepted).expect("mirror accepted Lab job");
+        let lifecycle = lifecycle_store
+            .read_record(run_id)
+            .expect("continuation identity remains typed");
+
+        assert_eq!(mirrored.kind, "agent-task");
+        assert_eq!(lifecycle.run_id, run_id);
+        assert_eq!(lifecycle.metadata["runner_id"], "lab");
+        assert_eq!(lifecycle.metadata["runner_job_id"], job_id.to_string());
+        assert!(mirrored.metadata_json.get("agent_task_run").is_some());
+    });
 }
 
 #[test]

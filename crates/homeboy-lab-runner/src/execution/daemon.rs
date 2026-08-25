@@ -317,6 +317,8 @@ pub(super) fn exec_via_daemon(
             );
             let request = if run_id_owns_generic_exec {
                 request.with_generic_runner_exec_run()
+            } else if run_id.is_some() {
+                request.with_agent_task_run()
             } else {
                 request
             };
