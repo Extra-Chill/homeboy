@@ -684,7 +684,9 @@ fn multi_deploy_actionable(
             .with_kind(CommandNextActionKind::Show),
         );
     }
-    if let Some(run_id) = resume_run_id {
+    if let Some(run_id) = resume_run_id.filter(|_| {
+        has_retryable_multi_target_failures(projects.iter().map(|project| project.status.as_str()))
+    }) {
         metadata.next_actions.push(
             CommandNextAction::new(
                 "resume deploy checkpoint",
@@ -694,6 +696,10 @@ fn multi_deploy_actionable(
         );
     }
     metadata
+}
+
+fn has_retryable_multi_target_failures<'a>(statuses: impl IntoIterator<Item = &'a str>) -> bool {
+    statuses.into_iter().any(|status| status == "failed")
 }
 
 /// Reconstruct the CLI inputs whose lifecycle identity is stored by the

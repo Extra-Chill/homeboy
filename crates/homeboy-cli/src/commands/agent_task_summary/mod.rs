@@ -82,7 +82,8 @@ fn render_providers_summary(payload: &Value) -> Option<String> {
 }
 
 fn render_cook_summary(payload: &Value) -> Option<String> {
-    let run_id = string_value(payload, &["run_id"])?;
+    let run_id =
+        string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["latest_run_id"]))?;
     let raw_state = string_value(payload, &["state"])
         .or_else(|| string_value(payload, &["record", "state"]))
         .unwrap_or("unknown");
@@ -115,13 +116,37 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
         )
     });
 
-    let mut lines = vec![
-        "Agent task cook".to_string(),
+    let primary_failure = payload
+        .get("primary_failure")
+        .filter(|value| value.is_object());
+    let mut lines = vec!["Agent task cook".to_string()];
+    if let Some(failure) = primary_failure {
+        lines.push(format!(
+            "Primary failure: provider {} {} failed during {} (exit {})",
+            string_value(failure, &["provider_id"]).unwrap_or("unknown"),
+            string_value(failure, &["operation"]).unwrap_or("unknown operation"),
+            string_value(failure, &["phase"]).unwrap_or("pre-execution"),
+            failure
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        ));
+        let stderr = string_value(failure, &["stderr_excerpt"]).unwrap_or("");
+        lines.push(format!(
+            "Provider stderr: {}",
+            if stderr.is_empty() { "(empty)" } else { stderr }
+        ));
+        if let Some(command) = string_value(failure, &["next_action", "command"]) {
+            lines.push(format!("Next: {command}"));
+        }
+    }
+    lines.extend([
         format!("Run: {run_id}"),
         format!("Status: {state}"),
         format!("Tasks planned: {tasks_planned}"),
         format!("Tasks attempted: {tasks_attempted}"),
-    ];
+    ]);
     lines.extend(code_production_lines(&metrics));
     if let Some(path) = aggregate_path {
         lines.push(format!("Aggregate: {path}"));
@@ -130,7 +155,9 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
     }
-    if metrics.candidate_state.is_available() {
+    if primary_failure.is_some() {
+        // Its exact action already leads the report.
+    } else if metrics.candidate_state.is_available() {
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
     } else {
         lines.push(format!("Next: homeboy agent-task logs {run_id}"));
@@ -756,6 +783,56 @@ mod tests {
         assert!(summary.contains("First artifact: /tmp/patch.diff\n"));
         assert!(summary.contains("Next: homeboy agent-task review homeboy-4345\n"));
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn cook_summary_leads_with_provider_primary_failure_and_one_exact_action() {
+        let payload = json!({
+            "run_id": "agent-task-provider-failure",
+            "state": "failed",
+            "task_count": 1,
+            "primary_failure": {
+                "schema": "homeboy/agent-task-cook-primary-failure/v1",
+                "provider_id": "dmc",
+                "operation": "resolve",
+                "phase": "transport_dispatcher_prepare",
+                "exit_code": 1,
+                "stderr_excerpt": "DMC standalone identity does not provide tracker ownership.",
+                "evidence_ref": "homeboy://agent-task/run/agent-task-provider-failure/status",
+                "next_action": {
+                    "action": "diagnose",
+                    "command": "homeboy agent-task diagnose agent-task-provider-failure --full"
+                }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.starts_with(
+            "Agent task cook\nPrimary failure: provider dmc resolve failed during transport_dispatcher_prepare (exit 1)\nProvider stderr: DMC standalone identity does not provide tracker ownership.\nNext: homeboy agent-task diagnose agent-task-provider-failure --full\nRun: agent-task-provider-failure"
+        ));
+        assert_eq!(summary.matches("Next:").count(), 1);
+    }
+
+    #[test]
+    fn cook_summary_labels_empty_provider_stderr() {
+        let payload = json!({
+            "run_id": "agent-task-provider-failure",
+            "state": "failed",
+            "primary_failure": {
+                "provider_id": "dmc",
+                "operation": "resolve",
+                "phase": "worktree_provider_lookup",
+                "exit_code": 1,
+                "stderr_excerpt": "",
+                "next_action": {
+                    "command": "homeboy agent-task diagnose agent-task-provider-failure --full"
+                }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+        assert!(summary.contains("Provider stderr: (empty)\n"));
     }
 
     #[test]

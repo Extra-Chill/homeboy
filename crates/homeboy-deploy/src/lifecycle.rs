@@ -161,6 +161,7 @@ pub(crate) enum DeployTargetStatus {
     Planned,
     Running,
     Succeeded,
+    AppliedUnverified,
     Failed,
 }
 
@@ -236,10 +237,21 @@ impl DeployLifecycleRun {
         Ok(())
     }
 
-    pub(crate) fn target_is_succeeded(&self, target: &str) -> bool {
+    pub(crate) fn target_skips_mutation_retry(&self, target: &str) -> bool {
+        self.targets.iter().any(|entry| {
+            entry.target == target
+                && matches!(
+                    entry.status,
+                    DeployTargetStatus::Succeeded | DeployTargetStatus::AppliedUnverified
+                )
+        })
+    }
+
+    pub(crate) fn target_status(&self, target: &str) -> Option<DeployTargetStatus> {
         self.targets
             .iter()
-            .any(|entry| entry.target == target && entry.status == DeployTargetStatus::Succeeded)
+            .find(|entry| entry.target == target)
+            .map(|entry| entry.status.clone())
     }
 
     pub(crate) fn update_target(
@@ -337,8 +349,8 @@ mod tests {
             Some("boom".to_string()),
             None,
         );
-        assert!(run.target_is_succeeded("a"));
-        assert!(!run.target_is_succeeded("b"));
+        assert!(run.target_skips_mutation_retry("a"));
+        assert!(!run.target_skips_mutation_retry("b"));
         assert_eq!(run.targets[1].error.as_deref(), Some("boom"));
     }
 
@@ -348,8 +360,25 @@ mod tests {
         run.update_target("a", DeployTargetStatus::Succeeded, None, None);
         run.update_target("b", DeployTargetStatus::Running, None, None);
         run.resume(&identity()).expect("matching resume");
-        assert!(run.target_is_succeeded("a"));
+        assert!(run.target_skips_mutation_retry("a"));
         assert_eq!(run.targets[1].status, DeployTargetStatus::Planned);
+    }
+
+    #[test]
+    fn applied_unverified_targets_are_terminal_without_mutation_retry() {
+        let mut run = DeployLifecycleRun::new("run".to_string(), identity());
+        run.update_target(
+            "a",
+            DeployTargetStatus::AppliedUnverified,
+            Some("post-deploy verification unavailable".to_string()),
+            None,
+        );
+        run.resume(&identity()).expect("matching resume");
+        assert!(run.target_skips_mutation_retry("a"));
+        assert_eq!(
+            run.target_status("a"),
+            Some(DeployTargetStatus::AppliedUnverified)
+        );
     }
 
     #[test]

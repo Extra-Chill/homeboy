@@ -676,6 +676,19 @@ impl ComponentDeployResult {
             .with_error(error)
     }
 
+    pub(super) fn applied_unverified(
+        component: &Component,
+        base_path: &str,
+        local_version: Option<String>,
+        remote_version: Option<String>,
+        error: String,
+    ) -> Self {
+        Self::new(component, base_path)
+            .with_status("applied_unverified")
+            .with_versions(local_version, remote_version)
+            .with_error(error)
+    }
+
     pub(super) fn with_status(mut self, status: &str) -> Self {
         self.status = status.to_string();
         self
@@ -974,6 +987,25 @@ mod tests {
         assert_eq!(result.local_version.as_deref(), Some("1.0.0"));
         assert_eq!(result.remote_version.as_deref(), Some("0.9.0"));
         assert_eq!(result.error.as_deref(), Some("deploy failed"));
+    }
+
+    #[test]
+    fn test_applied_unverified() {
+        let result = ComponentDeployResult::applied_unverified(
+            &component(),
+            "/var/www/example",
+            Some("1.0.0".to_string()),
+            Some("0.9.0".to_string()),
+            "post-deploy verification unavailable".to_string(),
+        );
+
+        assert_eq!(result.status, "applied_unverified");
+        assert_eq!(result.local_version.as_deref(), Some("1.0.0"));
+        assert_eq!(result.remote_version.as_deref(), Some("0.9.0"));
+        assert_eq!(
+            result.error.as_deref(),
+            Some("post-deploy verification unavailable")
+        );
     }
 
     #[test]
