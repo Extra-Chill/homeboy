@@ -3109,12 +3109,28 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         .get("skipped_count")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let scan_complete = payload
+        .get("scan_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let inspected_count = payload
+        .get("inspected_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(candidate_count);
+    let size_estimates_complete = payload
+        .get("size_estimates_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let estimated_bytes = payload
         .get("estimated_bytes")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let reclaimed_bytes = payload
         .get("reclaimed_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let observed_filesystem_delta = payload
+        .get("observed_filesystem_available_delta_bytes")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let mut lines = vec![
@@ -3125,9 +3141,21 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         ),
         format!("Root: {root}"),
         format!("Candidates: {candidate_count}"),
+        format!(
+            "Inventory: {} ({inspected_count} artifact paths inspected)",
+            if scan_complete { "complete" } else { "partial" }
+        ),
         format!("Applied: {applied_count}"),
         format!("Remaining candidates: {remaining_count}"),
-        format!("Estimated reclaimable: {}", format_bytes(estimated_bytes)),
+        format!(
+            "{}: {}",
+            if size_estimates_complete {
+                "Estimated reclaimable"
+            } else {
+                "Measured candidate size (partial; pressure sizes omitted)"
+            },
+            format_bytes(estimated_bytes)
+        ),
         format!(
             "Estimated reclaimable (allocated): {}",
             format_bytes(allocated_total(payload, "estimated_allocated_bytes"))
@@ -3136,6 +3164,10 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         format!(
             "Reclaimed (allocated): {}",
             format_bytes(allocated_total(payload, "reclaimed_allocated_bytes"))
+        ),
+        format!(
+            "Observed filesystem availability increase: {}",
+            format_bytes(observed_filesystem_delta)
         ),
         format!("Skipped: {skipped_count}"),
     ];
@@ -3171,8 +3203,10 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
 
     if let Some(next) = payload.get("next_command").and_then(Value::as_str) {
         lines.push(format!("Next safe command: {next}"));
-    } else {
+    } else if scan_complete {
         lines.push("Cleanup complete: no eligible candidates remain.".to_string());
+    } else {
+        lines.push("Cleanup inventory is partial; eligible artifacts may remain.".to_string());
     }
     lines.push(String::new());
 
@@ -3304,6 +3338,10 @@ fn artifact_candidate_lines(payload: &Value, limit: usize) -> Vec<String> {
         .take(limit)
         .filter_map(|row| {
             let path = row.get("path").and_then(Value::as_str)?;
+            if row.get("usage_measurement").and_then(Value::as_str) == Some("not_measured_pressure")
+            {
+                return Some(format!("  - size not measured (pressure) {path}"));
+            }
             let bytes = row.get("size_bytes").and_then(Value::as_u64).unwrap_or(0);
             Some(format!("  - {} {}", format_bytes(bytes), path))
         })
@@ -4866,6 +4904,8 @@ mod tests {
             "mode": "apply",
             "root": "/tmp/homeboy",
             "candidate_count": 2,
+            "inspected_count": 2,
+            "scan_complete": false,
             "skipped_count": 0,
             "applied_count": 2,
             "remaining_count": 1,
@@ -4878,9 +4918,43 @@ mod tests {
         let summary = render_artifact_cleanup_summary(&payload).expect("summary");
 
         assert!(summary.contains("Remaining candidates: 1\n"));
+        assert!(summary.contains("Inventory: partial (2 artifact paths inspected)\n"));
         assert!(summary.contains(
             "Next safe command: homeboy cleanup artifacts --path /tmp/homeboy --limit 2 --apply\n"
         ));
+    }
+
+    #[test]
+    fn cleanup_artifacts_summary_does_not_present_pressure_sizes_as_zero() {
+        let payload = json!({
+            "command": "cleanup.artifacts",
+            "mode": "apply",
+            "root": "/tmp/homeboy",
+            "candidate_count": 1,
+            "inspected_count": 1,
+            "scan_complete": true,
+            "size_estimates_complete": false,
+            "skipped_count": 0,
+            "applied_count": 1,
+            "remaining_count": 0,
+            "estimated_bytes": 0,
+            "reclaimed_bytes": 4096,
+            "observed_filesystem_available_delta_bytes": 4096,
+            "candidates": [{
+                "path": "/tmp/homeboy/target",
+                "size_bytes": 0,
+                "usage_measurement": "not_measured_pressure"
+            }],
+            "skipped": []
+        });
+
+        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
+
+        assert!(
+            summary.contains("Measured candidate size (partial; pressure sizes omitted): 0 B\n")
+        );
+        assert!(summary.contains("Observed filesystem availability increase: 4.0 KiB\n"));
+        assert!(summary.contains("size not measured (pressure) /tmp/homeboy/target\n"));
     }
 
     #[test]
