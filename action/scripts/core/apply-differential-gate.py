@@ -232,6 +232,37 @@ def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, s
     return "complete", set(inventory_ids), set(failed_ids)
 
 
+def test_evidence_defect(command: str, directory: str) -> str | None:
+    """The producer's own account of why its sidecars are not evidence.
+
+    Homeboy writes `{"invalid_evidence": {"type": ..., "reason": ...}}` in place
+    of the outcome/inventory bodies when the run could not produce them, and that
+    reason names the failing producer or field. Reading it costs nothing and is
+    the difference between "the sidecars are malformed" -- which sent
+    `Extra-Chill/extrachill-users#377` through two identical rerun cycles with
+    nothing to act on -- and naming the defect. See Extra-Chill/homeboy#13494.
+    """
+    stem = output_stem(command)
+    for suffix in ("test-outcomes", "test-inventory"):
+        payload = read_json(os.path.join(directory, f"{stem}.{suffix}.json"))
+        declared = payload.get("invalid_evidence") if isinstance(payload, dict) else None
+        reason = declared.get("reason") if isinstance(declared, dict) else None
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    return None
+
+
+def invalid_evidence_detail(command: str, sides: list[tuple[str, str, str]]) -> str:
+    """Name the invalid side(s), and why, when the producer said why."""
+    described = []
+    for label, directory, evidence in sides:
+        if evidence != "invalid":
+            continue
+        reason = test_evidence_defect(command, directory)
+        described.append(f"{label}: {reason}" if reason else label)
+    return f" ({'; '.join(described)})" if described else ""
+
+
 def command_label(command: str, metadata: dict[str, Any]) -> str:
     full = metadata.get("command")
     if isinstance(full, str) and full:
@@ -287,9 +318,17 @@ def main() -> int:
             base_evidence, base_inventory, base_failed = test_outcomes(command, base_dir)
             if "invalid" in {current_evidence, base_evidence}:
                 adjusted[command] = "invalid_evidence"
+                detail = invalid_evidence_detail(
+                    command,
+                    [
+                        ("candidate", current_dir, current_evidence),
+                        ("baseline", base_dir, base_evidence),
+                    ],
+                )
                 print(
                     f"::error::Differential gate rejected {command}: type=invalid_evidence; "
-                    "Homeboy per-test outcome/inventory sidecars are malformed, duplicate, or provenance-mismatched.",
+                    "Homeboy per-test outcome/inventory sidecars are malformed, duplicate, or "
+                    f"provenance-mismatched{detail}.",
                     file=sys.stderr,
                 )
                 continue
