@@ -410,18 +410,25 @@ homeboy agent-task finalize-pr --recover cook-9750 \
   --review-override 'compatibility=No public compatibility impact.@reviewed issue #9750'
 ```
 
-Manual finalization can execute one candidate-bound verification command and
-derive its gate result plus reviewer evidence from that result:
+Manual finalization first reuses every authoritative green gate from the same
+run's durable promotion receipt when its base, target worktree, candidate tree
+and digest, and exact commands remain bound to the current candidate. The report
+labels these gates as `verified_inherited`; any stale, red, or malformed receipt
+requires fresh verification instead of silently accepting it.
+
+Fresh manual finalization can execute repeated candidate-bound verification
+commands and derive separate gate results plus reviewer evidence from them:
 
 ```bash
 homeboy agent-task finalize-pr --manual-finalization \
   --verify 'cargo test --locked' ...
 ```
 
-`--verify` runs only against a clean committed candidate in an isolated detached
-checkout, before Homeboy reserves a manual-finalization lifecycle record. It
-derives the durable gate result, targeted-check evidence, and reviewer test
-step. Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain
+Each `--verify` runs against the same clean committed candidate in an isolated
+detached checkout, before Homeboy reserves a manual-finalization lifecycle
+record. Homeboy hydrates declared dependencies there, retains structured setup
+provenance, and derives one durable gate result and reviewer test step per
+command. Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain
 the explicit external-proof import path for verification that already occurred;
 they cannot be combined with `--verify`.
 

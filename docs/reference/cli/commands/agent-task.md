@@ -1044,7 +1044,7 @@ This is the core-owned publication boundary for external runtimes.
 | `--external-usage-limitations` | `<TEXT>` | Limitations of the external usage evidence or manual review |
 | `--external-usage-url` | `<URL>` | Reviewer-resolvable HTTPS URL for external usage evidence |
 | `--gate-result` | `<NAME=STATUS[:DETAIL]>` | _no help text_ |
-| `--verify` | `<COMMAND>` | Execute one deterministic verification command against the committed manual candidate |
+| `--verify` | `<COMMAND>` | Execute a deterministic verification command against the committed manual candidate. Repeat for multiple gates |
 | `--changed-file` | `<PATH>` | _no help text_ |
 | `--protected-branch` | `<BRANCH>` | _no help text_ |
 | `--ai-used-for` | `<TEXT>` | _no help text_ |

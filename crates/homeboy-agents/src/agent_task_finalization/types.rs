@@ -1,11 +1,29 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
+pub use crate::agent_task_gate::AgentTaskGateSetupEvidence;
 use crate::agent_task_review_dossier::{AgentTaskPublicContract, AgentTaskPublicContractEvidence};
 use homeboy_core::git::GitIdentityProof;
 
 pub const AGENT_TASK_MANUAL_CANDIDATE_BINDING_SCHEMA: &str =
     "homeboy/agent-task-manual-candidate-binding/v1";
+pub const AGENT_TASK_INHERITED_GATE_EVIDENCE_SCHEMA: &str =
+    "homeboy/agent-task-inherited-gate-evidence/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskInheritedGateEvidence {
+    pub schema: String,
+    pub status: String,
+    pub source_run_id: String,
+    pub promotion_schema: String,
+    pub target_worktree: String,
+    pub target_path: String,
+    pub verified_base: crate::agent_task_promotion::AgentTaskPromotionVerifiedBase,
+    pub candidate: crate::agent_task_gate::AgentTaskGateCandidateCheckout,
+    pub gate_ids: Vec<String>,
+    /// Exact command identity for every visible or private gate, keyed by gate id.
+    pub gate_command_sha256: std::collections::BTreeMap<String, String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskManualCandidateBinding {
@@ -58,6 +76,9 @@ pub struct AgentTaskPrFinalizationReport {
     pub acceptance: Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>,
     pub review_dossier: AgentTaskReviewDossier,
     pub manual_finalization: bool,
+    /// A green promotion receipt inherited after exact candidate binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_gate_evidence: Option<AgentTaskInheritedGateEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_candidate_binding: Option<AgentTaskManualCandidateBinding>,
     #[serde(flatten)]
@@ -221,6 +242,9 @@ impl AgentTaskPrSourceRelationship {
 pub struct AgentTaskPrVerification {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targeted_checks_run: Vec<String>,
+    /// Dependency setup performed in the immutable manual verification checkout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_hydration: Vec<AgentTaskGateSetupEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targeted_checks_unavailable: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -232,6 +256,7 @@ pub struct AgentTaskPrVerification {
 impl AgentTaskPrVerification {
     pub fn is_empty(&self) -> bool {
         self.targeted_checks_run.is_empty()
+            && self.dependency_hydration.is_empty()
             && self.targeted_checks_unavailable.is_none()
             && self.ci_expected.is_empty()
             && self.manual_reviewer_check.is_none()
@@ -281,6 +306,8 @@ pub struct AgentTaskPrFinalizationOptions {
     pub expected_candidate_sha: Option<String>,
     /// A command gate may only finalize the committed candidate it observed.
     pub verified_candidate_sha: Option<String>,
+    /// Set only after finalization validates a durable green promotion receipt.
+    pub inherited_gate_evidence: Option<AgentTaskInheritedGateEvidence>,
     pub protected_branches: Vec<String>,
     /// Create a draft PR for a new publication. Existing PR state is preserved.
     pub draft_pr: bool,
@@ -334,6 +361,12 @@ pub struct AgentTaskPrDurableGateProof {
 pub trait AgentTaskPrFinalizationBackend {
     fn hydrate_run(&mut self, run_id: &str) -> Result<RunLifecycleRecord>;
     fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof>;
+    fn hydrate_optional_gate_proof(
+        &mut self,
+        _run_id: &str,
+    ) -> Result<Option<AgentTaskPrDurableGateProof>> {
+        Ok(None)
+    }
     fn hydrate_run_in_store(
         &mut self,
         _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -357,6 +390,13 @@ pub trait AgentTaskPrFinalizationBackend {
             None,
             None,
         ))
+    }
+    fn hydrate_optional_gate_proof_in_store(
+        &mut self,
+        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<Option<AgentTaskPrDurableGateProof>> {
+        self.hydrate_optional_gate_proof(run_id)
     }
     /// Real finalization binds the exact promoted bytes immediately before the
     /// first mutation. Test backends can focus on publication behavior.

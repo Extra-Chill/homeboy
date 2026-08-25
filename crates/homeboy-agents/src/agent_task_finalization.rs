@@ -38,6 +38,17 @@ pub fn preflight_pr(
     preflight_pr_with_backend(options, &mut RealAgentTaskPrFinalizationBackend)
 }
 
+/// Hydrate dependencies for fresh manual gates in their immutable checkout.
+pub fn hydrate_manual_verification_dependencies(
+    checkout: &std::path::Path,
+) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+    crate::agent_task_gate::hydrate_gate_dependency_roots(
+        checkout,
+        true,
+        "manual_finalization_checkout",
+    )
+}
+
 pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
@@ -70,6 +81,38 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     let durable_acceptance;
     if options.manual_finalization {
         durable_acceptance = validate_manual_finalization_policy(&options.run_id)?;
+        if options.inherited_gate_evidence.is_some()
+            || (options.normalized_gate_results.is_empty()
+                && options.verified_candidate_sha.is_none())
+        {
+            let claimed_evidence = options.inherited_gate_evidence.take();
+            let inherited = match lifecycle_store {
+                Some(store) => {
+                    backend.hydrate_optional_gate_proof_in_store(store, &options.run_id)?
+                }
+                None => backend.hydrate_optional_gate_proof(&options.run_id)?,
+            };
+            if let Some(gate_proof) = inherited {
+                inherit_promotion_gates(&mut options, gate_proof)?;
+                if claimed_evidence.is_some()
+                    && claimed_evidence.as_ref() != options.inherited_gate_evidence.as_ref()
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "inherited_gate_evidence",
+                        "persisted inherited gate evidence no longer matches the current durable promotion receipt; run fresh verification",
+                        None,
+                        None,
+                    ));
+                }
+            } else if claimed_evidence.is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "inherited_gate_evidence",
+                    "persisted inherited gate evidence has no current durable promotion receipt; run fresh verification",
+                    None,
+                    None,
+                ));
+            }
+        }
     } else {
         let lifecycle = match lifecycle_store {
             Some(store) => backend.hydrate_run_in_store(store, &options.run_id)?,
@@ -190,14 +233,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
     }
-    if options.manual_finalization && !publish && !commit_required && push_required {
-        return Err(Error::validation_invalid_argument(
-            "publication_intent",
-            "recoverable manual preflight requires an already-pushed candidate; push the candidate branch and rerun preflight",
-            None,
-            None,
-        ));
-    }
     if options.expected_candidate_sha.is_some() && (commit_required || push_required) {
         return Err(Error::validation_invalid_argument(
             "publication_intent",
@@ -283,11 +318,19 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         ));
     }
 
-    if !options.manual_finalization {
+    if !options.manual_finalization || options.inherited_gate_evidence.is_some() {
         match lifecycle_store {
             Some(store) => backend.validate_candidate_in_store(store, &options)?,
             None => backend.validate_candidate(&options)?,
         }
+    }
+    if options.manual_finalization && !publish && !commit_required && push_required {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent",
+            "recoverable manual preflight requires an already-pushed candidate; push the candidate branch and rerun preflight",
+            None,
+            None,
+        ));
     }
     // Validate intent before commit mutation, then bind evidence to immutable HEAD before push.
     let prospective_identity = if commit_required {
@@ -707,6 +750,196 @@ fn validate_gate_proof_binding(
             None,
         ));
     }
+    Ok(())
+}
+
+fn inherit_promotion_gates(
+    options: &mut AgentTaskPrFinalizationOptions,
+    gate_proof: AgentTaskPrDurableGateProof,
+) -> Result<()> {
+    validate_gate_proof_binding(&gate_proof, options)?;
+    let promotion = gate_proof.promotion;
+    if promotion.schema != crate::agent_task_promotion::AGENT_TASK_PROMOTION_REPORT_SCHEMA
+        || promotion.to_worktree.trim().is_empty()
+        || promotion.target.worktree != promotion.to_worktree
+    {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion",
+            "green promotion reuse requires a current receipt bound to one exact target worktree",
+            None,
+            None,
+        ));
+    }
+    let verified_base = promotion.verified_base.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion.verified_base",
+            "green promotion reuse requires the immutable base captured before its gates ran",
+            None,
+            None,
+        )
+    })?;
+    if verified_base.base != options.base
+        || options.verified_base_sha.as_deref() != Some(verified_base.sha.as_str())
+    {
+        return Err(Error::validation_invalid_argument(
+            "verified_base_sha",
+            "manual finalization base does not match the green promotion receipt; run fresh verification for the current base",
+            options.verified_base_sha.clone(),
+            None,
+        ));
+    }
+    if !promotion.finalization_eligible(false)
+        || promotion.gate_outcome().gate_results != promotion.gate_results
+    {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.gate_results",
+            "manual finalization can inherit only authoritative green promotion gates; run fresh verification",
+            None,
+            None,
+        ));
+    }
+    let candidate: crate::agent_task_gate::AgentTaskGateCandidateCheckout = serde_json::from_value(
+        promotion.provenance["candidate_checkout"].clone(),
+    )
+    .map_err(|_| {
+        Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate_checkout",
+            "green promotion reuse requires an immutable candidate checkout identity",
+            None,
+            None,
+        )
+    })?;
+    let promoted_candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate =
+        serde_json::from_value(promotion.provenance["candidate"].clone()).map_err(|_| {
+            Error::validation_invalid_argument(
+                "latest_promotion.provenance.candidate",
+                "green promotion reuse requires the exact promoted Git candidate fingerprint",
+                None,
+                None,
+            )
+        })?;
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
+        promoted_candidate
+    else {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate",
+            "green promotion reuse requires the exact promoted Git candidate fingerprint",
+            None,
+            None,
+        ));
+    };
+    if candidate.schema != "homeboy/agent-task-gate-candidate-checkout/v1"
+        || candidate.commit.trim().is_empty()
+        || candidate.tree.trim().is_empty()
+        || candidate.candidate_sha256.trim().is_empty()
+        || candidate.tree != fingerprint.tree
+        || candidate.candidate_sha256 != fingerprint.sha256
+    {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate_checkout",
+            "green promotion gate checkout does not match the exact promoted candidate tree and digest; run fresh verification",
+            None,
+            None,
+        ));
+    }
+    let gate_bindings = promotion
+        .deterministic_gates
+        .iter()
+        .map(|gate| {
+            let [shell, flag, command] = gate.command.as_slice() else {
+                return Err(Error::validation_invalid_argument(
+                    "latest_promotion.deterministic_gates.command",
+                    "green promotion reuse requires each retained gate to preserve its exact shell command",
+                    None,
+                    None,
+                ));
+            };
+            if gate.id.trim().is_empty()
+                || shell != "sh"
+                || flag != "-lc"
+                || command.trim().is_empty()
+                || gate.candidate_checkout.as_ref() != Some(&candidate)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "latest_promotion.deterministic_gates",
+                    "green promotion gate commands and candidate identities do not match their durable receipt; run fresh verification",
+                    None,
+                    None,
+                ));
+            }
+            Ok((
+                gate.id.clone(),
+                homeboy_engine_primitives::content_hash::nul_separated_digest(
+                    gate.command.iter().map(String::as_str),
+                ),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let gate_command_sha256: std::collections::BTreeMap<_, _> =
+        gate_bindings.iter().cloned().collect();
+    if gate_command_sha256.len() != gate_bindings.len() {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.deterministic_gates.id",
+            "green promotion reuse requires unique non-empty retained gate ids",
+            None,
+            None,
+        ));
+    }
+    let gate_ids = gate_bindings
+        .into_iter()
+        .map(|(gate_id, _)| gate_id)
+        .collect::<Vec<_>>();
+    let verified_commands =
+        crate::agent_task_review_dossier::verified_commands_from_promotion(&promotion);
+    if options.review_dossier.how_to_test.is_empty() {
+        options.review_dossier.how_to_test = verified_commands
+            .iter()
+            .map(
+                |verified| crate::agent_task_review_dossier::AgentTaskReviewTestStep {
+                    command: verified.command.clone(),
+                    expected: "passes as inherited from the exact green promotion receipt"
+                        .to_string(),
+                },
+            )
+            .collect();
+    }
+    options.evidence.verification.targeted_checks_run = verified_commands
+        .iter()
+        .map(|verified| verified.command.clone())
+        .collect();
+    options.review_dossier.verified_commands = verified_commands;
+    options.review_dossier.evidence.push(
+        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: format!(
+                "Verified inherited promotion evidence: {} exact candidate-bound gate(s) from {}.",
+                gate_ids.len(),
+                gate_proof.run_id
+            ),
+            url: None,
+        },
+    );
+    options.gate_results = promotion
+        .gate_results
+        .iter()
+        .map(|gate| AgentTaskGateResult {
+            name: gate.name.clone(),
+            status: "passed".to_string(),
+            detail: Some("verified inherited promotion evidence".to_string()),
+        })
+        .collect();
+    options.normalized_gate_results = promotion.gate_results;
+    options.inherited_gate_evidence = Some(AgentTaskInheritedGateEvidence {
+        schema: AGENT_TASK_INHERITED_GATE_EVIDENCE_SCHEMA.to_string(),
+        status: "verified_inherited".to_string(),
+        source_run_id: gate_proof.run_id,
+        promotion_schema: promotion.schema,
+        target_worktree: promotion.to_worktree,
+        target_path: options.path.clone(),
+        verified_base,
+        candidate,
+        gate_ids,
+        gate_command_sha256,
+    });
     Ok(())
 }
 
@@ -1148,6 +1381,7 @@ fn report(
         acceptance,
         review_dossier: options.review_dossier.clone(),
         manual_finalization: options.manual_finalization,
+        inherited_gate_evidence: options.inherited_gate_evidence.clone(),
         manual_candidate_binding: None,
         evidence: options.evidence.clone(),
     }

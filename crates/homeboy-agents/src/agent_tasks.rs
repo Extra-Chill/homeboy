@@ -258,15 +258,15 @@ pub mod dispatch_service {
 /// PR finalization contracts and backends.
 pub mod finalization {
     pub use super::super::agent_task_finalization::{
-        finalize_pr, finalize_pr_with_backend, preflight_pr, preflight_pr_with_backend,
-        validate_publication_intent, AgentTaskGateResult, AgentTaskPrEvidence,
-        AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
-        AgentTaskPrFinalizationOutcome, AgentTaskPrFinalizationReport, AgentTaskPrRef,
-        AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
-        AgentTaskPublicationIntent, AgentTaskPublicationProof, AgentTaskPublicationTarget,
-        RealAgentTaskPrFinalizationBackend, AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA,
-        AGENT_TASK_PR_FINALIZATION_SCHEMA, AGENT_TASK_PUBLICATION_INTENT_SCHEMA,
-        AGENT_TASK_PUBLICATION_PROOF_SCHEMA,
+        finalize_pr, finalize_pr_with_backend, hydrate_manual_verification_dependencies,
+        preflight_pr, preflight_pr_with_backend, validate_publication_intent, AgentTaskGateResult,
+        AgentTaskGateSetupEvidence, AgentTaskPrEvidence, AgentTaskPrFinalizationBackend,
+        AgentTaskPrFinalizationOptions, AgentTaskPrFinalizationOutcome,
+        AgentTaskPrFinalizationReport, AgentTaskPrRef, AgentTaskPrRuntimeGuardrails,
+        AgentTaskPrSourceRelationship, AgentTaskPrVerification, AgentTaskPublicationIntent,
+        AgentTaskPublicationProof, AgentTaskPublicationTarget, RealAgentTaskPrFinalizationBackend,
+        AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA, AGENT_TASK_PR_FINALIZATION_SCHEMA,
+        AGENT_TASK_PUBLICATION_INTENT_SCHEMA, AGENT_TASK_PUBLICATION_PROOF_SCHEMA,
     };
 }
 
