@@ -266,8 +266,24 @@ jobs:
     # (downloaded Test archives stay out of consumer Git state), #416
     # (sharded Test result retrieval works across reruns), #424 (extension-owned
     # Cargo build and quality caches), and #425 (cache ownership assertions).
-    # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, and #13267.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@bf6b7072e6cb11a21d14c0f78ccd33beade24f48
+    #
+    # v2.15.7 additionally carries the per-test identity path, without which the
+    # differential gate has no `Test` verdict it can attribute. The previous pin
+    # predates `apply-differential-gate.py`'s outcome/inventory branch entirely —
+    # `test_outcomes` and `failed_test_ids` do not appear in it — so every failed
+    # `review test` fell through to a bare `current > base` count comparison.
+    # That comparison is strictly-greater against a suite whose own run-to-run
+    # variance is nonzero, so it rejected changes it could not have been caused
+    # by: #13416, whose entire diff is one `#[cfg(not(unix))]` function the Linux
+    # runner never compiles, was rejected `current=115 base=114`. Carries #431
+    # (aggregate Test evidence by identity), #430/#365 (observed failed test IDs
+    # and terminal evidence contract), #432/#13269 (canonical failure-digest
+    # result filenames, so a multi-word command no longer reads
+    # `review test.json` while the writer emits `review-test.json`), #433
+    # (bounded action setup subprocesses), and suffixed measurement commands.
+    #
+    # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, and #13437.
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@83110d6638ec1c2f63352fcb004920524add0377
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
@@ -282,8 +298,23 @@ jobs:
       args: --skip-lint
       expected-commands: review audit,review lint,review test
       component: homeboy
-      action-ref: bf6b7072e6cb11a21d14c0f78ccd33beade24f48
-      extension-ref: 691d0527d7a4b3917649043a7f91a81913a139ab
+      # Must track the `uses:` pin above. This is the revision the reusable
+      # workflow checks out to run the gate itself — it is what surfaces as
+      # `ACTION_REVISION` in the Test job — so leaving it behind would keep the
+      # old `apply-differential-gate.py` even with a newer workflow.
+      action-ref: 83110d6638ec1c2f63352fcb004920524add0377
+      # v3.38.8. Must move with the action pin, not after it: the action consumes
+      # per-test identities, and homeboy-extensions#2699 (`fix(rust): canonicalize
+      # failed test identities`, released in rust v1.37.2) is what produces them.
+      # Bumping only the action would swap an unattributable `current > base`
+      # rejection for an equally blocking `no_comparable_evidence` one.
+      #
+      # Of the 93 commits since the previous pin only 8 touch `rust/`; the rest
+      # are WordPress-scoped and unreachable from this component. This also
+      # carries #2697 (structural generic field-type resolution), which has been
+      # released since v1.37.1 but could not reach this repository while the pin
+      # was frozen.
+      extension-ref: fd4165ef2b9713672d0e25786c3af27c03012aae
       source: .
       scope: auto
       differential-gating: 'true'
