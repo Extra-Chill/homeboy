@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use homeboy_core::content_diff::{self, TreeEntry, TreeEntryKind, TreeScanOptions};
 use homeboy_core::engine::shell;
-use homeboy_core::error::{CommandEvidence, Error};
+use homeboy_core::error::{CommandEvidence, Error, RemoteCapabilityMissingDetails, TargetDetails};
 use homeboy_core::server::{CommandOutput, SshClient};
 use homeboy_engine_primitives::content_hash;
 
@@ -631,6 +631,9 @@ fn local_manifest_with_exclusions(root: &Path, exclusions: &[String]) -> Result<
             root.display().to_string(),
         ));
     }
+    if root.is_file() {
+        return single_file_manifest(root, root, exclusions);
+    }
     // `scan_tree` already reports a coded, detailed error. Stringifying it here
     // is what erased the walker's own diagnosis on the deploy path (#11135).
     let entries = content_diff::scan_tree(
@@ -650,6 +653,57 @@ fn local_manifest_with_exclusions(root: &Path, exclusions: &[String]) -> Result<
         })
         .collect::<Result<BTreeMap<_, _>, Error>>()?;
     Ok(Manifest { entries })
+}
+
+fn single_file_manifest(
+    path: &Path,
+    identity_root: &Path,
+    exclusions: &[String],
+) -> Result<Manifest, Error> {
+    let relative = normalize_single_file_path(identity_root)?;
+    if ignored(&relative, exclusions) {
+        return Ok(Manifest::default());
+    }
+    let metadata = fs::metadata(path).map_err(|error| {
+        Error::from_io_error(&error, Some(format!("stat '{}'", path.display())))
+    })?;
+    Ok(Manifest {
+        entries: BTreeMap::from([(
+            relative,
+            TreeEntry {
+                kind: TreeEntryKind::File,
+                mode: content_diff::executable_mode_tag(platform_mode(&metadata)),
+                value: sha256(path)?,
+                bytes: metadata.len(),
+            },
+        )]),
+    })
+}
+
+#[cfg(unix)]
+fn platform_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+
+    metadata.permissions().mode()
+}
+
+#[cfg(not(unix))]
+fn platform_mode(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
+fn normalize_single_file_path(path: &Path) -> Result<String, Error> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            Error::invalid_argument_for(
+                "manifest_path",
+                format!("{} has no filename", path.display()),
+                path.display().to_string(),
+            )
+        })?;
+    normalize_path(file_name)
 }
 
 /// A failure reading or interpreting the canonical package archive, naming the
@@ -829,6 +883,134 @@ fn remote_probe_error(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteProbeCapability {
+    Sha256,
+    Find,
+    Stat,
+    Readlink,
+}
+
+impl RemoteProbeCapability {
+    fn exit_code(self) -> i32 {
+        match self {
+            Self::Sha256 => 45,
+            Self::Find => 46,
+            Self::Stat => 47,
+            Self::Readlink => 48,
+        }
+    }
+
+    fn primitive(self) -> &'static str {
+        match self {
+            Self::Sha256 => "sha256sum",
+            Self::Find => "find",
+            Self::Stat => "stat",
+            Self::Readlink => "readlink",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Sha256 => "Install `sha256sum` (coreutils) or `shasum` on the deploy target.",
+            Self::Find => "Install a POSIX-compatible `find` on the deploy target.",
+            Self::Stat => {
+                "Install a `stat` implementation that supports either `-c %a` or `-f %Lp`."
+            }
+            Self::Readlink => {
+                "Install `readlink` on the deploy target so symlink payloads can be inspected."
+            }
+        }
+    }
+
+    fn from_exit_code(exit_code: i32) -> Option<Self> {
+        [Self::Sha256, Self::Find, Self::Stat, Self::Readlink]
+            .into_iter()
+            .find(|capability| capability.exit_code() == exit_code)
+    }
+}
+
+fn remote_probe_capability_error(
+    root: &str,
+    capability: RemoteProbeCapability,
+    location: &str,
+    output: &CommandOutput,
+) -> Error {
+    Error::remote_capability_missing(
+        format!(
+            "remote content manifest probe requires unsupported command '{}'",
+            capability.primitive()
+        ),
+        RemoteCapabilityMissingDetails {
+            capability: capability.primitive().to_string(),
+            target: Some(TargetDetails {
+                project_id: None,
+                server_id: None,
+                host: None,
+            }),
+            command_evidence: Some(CommandEvidence {
+                command: format!("deploy content-manifest probe of {root}"),
+                cwd: None,
+                location: Some(location.to_string()),
+                exit_code: output.exit_code,
+                stdout: bound_text(&output.stdout, REMOTE_PROBE_DIAGNOSTIC_BYTES),
+                stderr: bound_text(&output.stderr, REMOTE_PROBE_DIAGNOSTIC_BYTES),
+                truncated: output.stdout.len() > REMOTE_PROBE_DIAGNOSTIC_BYTES
+                    || output.stderr.len() > REMOTE_PROBE_DIAGNOSTIC_BYTES,
+            }),
+        },
+    )
+    .with_hint(capability.hint())
+}
+
+fn remote_manifest_probe_command(root: &str) -> String {
+    let root = shell::quote_path(root);
+    let sha_exit = RemoteProbeCapability::Sha256.exit_code();
+    let find_exit = RemoteProbeCapability::Find.exit_code();
+    let stat_exit = RemoteProbeCapability::Stat.exit_code();
+    let readlink_exit = RemoteProbeCapability::Readlink.exit_code();
+    format!(
+        concat!(
+            "root={root}; test -e \"$root\" || exit 44; ",
+            "emit_entry() {{ ",
+            "rel=$1; path=$2; ",
+            "if [ -L \"$path\" ]; then ",
+            "command -v readlink >/dev/null 2>&1 || {{ printf '%s\\n' readlink >&2; exit {readlink_exit}; }}; ",
+            "mode=$(stat -c %a \"$path\" 2>/dev/null || stat -f %Lp \"$path\" 2>/dev/null || exit {stat_exit}); ",
+            "printf 'l\\t%s\\t%s\\t%s\\n' \"$rel\" \"$mode\" \"$(readlink \"$path\")\"; ",
+            "else ",
+            "mode=$(stat -c %a \"$path\" 2>/dev/null || stat -f %Lp \"$path\" 2>/dev/null || exit {stat_exit}); ",
+            "if command -v sha256sum >/dev/null 2>&1; then hash_output=$(sha256sum \"$path\") || exit $?; ",
+            "elif command -v shasum >/dev/null 2>&1; then hash_output=$(shasum -a 256 \"$path\") || exit $?; ",
+            "else printf '%s\\n' sha256sum >&2; exit {sha_exit}; fi; ",
+            "set -- $hash_output; printf 'f\\t%s\\t%s\\t%s\\n' \"$rel\" \"$mode\" \"$1\"; ",
+            "fi; }}; ",
+            "if [ -d \"$root\" ]; then ",
+            "command -v find >/dev/null 2>&1 || {{ printf '%s\\n' find >&2; exit {find_exit}; }}; ",
+            "find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o \\( -type f -o -type l \\) ",
+            "-exec sh -c 'root=$1; shift; ",
+            "for f do rel=${{f#\"$root\"/}}; ",
+            "if [ -L \"$f\" ]; then ",
+            "command -v readlink >/dev/null 2>&1 || {{ printf \"%s\\n\" readlink >&2; exit {readlink_exit}; }}; ",
+            "mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\" 2>/dev/null || exit {stat_exit}); ",
+            "printf \"l\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$(readlink \"$f\")\"; ",
+            "else ",
+            "mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\" 2>/dev/null || exit {stat_exit}); ",
+            "if command -v sha256sum >/dev/null 2>&1; then hash_output=$(sha256sum \"$f\") || exit $?; ",
+            "elif command -v shasum >/dev/null 2>&1; then hash_output=$(shasum -a 256 \"$f\") || exit $?; ",
+            "else printf \"%s\\n\" sha256sum >&2; exit {sha_exit}; fi; ",
+            "set -- $hash_output; printf \"f\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$1\"; ",
+            "fi; done' sh \"$root\" {{}} +; ",
+            "else rel=${{root##*/}}; emit_entry \"$rel\" \"$root\"; fi"
+        ),
+        root = root,
+        sha_exit = sha_exit,
+        find_exit = find_exit,
+        stat_exit = stat_exit,
+        readlink_exit = readlink_exit,
+    )
+}
+
 fn remote_manifest(
     root: &str,
     client: &SshClient,
@@ -838,7 +1020,7 @@ fn remote_manifest(
         return local_manifest_with_exclusions(Path::new(root), exclusions).map(Some);
     }
     // The target computes hashes and returns compact records; content never crosses SSH.
-    let command = format!("root={}; test -e \"$root\" || exit 44; if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then exit 45; fi; find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o -type f -exec sh -c 'for f do rel=${{f#\"$1\"/}}; if command -v sha256sum >/dev/null 2>&1; then set -- $(sha256sum \"$f\"); else set -- $(shasum -a 256 \"$f\"); fi; mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\"); printf \"f\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$1\"; done' sh \"$root\" {{}} + -o -type l -exec sh -c 'for f do rel=${{f#\"$1\"/}}; mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\"); printf \"l\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$(readlink \"$f\")\"; done' sh \"$root\" {{}} +", shell::quote_path(root));
+    let command = remote_manifest_probe_command(root);
     // The local case returned above, so anything reaching here ran on the target.
     let output = client.execute_with_timeout(&command, PROBE_TIMEOUT);
     let location = "remote";
@@ -858,17 +1040,10 @@ fn remote_manifest(
     if output.exit_code == 44 {
         return Ok(None);
     }
-    // Exit 45 is the probe's own signal that no SHA-256 tool exists. Any other
-    // non-zero status is something else entirely, and reporting all of them as
-    // a missing hashing tool is how the target's real stderr got buried.
-    if output.exit_code == 45 {
-        return Err(remote_probe_error(
-            root,
-            "remote does not provide a supported SHA-256 command",
-            location,
-            &output,
-        )
-        .with_hint("Install `sha256sum` (coreutils) or `shasum` on the deploy target."));
+    if let Some(capability) = RemoteProbeCapability::from_exit_code(output.exit_code) {
+        return Err(remote_probe_capability_error(
+            root, capability, location, &output,
+        ));
     }
     if !output.success {
         return Err(remote_probe_error(
@@ -1109,6 +1284,7 @@ fn entries_match(local: Option<&TreeEntry>, remote: Option<&TreeEntry>) -> bool 
 mod tests {
     use super::*;
     use homeboy_core::server::CommandObservation;
+    use std::process::Command;
 
     #[test]
     fn local_manifest_detects_content_add_delete_mode_symlink_and_ignores_runtime() {
@@ -1357,6 +1533,95 @@ mod tests {
         let remote = parse_remote_manifest(&format!("f\tplugin.php\t644\t{digest}\n"), &[])
             .expect("valid remote evidence");
         assert!(differences(&local_manifest(&local).expect("local manifest"), &remote).is_empty());
+    }
+
+    #[test]
+    fn probe_command_hashes_directory_roots_as_relative_tree_entries() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("static-site-importer");
+        fs::create_dir_all(root.join("assets")).expect("assets");
+        fs::write(root.join("plugin.php"), "release").expect("plugin");
+        fs::write(root.join("assets/app.js"), "bundle").expect("asset");
+
+        let output = run_probe_command(&root, None);
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "stderr should stay off stdout parsing path"
+        );
+
+        let remote = parse_remote_manifest(&String::from_utf8_lossy(&output.stdout), &[])
+            .expect("remote manifest");
+        assert_eq!(
+            remote,
+            local_manifest(&root).expect("local manifest"),
+            "the probe should describe the bounded relative file tree, not the root directory itself"
+        );
+    }
+
+    #[test]
+    fn probe_command_and_local_manifest_support_single_file_roots() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("plugin.php");
+        fs::write(&root, "release").expect("file");
+
+        let output = run_probe_command(&root, None);
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let remote = parse_remote_manifest(&String::from_utf8_lossy(&output.stdout), &[])
+            .expect("remote manifest");
+        assert_eq!(
+            remote,
+            local_manifest(&root).expect("local manifest"),
+            "single-file deliverables should use the same canonical entry identity locally and remotely"
+        );
+    }
+
+    #[test]
+    fn missing_remote_hash_tool_returns_typed_capability_failure() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("plugin.php");
+        fs::write(&root, "release").expect("file");
+
+        let output = run_probe_command(&root, Some("PATH=''"));
+        assert_eq!(
+            output.status.code(),
+            Some(RemoteProbeCapability::Sha256.exit_code())
+        );
+
+        let error = remote_probe_capability_error(
+            root.to_str().expect("path"),
+            RemoteProbeCapability::Sha256,
+            "remote",
+            &command_output(&output),
+        );
+        assert_eq!(
+            error.code,
+            homeboy_core::error::ErrorCode::RemoteCapabilityMissing
+        );
+        assert_eq!(
+            error
+                .details
+                .get("capability")
+                .and_then(|value| value.as_str()),
+            Some("sha256sum")
+        );
+        assert_eq!(
+            error
+                .details
+                .get("command_evidence")
+                .and_then(|value| value.get("stderr"))
+                .and_then(|value| value.as_str()),
+            Some("sha256sum\n")
+        );
     }
 
     /// #10290: deploy and recovery now share one walker, and this pins the two
@@ -1687,6 +1952,30 @@ mod tests {
             auth: None,
             is_local: true,
             env: Default::default(),
+        }
+    }
+
+    fn run_probe_command(root: &Path, prefix: Option<&str>) -> std::process::Output {
+        let command = remote_manifest_probe_command(root.to_str().expect("path"));
+        let command = prefix
+            .map(|prefix| format!("{prefix}; {command}"))
+            .unwrap_or(command);
+        Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .expect("probe command")
+    }
+
+    fn command_output(output: &std::process::Output) -> CommandOutput {
+        CommandOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            success: output.status.success(),
+            exit_code: output.status.code().unwrap_or(-1),
+            timed_out: false,
+            observation: CommandObservation::Complete,
+            child_resource: None,
         }
     }
 }
