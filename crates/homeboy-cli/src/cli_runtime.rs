@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::capability_registry::CommandCapabilityRegistry;
 use crate::cli_surface::{
     command_safety_manifest_from_dynamic, command_surface_from, Cli, CommandSafetyManifest,
-    Commands, DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
+    CommandSurfaceCommandProvenance, CommandSurfaceDoctorReport, CommandSurfaceRegistry, Commands,
+    DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
     ExtensionCommandHealth, ExtensionCommandManifest,
 };
 use crate::command_capability::{
@@ -250,6 +251,11 @@ struct ExtensionCliHealth {
 struct ExtensionCliDiscovery {
     info: Vec<ExtensionCliInfo>,
     health: ExtensionCliHealth,
+}
+
+struct ComposedCommandRegistry {
+    command: Command,
+    provenance: Vec<CommandSurfaceCommandProvenance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1347,21 +1353,33 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        let exit_code = crate::core::notification_route::with_current_resolution(
-            Some(notification_resolution.evidence),
+        let command_surface_doctor_report = matches!(
+            &cli.command,
+            Commands::SelfCmd(crate::commands::self_cmd::SelfArgs {
+                command: crate::commands::self_cmd::SelfCommand::Doctor(_),
+            })
+        )
+        .then(|| self.command_surface_doctor_report());
+        let exit_code = crate::cli_surface::with_command_surface_doctor_report(
+            command_surface_doctor_report,
             || {
-                crate::core::notification_route::with_current(notification_route, || {
-                    #[cfg(test)]
-                    record_marker_context_before_run_command();
-                    commands::output_runtime::run_command(
-                        cli.command,
-                        command_spec,
-                        output_file.as_deref(),
-                        &command_identity,
-                        command_provenance,
-                        cli.placement,
-                    )
-                })
+                crate::core::notification_route::with_current_resolution(
+                    Some(notification_resolution.evidence),
+                    || {
+                        crate::core::notification_route::with_current(notification_route, || {
+                            #[cfg(test)]
+                            record_marker_context_before_run_command();
+                            commands::output_runtime::run_command(
+                                cli.command,
+                                command_spec,
+                                output_file.as_deref(),
+                                &command_identity,
+                                command_provenance,
+                                cli.placement,
+                            )
+                        })
+                    },
+                )
             },
         );
         // The command's initial outcome is now durable and returned. Historical
@@ -1374,12 +1392,47 @@ impl CliRuntime {
     }
 
     fn build_augmented_command(&self) -> Command {
+        self.composed_command_registry().command
+    }
+
+    fn command_surface_doctor_report(&self) -> CommandSurfaceDoctorReport {
+        let registry = self.composed_command_registry();
+        crate::cli_surface::command_surface_doctor_report_from_composed(
+            registry.command,
+            registry.provenance,
+        )
+    }
+
+    fn composed_command_registry(&self) -> ComposedCommandRegistry {
         let discovery = self.extension_discovery();
         self.capabilities
             .validate_external_names(discovery.info.iter().map(|info| info.tool.as_str()))
             .expect("dynamic and typed capability command names must not conflict");
         let mut command = build_augmented_command(&discovery.info, &discovery.health);
+        let mut provenance = Cli::command_with_scoped_lab_args()
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| CommandSurfaceCommandProvenance {
+                command: subcommand.get_name().to_string(),
+                registry: CommandSurfaceRegistry::Core,
+            })
+            .collect::<Vec<_>>();
+        provenance.extend(
+            discovery
+                .info
+                .iter()
+                .map(|info| CommandSurfaceCommandProvenance {
+                    command: info.descriptor.name.clone(),
+                    registry: CommandSurfaceRegistry::Extension,
+                }),
+        );
         for entry in self.capabilities.entries() {
+            if !entry.command.is_hide_set() {
+                provenance.push(CommandSurfaceCommandProvenance {
+                    command: entry.capability.name().to_string(),
+                    registry: CommandSurfaceRegistry::Descriptor,
+                });
+            }
             command = command.subcommand(entry.command.clone());
         }
         let support = self
@@ -1388,7 +1441,10 @@ impl CliRuntime {
             .iter()
             .filter_map(|entry| entry.capability.lab_command_route_support())
             .collect::<Vec<_>>();
-        crate::command_contract::scope_composed_lab_cli_arguments(command, &support)
+        ComposedCommandRegistry {
+            command: crate::command_contract::scope_composed_lab_cli_arguments(command, &support),
+            provenance,
+        }
     }
 
     fn capability_matches<'a>(
@@ -3536,6 +3592,45 @@ mod tests {
     static ADMISSION_FIXTURE_CAPABILITIES: [&'static dyn CliCapability; 1] =
         [&ADMISSION_FIXTURE_CAPABILITY];
 
+    struct ComposedDoctorCapability;
+    struct HiddenComposedDoctorCapability;
+
+    static COMPOSED_DOCTOR_CAPABILITY: ComposedDoctorCapability = ComposedDoctorCapability;
+    static HIDDEN_COMPOSED_DOCTOR_CAPABILITY: HiddenComposedDoctorCapability =
+        HiddenComposedDoctorCapability;
+    static COMPOSED_DOCTOR_CAPABILITIES: [&'static dyn CliCapability; 2] = [
+        &COMPOSED_DOCTOR_CAPABILITY,
+        &HIDDEN_COMPOSED_DOCTOR_CAPABILITY,
+    ];
+
+    impl CliCapability for ComposedDoctorCapability {
+        fn name(&self) -> &'static str {
+            "triage"
+        }
+
+        fn command(&self) -> Command {
+            Command::new(self.name()).about("composed doctor fixture")
+        }
+
+        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
+            unreachable!("the command-surface fixture is never dispatched")
+        }
+    }
+
+    impl CliCapability for HiddenComposedDoctorCapability {
+        fn name(&self) -> &'static str {
+            "hidden-doctor-fixture"
+        }
+
+        fn command(&self) -> Command {
+            Command::new(self.name()).hide(true)
+        }
+
+        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
+            unreachable!("the command-surface fixture is never dispatched")
+        }
+    }
+
     impl CliCapability for AdmissionFixtureCapability {
         fn name(&self) -> &'static str {
             "admission-fixture"
@@ -4675,6 +4770,54 @@ mod tests {
                 assert!(
                     help.contains("sample-cli"),
                     "`homeboy {flag}` should list the extension subcommand: {help}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn doctor_uses_the_same_composed_registry_as_root_help() {
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
+            let runtime = CliRuntime::with_capabilities(&COMPOSED_DOCTOR_CAPABILITIES);
+            let registry = runtime.composed_command_registry();
+
+            let help = registry
+                .command
+                .clone()
+                .try_get_matches_from(["homeboy", "--help"])
+                .expect_err("root help should terminate Clap parsing")
+                .to_string();
+            let report = crate::cli_surface::command_surface_doctor_report_from_composed(
+                registry.command,
+                registry.provenance,
+            );
+
+            assert!(report.agrees, "{:?}", report.drift_notes);
+            assert!(help.contains("triage"), "root help omitted triage: {help}");
+            assert!(
+                help.contains("sample-cli"),
+                "root help omitted extension command: {help}"
+            );
+            assert!(!help.contains("hidden-doctor-fixture"));
+            assert!(!report
+                .source_registry_commands
+                .contains(&"hidden-doctor-fixture".to_string()));
+            assert!(report.help_commands.contains(&"triage".to_string()));
+            assert!(report
+                .source_registry_commands
+                .contains(&"triage".to_string()));
+            for (command, registry) in [
+                ("status", CommandSurfaceRegistry::Core),
+                ("triage", CommandSurfaceRegistry::Descriptor),
+                ("sample-cli", CommandSurfaceRegistry::Extension),
+            ] {
+                assert!(
+                    report
+                        .command_provenance
+                        .iter()
+                        .any(|entry| { entry.command == command && entry.registry == registry }),
+                    "missing {registry:?} provenance for {command}"
                 );
             }
         });
