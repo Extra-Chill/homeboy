@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.3] - 2026-08-25
+
+### Fixed
+- budget the from-source build like the phases beside it
+- pass extension settings to packagers
+- delete BaselineInconclusive instead of excusing a red candidate
+- bound explicit repository resolution
+
 ## [0.361.2] - 2026-08-25
 
 ### Fixed
