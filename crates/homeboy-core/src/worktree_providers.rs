@@ -2400,6 +2400,36 @@ pub(crate) fn is_worktree_provider_not_found(error: &Error) -> bool {
     error.details["worktree_provider_lookup"] == "not_found"
 }
 
+pub(crate) fn list_enabled_worktree_providers_from_config(
+    config: &HomeboyConfig,
+) -> Result<Vec<WorktreeProviderResolution>> {
+    let mut provider_ids = config
+        .worktree_providers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    let mut resolutions = Vec::new();
+    for provider_id in provider_ids {
+        let provider = &config.worktree_providers[&provider_id];
+        if !provider.enabled {
+            continue;
+        }
+        let Some(command) = provider.commands.list.as_ref() else {
+            continue;
+        };
+        resolutions.extend(
+            run_provider_list_command(&provider_id, provider, command)?
+                .into_iter()
+                .map(|worktree| WorktreeProviderResolution {
+                    provider_id: provider_id.clone(),
+                    worktree,
+                }),
+        );
+    }
+    Ok(resolutions)
+}
+
 pub(crate) fn worktree_provider_not_found_error(
     handle: &str,
     config: &HomeboyConfig,

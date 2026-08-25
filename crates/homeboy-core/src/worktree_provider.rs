@@ -1,6 +1,7 @@
 use crate::defaults::{self, HomeboyConfig};
 use crate::error::{Error, Result};
 use crate::{worktree, worktree_providers};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Canonical read-only ownership returned by every worktree provider.
@@ -36,6 +37,28 @@ pub enum WorktreeProviderLookup {
 /// errors and must never be treated as permission to fall through.
 pub trait WorktreeProvider {
     fn resolve(&self, handle: &str) -> Result<WorktreeProviderLookup>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderSafety {
+    pub dirty: bool,
+    pub unpushed: bool,
+    pub primary: bool,
+    pub missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderWorkspace {
+    pub ownership: WorktreeOwnership,
+    pub repository: Option<String>,
+    pub owner_run_ref: Option<String>,
+    pub created_at: Option<String>,
+    pub terminal_disposition: Option<String>,
+    pub safety: WorktreeProviderSafety,
+}
+
+pub trait WorktreeInventoryProvider {
+    fn list(&self) -> Result<Vec<WorktreeProviderWorkspace>>;
 }
 
 /// Canonical local target admitted for a provider-owned mutation.
@@ -215,6 +238,38 @@ impl WorktreeProvider for NativeWorktreeProvider {
             branch: record.branch,
             task_url: record.task_url,
         }))
+    }
+}
+
+impl WorktreeInventoryProvider for NativeWorktreeProvider {
+    fn list(&self) -> Result<Vec<WorktreeProviderWorkspace>> {
+        worktree::list()?
+            .worktrees
+            .into_iter()
+            .filter(|record| record.state == worktree::TaskWorktreeState::Active)
+            .map(|record| {
+                let safety = worktree::safety_report_for_provider(&record)?;
+                Ok(WorktreeProviderWorkspace {
+                    ownership: WorktreeOwnership {
+                        provider: WorktreeProviderIdentity::Native,
+                        handle: record.id,
+                        path: record.worktree_path,
+                        branch: record.branch,
+                        task_url: record.task_url,
+                    },
+                    repository: Some(record.component_id),
+                    owner_run_ref: record.run_id,
+                    created_at: Some(record.created_at),
+                    terminal_disposition: record.terminal_disposition,
+                    safety: WorktreeProviderSafety {
+                        dirty: safety.dirty,
+                        unpushed: safety.unpushed_commits > 0,
+                        primary: safety.primary_checkout,
+                        missing: safety.worktree_missing,
+                    },
+                })
+            })
+            .collect()
     }
 }
 
@@ -439,6 +494,36 @@ impl WorktreeProvider for CommandWorktreeProvider<'_> {
     }
 }
 
+impl WorktreeInventoryProvider for CommandWorktreeProvider<'_> {
+    fn list(&self) -> Result<Vec<WorktreeProviderWorkspace>> {
+        worktree_providers::list_enabled_worktree_providers_from_config(self.config)?
+            .into_iter()
+            .map(|resolution| {
+                let worktree = resolution.worktree;
+                Ok(WorktreeProviderWorkspace {
+                    ownership: WorktreeOwnership {
+                        provider: WorktreeProviderIdentity::Configured(resolution.provider_id),
+                        handle: worktree.handle,
+                        path: worktree.path,
+                        branch: worktree.branch,
+                        task_url: worktree.task_url,
+                    },
+                    repository: None,
+                    owner_run_ref: None,
+                    created_at: None,
+                    terminal_disposition: None,
+                    safety: WorktreeProviderSafety {
+                        dirty: worktree.safety.dirty,
+                        unpushed: worktree.safety.unpushed,
+                        primary: worktree.safety.primary,
+                        missing: false,
+                    },
+                })
+            })
+            .collect()
+    }
+}
+
 impl WorktreeMutationProvider for CommandWorktreeProvider<'_> {
     fn resolve_for_mutation(
         &self,
@@ -646,6 +731,30 @@ pub fn resolve_worktree_ownership_from_config(
     Err(worktree_providers::worktree_provider_not_found_error(
         handle, config, false,
     ))
+}
+
+pub fn list_worktree_provider_inventory() -> Result<Vec<WorktreeProviderWorkspace>> {
+    list_worktree_provider_inventory_from_config(&defaults::load_config())
+}
+
+pub fn list_worktree_provider_inventory_from_config(
+    config: &HomeboyConfig,
+) -> Result<Vec<WorktreeProviderWorkspace>> {
+    let native = NativeWorktreeProvider;
+    let command = CommandWorktreeProvider::new(config);
+    let mut by_handle = BTreeMap::new();
+    for workspace in native.list()?.into_iter().chain(command.list()?) {
+        if let Some(existing) = by_handle.insert(workspace.ownership.handle.clone(), workspace) {
+            let handle = existing.ownership.handle;
+            return Err(Error::validation_invalid_argument(
+                "worktree_provider",
+                format!("multiple providers claim worktree handle `{handle}`"),
+                Some(handle),
+                None,
+            ));
+        }
+    }
+    Ok(by_handle.into_values().collect())
 }
 
 /// Resolve a local mutation target through native ownership first, then the
@@ -1004,6 +1113,9 @@ mod tests {
                 WorktreeProviderIdentity::Native,
                 &path,
             );
+            let native_inventory = NativeWorktreeProvider.list().expect("native inventory");
+            assert_eq!(native_inventory.len(), 1);
+            assert_eq!(native_inventory[0].repository.as_deref(), Some("fixture"));
             let intent = WorktreeProvisionIntent {
                 handle: "fixture@planned".to_string(),
                 repo: "fixture".to_string(),
@@ -1205,6 +1317,13 @@ mod tests {
                 WorktreeProviderIdentity::Configured("command-fixture".to_string()),
                 workspace.path(),
             );
+            let command_inventory = CommandWorktreeProvider::new(&config)
+                .list()
+                .expect("command inventory");
+            assert_eq!(command_inventory.len(), 2);
+            assert!(command_inventory.iter().any(|workspace| {
+                workspace.ownership.handle == "fixture@unsafe" && workspace.safety.dirty
+            }));
             assert_unsafe_lookup(&CommandWorktreeProvider::new(&config), "fixture@unsafe");
         });
     }
