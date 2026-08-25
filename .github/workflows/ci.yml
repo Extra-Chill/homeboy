@@ -239,6 +239,9 @@ jobs:
           expected-commands: review audit,review lint,review test
           differential-gating: true
           execution-timeout-seconds: ${{ matrix.execution_timeout_seconds }}
+          # See the note on the other call site: a from-source release build of
+          # this workspace does not fit the shared 900s setup default.
+          setup-timeout-seconds: '2400'
           app-token: ${{ steps.app-token.outputs.token || github.token }}
           comment-section-key: ${{ matrix.section_key }}
           comment-section-title: ${{ matrix.section_title }}
@@ -322,6 +325,14 @@ jobs:
       test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}
       execution-timeout-seconds: '2100'
       test-timeout-seconds: '1800'
+      # Homeboy builds itself from source in `release`. That is the most
+      # expensive setup step this action has, and the shared 900s default is
+      # scoped to downstream components that download a prebuilt binary. A cold
+      # or partially-warm cargo cache pushes this workspace past 900s, the setup
+      # wrapper terminates the build, and the action then reports every expected
+      # command as failed -- so an unrelated PR sees a red `Audit` with no
+      # findings and no digest. Budget it like the other two phases already are.
+      setup-timeout-seconds: '2400'
       comment-section-key: test
       comment-section-title: Test
     secrets: inherit
