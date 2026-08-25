@@ -736,8 +736,6 @@ impl<M: RunnerStagingMaterializer> RemoteRunnerStagingTransport for RunnerStagin
         self.store.stage_durable(envelope)
     }
 }
-
-pub type DirectRunnerStagingTransport<M> = RunnerStagingTransport<M>;
 pub type ReverseRunnerStagingTransport<M> = RunnerStagingTransport<M>;
 
 /// Resolve the connected runner into the production HTTP transport. Capability
