@@ -55,6 +55,7 @@ use super::args::{
     AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
 };
 use super::command_json_value;
+use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 use super::gate_contract::{validate_gate_contracts, GateContractValidation};
 
 pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
@@ -2010,6 +2011,7 @@ fn cook_batch_inner(
     }
     args.gates.snapshot_file_inputs()?;
     normalize_cook_batch_repo_with_placement(&mut args, placement)?;
+    resolve_cook_batch_default_branch(&mut args)?;
     apply_provider_profile(&mut args);
     // Resolve the effective backend (explicit --backend or the configured
     // default) and validate it up front (#7717). Otherwise an omitted
@@ -2189,6 +2191,7 @@ fn cook_batch_inner(
                 "primary_failure": primary_failure,
                 "causal_failures": causal_failures,
                 "preflight": {
+                    "default_branch": args.base_resolution.clone(),
                     "provider_readiness_command": provider_readiness_command(&args),
                     "provider_selection": provider_selection_preflight(&args, args.dry_run),
                     "deterministic_gates": effective_batch_cook_gates(&plan)
@@ -2331,6 +2334,7 @@ fn cook_batch_dry_run(
     normalized_args =
         planner.run_bounded("repository", "registered primary repository", move || {
             normalize_static_cook_batch_repo_with_placement(&mut normalized_args, placement)?;
+            resolve_cook_batch_default_branch(&mut normalized_args)?;
             Ok(normalized_args)
         })?;
     args = normalized_args;
@@ -2386,6 +2390,7 @@ fn cook_batch_dry_run(
             "dry_run": true,
             "summary": { "issues": plan.cooks.len(), "worktrees_total": worktrees.rows.len(), "worktrees_blocked": 0 },
             "preflight": {
+                "default_branch": args.base_resolution.clone(),
                 "provider_readiness_command": provider_readiness_command(&args),
                 "provider_selection": provider_selection_preflight(&args, true),
                 "deterministic_gates": effective_batch_cook_gates(&plan),
@@ -2525,6 +2530,40 @@ fn normalize_cook_batch_repo_with_placement(
     }
 }
 
+fn resolve_cook_batch_default_branch(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
+    let component = homeboy::core::component::registered_by_id(&args.repo)?
+        .ok_or_else(|| invalid_cook_batch_repo(args, Vec::new(), Placement::Auto))?;
+    let component_path = PathBuf::from(component.local_path);
+    let resolution = resolve_default_branch(DefaultBranchRequest {
+        explicit_base: args.base.as_deref(),
+        explicit_from: args.from.as_deref(),
+        workspace: None,
+        component: Some(&component_path),
+        destination: None,
+        compatibility_fallback: None,
+    })?;
+    args.base = Some(resolution.base.clone());
+    args.from = Some(resolution.from.clone());
+    args.base_resolution = Some(serde_json::to_value(resolution).map_err(|error| {
+        Error::internal_unexpected(format!(
+            "serialize fanout default-branch resolution: {error}"
+        ))
+    })?);
+    Ok(())
+}
+
+fn cook_batch_base(args: &AgentTaskFanoutCookBatchArgs) -> &str {
+    args.base
+        .as_deref()
+        .expect("Cook-batch base is resolved before planning")
+}
+
+fn cook_batch_from(args: &AgentTaskFanoutCookBatchArgs) -> &str {
+    args.from
+        .as_deref()
+        .expect("Cook-batch source is resolved before planning")
+}
+
 fn invalid_cook_batch_repo(
     args: &AgentTaskFanoutCookBatchArgs,
     candidates: Vec<String>,
@@ -2584,10 +2623,6 @@ fn cook_batch_argv_with_placement(
         "cook-batch".to_string(),
         "--repo".to_string(),
         args.repo.clone(),
-        "--from".to_string(),
-        args.from.clone(),
-        "--base".to_string(),
-        args.base.clone(),
         "--branch-prefix".to_string(),
         args.branch_prefix.clone(),
         "--private-gate-reveal".to_string(),
@@ -2610,6 +2645,12 @@ fn cook_batch_argv_with_placement(
         "--isolate-gate-xdg".to_string(),
         args.gates.isolate_gate_xdg.to_string(),
     ];
+    if let Some(from) = &args.from {
+        command.extend(["--from".to_string(), from.clone()]);
+    }
+    if let Some(base) = &args.base {
+        command.extend(["--base".to_string(), base.clone()]);
+    }
     if placement != Placement::Auto {
         command.splice(
             1..1,
@@ -2847,7 +2888,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                     }
                 }),
             }).collect(),
-            from: args.from.clone(),
+            from: cook_batch_from(args).to_string(),
             dry_run,
             retry_after_seconds: 30,
         })
@@ -2934,7 +2975,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                 &[
                     "rev-parse",
                     "--verify",
-                    &format!("{}^{{commit}}", args.from),
+                    &format!("{}^{{commit}}", cook_batch_from(args)),
                 ],
                 "resolve explicit worktree base",
             )?;
@@ -3068,7 +3109,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
         worktree::WorktreeQueueCreateOutput {
             schema: "homeboy/worktree-queue-create/v1",
             repo: args.repo.clone(),
-            base_ref: args.from.clone(),
+            base_ref: cook_batch_from(args).to_string(),
             dry_run: false,
             rows,
         },
@@ -3139,7 +3180,7 @@ fn static_worktrees_dry_run(
     worktree::WorktreeQueueCreateOutput {
         schema: "homeboy/worktree-queue-create/v1",
         repo: args.repo.clone(),
-        base_ref: args.from.clone(),
+        base_ref: cook_batch_from(args).to_string(),
         dry_run: true,
         rows: plan
             .cooks
@@ -3192,7 +3233,7 @@ fn with_workspace_owner_repair_commands(
         let intent = homeboy::core::worktree_providers::WorktreeProviderCreateIntent {
             handle: row.handle.clone(),
             repo: args.repo.clone(),
-            base: args.from.clone(),
+            base: cook_batch_from(args).to_string(),
             head: row.branch.clone(),
             task_url: cook
                 .task_url
@@ -4265,7 +4306,7 @@ fn build_cook_batch_plan_with_profiles(
             max_attempts: default_max_attempts(),
             no_finalize: false,
             draft_pr: false,
-            base: args.base.clone(),
+            base: cook_batch_base(args).to_string(),
             head: Some(branch),
             title: Some(format!("Fix {}", issue.key)),
             commit_message: Some(format!("fix: address {}", issue.key)),
@@ -4312,6 +4353,7 @@ fn build_cook_batch_plan_with_profiles(
             "repo": args.repo,
             "base": args.base,
             "from": args.from,
+            "default_branch_resolution": args.base_resolution,
         }),
     })
 }
@@ -4821,7 +4863,7 @@ fn worktree_create_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) ->
         "--branch".to_string(),
         branch.to_string(),
         "--from".to_string(),
-        args.from.clone(),
+        cook_batch_from(args).to_string(),
     ]
 }
 
@@ -6617,8 +6659,9 @@ fi
                 "https://github.com/Extra-Chill/homeboy/issues/6454".to_string(),
             ],
             repo: "homeboy".to_string(),
-            from: "origin/main".to_string(),
-            base: "main".to_string(),
+            from: Some("origin/main".to_string()),
+            base: Some("main".to_string()),
+            base_resolution: None,
             branch_prefix: "fix".to_string(),
             fanout_id: Some("issue-wave".to_string()),
             worktrees: Vec::new(),
@@ -6876,8 +6919,8 @@ fi
 
             let mut handle = cook_batch_args();
             handle.repo = "fixture@fix-11984".to_string();
-            handle.from = "origin/release".to_string();
-            handle.base = "release".to_string();
+            handle.from = Some("origin/release".to_string());
+            handle.base = Some("release".to_string());
             handle.branch_prefix = "repair".to_string();
             handle.fanout_id = Some("faithful-correction".to_string());
             handle.backend = Some("fixture-backend".to_string());
@@ -8388,7 +8431,7 @@ fi
 
             let mut args = cook_batch_args();
             args.repo = "fanout-dry-run-fixture".to_string();
-            args.from = "HEAD".to_string();
+            args.from = Some("HEAD".to_string());
             let (value, exit_code) = cook_batch(args).expect("dry-run plan");
 
             assert_eq!(exit_code, 0);
@@ -8648,7 +8691,7 @@ fi
 
             let mut args = cook_batch_args();
             args.repo = "fanout-mixed-fixture".to_string();
-            args.from = "HEAD".to_string();
+            args.from = Some("HEAD".to_string());
             let (value, exit_code) = cook_batch(args).expect("mixed dry-run plan");
 
             assert_eq!(exit_code, 0, "{value}");
@@ -9287,7 +9330,8 @@ fi
             args.ai_tool.as_deref(),
             Some("OpenAI GPT-5.6 Sol via OpenCode")
         );
-        assert_eq!(args.from, "origin/main");
+        assert_eq!(args.from, None);
+        assert_eq!(args.base, None);
         assert_eq!(
             args.provider_profile,
             Some("opencode-codex-gpt55".to_string())
