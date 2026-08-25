@@ -27,7 +27,7 @@ assert_not_contains() {
 }
 
 component="${TMPDIR}/component"
-mkdir -p "${component}/tests/Unit" "${component}/wordpress/tests" "${component}/tools" "${component}/bin/tests/i18n-tools" "${TMPDIR}/stubs"
+mkdir -p "${component}/tests/Unit/Support" "${component}/wordpress/tests" "${component}/tools" "${component}/bin/tests/i18n-tools" "${TMPDIR}/stubs"
 runner_prelude="${TMPDIR}/runner-prelude.sh"
 cat > "${runner_prelude}" <<'SH'
 homeboy_runner_init() {
@@ -37,6 +37,14 @@ homeboy_runner_init() {
 }
 SH
 export HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude"
+
+results_writer="${TMPDIR}/write-test-results.sh"
+cat > "$results_writer" <<'SH'
+homeboy_write_test_results() {
+    jq -n --argjson total "$1" --argjson passed "$2" --argjson failed "$3" --argjson skipped "$4" --arg source "$5" \
+        '{total: $total, passed: $passed, failed: $failed, skipped: $skipped, source: $source}' > "$HOMEBOY_TEST_RESULTS_FILE"
+}
+SH
 
 # Simulate a caller with a managed Codebox installation whose CLI and core module
 # are incompatible with this fixture. The smoke owns its runtime inputs below.
@@ -79,6 +87,17 @@ cat > "${component}/tests/queue-routing-smoke.php" <<'PHP'
 fwrite( STDOUT, "queue routing smoke ran\n" );
 PHP
 
+cat > "${component}/tests/worktree-command-help-snapshots.php" <<'PHP'
+<?php
+fwrite( STDOUT, "settings-declared standalone test ran\n" );
+PHP
+
+cat > "${component}/tests/failing-smoke.php" <<'PHP'
+<?php
+fwrite( STDERR, "failing smoke\n" );
+exit( 3 );
+PHP
+
 cat > "${component}/tests/codebox-agent-task-matrix-smoke.js" <<'JS'
 console.log('codebox agent task matrix smoke ran');
 JS
@@ -106,6 +125,11 @@ cat > "${component}/tests/Unit/ImportAgentAbilityTest.php" <<'PHP'
 // PHPUnit-shaped file; the WP Codebox backend owns execution.
 PHP
 
+cat > "${component}/tests/Unit/Support/TestDoubles.php" <<'PHP'
+<?php
+// Shared helper; intentionally not an executable test case.
+PHP
+
 cat > "${component}/bin/tests/i18n-tools/ExtractTest.php" <<'PHP'
 <?php
 // PHPUnit-shaped file under a configured non-default test root.
@@ -131,6 +155,7 @@ echo "WP_CODEBOX_STUB"
 echo "SELECTED=${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
 echo "CORE_MODULE=${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
 printf 'CHANGED=%s\n' "${HOMEBOY_CHANGED_TEST_FILES:-}"
+printf 'PHPUNIT_CHANGED=%s\n' "${HOMEBOY_WORDPRESS_PHPUNIT_CHANGED_TEST_FILES:-}"
 printf 'NODE_OPTIONS=%s\n' "${NODE_OPTIONS:-}"
 printf 'ARGS=%s\n' "$*"
 if [ -n "${WP_CODEBOX_ARGS_FILE:-}" ]; then
@@ -298,6 +323,29 @@ echo "headless preview boot smoke passed"
 SH
 chmod +x "${TMPDIR}/stubs/npm"
 
+run_changed_scope() {
+    local outfile="$1"
+    local changed="$2"
+    local status=0
+
+    set +e
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+    HOMEBOY_COMPONENT_ID="component" \
+    HOMEBOY_COMPONENT_PATH="$component" \
+    HOMEBOY_COMPONENT_SHAPE="plugin" \
+    HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
+    HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+    HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
+    HOMEBOY_TEST_RESULTS_FILE="${outfile}.results.json" \
+    HOMEBOY_CHANGED_TEST_FILES="$changed" \
+    HOMEBOY_SETTINGS_JSON='{"standalone_php_test_paths":["tests/*-command-help-snapshots.php"]}' \
+        bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "$outfile" 2>&1
+    status=$?
+    set -e
+    return "$status"
+}
+
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
 HOMEBOY_COMPONENT_ID="component" \
@@ -337,6 +385,49 @@ HOMEBOY_TEST_SCOPE_ENV_VALUE=$'tests/import-agent-ability-smoke.php\ntests/queue
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_OK:tests/import-agent-ability-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_SUMMARY:passed=1 failed=0"
+
+# A mixed changed scope accounts for every selection, including a settings-
+# declared standalone route and a deliberately unsupported helper.
+run_changed_scope "${TMPDIR}/reconciled-mixed.out" $'tests/Unit/ImportAgentAbilityTest.php\ntests/import-agent-ability-smoke.php\ntests/worktree-command-help-snapshots.php\ntests/queue-routing-smoke.php\ntests/Unit/Support/TestDoubles.php'
+assert_contains "${TMPDIR}/reconciled-mixed.out" "CHANGED_SCOPE_ROUTE:tests/Unit/ImportAgentAbilityTest.php:runner=phpunit"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "CHANGED_SCOPE_ROUTE:tests/import-agent-ability-smoke.php:runner=host-php-smoke"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "CHANGED_SCOPE_ROUTE:tests/worktree-command-help-snapshots.php:runner=host-php-smoke"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "CHANGED_SCOPE_ROUTE:tests/queue-routing-smoke.php:runner=host-php-smoke"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "CHANGED_SCOPE_EXCLUDED:tests/Unit/Support/TestDoubles.php:reason=unsupported_test_shape"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "CHANGED_SCOPE_SUMMARY:selected=5 routed=4 excluded=1"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "PHP_SMOKE_OK:tests/import-agent-ability-smoke.php"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "PHP_SMOKE_OK:tests/worktree-command-help-snapshots.php"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "HOST_SMOKE_BEGIN:tests/queue-routing-smoke.php"
+assert_contains "${TMPDIR}/reconciled-mixed.out" "PHPUNIT_CHANGED=tests/Unit/ImportAgentAbilityTest.php"
+
+# A standalone-only changed scope must not widen into PHPUnit, and its sidecar
+# reports exact host-PHP counts and ownership.
+run_changed_scope "${TMPDIR}/declared-only.out" 'tests/worktree-command-help-snapshots.php'
+assert_contains "${TMPDIR}/declared-only.out" "CHANGED_SCOPE_SUMMARY:selected=1 routed=1 excluded=0"
+assert_contains "${TMPDIR}/declared-only.out" "PHP_SMOKE_OK:tests/worktree-command-help-snapshots.php"
+assert_not_contains "${TMPDIR}/declared-only.out" "WP_CODEBOX_STUB"
+jq -e '.total == 1 and .passed == 1 and .failed == 0 and .skipped == 0 and .source == "changed-scope-host-php"' "${TMPDIR}/declared-only.out.results.json" >/dev/null
+
+# Standalone failure remains authoritative both alone and when followed by a
+# passing PHPUnit backend.
+standalone_failure_status=0
+run_changed_scope "${TMPDIR}/standalone-failure.out" 'tests/failing-smoke.php' || standalone_failure_status=$?
+if [ "$standalone_failure_status" -eq 0 ]; then
+    echo "Expected a failing standalone-only changed scope to fail" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/standalone-failure.out" "PHP_SMOKE_FAIL:tests/failing-smoke.php:exit=3"
+jq -e '.total == 1 and .passed == 0 and .failed == 1 and .skipped == 0 and .source == "changed-scope-host-php"' "${TMPDIR}/standalone-failure.out.results.json" >/dev/null
+
+mixed_failure_status=0
+run_changed_scope "${TMPDIR}/mixed-failure.out" $'tests/Unit/ImportAgentAbilityTest.php\ntests/failing-smoke.php' || mixed_failure_status=$?
+if [ "$mixed_failure_status" -eq 0 ]; then
+    echo "Expected a passing PHPUnit backend not to erase a standalone failure" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/mixed-failure.out" "PHP_SMOKE_FAIL:tests/failing-smoke.php:exit=3"
+assert_contains "${TMPDIR}/mixed-failure.out" "WP_CODEBOX_STUB"
+assert_contains "${TMPDIR}/mixed-failure.out" "PHPUNIT_CHANGED=tests/Unit/ImportAgentAbilityTest.php"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
