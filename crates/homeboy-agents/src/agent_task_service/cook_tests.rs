@@ -6592,6 +6592,189 @@ fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation()
 
 #[cfg(unix)]
 #[test]
+fn pending_cook_attaches_task_before_exact_provider_resolution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
+        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
+        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
+        let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
+        let root = tempfile::tempdir().expect("workspace root");
+        let source = root.path().join("source");
+        let workspace = root.path().join("workspace");
+        for args in [
+            vec!["init", "--quiet", "-b", "main", source.to_str().unwrap()],
+            vec![
+                "-C",
+                source.to_str().unwrap(),
+                "config",
+                "user.email",
+                "test@example.com",
+            ],
+            vec![
+                "-C",
+                source.to_str().unwrap(),
+                "config",
+                "user.name",
+                "Homeboy Test",
+            ],
+            vec![
+                "-C",
+                source.to_str().unwrap(),
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            vec![
+                "-C",
+                source.to_str().unwrap(),
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "fix-13427",
+                workspace.to_str().unwrap(),
+            ],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .status()
+                .expect("git runs")
+                .success());
+        }
+        let provider_dir = tempfile::tempdir().expect("provider directory");
+        let attached = provider_dir.path().join("attached");
+        let apply_count = provider_dir.path().join("apply-count");
+        let provider = provider_dir.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                r#"#!/bin/sh
+case "$1" in
+preview)
+  status=eligible
+  test -f '{}' && status=already_attached
+  printf '{{"schema":"homeboy/worktree-provider-task-attachment/v1","provider_id":"fixture","handle":"fixture@fix-13427","task_url":"https://example.test/issues/13427","path":"{}","branch":"fix-13427","primary":false,"status":"%s"}}\n' "$status"
+  ;;
+apply)
+  printf '1\n' >> '{}'
+  touch '{}'
+  printf '%s\n' '{{"schema":"homeboy/worktree-provider-task-attachment/v1","provider_id":"fixture","handle":"fixture@fix-13427","task_url":"https://example.test/issues/13427","path":"{}","branch":"fix-13427","primary":false,"status":"attached"}}'
+  ;;
+resolve)
+  if test -f '{}'; then
+    printf '%s\n' '{{"worktrees":[{{"handle":"fixture@fix-13427","path":"{}","branch":"fix-13427","safety":{{"dirty":false,"unpushed":false,"primary":false}}}}]}}'
+  else
+    printf 'exact worktree has no tracker ownership\n' >&2
+    exit 23
+  fi
+  ;;
+esac
+"#,
+                attached.display(),
+                workspace.display(),
+                apply_count.display(),
+                attached.display(),
+                workspace.display(),
+                attached.display(),
+                workspace.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    task_attachment_preview: Some(vec![
+                        provider.display().to_string(),
+                        "preview".to_string(),
+                        "{handle}".to_string(),
+                        "{task_url}".to_string(),
+                        "{idempotency_key}".to_string(),
+                    ]),
+                    task_attachment_apply: Some(vec![
+                        provider.display().to_string(),
+                        "apply".to_string(),
+                        "{handle}".to_string(),
+                        "{task_url}".to_string(),
+                        "{idempotency_key}".to_string(),
+                    ]),
+                    resolve: Some(vec![
+                        provider.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy_core::defaults::save_config(&config).expect("save provider config");
+
+        let mut options =
+            batch_cook_options("fix-13427", Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = "fix-13427-run".to_string();
+        options.to_worktree = "fixture@fix-13427".to_string();
+        options.task_base_sha = Some("fixture-base".to_string());
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending",
+            "kind": "provider",
+            "handle": options.to_worktree,
+            "provision_intent": {
+                "repo": "fixture",
+                "base": "main",
+                "head": "fix-13427",
+                "task_url": "https://example.test/issues/13427"
+            }
+        });
+        recipe_store
+            .persist_initial_recipe(&options)
+            .expect("persist recipe");
+        materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, &options)
+            .expect("materialize durable run");
+
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
+            .expect("attach ownership and resolve exact workspace");
+
+        assert_eq!(std::fs::read_to_string(apply_count).unwrap(), "1\n");
+        assert_eq!(
+            options.initial_plan.metadata["cook_provision"]["worktree_provider_id"],
+            "fixture"
+        );
+        assert_eq!(
+            options.source_worktree_path.as_deref(),
+            Some(workspace.as_path())
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
     use std::os::unix::fs::PermissionsExt;
 

@@ -7435,6 +7435,56 @@ fn materialize_pending_cook_workspace(
             provider.lookup_timeout_ms = provider.lookup_timeout_ms.min(timeout_ms);
         }
     }
+    let task_url = options
+        .initial_plan
+        .metadata
+        .pointer("/cook_provision/provision_intent/task_url")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            options
+                .initial_plan
+                .tasks
+                .first()
+                .and_then(|task| task.workspace.task_url.as_deref())
+        })
+        .map(str::to_string);
+    let attachment = task_url
+        .as_deref()
+        .map(|task_url| {
+            homeboy_core::worktree_providers::preview_apply_enabled_worktree_provider_task_attachment_from_config(
+                &options.to_worktree,
+                task_url,
+                &config,
+            )
+        })
+        .transpose()?
+        .flatten();
+    if let Some(attachment) = &attachment {
+        options.initial_plan.metadata["cook_provision"]["worktree_provider_id"] =
+            Value::String(attachment.provider_id.clone());
+        agent_task_lifecycle::persist_controller_plan_in_store(
+            lifecycle_store,
+            &initial_run_id,
+            &options.initial_plan,
+        )?;
+        if attachment.status
+            == homeboy_core::worktree_providers::WorktreeProviderTaskAttachmentStatus::Eligible
+        {
+            with_controller_pre_provider_heartbeat(
+                lifecycle_store,
+                &initial_run_id,
+                "worktree_provider_task_attachment",
+                "attaching tracker ownership to controller-owned provider workspace",
+                COOK_HEARTBEAT_INTERVAL,
+                || {
+                    homeboy_core::worktree_providers::apply_worktree_provider_task_attachment_from_config(
+                        attachment,
+                        &config,
+                    )
+                },
+            )?;
+        }
+    }
     let resolve = |options: &AgentTaskCookServiceOptions| {
         match provider_id(options) {
         Some(provider_id) => homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
@@ -7522,6 +7572,12 @@ fn materialize_pending_cook_workspace(
                 }
                 Err(error) => return Err(error),
             }
+        }
+        Err(_error) if task_url.is_some() && attachment.is_none() => {
+            return Err(homeboy_core::worktree_providers::unsupported_worktree_provider_task_attachment_error(
+                &options.to_worktree,
+                task_url.as_deref().expect("task URL checked"),
+            ));
         }
         Err(error) => return Err(error),
     };
