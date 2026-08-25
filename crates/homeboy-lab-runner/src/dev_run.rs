@@ -208,7 +208,7 @@ pub(crate) fn run_extension_dev_run_with(
         &plan.runner_id,
         Path::new(&synced.local_path),
         Some(&synced.remote_path),
-        synced.sync_mode.label(),
+        synced.sync_mode.as_str(),
     );
     source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
     let lifecycle = extension_dev_run_overlay_lifecycle(&plan, &synced, &source_snapshot);
@@ -217,7 +217,7 @@ pub(crate) fn run_extension_dev_run_with(
         runner_id: plan.runner_id.clone(),
         local_source: synced.local_path.clone(),
         remote_source: remote_install_source.clone(),
-        sync_mode: synced.sync_mode.label().to_string(),
+        sync_mode: synced.sync_mode.as_str().to_string(),
         snapshot_identity: synced.snapshot_identity.clone(),
         source_revision: lifecycle.source_revision.clone(),
         install_mode: lifecycle.install_mode.clone(),

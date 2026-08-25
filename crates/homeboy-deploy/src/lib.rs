@@ -498,16 +498,28 @@ pub fn run_multi(
 
         if lifecycle_run
             .as_ref()
-            .is_some_and(|run| run.target_is_succeeded(project_id))
+            .is_some_and(|run| run.target_skips_mutation_retry(project_id))
         {
             let mut timer = PhaseTimer::new();
             timer.record_skipped("transfer");
             timer.record_skipped("install");
             timer.record_skipped("verify");
+            let status = lifecycle_run
+                .as_ref()
+                .and_then(|run| run.target_status(project_id))
+                .expect("skip status from lifecycle state");
             project_results.push(ProjectDeployResult {
                 project_id: project_id.to_string(),
                 status: "skipped".to_string(),
-                error: Some("Already succeeded in the resumed deploy run".to_string()),
+                error: Some(match status {
+                    lifecycle::DeployTargetStatus::AppliedUnverified => {
+                        format!(
+                            "Mutation already applied in the resumed deploy run; reverify with 'homeboy deploy --project {} --check'",
+                            project_id
+                        )
+                    }
+                    _ => "Already succeeded in the resumed deploy run".to_string(),
+                }),
                 results: vec![],
                 summary: DeploySummary {
                     total: 0,
@@ -560,10 +572,19 @@ pub fn run_multi(
                         .iter()
                         .find_map(|r| r.error.clone())
                         .unwrap_or_else(|| "Deployment failed".to_string());
+                    let applied_unverified_only = result
+                        .results
+                        .iter()
+                        .any(|row| row.status == "applied_unverified")
+                        && result.results.iter().all(|row| row.status != "failed");
 
                     project_results.push(ProjectDeployResult {
                         project_id: project_id.to_string(),
-                        status: "failed".to_string(),
+                        status: if applied_unverified_only {
+                            "applied_unverified".to_string()
+                        } else {
+                            "failed".to_string()
+                        },
                         error: Some(error_msg),
                         results: result.results,
                         summary: result.summary,
@@ -573,7 +594,11 @@ pub fn run_multi(
                     if let Some(run) = lifecycle_run.as_mut() {
                         run.update_target(
                             project_id,
-                            lifecycle::DeployTargetStatus::Failed,
+                            if applied_unverified_only {
+                                lifecycle::DeployTargetStatus::AppliedUnverified
+                            } else {
+                                lifecycle::DeployTargetStatus::Failed
+                            },
                             project_results.last().and_then(|entry| entry.error.clone()),
                             Some(timings.clone()),
                         );
