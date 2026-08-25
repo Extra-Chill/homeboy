@@ -807,7 +807,14 @@ pub fn resolve_worktree_provider_from_config(
     handle: &str,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderResolution> {
-    resolve_worktree_provider_with_policy_from_config(handle, config, false, None, None)
+    resolve_worktree_provider_with_policy_from_config(handle, config, false, true, None, None)
+}
+
+pub(crate) fn observe_worktree_provider_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
+    resolve_worktree_provider_with_policy_from_config(handle, config, false, false, None, None)
 }
 
 /// Resolve a workspace only from providers explicitly authorized for apply operations.
@@ -1574,6 +1581,7 @@ pub fn resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination
         handle,
         config,
         true,
+        true,
         gate_feedback_baseline,
         trusted_unpushed_destination,
     )
@@ -2338,6 +2346,7 @@ fn resolve_worktree_provider_with_policy_from_config(
     handle: &str,
     config: &HomeboyConfig,
     require_apply_enabled: bool,
+    validate_safety: bool,
     gate_feedback_baseline: Option<&serde_json::Value>,
     trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
 ) -> Result<WorktreeProviderResolution> {
@@ -2358,12 +2367,14 @@ fn resolve_worktree_provider_with_policy_from_config(
         if let Some(command) = provider.commands.resolve.as_ref() {
             let worktrees = run_provider_resolve_command(&provider_id, provider, command, handle)?;
             if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
-                validate_provider_handle(
-                    &provider_id,
-                    &worktree,
-                    gate_feedback_baseline,
-                    trusted_unpushed_destination,
-                )?;
+                if validate_safety {
+                    validate_provider_handle(
+                        &provider_id,
+                        &worktree,
+                        gate_feedback_baseline,
+                        trusted_unpushed_destination,
+                    )?;
+                }
                 return Ok(WorktreeProviderResolution {
                     provider_id,
                     worktree,
@@ -2376,12 +2387,14 @@ fn resolve_worktree_provider_with_policy_from_config(
         };
         let worktrees = run_provider_list_command(&provider_id, provider, command)?;
         if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
-            validate_provider_handle(
-                &provider_id,
-                &worktree,
-                gate_feedback_baseline,
-                trusted_unpushed_destination,
-            )?;
+            if validate_safety {
+                validate_provider_handle(
+                    &provider_id,
+                    &worktree,
+                    gate_feedback_baseline,
+                    trusted_unpushed_destination,
+                )?;
+            }
             return Ok(WorktreeProviderResolution {
                 provider_id,
                 worktree,
