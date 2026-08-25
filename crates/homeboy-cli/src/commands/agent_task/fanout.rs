@@ -1965,6 +1965,90 @@ fn batch_cook_result(
     )
 }
 
+fn cook_batch_failure_projection(
+    worktrees: &worktree::WorktreeQueueCreateOutput,
+) -> (usize, Option<Value>) {
+    let causal_rows = worktrees
+        .rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.status,
+                worktree::WorktreeQueueCreateStatus::Failed
+                    | worktree::WorktreeQueueCreateStatus::ActiveLockHolder
+            )
+        })
+        .collect::<Vec<_>>();
+    let primary_failure = causal_rows.first().map(|row| {
+        let (classification, reason, next_action) = match row.status {
+            worktree::WorktreeQueueCreateStatus::Failed => (
+                "worktree_creation_failed",
+                row.error
+                    .clone()
+                    .unwrap_or_else(|| "worktree creation failed".to_string()),
+                CommandNextAction::new(
+                    format!("create blocked worktree {}", row.handle),
+                    quote_args(if row.command.is_empty() {
+                        &[]
+                    } else {
+                        row.command.as_slice()
+                    }),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            ),
+            worktree::WorktreeQueueCreateStatus::ActiveLockHolder => (
+                "worktree_active_lock",
+                row.active_lock_holder
+                    .as_ref()
+                    .map(|holder| format!("worktree is held by active lock {}", holder.lock_key))
+                    .unwrap_or_else(|| "worktree is held by an active lock".to_string()),
+                CommandNextAction::new(
+                    format!("inspect locked worktree {}", row.handle),
+                    row.active_lock_holder
+                        .as_ref()
+                        .and_then(|holder| holder.command.clone())
+                        .filter(|command| !command.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            quote_args(&[
+                                "homeboy".to_string(),
+                                "worktree".to_string(),
+                                "status".to_string(),
+                                row.handle.clone(),
+                            ])
+                        }),
+                )
+                .with_kind(CommandNextActionKind::Show),
+            ),
+            _ => unreachable!("causal rows are filtered above"),
+        };
+        let next_action = if next_action.command.is_empty() {
+            CommandNextAction::new(
+                format!("inspect blocked worktree {}", row.handle),
+                quote_args(&[
+                    "homeboy".to_string(),
+                    "worktree".to_string(),
+                    "status".to_string(),
+                    row.handle.clone(),
+                ]),
+            )
+            .with_kind(CommandNextActionKind::Show)
+        } else {
+            next_action
+        };
+        serde_json::json!({
+            "phase": "worktree_preflight",
+            "row": row.handle,
+            "handle": row.handle,
+            "provider_id": row.provider_id,
+            "classification": classification,
+            "reason": reason,
+            "next_action": next_action,
+            "complete_evidence": "$.worktrees.rows",
+        })
+    });
+    (causal_rows.len(), primary_failure)
+}
+
 #[cfg(test)]
 fn cook_batch(args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
     cook_batch_with_placement(args, Placement::Auto)
@@ -2127,6 +2211,7 @@ fn cook_batch_inner(
     let resume_legal = run_result
         .as_ref()
         .is_some_and(|result| batch_resume_is_legal(&result["result"]));
+    let (causal_failures, primary_failure) = cook_batch_failure_projection(&worktrees);
 
     Ok((
         serde_json::json!({
@@ -2138,7 +2223,11 @@ fn cook_batch_inner(
                     "issues": plan.cooks.len(),
                     "worktrees_total": worktrees.rows.len(),
                     "worktrees_blocked": blocked,
+                    "causal_failures": causal_failures,
+                    "causal_failures_shown": usize::from(primary_failure.is_some()),
+                    "failure_evidence": "$.worktrees.rows",
                 },
+                "primary_failure": primary_failure,
                 "preflight": {
                     "provider_readiness_command": provider_readiness_command(&args),
                     "provider_selection": provider_selection_preflight(&args, args.dry_run),
@@ -2783,6 +2872,7 @@ fn queue_or_reuse_worktrees(
                 handle: cook.to_worktree.clone(),
                 status: worktree::WorktreeQueueCreateStatus::Created,
                 command: vec!["adopted".to_string(), cook.to_worktree.clone()],
+                provider_id: Some(resolution.provider_id.clone()),
                 retry_after_seconds: None,
                 active_lock_holder: None,
                 path: Some(workspace.path.clone()),
@@ -2799,6 +2889,7 @@ fn queue_or_reuse_worktrees(
                     handle: cook.to_worktree.clone(),
                     status: worktree::WorktreeQueueCreateStatus::Created,
                     command: worktree_create_command(args, branch),
+                    provider_id: None,
                     retry_after_seconds: None,
                     active_lock_holder: None,
                     path: Some(path),
@@ -2820,17 +2911,13 @@ fn queue_or_reuse_worktrees(
         }
     }
 
-    with_workspace_owner_repair_commands(
-        args,
-        plan,
-        worktree::WorktreeQueueCreateOutput {
-            schema: "homeboy/worktree-queue-create/v1",
-            repo: args.repo.clone(),
-            base_ref: args.from.clone(),
-            dry_run: false,
-            rows,
-        },
-    )
+    Ok(worktree::WorktreeQueueCreateOutput {
+        schema: "homeboy/worktree-queue-create/v1",
+        repo: args.repo.clone(),
+        base_ref: args.from.clone(),
+        dry_run: false,
+        rows,
+    })
 }
 
 /// A preview must not contact a worktree provider, inspect existing worktrees,
@@ -2856,6 +2943,7 @@ fn static_worktrees_dry_run(
                 handle: cook.to_worktree.clone(),
                 status: worktree::WorktreeQueueCreateStatus::WouldCreate,
                 command: worktree_create_command(args, cook.head.as_deref().expect("head exists")),
+                provider_id: None,
                 retry_after_seconds: None,
                 active_lock_holder: None,
                 path: None,
@@ -2863,48 +2951,6 @@ fn static_worktrees_dry_run(
             })
             .collect(),
     }
-}
-
-fn with_workspace_owner_repair_commands(
-    args: &AgentTaskFanoutCookBatchArgs,
-    plan: &BatchCookFanoutPlan,
-    mut worktrees: worktree::WorktreeQueueCreateOutput,
-) -> Result<worktree::WorktreeQueueCreateOutput> {
-    if !configured_provider_workspace_creation()? {
-        return Ok(worktrees);
-    }
-
-    let config = homeboy::core::defaults::load_config();
-    for row in &mut worktrees.rows {
-        let Some(cook) = plan
-            .cooks
-            .iter()
-            .find(|cook| cook.to_worktree == row.handle)
-        else {
-            continue;
-        };
-        let intent = homeboy::core::worktree_providers::WorktreeProviderCreateIntent {
-            handle: row.handle.clone(),
-            repo: args.repo.clone(),
-            base: args.from.clone(),
-            head: row.branch.clone(),
-            task_url: cook
-                .task_url
-                .clone()
-                .expect("generated cooks have task URLs"),
-        };
-        let lifecycle = homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
-            purpose: "agent_task_cook".to_string(),
-            owner_run_ref: cook.run_id(),
-            cleanup_policy:
-                homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
-        };
-        row.command =
-            homeboy::core::worktree_providers::worktree_provider_lifecycle_ensure_argv_from_config(
-                &intent, &lifecycle, &config,
-            )?;
-    }
-    Ok(worktrees)
 }
 
 fn configured_provider_workspace_creation() -> Result<bool> {
@@ -6848,7 +6894,8 @@ fi
                 .iter()
                 .all(|cook| ensured.contains(&cook.to_worktree)));
             assert!(worktrees.rows.iter().all(|row| {
-                row.command.first() == Some(&provider.display().to_string())
+                row.provider_id.as_deref() == Some("fixture")
+                    && row.command.first() == Some(&provider.display().to_string())
                     && !row
                         .command
                         .windows(3)
@@ -6937,6 +6984,7 @@ fi
                         handle: "homeboy@fix-issue-6453-homeboy".to_string(),
                         status: worktree::WorktreeQueueCreateStatus::Created,
                         command: Vec::new(),
+                        provider_id: None,
                         retry_after_seconds: None,
                         active_lock_holder: None,
                         path: Some(workspace.path().display().to_string()),
@@ -7268,6 +7316,7 @@ fi
                 handle: cook.to_worktree.clone(),
                 status: worktree::WorktreeQueueCreateStatus::Created,
                 command: Vec::new(),
+                provider_id: None,
                 retry_after_seconds: None,
                 active_lock_holder: None,
                 path: Some(root.display().to_string()),
@@ -7321,6 +7370,7 @@ fi
                 handle: cook.to_worktree.clone(),
                 status: worktree::WorktreeQueueCreateStatus::Created,
                 command: Vec::new(),
+                provider_id: None,
                 retry_after_seconds: None,
                 active_lock_holder: None,
                 path: Some(materialized_root.display().to_string()),
@@ -8117,6 +8167,7 @@ fi
                 "--from".to_string(),
                 "origin/main".to_string(),
             ],
+            provider_id: None,
             retry_after_seconds: None,
             active_lock_holder: None,
             path: None,
@@ -8355,6 +8406,69 @@ fi
 
         result["cooks"][1]["result"]["failure_context"]["recovery_legal"] = json!(true);
         assert!(batch_resume_is_legal(&result));
+    }
+
+    #[test]
+    fn blocked_worktree_projection_is_ordered_bounded_and_provider_owned() {
+        let mut first = worktree_row("homeboy@first", worktree::WorktreeQueueCreateStatus::Failed);
+        first.error = Some("Component not found".to_string());
+        first.command = vec![
+            "dmc".to_string(),
+            "worktree".to_string(),
+            "ensure".to_string(),
+            "homeboy@first".to_string(),
+        ];
+        let mut second = worktree_row(
+            "homeboy@second",
+            worktree::WorktreeQueueCreateStatus::Failed,
+        );
+        second.error = Some("independent provider failure".to_string());
+        let mut worktrees = worktree_output(vec![first, second]);
+
+        worktrees.rows[0].provider_id = Some("dmc".to_string());
+        let (count, primary) = cook_batch_failure_projection(&worktrees);
+        let primary = primary.expect("primary failure");
+
+        assert_eq!(count, 2);
+        assert_eq!(primary["phase"], "worktree_preflight");
+        assert_eq!(primary["handle"], "homeboy@first");
+        assert_eq!(primary["provider_id"], "dmc");
+        assert_eq!(primary["classification"], "worktree_creation_failed");
+        assert_eq!(primary["reason"], "Component not found");
+        assert_eq!(
+            primary["next_action"]["command"],
+            "dmc worktree ensure homeboy@first"
+        );
+        assert_eq!(primary["complete_evidence"], "$.worktrees.rows");
+        assert_eq!(
+            worktrees.rows.len(),
+            2,
+            "complete row evidence stays lossless"
+        );
+    }
+
+    #[test]
+    fn active_lock_projection_inspects_the_owner_instead_of_recreating() {
+        let mut row = worktree_row(
+            "homeboy@locked",
+            worktree::WorktreeQueueCreateStatus::ActiveLockHolder,
+        );
+        row.active_lock_holder = Some(worktree::WorktreeQueueLockHolder {
+            lock_key: "agent-task:123".to_string(),
+            scope: "worktree".to_string(),
+            path: None,
+            command: Some("homeboy agent-task status 123".to_string()),
+        });
+
+        let (_, primary) = cook_batch_failure_projection(&worktree_output(vec![row]));
+        let primary = primary.expect("primary failure");
+
+        assert_eq!(primary["classification"], "worktree_active_lock");
+        assert_eq!(
+            primary["next_action"]["command"],
+            "homeboy agent-task status 123"
+        );
+        assert_eq!(primary["next_action"]["kind"], "show");
     }
 
     #[test]

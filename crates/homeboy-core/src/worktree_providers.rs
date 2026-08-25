@@ -1366,7 +1366,7 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
     intent: &WorktreeProviderCreateIntent,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
-    provision_apply_enabled_worktree_provider_from_config_with_lifecycle(intent, None, config)
+    provision_apply_enabled_worktree_provider_from_config_with_lifecycle(intent, None, None, config)
 }
 
 /// Determine the provider that will own an ensure before the external command
@@ -1713,13 +1713,9 @@ fn escape_json_pointer_token(token: &str) -> String {
 fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
     intent: &WorktreeProviderCreateIntent,
     lifecycle: Option<&WorktreeProviderLifecycleIntent>,
+    lifecycle_provider: Option<String>,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
-    // Purpose-owned callers select once using the creation capability contract.
-    // Keep that exact identity through ensure and postcondition lookup.
-    let lifecycle_provider = lifecycle
-        .map(|_| select_apply_enabled_worktree_provider_from_config(intent, config))
-        .transpose()?;
     match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
         Ok(resolution) => {
             if let Some(lifecycle) = lifecycle {
@@ -1877,9 +1873,27 @@ pub fn provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
     lifecycle: &WorktreeProviderLifecycleIntent,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
+    let provider_id = select_apply_enabled_worktree_provider_from_config(intent, config)?;
     provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
         intent,
         Some(lifecycle),
+        Some(provider_id),
+        config,
+    )
+}
+
+/// Provision through a provider selected before queue execution so failure
+/// evidence and repair argv retain the exact attempted workspace authority.
+pub fn provision_apply_enabled_worktree_provider_with_selected_lifecycle_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderProvision> {
+    provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
+        intent,
+        Some(lifecycle),
+        Some(provider_id.to_string()),
         config,
     )
 }
@@ -1963,10 +1977,28 @@ pub fn worktree_provider_lifecycle_ensure_argv_from_config(
     config: &HomeboyConfig,
 ) -> Result<Vec<String>> {
     let provider_id = select_apply_enabled_worktree_provider_from_config(intent, config)?;
-    let provider = config
-        .worktree_providers
-        .get(&provider_id)
-        .expect("selected provider is configured");
+    worktree_provider_lifecycle_ensure_argv_for_provider_from_config(
+        intent,
+        lifecycle,
+        &provider_id,
+        config,
+    )
+}
+
+pub fn worktree_provider_lifecycle_ensure_argv_for_provider_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<Vec<String>> {
+    let provider = config.worktree_providers.get(provider_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "worktree_provider",
+            "selected provider is no longer configured",
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
     let command = provider
         .commands
         .ensure

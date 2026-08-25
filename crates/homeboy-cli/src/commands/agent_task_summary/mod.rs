@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 use super::agent_task::candidate::{
     changed_files_for_artifact, classify_candidates, CandidateState,
 };
-use super::agent_task::{AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand};
+use super::agent_task::{
+    AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand, AgentTaskFanoutCommand,
+};
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
 
 mod controller;
@@ -16,6 +18,7 @@ pub(crate) enum AgentTaskSummaryKind {
     Review,
     Controller,
     Providers,
+    Fanout,
 }
 
 pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskSummaryKind> {
@@ -25,6 +28,11 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
         AgentTaskCommand::Logs(_) => Some(AgentTaskSummaryKind::Logs),
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
         AgentTaskCommand::Providers(_) => Some(AgentTaskSummaryKind::Providers),
+        AgentTaskCommand::Fanout(fanout)
+            if matches!(&fanout.command, AgentTaskFanoutCommand::CookBatch(_)) =>
+        {
+            Some(AgentTaskSummaryKind::Fanout)
+        }
         AgentTaskCommand::Controller(controller_args) => match &controller_args.command {
             AgentTaskControllerCommand::Status(_)
             | AgentTaskControllerCommand::Diagnose(_)
@@ -51,7 +59,30 @@ pub(crate) fn render_agent_task_summary(
         AgentTaskSummaryKind::Review => render_review_summary(payload),
         AgentTaskSummaryKind::Controller => controller::render_controller_summary(payload),
         AgentTaskSummaryKind::Providers => render_providers_summary(payload),
+        AgentTaskSummaryKind::Fanout => render_fanout_summary(payload),
     }
+}
+
+fn render_fanout_summary(payload: &Value) -> Option<String> {
+    let fanout_id = string_value(payload, &["fanout_id"])?;
+    let status = string_value(payload, &["status"]).unwrap_or("unknown");
+    let Some(failure) = payload
+        .get("primary_failure")
+        .filter(|value| value.is_object())
+    else {
+        return Some(format!("Fanout {fanout_id}: {status}\n"));
+    };
+    let phase = string_value(failure, &["phase"]).unwrap_or("unknown");
+    let handle = string_value(failure, &["handle"]).unwrap_or("unknown");
+    let reason = string_value(failure, &["reason"]).unwrap_or("unknown failure");
+    let next = string_value(failure, &["next_action", "command"]).unwrap_or("unavailable");
+    let count = usize_value(payload, &["summary", "causal_failures"]).unwrap_or(1);
+    let provider = string_value(failure, &["provider_id"])
+        .map(|provider| format!("; provider {provider}"))
+        .unwrap_or_default();
+    Some(format!(
+        "Fanout {fanout_id}: {status} at {phase}; {count} causal row(s); {handle}{provider}: {reason}; next: {next}\nEvidence: $.worktrees.rows ({count} causal row(s))\n"
+    ))
 }
 
 fn render_providers_summary(payload: &Value) -> Option<String> {
@@ -756,6 +787,35 @@ mod tests {
             summary,
             "Agent task providers\nStatus: selection_required\nProviders shown: 2\nChoose backend: alpha, zeta\nNext: homeboy agent-task providers --backend alpha --validate-readiness"
         );
+    }
+
+    #[test]
+    fn fanout_summary_leads_with_the_causal_row_and_omits_repeated_payloads() {
+        let payload = json!({
+            "fanout_id": "issue-wave",
+            "status": "blocked",
+            "summary": { "causal_failures": 2 },
+            "primary_failure": {
+                "phase": "worktree_preflight",
+                "handle": "homeboy@first",
+                "provider_id": "dmc",
+                "reason": "Component not found",
+                "next_action": { "command": "dmc worktree ensure homeboy@first" }
+            },
+            "plan": { "prompt": "FULL_PLAN_SENTINEL" },
+            "commands": { "run": "FULL_COMMAND_SENTINEL" },
+            "worktrees": { "rows": [{ "handle": "homeboy@first" }] }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Fanout, &payload)
+            .expect("fanout summary");
+
+        assert!(summary.starts_with(
+            "Fanout issue-wave: blocked at worktree_preflight; 2 causal row(s); homeboy@first; provider dmc: Component not found; next: dmc worktree ensure homeboy@first"
+        ));
+        assert!(summary.contains("Evidence: $.worktrees.rows (2 causal row(s))"));
+        assert!(!summary.contains("FULL_PLAN_SENTINEL"));
+        assert!(!summary.contains("FULL_COMMAND_SENTINEL"));
     }
 
     #[test]

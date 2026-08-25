@@ -639,6 +639,8 @@ pub struct WorktreeQueueCreateRow {
     pub status: WorktreeQueueCreateStatus,
     pub command: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_lock_holder: Option<WorktreeQueueLockHolder>,

@@ -489,8 +489,9 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
     let mut rows = Vec::new();
     let total = options.requests.len();
     for (index, request) in options.requests.iter().enumerate() {
-        let command = worktree_create_command(&options, request);
+        let mut command = worktree_create_command(&options, request);
         let handle = worktree_handle(&options.repo, &request.branch);
+        let mut provider_id = None;
 
         if options.dry_run {
             match planned_create_path(&options.repo, &request.branch, &options.from) {
@@ -527,12 +528,33 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     None,
                 )
             })?;
-            crate::worktree_providers::provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
-                &crate::worktree_providers::WorktreeProviderCreateIntent {
-                    handle: handle.clone(), repo: options.repo.clone(), base: options.from.clone(),
-                    head: request.branch.clone(), task_url,
-                }, lifecycle, &crate::defaults::load_config(),
-            ).map(|provision| provision.resolution.worktree.path)
+            let intent = crate::worktree_providers::WorktreeProviderCreateIntent {
+                handle: handle.clone(),
+                repo: options.repo.clone(),
+                base: options.from.clone(),
+                head: request.branch.clone(),
+                task_url,
+            };
+            let config = crate::defaults::load_config();
+            crate::worktree_providers::select_apply_enabled_worktree_provider_from_config(
+                &intent, &config,
+            )
+            .and_then(|selected_provider| {
+                command = crate::worktree_providers::worktree_provider_lifecycle_ensure_argv_for_provider_from_config(
+                    &intent,
+                    lifecycle,
+                    &selected_provider,
+                    &config,
+                )?;
+                provider_id = Some(selected_provider.clone());
+                crate::worktree_providers::provision_apply_enabled_worktree_provider_with_selected_lifecycle_from_config(
+                    &intent,
+                    lifecycle,
+                    &selected_provider,
+                    &config,
+                )
+            })
+            .map(|provision| provision.resolution.worktree.path)
         } else {
             create(WorktreeCreateOptions {
                 component_id: options.repo.clone(),
@@ -552,6 +574,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     command,
                     WorktreeQueueCreateStatus::Created,
                 );
+                row.provider_id = provider_id.clone();
                 row.path = Some(path);
                 rows.push(row);
             }
@@ -562,6 +585,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     command,
                     WorktreeQueueCreateStatus::Failed,
                 );
+                row.provider_id = provider_id.clone();
                 row.error = Some(error.message);
                 rows.push(row);
                 for queued_request in options.requests.iter().take(total).skip(index + 1) {

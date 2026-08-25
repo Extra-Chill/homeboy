@@ -71,6 +71,7 @@ pub(super) fn queue_row(
         handle,
         status,
         command,
+        provider_id: None,
         retry_after_seconds: None,
         active_lock_holder: None,
         path: None,
