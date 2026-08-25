@@ -227,19 +227,11 @@ fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry()
             status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded,
             totals: Default::default(),
             outcomes: vec![AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: task_id.clone(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("historical patch".to_string()),
-                failure_classification: None,
                 artifacts: vec![artifact.clone()],
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -570,19 +562,10 @@ impl AgentTaskExecutorAdapter for CountingCookExecutor {
     ) -> AgentTaskOutcome {
         self.executions.fetch_add(1, Ordering::SeqCst);
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("unexpected execution".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -1127,19 +1110,10 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
                 status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "provider".to_string(),
                     status: AgentTaskOutcomeStatus::CandidateRecoverable,
                     summary: Some("legacy candidate".to_string()),
-                    failure_classification: None,
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
-                    metadata: Value::Null,
+                    ..Default::default()
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
@@ -2678,19 +2652,11 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
                 status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Failed,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "task-a".to_string(),
                     status: AgentTaskOutcomeStatus::Timeout,
                     summary: Some("review form timed out".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Timeout),
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
-                    metadata: Value::Null,
+                    ..Default::default()
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
@@ -3598,19 +3564,11 @@ fn fixture_execution_outcome(
     outputs: Value,
 ) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-        task_id: String::new(),
         status,
-        summary: None,
         failure_classification,
         artifacts,
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
         outputs,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     }
 }
 
@@ -3786,13 +3744,10 @@ impl AgentTaskExecutorAdapter for EvidencePathFixtureExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Failed,
             summary: Some("failed with path evidence".to_string()),
             failure_classification: Some(AgentTaskFailureClassification::Provider),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![
                 AgentTaskEvidenceRef {
                     kind: "executor-result".to_string(),
@@ -3805,11 +3760,7 @@ impl AgentTaskExecutorAdapter for EvidencePathFixtureExecutor {
                     label: Some("Unsupported ref".to_string()),
                 },
             ],
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3914,13 +3865,10 @@ impl AgentTaskExecutorAdapter for EvidenceFixtureExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id.clone(),
             status: AgentTaskOutcomeStatus::Failed,
             summary: Some("failed with evidence".to_string()),
             failure_classification: Some(AgentTaskFailureClassification::Provider),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![
                 AgentTaskEvidenceRef {
                     kind: "executor-result".to_string(),
@@ -3936,11 +3884,8 @@ impl AgentTaskExecutorAdapter for EvidenceFixtureExecutor {
                     label: Some("Normalized output".to_string()),
                 },
             ],
-            diagnostics: Vec::new(),
             outputs: json!({ "api_key": "super-secret", "result": "failed" }),
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }

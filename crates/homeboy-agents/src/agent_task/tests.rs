@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use serde_json::{json, Value};
+use serde_json::json;
 
 #[test]
 fn request_round_trips_generic_agent_task_shape() {
@@ -258,7 +258,6 @@ fn outcome_round_trips_success_noop_timeout_and_follow_up_shapes() {
 
     for status in statuses {
         let outcome = AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "task-1".to_string(),
             status,
             summary: Some("completed".to_string()),
@@ -303,7 +302,6 @@ fn outcome_round_trips_success_noop_timeout_and_follow_up_shapes() {
                 data: json!({}),
             }],
             outputs: json!({ "issue_number": 3447 }),
-            workflow: None,
             follow_up: Some(AgentTaskFollowUp {
                 kind: "issue_report".to_string(),
                 title: "Needs human decision".to_string(),
@@ -311,6 +309,7 @@ fn outcome_round_trips_success_noop_timeout_and_follow_up_shapes() {
                 uri: None,
             }),
             metadata: json!({}),
+            ..Default::default()
         };
 
         let value = serde_json::to_value(&outcome).expect("serialize outcome");
@@ -351,7 +350,6 @@ fn artifact_role_helpers_fall_back_to_metadata() {
 #[test]
 fn outcome_round_trips_nested_workflow_step_evidence() {
     let outcome = AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: "model-kimi-site-a".to_string(),
         status: AgentTaskOutcomeStatus::Failed,
         summary: Some("diagnose step failed".to_string()),
@@ -379,9 +377,6 @@ fn outcome_round_trips_nested_workflow_step_evidence() {
             artifact: None,
             metadata: json!({ "source": "diagnose" }),
         }],
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
-        outputs: Value::Null,
         workflow: Some(AgentTaskWorkflowEvidence {
             schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
             id: "site-build".to_string(),
@@ -431,8 +426,8 @@ fn outcome_round_trips_nested_workflow_step_evidence() {
             ],
             metadata: json!({ "executor": "custom-provider" }),
         }),
-        follow_up: None,
         metadata: json!({}),
+        ..Default::default()
     };
 
     let value = serde_json::to_value(&outcome).expect("serialize outcome");
@@ -493,7 +488,6 @@ fn redacted_request_removes_sensitive_fields() {
 #[test]
 fn redacted_outcome_removes_sensitive_artifact_and_diagnostic_data() {
     let outcome = AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: "task-secret".to_string(),
         status: AgentTaskOutcomeStatus::Failed,
         summary: Some("failed with password=hunter2".to_string()),
@@ -513,8 +507,6 @@ fn redacted_outcome_removes_sensitive_artifact_and_diagnostic_data() {
             sha256: None,
             metadata: json!({ "cookie": "session=secret" }),
         }],
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
         diagnostics: vec![AgentTaskDiagnostic {
             class: "provider".to_string(),
             message: "Authorization: Bearer abc123".to_string(),
@@ -549,9 +541,9 @@ fn redacted_outcome_removes_sensitive_artifact_and_diagnostic_data() {
             }],
             metadata: json!({ "client_secret": "secret" }),
         }),
-        follow_up: None,
         outputs: json!({ "api_key": "secret-value", "safe": "value" }),
         metadata: json!({ "safe": "value", "password": "hunter2" }),
+        ..Default::default()
     };
 
     let redacted = serde_json::to_value(outcome.redacted()).expect("redacted json");

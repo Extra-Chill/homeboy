@@ -3934,15 +3934,7 @@ impl homeboy::agents::agent_task_scheduler::AgentTaskExecutorAdapter for ReplayR
             task_id: request.task_id,
             status: homeboy::agents::agent_task::AgentTaskOutcomeStatus::Succeeded,
             summary: Some("remote replay fixture completed".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: serde_json::Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: serde_json::Value::Null,
+            ..Default::default()
         }
     }
 }

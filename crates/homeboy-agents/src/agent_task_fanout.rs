@@ -344,7 +344,7 @@ mod tests {
     use super::*;
     use crate::agent_task::{
         AgentTaskExecutor, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy,
-        AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_scheduler::{
         AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskOutputBinding,
@@ -540,19 +540,12 @@ mod tests {
                 Value::Null
             };
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("ok".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
                 outputs,
-                workflow: None,
-                follow_up: None,
                 metadata: request.metadata,
+                ..Default::default()
             }
         }
     }
@@ -564,11 +557,9 @@ mod tests {
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id.clone(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("generic fuzz case completed".to_string()),
-                failure_classification: None,
                 artifacts: vec![crate::agent_task::AgentTaskArtifact {
                     schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                     id: format!("artifact-{}", request.task_id),
@@ -584,16 +575,12 @@ mod tests {
                     sha256: None,
                     metadata: json!({ "case_id": request.task_id }),
                 }],
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
                 outputs: json!({ "case_id": request.task_id }),
-                workflow: None,
-                follow_up: None,
                 metadata: json!({
                     "provider": "generic-fuzz",
                     "child_run_id": format!("child-{}", request.task_id)
                 }),
+                ..Default::default()
             }
         }
     }
