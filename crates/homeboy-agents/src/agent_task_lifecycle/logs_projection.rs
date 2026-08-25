@@ -20,7 +20,7 @@ pub fn logs_in_store(
     logs_with_raw_in_store(lifecycle_store, run_id, false)
 }
 
-pub fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog> {
+pub(crate) fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     logs_with_raw_in_store(&lifecycle_store, run_id, include_raw)
 }

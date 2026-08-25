@@ -48,7 +48,7 @@ impl TransportProxyRecovery {
 
 /// Reconnect a transport-owned proxy through its durable runner execution
 /// record. `None` means the run is a normal scheduler-owned plan.
-pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyRecovery>> {
+pub(crate) fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyRecovery>> {
     recover_transport_proxy_in_store(
         &AgentTaskLifecycleStore::from_current_environment()?,
         run_id,

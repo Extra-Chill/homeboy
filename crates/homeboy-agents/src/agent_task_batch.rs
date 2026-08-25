@@ -445,7 +445,7 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
 /// Expire a live coordinator only when its durable record proves it never
 /// advanced beyond pre-child admission. Detached supervision uses this to stop
 /// the stranded process as soon as the durable terminal blocker is written.
-pub fn expire_stalled_fanout_admission(batch_id: &str) -> Result<bool> {
+pub(crate) fn expire_stalled_fanout_admission(batch_id: &str) -> Result<bool> {
     AgentTaskBatchStore::from_current_data_root()?.expire_stalled_fanout_admission(batch_id)
 }
 
@@ -891,7 +891,7 @@ where
 
 /// Read the graph-projected executable frontier. Resume callers use this to
 /// avoid finalizing a dependent before its upstream candidate is accepted.
-pub fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
+pub(crate) fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
     AgentTaskBatchStore::from_current_data_root()?.fanout_ready_child_run_ids(batch_id)
 }
 
@@ -1545,7 +1545,7 @@ pub fn read_batch_record_in_store(
 /// record's metadata, keyed by the child run id. Repeated resume calls overwrite
 /// the same key so the batch record stays a single, convergent view of what has
 /// been harvested — no duplicate finalization state accumulates (#9525).
-pub fn record_child_finalization(
+pub(crate) fn record_child_finalization(
     batch_id: &str,
     child_run_id: &str,
     finalization: Value,
@@ -1602,7 +1602,7 @@ pub fn record_child_finalization_in_store(
 /// reads exactly this. It is deliberately kept in `metadata` rather than in
 /// `state`, because [`status`] recomputes `state` from live child observation
 /// on every read and would erase a marker written there.
-pub fn record_coordinator_cancellation(batch_id: &str, reason: &str) -> Result<()> {
+pub(crate) fn record_coordinator_cancellation(batch_id: &str, reason: &str) -> Result<()> {
     AgentTaskBatchStore::from_current_data_root()?.record_coordinator_cancellation(batch_id, reason)
 }
 
@@ -1638,7 +1638,7 @@ pub fn record_coordinator_cancellation_in_store(
 /// An unreadable or absent batch record is reported as "not cancelled" rather
 /// than as an error: this is consulted from the coordinator's claim loop, where
 /// a transient read failure must not be allowed to abandon a live batch.
-pub fn coordinator_is_cancelled(batch_id: &str) -> bool {
+pub(crate) fn coordinator_is_cancelled(batch_id: &str) -> bool {
     AgentTaskBatchStore::from_current_data_root()
         .map(|store| store.coordinator_is_cancelled(batch_id))
         .unwrap_or(false)
@@ -1654,7 +1654,7 @@ pub fn coordinator_is_cancelled_in_store(store: &AgentTaskBatchStore, batch_id: 
 
 const COORDINATOR_CANCELLATION_KEY: &str = "coordinator_cancellation";
 
-pub fn dependency_action_receipt(batch_id: &str, key: &str) -> Result<Option<Value>> {
+pub(crate) fn dependency_action_receipt(batch_id: &str, key: &str) -> Result<Option<Value>> {
     AgentTaskBatchStore::from_current_data_root()?.dependency_action_receipt(batch_id, key)
 }
 
@@ -1669,7 +1669,11 @@ pub fn dependency_action_receipt_in_store(
         .map(|_| batch.metadata["dependency_action_receipts"][key].clone()))
 }
 
-pub fn record_dependency_action_receipt(batch_id: &str, key: &str, receipt: Value) -> Result<()> {
+pub(crate) fn record_dependency_action_receipt(
+    batch_id: &str,
+    key: &str,
+    receipt: Value,
+) -> Result<()> {
     AgentTaskBatchStore::from_current_data_root()?
         .record_dependency_action_receipt(batch_id, key, receipt)
 }

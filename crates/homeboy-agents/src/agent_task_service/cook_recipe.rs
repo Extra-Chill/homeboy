@@ -1117,7 +1117,7 @@ fn initial_attempt_inputs_match(
     attempt_inputs_match(&left, &right)
 }
 
-pub fn record_recipe_attempt(
+pub(crate) fn record_recipe_attempt(
     cook_id: &str,
     attempt: u32,
     run_id: &str,
@@ -1126,7 +1126,7 @@ pub fn record_recipe_attempt(
     default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
 }
 
-pub fn record_recipe_attempt_replacement(
+pub(crate) fn record_recipe_attempt_replacement(
     cook_id: &str,
     replaced_run_id: &str,
     replacement_run_id: &str,
