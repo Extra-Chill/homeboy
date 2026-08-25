@@ -22,6 +22,7 @@ use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::output::{budget_json_values, OutputBudget};
 use homeboy::runner::runners::{self as runner, RunnerKind};
+use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
 use super::args::{
@@ -406,6 +407,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         project_owning_cook_terminal_status(&mut value);
     }
     attach_transport_proxy_recovery_guidance(&mut value, run_id);
+    attach_lab_transport_failure(&mut value, run_id);
     if let Some(selection) = target.selection.as_ref() {
         value["candidate_selection"] = selection.clone();
     }
@@ -1310,6 +1312,7 @@ fn normalized_full_status(
             "notification_state": bounded_value(value.pointer("/notification_delivery/status").unwrap_or(&Value::Null)),
             "pr_url": bounded_value(value.get("pr_url").unwrap_or(&Value::Null)),
             "blocker": bounded_value(value.get("diagnostic_summary").unwrap_or(&Value::Null)),
+            "lab_transport_failure": value.get("lab_transport_failure"),
             "next_action": value.pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0")).map(|action| json!({
                 "kind": bounded_value(action.get("kind").unwrap_or(&Value::Null)),
                 "command": bounded_value(action.get("command").unwrap_or(&Value::Null)),
@@ -1856,6 +1859,20 @@ fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport
 }
 
 fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
+    if let Some(action) = lab_transport_repair_action_from_value(value) {
+        attach_actionable_metadata(
+            value,
+            CommandActionableMetadata {
+                refs: CommandResultRefs {
+                    agent_tasks: vec![agent_task_ref(run_id)],
+                    ..Default::default()
+                },
+                next_actions: vec![action],
+                ..Default::default()
+            },
+        );
+        return;
+    }
     if value
         .pointer("/metadata/manual_finalization_failure/status")
         .and_then(Value::as_str)
@@ -1991,6 +2008,68 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
     }
 
     attach_actionable_metadata(value, metadata);
+}
+
+fn lab_transport_receipt_from_details(details: &Value) -> Option<LabTransportAttemptReceipt> {
+    serde_json::from_value(details.get("lab_transport_attempt_receipt")?.clone()).ok()
+}
+
+fn lab_transport_receipt(record: &AgentTaskRunRecord) -> Option<LabTransportAttemptReceipt> {
+    lab_transport_receipt_from_details(record.metadata.pointer("/pre_execution_failure/details")?)
+}
+
+fn lab_transport_failure_projection(record: &AgentTaskRunRecord, _run_id: &str) -> Option<Value> {
+    let receipt = lab_transport_receipt(record)?;
+    let action = lab_transport_repair_action_for_receipt(&receipt);
+    Some(json!({
+        "receipt": receipt,
+        "recovery": {
+            "kind": "repair_selected_runner_transport",
+            "command": action.command,
+        },
+    }))
+}
+
+fn attach_lab_transport_failure(value: &mut Value, run_id: &str) {
+    let Some(details) = value.pointer("/metadata/pre_execution_failure/details") else {
+        return;
+    };
+    let Some(receipt) = lab_transport_receipt_from_details(details) else {
+        return;
+    };
+    let action = lab_transport_repair_action_for_receipt(&receipt);
+    value["lab_transport_failure"] = json!({
+        "receipt": receipt,
+        "recovery": {
+            "kind": "repair_selected_runner_transport",
+            "command": action.command,
+            "diagnose_command": format!("homeboy agent-task diagnose {} --full", quote_arg(run_id)),
+        },
+    });
+}
+
+fn lab_transport_repair_action(record: &AgentTaskRunRecord) -> Option<CommandNextAction> {
+    lab_transport_receipt(record).map(|receipt| lab_transport_repair_action_for_receipt(&receipt))
+}
+
+fn lab_transport_repair_action_from_value(value: &Value) -> Option<CommandNextAction> {
+    let receipt =
+        serde_json::from_value(value.pointer("/lab_transport_failure/receipt")?.clone()).ok()?;
+    Some(lab_transport_repair_action_for_receipt(&receipt))
+}
+
+fn lab_transport_repair_action_for_receipt(
+    receipt: &LabTransportAttemptReceipt,
+) -> CommandNextAction {
+    let runner = quote_arg(&receipt.selected_runner);
+    CommandNextAction::new(
+        format!(
+            "diagnose and repair Lab transport for {}",
+            receipt.selected_runner
+        ),
+        format!("homeboy runner doctor {runner} --scope lab-offload --repair"),
+    )
+    .with_kind(CommandNextActionKind::Repair)
 }
 
 fn transport_proxy_recovery_command(value: &Value) -> Option<String> {
@@ -2515,6 +2594,9 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "retry_replay": retry.projection(),
         "next_commands": next_commands,
     });
+    if let Some(projection) = lab_transport_failure_projection(&record, run_id) {
+        value["lab_transport_failure"] = projection;
+    }
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     attach_cook_completion(&mut value, &record);
     if let Some(selection) = target.selection {
@@ -2585,6 +2667,7 @@ fn normalized_full_diagnosis(
         "retry_replay": value.get("retry_replay"),
         "next_action": value.pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0")),
         "actionable": value.get(ACTIONABLE_METADATA_KEY),
+        "lab_transport_failure": value.get("lab_transport_failure"),
         "evidence_graph": normalized_evidence_graph(run_id, aggregate, artifact_count, evidence_count),
         "output_budget": {
             "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
@@ -2888,6 +2971,27 @@ fn attach_diagnose_actionable(
     current_lifecycle_denial: bool,
 ) {
     let run_id = record.run_id.as_str();
+    if let Some(action) = lab_transport_repair_action(record) {
+        if let Value::Object(map) = value {
+            map.insert(
+                "next_action_basis".to_string(),
+                Value::String(DIAGNOSE_ACTION_BASIS_DIAGNOSIS.to_string()),
+            );
+        }
+        attach_actionable_metadata(
+            value,
+            CommandActionableMetadata {
+                run: Some(diagnose_run_ref(record, runner_id)),
+                refs: CommandResultRefs {
+                    agent_tasks: vec![agent_task_ref(run_id)],
+                    ..Default::default()
+                },
+                next_actions: vec![action],
+                ..Default::default()
+            },
+        );
+        return;
+    }
     let candidate_payload = candidate_result_payload(
         &serde_json::to_value(record).unwrap_or(Value::Null),
         aggregate,
@@ -5677,6 +5781,9 @@ fn compact_status_summary_with_aggregate(
     if let Some(recovery) = record.get("transport_recovery") {
         summary["transport_recovery"] = recovery.clone();
     }
+    if let Some(failure) = record.get("lab_transport_failure") {
+        summary["lab_transport_failure"] = failure.clone();
+    }
     if let Some(failure_reasons) = record.get("failure_reasons") {
         if failure_reasons
             .as_array()
@@ -6086,6 +6193,7 @@ fn compact_mandatory_field(field: &str) -> bool {
             | "status"
             | "state"
             | "status_scope"
+            | "lab_transport_failure"
             | "full_command"
     )
 }
@@ -6272,6 +6380,18 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
     }
     if let Some(failure) = record.metadata.get("pre_execution_failure") {
         let details = failure.get("details")?;
+        if let Some(receipt) = lab_transport_receipt_from_details(details) {
+            return Some(CollectedDiagnostic {
+                task_id: "controller".to_string(),
+                class: receipt.error.code.clone(),
+                message: receipt.error.message.clone(),
+                source: "lab_preacceptance_transport".to_string(),
+                data: json!({
+                    "phase": failure.get("phase"),
+                    "lab_transport_attempt_receipt": receipt,
+                }),
+            });
+        }
         let provider_failure =
             homeboy::core::worktree_providers::compact_provider_failure_details(details);
         return Some(CollectedDiagnostic {
@@ -7323,6 +7443,8 @@ fn collected_diagnostic_value_with_details(
         value["details"] = details;
     } else if item.source == "pre_execution_failure" {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
+    } else if item.source == "lab_preacceptance_transport" {
+        value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if let Some(details) = item.data.get("worktree_provider_failure") {
         value["details"] = details.clone();
     }
@@ -7412,6 +7534,8 @@ fn diagnostic_owner(class: &str, source: &str, data: &Value) -> &'static str {
         && data.get("phase").and_then(Value::as_str) == Some("controller_admission")
     {
         "controller_runtime"
+    } else if source == "lab_preacceptance_transport" {
+        "lab_transport"
     } else if source == "hydrated_process_stream" {
         "provider_runtime"
     } else if class.contains("malformed") || class.contains("normalization") {

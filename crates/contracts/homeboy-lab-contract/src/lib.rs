@@ -18,6 +18,7 @@ pub mod secret_env_plan;
 pub mod lab {
     pub mod handoff;
     pub mod labels;
+    pub mod transport_failure;
     pub mod types;
     pub mod workload;
 }

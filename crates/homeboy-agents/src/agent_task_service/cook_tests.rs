@@ -43,6 +43,10 @@ use homeboy_core::run_lifecycle_record::{
     ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
     RunLifecycleRecord,
 };
+use homeboy_lab_contract::lab::transport_failure::{
+    preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportAttemptReceipt,
+    LabTransportErrorKind, LabTransportOperation,
+};
 use serde::Deserialize;
 use sha2::Digest;
 use std::process::Command;
@@ -3653,6 +3657,7 @@ struct AdmissionFailingAttemptDispatcher {
 #[derive(Debug)]
 struct RetryableTransportFailingAttemptDispatcher {
     dispatches: Arc<AtomicUsize>,
+    runner_jobs_created: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
@@ -3824,16 +3829,31 @@ impl AgentTaskCookAttemptDispatcher for RetryableTransportFailingAttemptDispatch
     fn dispatch_attempt(
         &self,
         _plan: AgentTaskPlan,
-        _run_id: &str,
+        run_id: &str,
         _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> Result<()> {
         self.dispatches.fetch_add(1, Ordering::SeqCst);
-        Err(Error::new(
-            homeboy_core::error::ErrorCode::RunnerLabTransportFailure,
-            "fixture transport disconnected",
-            serde_json::json!({ "phase": "lab_handoff" }),
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_id"] = serde_json::json!("fixture-lab");
+        })?;
+        let io_error = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "Authorization: Bearer fixture-preacceptance-secret",
+        );
+        let error = Error::internal_io(
+            io_error.to_string(),
+            Some("submit selected Lab runner job".to_string()),
         )
-        .with_retryable(true))
+        .with_source(io_error)
+        .with_retryable(true);
+        debug_assert_eq!(self.runner_jobs_created.load(Ordering::SeqCst), 0);
+        Err(preacceptance_transport_error(
+            run_id,
+            "fixture-lab",
+            LabTransportOperation::DispatchCookAttempt,
+            LabJobAcceptanceDisposition::NoJobAccepted,
+            error,
+        ))
     }
 }
 
@@ -10530,11 +10550,13 @@ fn cook_ignores_untrusted_or_malformed_lab_runtime_recovery_metadata() {
 fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let dispatches = Arc::new(AtomicUsize::new(0));
+        let runner_jobs_created = Arc::new(AtomicUsize::new(0));
         let cook_id = "cook-retryable-transport";
         let mut options = batch_cook_options(
             cook_id,
             Arc::new(RetryableTransportFailingAttemptDispatcher {
                 dispatches: Arc::clone(&dispatches),
+                runner_jobs_created: Arc::clone(&runner_jobs_created),
             }),
         );
         options.provider_command = Some("fixture-provider".to_string());
@@ -10548,6 +10570,7 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
         assert_eq!(result.value.status, "pre_execution_failure");
         assert_eq!(result.value.attempts.len(), 2);
         assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+        assert_eq!(runner_jobs_created.load(Ordering::SeqCst), 0);
         assert_eq!(result.value.history_run_ids.len(), 2);
         assert_eq!(
             result.value.history_run_ids[0],
@@ -10563,15 +10586,36 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
         let recipe = super::super::load_recipe(cook_id).expect("transport retries are durable");
         assert_eq!(recipe.attempts.len(), 2);
         assert!(recipe.attempts.iter().all(|attempt| attempt.attempt == 1));
-        for run_id in &result.value.history_run_ids {
+        for (transport_attempt, run_id) in result.value.history_run_ids.iter().enumerate() {
             let record = agent_task_lifecycle::status(run_id).expect("retry attempt exists");
             assert!(record.provider_handles.is_empty());
+            assert!(record.lab_handoff.is_none());
+            assert!(record.runner_job_id().is_none());
+            assert_eq!(record.runner_id(), Some("fixture-lab"));
             assert_eq!(record.metadata["provider_executions_consumed"], 0);
             assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
             assert_eq!(
                 record.metadata["pre_execution_failure"]["failure_classification"],
                 "transient"
             );
+            let receipt: LabTransportAttemptReceipt = serde_json::from_value(
+                record.metadata["pre_execution_failure"]["details"]
+                    ["lab_transport_attempt_receipt"]
+                    .clone(),
+            )
+            .expect("durable typed transport receipt");
+            assert_eq!(receipt.transport_attempt as usize, transport_attempt);
+            assert_eq!(receipt.transport_retry_limit, 1);
+            assert_eq!(receipt.selected_runner, "fixture-lab");
+            assert_eq!(receipt.error.kind, LabTransportErrorKind::BrokenPipe);
+            assert_eq!(
+                receipt.acceptance,
+                LabJobAcceptanceDisposition::NoJobAccepted
+            );
+            assert!(receipt.receipt_id.starts_with(run_id));
+            assert!(!serde_json::to_string(&record)
+                .expect("serialize durable record")
+                .contains("fixture-preacceptance-secret"));
         }
     });
 }
@@ -10671,6 +10715,7 @@ fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_rep
             cook_id,
             Arc::new(RetryableTransportFailingAttemptDispatcher {
                 dispatches: Arc::clone(&lab_dispatches),
+                runner_jobs_created: Arc::new(AtomicUsize::new(0)),
             }),
         );
         options.provider_command = Some("fixture-provider".to_string());

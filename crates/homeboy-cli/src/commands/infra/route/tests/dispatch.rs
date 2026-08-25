@@ -2224,6 +2224,39 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
 }
 
 #[test]
+fn preacceptance_io_failure_becomes_a_typed_no_job_receipt() {
+    let io_error = std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "Authorization: Bearer route-fixture-secret",
+    );
+    let error = Error::internal_io(
+        io_error.to_string(),
+        Some("submit selected Lab runner job".to_string()),
+    )
+    .with_source(io_error);
+
+    let wrapped =
+        durable_lab_preacceptance_transport_error("cook-route-attempt-1", "homeboy-lab", error);
+    let receipt: homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt =
+        serde_json::from_value(wrapped.details["lab_transport_attempt_receipt"].clone())
+            .expect("typed transport receipt");
+
+    assert_eq!(wrapped.code.as_str(), "runner.lab_transport_failure");
+    assert_eq!(receipt.selected_runner, "homeboy-lab");
+    assert_eq!(
+        receipt.acceptance,
+        LabJobAcceptanceDisposition::NoJobAccepted
+    );
+    assert_eq!(
+        receipt.error.kind,
+        homeboy_lab_contract::lab::transport_failure::LabTransportErrorKind::BrokenPipe
+    );
+    assert!(!serde_json::to_string(&wrapped.details)
+        .expect("serialize wrapped details")
+        .contains("route-fixture-secret"));
+}
+
+#[test]
 fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_failure() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -2383,6 +2416,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
 
         let error = persist_retry_handoff_preacceptance_failure(
             &handoff,
+            Some("homeboy-lab"),
             Error::internal_unexpected("runner preflight rejected the handoff"),
         );
         assert!(error
