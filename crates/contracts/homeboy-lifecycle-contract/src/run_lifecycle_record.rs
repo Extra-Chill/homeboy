@@ -221,16 +221,22 @@ impl Default for CleanupLifecycle {
     }
 }
 
+/// Cleanup progress for a run.
+///
+/// `Unknown` is `#[serde(other)]`, so a state this binary does not know —
+/// including `not_required`, removed in #13398 as unreachable — degrades to
+/// "no verdict" rather than failing the enclosing record parse.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupState {
-    Unknown,
-    NotRequired,
     Pending,
     Running,
     Succeeded,
     Failed,
+    /// Cleanup ran and deliberately kept the workspace.
     Preserved,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +255,25 @@ impl Default for FinalizationLifecycle {
     }
 }
 
+/// Finalization progress for a run.
+///
+/// # Nothing writes this
+///
+/// Every reference to this type is structural — the field, the re-export, and
+/// the `Default` above. No code assigns it, so `finalization.state` is
+/// `not_requested` in every record ever written and the remaining variants have
+/// never been observed on disk.
+///
+/// It is left in place because removing it changes the durable
+/// `RunLifecycleRecord` shape, which is a separate decision from deleting
+/// unreachable variants (#13398). The open question is whether finalization
+/// *should* be reporting progress here — in which case the missing writer is
+/// the defect — or whether this and [`FinalizationLifecycle`] should come out
+/// of the record entirely.
+///
+/// Unlike its two siblings this enum has no catch-all, so it cannot carry a
+/// `#[serde(other)]` hatch without first choosing which variant means "no
+/// verdict". Do not add variants here until the question above is answered.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FinalizationState {
@@ -257,7 +282,6 @@ pub enum FinalizationState {
     Running,
     Succeeded,
     Failed,
-    Blocked,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -281,14 +305,19 @@ impl Default for ArtifactRetentionLifecycle {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Retention outcome for a run's artifacts.
+///
+/// `Unknown` is `#[serde(other)]`, so a status this binary does not know —
+/// including `expired` and `deleted`, removed in #13398 as unreachable —
+/// degrades to "no verdict" rather than failing the enclosing record parse.
 pub enum ArtifactRetentionStatus {
-    Unknown,
     NotApplicable,
     Pending,
+    /// Retention ran and the artifacts were kept.
     Retained,
-    Expired,
-    Deleted,
     Failed,
+    #[serde(other)]
+    Unknown,
 }
 
 fn record_schema() -> String {
@@ -428,5 +457,99 @@ mod run_execution_state_compatibility_tests {
         .expect("record with an unknown execution state must still parse");
 
         assert_eq!(record.execution.state, RunExecutionState::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod subsystem_state_compatibility_tests {
+    use super::*;
+
+    /// The variants #13398 removed had no producer anywhere in the tree, so no
+    /// record can contain them. This pins the belt-and-braces case anyway: if
+    /// one ever appears — a hand-edited record, a binary from another branch —
+    /// it degrades to `Unknown` instead of failing the whole record parse.
+    ///
+    /// This is what makes deleting a variant from a durable enum safe, and it
+    /// is why the removal shipped together with the `#[serde(other)]` hatch
+    /// rather than on its own.
+    #[test]
+    fn removed_states_degrade_to_unknown_rather_than_failing() {
+        for label in ["not_required", "some_state_from_another_binary"] {
+            let parsed: CleanupState =
+                serde_json::from_value(label.into()).expect("must not fail the parse");
+            assert_eq!(parsed, CleanupState::Unknown, "{label}");
+        }
+
+        for label in ["expired", "deleted", "a_status_this_binary_never_had"] {
+            let parsed: ArtifactRetentionStatus =
+                serde_json::from_value(label.into()).expect("must not fail the parse");
+            assert_eq!(parsed, ArtifactRetentionStatus::Unknown, "{label}");
+        }
+    }
+
+    /// Degradation has to survive the enclosing record, which is the shape that
+    /// actually lands on disk.
+    #[test]
+    fn a_removed_state_does_not_fail_the_enclosing_record() {
+        let record: RunLifecycleRecord = serde_json::from_value(serde_json::json!({
+            "schema": RUN_LIFECYCLE_RECORD_SCHEMA,
+            "execution": { "state": "running" },
+            "cleanup": { "state": "not_required" },
+            "artifact_retention": { "status": "deleted" },
+        }))
+        .expect("record carrying removed states must still parse");
+
+        assert_eq!(record.cleanup.state, CleanupState::Unknown);
+        assert_eq!(
+            record.artifact_retention.status,
+            ArtifactRetentionStatus::Unknown
+        );
+    }
+
+    /// Every surviving variant keeps its durable spelling. Deleting a variant
+    /// must not renumber or rename its neighbours.
+    #[test]
+    fn surviving_states_keep_their_wire_labels() {
+        for (label, state) in [
+            ("pending", CleanupState::Pending),
+            ("running", CleanupState::Running),
+            ("succeeded", CleanupState::Succeeded),
+            ("failed", CleanupState::Failed),
+            ("preserved", CleanupState::Preserved),
+            ("unknown", CleanupState::Unknown),
+        ] {
+            assert_eq!(
+                serde_json::to_value(state).expect("serialize"),
+                serde_json::json!(label)
+            );
+        }
+
+        for (label, status) in [
+            ("not_applicable", ArtifactRetentionStatus::NotApplicable),
+            ("pending", ArtifactRetentionStatus::Pending),
+            ("retained", ArtifactRetentionStatus::Retained),
+            ("failed", ArtifactRetentionStatus::Failed),
+            ("unknown", ArtifactRetentionStatus::Unknown),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).expect("serialize"),
+                serde_json::json!(label)
+            );
+        }
+
+        // FinalizationState has no catch-all, so its labels are pinned without
+        // a degradation case. `blocked` was removed with the others.
+        for (label, state) in [
+            ("not_requested", FinalizationState::NotRequested),
+            ("pending", FinalizationState::Pending),
+            ("running", FinalizationState::Running),
+            ("succeeded", FinalizationState::Succeeded),
+            ("failed", FinalizationState::Failed),
+        ] {
+            assert_eq!(
+                serde_json::to_value(state).expect("serialize"),
+                serde_json::json!(label)
+            );
+        }
     }
 }
