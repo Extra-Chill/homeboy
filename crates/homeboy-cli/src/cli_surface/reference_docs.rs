@@ -365,18 +365,16 @@ fn documented_positionals(command: &Command) -> Vec<&Arg> {
         .collect()
 }
 
-/// Non-positional, non-hidden, non-global arguments.
+/// Non-positional, non-hidden arguments declared on this command.
 ///
-/// Globals are deliberately excluded: they are identical on every node and are
-/// pinned as a wire protocol by `root_global_flag_surface_is_pinned`. Repeating
-/// them on ~500 pages would bury the per-command surface and would make an
-/// unrelated global-flag change rewrite the entire generated tree.
+/// This walks the unbuilt tree, so root globals have not propagated into child
+/// nodes. A scoped global must remain visible here at its declaration node;
+/// otherwise an option such as `release --full` disappears from the reference.
 fn documented_options(command: &Command) -> Vec<&Arg> {
     command
         .get_arguments()
         .filter(|arg| !arg.is_positional())
         .filter(|arg| !arg.is_hide_set())
-        .filter(|arg| !arg.is_global_set())
         .filter(|arg| !matches!(arg.get_id().as_str(), "help" | "version"))
         .collect()
 }
