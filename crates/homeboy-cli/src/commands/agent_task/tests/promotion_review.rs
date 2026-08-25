@@ -792,6 +792,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 preview: false,
                 goal: Some("cook fixture".to_string()),
                 to_worktree: Some(target.display().to_string()),
+                worktree_provider_self_repair: None,
                 provider_command: None,
                 provider_argv: vec![
                     "sh".to_string(),
@@ -1192,6 +1193,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 preview: false,
                 goal: None,
                 to_worktree: Some(target.display().to_string()),
+                worktree_provider_self_repair: None,
                 provider_command: None,
                 provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {

@@ -706,8 +706,21 @@ fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
     if let Some(run_id) = &args.attempt_run_id {
         argv.extend(["--attempt-run-id".to_string(), run_id.clone()]);
     }
-    if let Some(worktree) = &args.to_worktree {
-        argv.extend(["--to-worktree".to_string(), worktree.clone()]);
+    if args.worktree_provider_self_repair.is_none() {
+        if let Some(worktree) = &args.to_worktree {
+            argv.extend(["--to-worktree".to_string(), worktree.clone()]);
+        }
+    }
+    if let Some(provider_id) = &args.worktree_provider_self_repair {
+        argv.extend([
+            "--cwd".to_string(),
+            args.dispatch
+                .cwd
+                .clone()
+                .expect("provider self-repair requires an explicit CWD"),
+            "--worktree-provider-self-repair".to_string(),
+            provider_id.clone(),
+        ]);
     }
     for gate in &args.gates.verify {
         argv.extend(["--verify".to_string(), gate.clone()]);
@@ -3155,6 +3168,23 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "handle": to_worktree,
             "path": path,
         });
+        if let Some(provider_id) = args.worktree_provider_self_repair.as_deref() {
+            let contract = configured_worktree_provider_self_repair_contract(args, provider_id)?;
+            provision["self_repair_bootstrap"] = serde_json::json!({
+                "schema": "homeboy/worktree-provider-self-repair-bootstrap/v1",
+                "provider_id": contract.provider_id,
+                "repository": contract.repository,
+                "workspace_authority": "explicit_clean_existing_checkout",
+                "task_url": args.dispatch.task_url,
+                "branch": args.head,
+                "review_and_finalization": "normal",
+                "provider_lifecycle_reconciliation": {
+                    "status": "pending",
+                    "required_after": "repair_ships",
+                    "action": "resume_normal_provider_lifecycle_finalization",
+                },
+            });
+        }
         if let Some(provenance) = logical_provider_provenance {
             provision["logical_provider_provenance"] = provenance;
         }
@@ -3448,6 +3478,10 @@ pub(crate) fn resolve_cook_destination(
     mut args: AgentTaskCookArgs,
 ) -> homeboy::core::Result<AgentTaskCookArgs> {
     normalize_cook_repository_identity(&mut args)?;
+    if bind_worktree_provider_self_repair_bootstrap(&mut args)? {
+        resolve_cook_base(&mut args)?;
+        return Ok(args);
+    }
     if args.to_worktree.is_some() {
         resolve_cook_base(&mut args)?;
         return Ok(args);
@@ -3489,7 +3523,13 @@ pub(crate) fn resolve_cook_destination(
             resolution.worktree.handle
         }
         Ok(None) => format!("{repo}@{}", slugify_cook_branch(&head)),
-        Err(mut error) => {
+        Err(error) => {
+            let mut error = annotate_worktree_provider_self_repair_route(
+                error,
+                &args,
+                &config,
+                Some(&head),
+            );
             if let Some(handles) = error.message.strip_prefix(&format!("multiple active apply-enabled worktrees are owned by `{task_url}`: ")) {
                 error.details["recovery"] = serde_json::json!(handles.split(", ").map(|handle| format!("homeboy agent-task cook --to-worktree {handle}")).collect::<Vec<_>>());
             }
@@ -3501,6 +3541,163 @@ pub(crate) fn resolve_cook_destination(
     }
     resolve_cook_base(&mut args)?;
     Ok(args)
+}
+
+fn configured_worktree_provider_self_repair_contract(
+    args: &AgentTaskCookArgs,
+    provider_id: &str,
+) -> homeboy::core::Result<homeboy::core::worktree_providers::WorktreeProviderSelfRepairContract> {
+    let config = defaults::load_config();
+    if !config.worktree_providers.contains_key(provider_id) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "worktree_provider_self_repair",
+            "self-repair provider is not configured as a worktree provider",
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    let contract = homeboy::core::worktree_providers::worktree_provider_self_repair_contract_from_config(
+        provider_id,
+        &config,
+    )?
+    .ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "worktree_provider_self_repair",
+            format!("worktree provider `{provider_id}` does not declare a self-repair repository"),
+            Some(provider_id.to_string()),
+            Some(vec![format!(
+                "Configure settings.worktree_provider_self_repair.{provider_id}.repository with the owning component id."
+            )]),
+        )
+    })?;
+    let repository = args.dispatch.repo.as_deref().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--repo <repo> is required for a worktree provider self-repair bootstrap".to_string(),
+        ])
+    })?;
+    if contract.repository != repository {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "worktree_provider_self_repair",
+            format!(
+                "worktree provider `{provider_id}` is owned by configured repository `{}`, not `{repository}`",
+                contract.repository
+            ),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
+    if args.dispatch.task_url.as_deref().is_none_or(str::is_empty) {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            "--task-url <url> is required to preserve tracker identity during provider self-repair"
+                .to_string(),
+        ]));
+    }
+    Ok(contract)
+}
+
+fn bind_worktree_provider_self_repair_bootstrap(
+    args: &mut AgentTaskCookArgs,
+) -> homeboy::core::Result<bool> {
+    let Some(provider_id) = args.worktree_provider_self_repair.clone() else {
+        return Ok(false);
+    };
+    configured_worktree_provider_self_repair_contract(args, &provider_id)?;
+    let cwd = args.dispatch.cwd.as_deref().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--cwd <clean-existing-checkout> is required for provider self-repair".to_string(),
+        ])
+    })?;
+    let cwd = std::fs::canonicalize(cwd).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
+    })?;
+    homeboy::core::worktree_providers::validate_task_worktree_root(&cwd, &provider_id)?;
+    let branch = homeboy::core::git::current_branch(&cwd).ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "head",
+            "provider self-repair checkout must be on an attached branch",
+            Some(cwd.display().to_string()),
+            None,
+        )
+    })?;
+    if args.head.as_deref().is_some_and(|head| head != branch) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "head",
+            "provider self-repair --head does not match the explicit checkout branch",
+            args.head.clone(),
+            None,
+        ));
+    }
+    args.head = Some(branch);
+    args.dispatch.cwd = Some(cwd.display().to_string());
+    args.to_worktree = Some(cwd.display().to_string());
+    Ok(true)
+}
+
+fn annotate_worktree_provider_self_repair_route(
+    mut error: homeboy::core::Error,
+    args: &AgentTaskCookArgs,
+    config: &defaults::HomeboyConfig,
+    head: Option<&str>,
+) -> homeboy::core::Error {
+    // A bootstrap is a publication route, not an escape hatch from the review
+    // and finalization contract selected by the original Cook.
+    if args.no_finalize {
+        return error;
+    }
+    let provider_id = error.details["worktree_provider_id"].as_str();
+    let operation = error.details["worktree_provider_operation"].as_str();
+    let Some((provider_id, operation)) = provider_id.zip(operation) else {
+        return error;
+    };
+    if !matches!(operation, "resolve_task" | "ensure") {
+        return error;
+    }
+    let Ok(Some(contract)) =
+        homeboy::core::worktree_providers::worktree_provider_self_repair_contract_from_config(
+            provider_id,
+            config,
+        )
+    else {
+        return error;
+    };
+    if args.dispatch.repo.as_deref() != Some(contract.repository.as_str()) {
+        return error;
+    }
+    let mut replay_args = args.clone();
+    if replay_args.head.is_none() {
+        replay_args.head = head.map(str::to_string);
+    }
+    replay_args.to_worktree = None;
+    replay_args.dispatch.cwd = Some("<clean-existing-linked-worktree>".to_string());
+    replay_args.worktree_provider_self_repair = Some(provider_id.to_string());
+    let mut replay_argv = cook_replay_argv(&replay_args);
+    for _ in &args.gates.private_verify {
+        replay_argv.extend([
+            "--private-verify".to_string(),
+            "<redacted:--private-verify>".to_string(),
+        ]);
+    }
+    let replay_command = quote_args(&replay_argv);
+    let mut replay_requires = vec!["replace <clean-existing-linked-worktree> with an existing clean linked checkout of the configured owning repository".to_string()];
+    if !args.gates.private_verify.is_empty() {
+        replay_requires.push("replace each <redacted:--private-verify> placeholder with the original private gate before replaying".to_string());
+    }
+    error.details["worktree_provider_self_repair"] = serde_json::json!({
+        "schema": "homeboy/worktree-provider-self-repair-route/v1",
+        "provider_id": provider_id,
+        "repository": contract.repository,
+        "failed_operation": operation,
+        "workspace_authority": "explicit_clean_existing_checkout",
+        "replay_argv": replay_argv,
+        "replay_requires": replay_requires,
+        "provider_lifecycle_reconciliation": {
+            "status": "required_after_repair_ships",
+            "action": "resume_normal_provider_lifecycle_finalization",
+        },
+    });
+    error.with_hint(format!(
+        "Bootstrap the provider-owning repair with: {replay_command}"
+    ))
 }
 
 fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {

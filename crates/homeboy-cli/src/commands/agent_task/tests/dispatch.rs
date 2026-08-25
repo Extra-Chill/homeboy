@@ -239,6 +239,228 @@ fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
 
 #[cfg(unix)]
 #[test]
+fn self_repair_bootstrap_uses_explicit_checkout_and_preserves_normal_cook_contract() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("provider repository");
+        init_runtime_component_checkout(primary.path());
+        add_remote(
+            primary.path(),
+            "origin",
+            "https://github.com/example/workspace-service.git",
+        );
+        register_component(
+            "workspace-service-component",
+            primary.path(),
+            "https://github.com/example/workspace-service.git",
+        );
+        let root = tempfile::tempdir().expect("worktree root");
+        let checkout = root.path().join("workspace-service-self-repair");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/provider-self-repair",
+                checkout.to_str().expect("checkout path"),
+                "HEAD",
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create self-repair checkout")
+            .success());
+        let invoked = root.path().join("provider-invoked");
+        let provider = root.path().join("failed-provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf 'invoked\\n' >> '{}'\nexit 9\n",
+                invoked.display()
+            ),
+        )
+        .expect("write failed provider");
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "workspace-service".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve_task: Some(vec![provider.display().to_string()]),
+                    ensure: Some(vec![provider.display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: Some("$.task_url".to_string()),
+                    },
+                ),
+            },
+        );
+        config.settings.insert(
+            homeboy::core::worktree_providers::WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY
+                .to_string(),
+            json!({
+                "workspace-service": {
+                    "repository": "workspace-service-component"
+                }
+            }),
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider ownership");
+
+        let nonfinalizing_failure =
+            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "repair without publication".to_string(),
+                "--repo".to_string(),
+                "workspace-service-component".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/workspace-service/issues/13410".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect_err("non-finalizing provider failure is not a self-repair route");
+        assert!(nonfinalizing_failure
+            .details
+            .get("worktree_provider_self_repair")
+            .is_none());
+
+        let failure = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "repair the workspace service".to_string(),
+            "--repo".to_string(),
+            "workspace-service-component".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/example/workspace-service/issues/13410".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--verify".to_string(),
+            "cargo test --workspace".to_string(),
+            "--private-verify".to_string(),
+            "PRIVATE_GATE_SECRET=do-not-persist".to_string(),
+        ]))
+        .expect_err("normal provider-owned lookup fails before bootstrap");
+        assert_eq!(
+            failure.details["worktree_provider_self_repair"]["failed_operation"],
+            "resolve_task"
+        );
+        let route = &failure.details["worktree_provider_self_repair"];
+        assert_eq!(
+            route["schema"],
+            "homeboy/worktree-provider-self-repair-route/v1"
+        );
+        assert_eq!(route["provider_id"], "workspace-service");
+        assert_eq!(
+            route["provider_lifecycle_reconciliation"]["status"],
+            "required_after_repair_ships"
+        );
+        let replay = route["replay_argv"].as_array().expect("typed replay argv");
+        assert!(replay.iter().any(|value| value == "--cwd"));
+        assert!(replay
+            .iter()
+            .any(|value| value == "<clean-existing-linked-worktree>"));
+        assert!(replay
+            .iter()
+            .any(|value| value == "--worktree-provider-self-repair"));
+        assert!(replay.iter().any(|value| value == "cargo test --workspace"));
+        assert!(replay
+            .iter()
+            .any(|value| value == "<redacted:--private-verify>"));
+        assert!(!route.to_string().contains("PRIVATE_GATE_SECRET"));
+        assert!(route["replay_requires"]
+            .as_array()
+            .expect("replay requirements")
+            .iter()
+            .any(|requirement| requirement
+                .as_str()
+                .is_some_and(|requirement| requirement.contains("private gate"))));
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "repair the workspace service".to_string(),
+            "--repo".to_string(),
+            "workspace-service-component".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/example/workspace-service/issues/13410".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--cwd".to_string(),
+            checkout.display().to_string(),
+            "--worktree-provider-self-repair".to_string(),
+            "workspace-service".to_string(),
+            "--verify".to_string(),
+            "cargo test --workspace".to_string(),
+        ]))
+        .expect("admit explicit provider self-repair route");
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("provision from explicit checkout without provider");
+        let plan = super::super::run::compile_cook_plan(&args, provision.clone())
+            .expect("compile normal reviewed Cook plan");
+
+        assert_eq!(
+            std::fs::read_to_string(&invoked)
+                .expect("provider invocation record")
+                .lines()
+                .count(),
+            2,
+            "bootstrap must not invoke the failed provider again"
+        );
+        assert!(!args.no_finalize, "self-repair retains normal finalization");
+        assert_eq!(args.head.as_deref(), Some("fix/provider-self-repair"));
+        assert_eq!(
+            provision["self_repair_bootstrap"]["workspace_authority"],
+            "explicit_clean_existing_checkout"
+        );
+        assert_eq!(
+            provision["self_repair_bootstrap"]["review_and_finalization"],
+            "normal"
+        );
+        assert_eq!(
+            provision["self_repair_bootstrap"]["provider_lifecycle_reconciliation"]["status"],
+            "pending"
+        );
+        assert_eq!(
+            plan.metadata["cook_provision"]["self_repair_bootstrap"]["task_url"],
+            "https://github.com/example/workspace-service/issues/13410"
+        );
+        assert_eq!(
+            plan.tasks[0].workspace.root.as_deref(),
+            std::fs::canonicalize(&checkout)
+                .expect("canonical checkout")
+                .to_str()
+        );
+        assert_eq!(args.gates.verify, vec!["cargo test --workspace"]);
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
     use std::os::unix::fs::PermissionsExt;
 

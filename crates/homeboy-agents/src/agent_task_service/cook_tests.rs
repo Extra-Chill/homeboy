@@ -6772,6 +6772,13 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
         config
             .worktree_providers
             .insert("competing".to_string(), provider_config(&competing, false));
+        config.settings.insert(
+            homeboy_core::worktree_providers::WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY
+                .to_string(),
+            serde_json::json!({
+                "owner": { "repository": "fixture" }
+            }),
+        );
         homeboy_core::defaults::save_config(&config).expect("save provider config");
 
         let cook_id = "owner-timeout";
@@ -6779,6 +6786,8 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
         options.to_worktree = "fixture@owner-timeout".to_string();
+        options.no_finalize = false;
+        options.gates.private_verify = vec!["PRIVATE_GATE_SECRET=do-not-persist".to_string()];
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
@@ -6809,6 +6818,32 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
             record.metadata["pre_execution_failure"]["details"]["worktree_provider_operation"],
             "ensure"
         );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["worktree_provider_self_repair"]
+                ["failed_operation"],
+            "ensure"
+        );
+        assert!(record.metadata["pre_execution_failure"]["details"]
+            ["worktree_provider_self_repair"]["replay_argv"]
+            .as_array()
+            .expect("typed self-repair replay")
+            .iter()
+            .any(|argument| argument == "--worktree-provider-self-repair"));
+        let route =
+            &record.metadata["pre_execution_failure"]["details"]["worktree_provider_self_repair"];
+        assert!(route["replay_argv"]
+            .as_array()
+            .expect("typed self-repair replay")
+            .iter()
+            .any(|argument| argument == "<redacted:--private-verify>"));
+        assert!(!route.to_string().contains("PRIVATE_GATE_SECRET"));
+        assert!(route["replay_requires"]
+            .as_array()
+            .expect("replay requirements")
+            .iter()
+            .any(|requirement| requirement
+                .as_str()
+                .is_some_and(|requirement| requirement.contains("private gate"))));
         let plan = agent_task_lifecycle::load_plan(run_id).expect("durable timeout plan");
         assert_eq!(
             plan.metadata["cook_provision"]["worktree_provider_id"],
