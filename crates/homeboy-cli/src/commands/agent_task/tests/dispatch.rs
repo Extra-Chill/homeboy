@@ -70,6 +70,40 @@ fn register_component_with_aliases(
     .expect("register component");
 }
 
+#[test]
+fn explicit_repo_identity_resolution_does_not_hydrate_unrelated_components() {
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("checkout");
+        init_runtime_component_checkout(checkout.path());
+        add_remote(
+            checkout.path(),
+            "origin",
+            "https://github.com/example/fixture.git",
+        );
+        register_component(
+            "fixture",
+            checkout.path(),
+            "https://github.com/example/fixture.git",
+        );
+
+        let unrelated = tempfile::tempdir().expect("unrelated checkout");
+        register_component(
+            "unrelated",
+            unrelated.path(),
+            "https://github.com/example/fixture.git",
+        );
+
+        let identities = super::super::run::cook_repository_identities_for_workspace(
+            "--cwd",
+            checkout.path().to_str().expect("UTF-8 checkout path"),
+            Some("fixture"),
+        )
+        .expect("resolve explicit repository identity");
+
+        assert_eq!(identities.len(), 1);
+    });
+}
+
 fn write_component_without_collision_validation(component: homeboy::core::component::Component) {
     let directory = homeboy::core::paths::components().expect("component config directory");
     std::fs::create_dir_all(&directory).expect("create component config directory");
