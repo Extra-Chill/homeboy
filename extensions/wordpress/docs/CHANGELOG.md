@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.11] - 2026-08-25
+
+### Changed
+- consolidate PHP routing smokes
+
 ## [3.38.10] - 2026-08-25
 
 ### Changed
