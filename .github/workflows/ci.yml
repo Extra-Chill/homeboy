@@ -286,10 +286,12 @@ jobs:
     # (bounded action setup subprocesses), #448 (equivalent failed test identity
     # evidence), #450 (live-base resolution and passing inventory growth), and
     # suffixed measurement commands.
+    # v2.15.15 restores changed-test routing under differential gating and runs
+    # a baseline only after a non-passing candidate (#11751 W1-3/W1-10).
     #
     # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, #13437, and
     # #13536.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@eaa1da25204f47441e6799f43a746a0acab6d2ee
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@ea1d6bd17cf7eb67f03134b79aaf0929c234e369
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
@@ -308,7 +310,7 @@ jobs:
       # workflow checks out to run the gate itself — it is what surfaces as
       # `ACTION_REVISION` in the Test job — so leaving it behind would keep the
       # old `apply-differential-gate.py` even with a newer workflow.
-      action-ref: eaa1da25204f47441e6799f43a746a0acab6d2ee
+      action-ref: ea1d6bd17cf7eb67f03134b79aaf0929c234e369
       # rust v1.37.4. Must move with the action pin, not after it: the action consumes
       # per-test identities, and homeboy-extensions#2699 (`fix(rust): canonicalize
       # failed test identities`, released in rust v1.37.2) is what produces them.
