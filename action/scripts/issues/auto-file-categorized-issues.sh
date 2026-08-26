@@ -82,13 +82,13 @@ reconcile_command() {
 
   # Surface the plan + per-action outcomes.
   echo "Plan:"
-  jq -r '.data.plan_lines[]' "${result_file}" 2>/dev/null | sed 's/^/  /'
+  jq -r '.data.payload.plan_lines[]' "${result_file}" 2>/dev/null | sed 's/^/  /'
 
   # Update totals from the reconcile result.
   local filed updated closed_count
-  filed=$(jq -r '[.data.result.executions[]? | select(.outcome.outcome == "filed")] | length' "${result_file}" 2>/dev/null || echo 0)
-  updated=$(jq -r '[.data.result.executions[]? | select(.outcome.outcome == "updated" or .outcome.outcome == "updated_closed")] | length' "${result_file}" 2>/dev/null || echo 0)
-  closed_count=$(jq -r '[.data.result.executions[]? | select(.outcome.outcome == "closed" or .outcome.outcome == "closed_duplicate")] | length' "${result_file}" 2>/dev/null || echo 0)
+  filed=$(jq -r '[.data.payload.result.executions[]? | select(.outcome.outcome == "filed")] | length' "${result_file}" 2>/dev/null || echo 0)
+  updated=$(jq -r '[.data.payload.result.executions[]? | select(.outcome.outcome == "updated" or .outcome.outcome == "updated_closed")] | length' "${result_file}" 2>/dev/null || echo 0)
+  closed_count=$(jq -r '[.data.payload.result.executions[]? | select(.outcome.outcome == "closed" or .outcome.outcome == "closed_duplicate")] | length' "${result_file}" 2>/dev/null || echo 0)
 
   TOTAL_ISSUES_CREATED=$((TOTAL_ISSUES_CREATED + filed))
   TOTAL_ISSUES_UPDATED=$((TOTAL_ISSUES_UPDATED + updated))
