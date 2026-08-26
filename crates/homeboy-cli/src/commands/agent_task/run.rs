@@ -4338,14 +4338,13 @@ fn cook_components_for_repository_name(
         return Ok(vec![component]);
     }
     let repository_name = normalize_repository_name(repository_name);
-    let matches = homeboy::core::component::registered()?
+    let matches = homeboy::core::component::inventory::registered_base()?
         .into_iter()
         .filter(|component| {
-            component.id.eq_ignore_ascii_case(&repository_name)
-                || component
-                    .aliases
-                    .iter()
-                    .any(|alias| normalize_repository_name(alias) == repository_name)
+            component
+                .aliases
+                .iter()
+                .any(|alias| normalize_repository_name(alias) == repository_name)
                 || component
                     .remote_url
                     .as_deref()
@@ -4475,7 +4474,14 @@ pub(super) fn cook_repository_identities_for_workspace(
         })
         .collect::<Vec<_>>();
     let configured = match requested_repository {
-        Some(repository) => cook_components_for_repository_name(repository)?,
+        Some(repository) => {
+            let matches = cook_components_for_repository_name(repository)?;
+            if matches.is_empty() {
+                homeboy::core::component::inventory::registered_base()?
+            } else {
+                matches
+            }
+        }
         None => homeboy::core::component::registered()?,
     };
     let mut identities = Vec::new();
@@ -4501,6 +4507,21 @@ pub(super) fn cook_repository_identities_for_workspace(
                     provenance: format!("{flag}:git-remote:{remote_name}"),
                 });
             }
+        }
+        if requested_repository.is_some()
+            && !identities
+                .iter()
+                .any(|identity| identity.remote_identity == remote_identity)
+        {
+            let repository_name = normalize_repository_name(&remote_url);
+            identities.push(CookRepositoryIdentity {
+                repository_name: repository_name.clone(),
+                slug: repository_name,
+                aliases: Vec::new(),
+                remote_identity,
+                workspace_path: git_root.clone(),
+                provenance: format!("{flag}:git-remote:{remote_name}"),
+            });
         }
     }
     Ok(identities)
