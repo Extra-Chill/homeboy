@@ -25,6 +25,7 @@ mod local;
 mod probes;
 mod remote;
 mod repair;
+mod repair_policy;
 mod target;
 mod types;
 
