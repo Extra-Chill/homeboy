@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.11] - 2026-08-26
+
+### Changed
+- complete provider lifecycle contract
+- close provider capability surface
+- unify mutation consumers
+- unify resume path observation
+- unify worktree creation
+- unify direct creation
+- migrate remaining inventory reads
+- scope worktree fixture import
+- route worktrees through providers
+- expose provider inventory in CLI
+- project provider worktrees
+- unify worktree lifecycle
+- unify worktree finalization
+- unify worktree provisioning
+- unify promotion worktree resolution
+- add provider ownership contract
+
+### Fixed
+- preserve provider resolution errors
+- honor shared target reserve pressure
+
 ## [0.361.10] - 2026-08-26
 
 ### Changed
