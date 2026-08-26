@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.17] - 2026-08-26
+
+### Fixed
+- run differential baselines at full scope
+- validate published composite manifest
+
 ## [2.15.16] - 2026-08-26
 
 ### Fixed
