@@ -474,7 +474,8 @@ impl AgentTaskCookJob {
                         "local_retry_supervisor",
                         &homeboy_core::Error::internal_unexpected(
                             "local Cook retry launcher exited before provider execution",
-                        ),
+                        )
+                        .with_retryable(true),
                     )?;
                 }
             }
