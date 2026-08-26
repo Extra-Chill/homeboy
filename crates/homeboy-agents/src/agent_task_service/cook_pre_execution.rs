@@ -970,9 +970,29 @@ mod tests {
             let record = lifecycle_store.read_record(run_id).expect("read record");
             assert!(record.state.is_terminal());
             assert!(!runtime_admission_cancellation_requested(&record));
-            lifecycle_store
+            let rearmed = lifecycle_store
                 .submit_plan_with_current_runtime(&plan, run_id)
                 .expect("retryable pre-execution record reacquires runtime admission");
+            assert_eq!(
+                rearmed.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert_eq!(
+                rearmed.metadata["controller_runtime_recovery"]["reason"],
+                "retryable_pre_execution_failure"
+            );
+            assert_eq!(
+                rearmed.metadata["controller_runtime_recovery"]["provider_executions_consumed"],
+                0
+            );
+            assert_eq!(
+                rearmed.metadata["controller_runtime_recovery"]["previous"]["runtime"],
+                "test"
+            );
+            assert_eq!(
+                rearmed.metadata["controller_runtime_recovery"]["current"],
+                rearmed.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            );
         });
     }
 

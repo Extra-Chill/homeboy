@@ -43,6 +43,7 @@ pub mod discovery;
 mod dispatchability;
 mod executor;
 mod fixture_gate;
+mod launch_context;
 // The `fixture` backend is a test double, not an agent runtime. Its
 // implementation is compiled only into test builds; see `fixture_gate`.
 #[cfg(any(test, feature = "test-support"))]
@@ -89,6 +90,10 @@ pub use dispatchability::{
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;
+pub use launch_context::{
+    AgentTaskProviderLaunchContext, AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON_ENV,
+    AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_SCHEMA,
+};
 pub use resolution::{resolve_provider_for_backend, ProviderResolution};
 pub(crate) use resolution::{
     role_aliases_for_executor, role_aliases_for_provider, selector_runtime_provider_hint,

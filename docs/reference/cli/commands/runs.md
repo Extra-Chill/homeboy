@@ -567,7 +567,7 @@ homeboy runs findings reconcile [OPTIONS] <COMPONENT_ID>
 
 Reconcile a finding stream against an issue tracker.
 
-Reads structured findings (from `homeboy review audit --json-summary` or `homeboy review lint --json` or any equivalent), inspects open and closed issues on the tracker, and produces a deterministic plan: file new, update, close, dedupe, or skip per category.
+Reads structured findings (from `homeboy review audit --json-summary` or `homeboy review lint --json` or any equivalent), inspects open and closed issues on the tracker, and updates one rolling findings issue containing independently managed lint, audit, and test sections.
 
 Defaults to dry-run; pass `--apply` to actually call the tracker.
 
@@ -582,7 +582,7 @@ Defaults to dry-run; pass `--apply` to actually call the tracker.
 | `--from-output` | `<COMMAND=PATH>` | Native Homeboy command output to normalize before reconcile. Repeatable as `--from-output audit=/tmp/audit.json` |
 | `--run-url` | `<URL>` | Optional run URL appended to generated issue bodies when using `--from-output` |
 | `--no-refresh-closed` | flag | Don't refresh the body of closed-not_planned issues with the latest finding count. Default is to refresh (so the closed issue stays useful as a "current state" reference) |
-| `--list-limit` | `<LIST_LIMIT>` | Cap the number of issues fetched from the tracker for dedup analysis. Defaults to 200 — high enough for normal repos, but avoids paginating the entire tracker |
+| `--list-limit` | `<LIST_LIMIT>` | Cap the number of issues fetched from the tracker for migration and dedup analysis |
 | `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
 | `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json (CI runners, ad-hoc clones) |
@@ -607,7 +607,7 @@ Discovers `<command>.json` files in an output directory, runs the existing per-c
 | `--commands` | `<COMMANDS>` | Comma-separated command list to inspect in the output directory |
 | `--run-url` | `<URL>` | Optional run URL appended to generated issue bodies |
 | `--no-refresh-closed` | flag | Don't refresh the body of closed-not_planned issues with the latest finding count |
-| `--list-limit` | `<LIST_LIMIT>` | Cap the number of issues fetched from the tracker for dedup analysis per command |
+| `--list-limit` | `<LIST_LIMIT>` | Cap the number of issues fetched from the tracker for migration and dedup analysis per command |
 | `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
 | `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json (CI runners, ad-hoc clones) |

@@ -34,8 +34,8 @@ pub(crate) enum IssuesCommand {
     ///
     /// Reads structured findings (from `homeboy review audit --json-summary` or
     /// `homeboy review lint --json` or any equivalent), inspects open and closed
-    /// issues on the tracker, and produces a deterministic plan: file new,
-    /// update, close, dedupe, or skip per category.
+    /// issues on the tracker, and updates one rolling findings issue containing
+    /// independently managed lint, audit, and test sections.
     ///
     /// Defaults to dry-run; pass `--apply` to actually call the tracker.
     Reconcile {
@@ -84,10 +84,9 @@ pub(crate) enum IssuesCommand {
         #[arg(long)]
         no_refresh_closed: bool,
 
-        /// Cap the number of issues fetched from the tracker for dedup
-        /// analysis. Defaults to 200 — high enough for normal repos, but
-        /// avoids paginating the entire tracker.
-        #[arg(long, default_value_t = 200)]
+        /// Cap the number of issues fetched from the tracker for migration and
+        /// dedup analysis.
+        #[arg(long, default_value_t = 1000)]
         list_limit: usize,
 
         // Actually perform the reconcile actions. Default is dry-run.
@@ -130,9 +129,9 @@ pub(crate) enum IssuesCommand {
         #[arg(long)]
         no_refresh_closed: bool,
 
-        /// Cap the number of issues fetched from the tracker for dedup
-        /// analysis per command.
-        #[arg(long, default_value_t = 200)]
+        /// Cap the number of issues fetched from the tracker for migration and
+        /// dedup analysis per command.
+        #[arg(long, default_value_t = 1000)]
         list_limit: usize,
 
         // Actually perform the reconcile actions. Default is dry-run.
@@ -343,8 +342,8 @@ fn run_reconcile_command(
     // Default tracker = GitHub against the component's remote.
     let tracker_impl = GithubTracker::new(request.component_id.clone()).with_path(request.path);
 
-    // Fetch existing issues for label-scoping.
-    let existing = tracker_impl.list_issues(&command_label, request.list_limit)?;
+    // Reconcile keys, not optional labels, define ownership.
+    let existing = tracker_impl.list_issues(request.list_limit)?;
 
     // Pure decision.
     let plan = reconcile_measured(

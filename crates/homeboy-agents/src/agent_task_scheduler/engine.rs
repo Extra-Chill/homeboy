@@ -718,6 +718,10 @@ impl AgentTaskScheduler {
                     run_id: self.run_id.clone(),
                     attempt,
                     cancellation: cancellation.clone(),
+                    lifecycle_store: self
+                        .run_id
+                        .as_ref()
+                        .and_then(|_| self.durable_lifecycle_store().ok().cloned()),
                 };
 
                 if let Some(run_id) = self.run_id.as_deref() {
