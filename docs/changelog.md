@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.14] - 2026-08-26
+
+### Changed
+- Route loop supervision through Work jobs
+
+### Fixed
+- stage detached recovery from immutable SHA
+- distinguish absent recovery releases
+
 ## [0.361.13] - 2026-08-26
 
 ### Changed
