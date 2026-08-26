@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.8] - 2026-08-26
+
+### Changed
+- pin comparable differential baselines
+- pin composite cancellation repair
+- pin lazy differential baselines
+- compare tests against live base
+- isolate test sidecar producer
+
+### Fixed
+- register the required-gates ruleset scripts and refuse an empty gate declaration
+- parse normalized failure aliases
+- preserve wall timeout precedence
+- bound silent providers by default
+
 ## [0.361.7] - 2026-08-26
 
 ### Changed
