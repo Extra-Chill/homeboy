@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.10] - 2026-08-26
+
+### Changed
+- extract reconcile run helpers
+- remove rolling findings residue
+
+## [0.361.9] - 2026-08-26
+
+### Changed
+- exercise controller harness recovery
+- add reusable driver handle harness
+
+### Fixed
+- consume retry launch token once
+- repair release test regressions
+
 ## [0.361.8] - 2026-08-26
 
 ### Changed

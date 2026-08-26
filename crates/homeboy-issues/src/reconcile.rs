@@ -55,14 +55,12 @@ pub fn reconcile_measured(
         if let Some((keep, duplicates)) = open.split_first() {
             actions.push(ReconcileAction::Close {
                 number: keep.number,
-                category: "findings".to_string(),
                 comment: "All Homeboy findings have been resolved. Closing automatically."
                     .to_string(),
             });
             close_duplicates(&mut actions, duplicates, keep.number);
         } else {
             actions.push(ReconcileAction::Skip {
-                category: "findings".to_string(),
                 component_id: component_id.to_string(),
                 reason: ReconcileSkipReason::NoFindingsNoIssue,
             });
@@ -72,21 +70,16 @@ pub fn reconcile_measured(
 
     let body = render_body(component_id, &sections);
     let title = render_title(component_id);
-    let count = groups.iter().map(|group| group.count).sum();
-
     if let Some(closed) = closed_not_planned {
         if config.refresh_closed_not_planned {
             actions.push(ReconcileAction::UpdateClosed {
                 number: closed.number,
                 body,
-                category: "findings".to_string(),
-                count,
             });
         }
         close_duplicates(&mut actions, &open, closed.number);
         if !config.refresh_closed_not_planned {
             actions.push(ReconcileAction::Skip {
-                category: "findings".to_string(),
                 component_id: component_id.to_string(),
                 reason: ReconcileSkipReason::ClosedNotPlannedNoRefresh,
             });
@@ -99,8 +92,6 @@ pub fn reconcile_measured(
             number: keep.number,
             title,
             body,
-            category: "findings".to_string(),
-            count,
         });
         let duplicates: Vec<&TrackedIssue> = open
             .iter()
@@ -110,13 +101,10 @@ pub fn reconcile_measured(
         close_duplicates(&mut actions, &duplicates, keep.number);
     } else {
         actions.push(ReconcileAction::FileNew {
-            command: "findings".to_string(),
             component_id: component_id.to_string(),
-            category: "findings".to_string(),
             title,
             body,
             labels: vec![ISSUE_LABEL.to_string()],
-            count,
         });
     }
 
@@ -140,7 +128,6 @@ fn close_duplicates(actions: &mut Vec<ReconcileAction>, duplicates: &[&TrackedIs
         actions.push(ReconcileAction::CloseDuplicate {
             number: issue.number,
             keep,
-            category: "findings".to_string(),
             comment: format!(
                 "Closing as duplicate of #{keep}. Homeboy now maintains one rolling findings issue per component."
             ),
@@ -371,7 +358,6 @@ mod tests {
             body: body.into(),
             url: format!("https://example.test/issues/{number}"),
             state,
-            labels: Vec::new(),
         }
     }
 

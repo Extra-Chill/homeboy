@@ -6521,6 +6521,21 @@ fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation()
                 "-m",
                 "base",
             ],
+            vec![
+                "-C",
+                source.to_str().expect("source path"),
+                "remote",
+                "add",
+                "origin",
+                source.to_str().expect("source path"),
+            ],
+            vec![
+                "-C",
+                source.to_str().expect("source path"),
+                "fetch",
+                "origin",
+                "main:refs/remotes/origin/main",
+            ],
         ] {
             assert!(Command::new("git")
                 .args(args)
@@ -6602,7 +6617,6 @@ fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation()
         let run_id = "durable-ensure-run";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
-        // This fixture has no remote; base capture is outside ensure reconciliation.
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",

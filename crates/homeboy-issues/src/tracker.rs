@@ -17,6 +17,9 @@ use homeboy_core::git::{
 
 use super::plan::{TrackedIssue, TrackedIssueState};
 
+const CANONICAL_KEY_PREFIX: &str = "homeboy:issues-reconcile-key=findings:";
+const LEGACY_KEY_PREFIX: &str = "homeboy:issues-reconcile-key=";
+
 /// Abstract issue-tracker contract. All operations are component-scoped:
 /// the tracker resolves which repo/project to talk to from the component
 /// at construction time, NOT per call. This matches the existing
@@ -83,23 +86,24 @@ impl GithubTracker {
 
 impl Tracker for GithubTracker {
     fn list_issues(&self, limit: usize) -> Result<Vec<TrackedIssue>> {
-        let out = issue_find(
-            Some(&self.component_id),
-            IssueFindOptions {
-                title: None,
-                labels: Vec::new(),
-                state: IssueState::All,
-                limit,
-                path: self.path.clone(),
-            },
-        )?;
-
-        let issues = out
-            .items
-            .into_iter()
-            .filter_map(github_to_tracked)
-            .collect();
-        Ok(issues)
+        let mut issues = std::collections::BTreeMap::new();
+        for search in discovery_searches(&self.component_id) {
+            let out = issue_find(
+                Some(&self.component_id),
+                IssueFindOptions {
+                    title: None,
+                    search: Some(search),
+                    labels: Vec::new(),
+                    state: IssueState::All,
+                    limit,
+                    path: self.path.clone(),
+                },
+            )?;
+            for issue in out.items.into_iter().filter_map(github_to_tracked) {
+                issues.insert(issue.number, issue);
+            }
+        }
+        Ok(issues.into_values().collect())
     }
 
     fn create_issue(&self, title: &str, body: &str, labels: &[String]) -> Result<u64> {
@@ -149,6 +153,20 @@ impl Tracker for GithubTracker {
     }
 }
 
+fn discovery_searches(component_id: &str) -> [String; 3] {
+    [
+        // Canonical lookup is exact, so an old rolling issue cannot age out
+        // behind unrelated repository issues.
+        format!("\"{CANONICAL_KEY_PREFIX}{component_id}\""),
+        // Shipped category issues always receive this marker. Keep migration
+        // bounded to matching legacy records rather than scanning the repo.
+        format!("\"{LEGACY_KEY_PREFIX}\""),
+        // The earliest Action implementation created markerless issues. Their
+        // generated title is the final compatibility lookup.
+        format!("\" in {component_id}\" in:title"),
+    ]
+}
+
 /// Translate a GitHub `GithubFindItem` into the tracker-agnostic
 /// [`TrackedIssue`] shape. Returns `None` when the issue's state shape is
 /// unrecognized — defensive against future GitHub state additions.
@@ -176,7 +194,6 @@ fn github_to_tracked(item: homeboy_core::git::GithubFindItem) -> Option<TrackedI
         body: item.body,
         url: item.url,
         state,
-        labels: item.labels,
     })
 }
 
@@ -201,6 +218,18 @@ mod tests {
             closed_at: String::new(),
             labels: vec!["audit".into()],
         }
+    }
+
+    #[test]
+    fn discovery_is_marker_targeted_with_bounded_title_migration() {
+        assert_eq!(
+            discovery_searches("sample-plugin"),
+            [
+                "\"homeboy:issues-reconcile-key=findings:sample-plugin\"".to_string(),
+                "\"homeboy:issues-reconcile-key=\"".to_string(),
+                "\" in sample-plugin\" in:title".to_string(),
+            ]
+        );
     }
 
     #[test]

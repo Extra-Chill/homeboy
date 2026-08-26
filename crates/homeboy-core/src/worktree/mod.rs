@@ -397,7 +397,27 @@ pub(crate) fn with_task_worktree_registry_read_lock<T>(
         .get_or_init(|| RwLock::new(()))
         .read()
         .map_err(|_| Error::internal_unexpected("task worktree registry read gate poisoned"))?;
-    let lock = open_task_worktree_registry_lock()?;
+    let store = metadata_dir()?;
+    let parent = store.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree store has no parent: {}",
+            store.display()
+        ))
+    })?;
+    let lock = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(parent.join("task-worktrees.lock"))
+    {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return operation(),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("open task worktree registry lock for read".to_string()),
+            ));
+        }
+    };
     lock.lock_shared().map_err(|error| {
         Error::internal_io(
             error.to_string(),

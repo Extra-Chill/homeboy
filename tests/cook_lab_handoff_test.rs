@@ -178,15 +178,14 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
     assert!(!stderr.contains("worktree provider"));
 }
 
-/// A local detached Cook whose child exits before attempt materialization is
-/// rejected without publishing a zero-task durable run (#12290, #13512).
+/// A local detached Cook with pending provider resolution is accepted only after
+/// its durable attempt is externally visible (#12290, #13512).
 ///
 /// The launcher hands the Cook to a process in its own session, then observes
 /// whether it materializes the durable attempt. It performs no worktree or
-/// provider resolution itself, so this still asserts the fast failure boundary
-/// the old rejection guaranteed.
+/// provider resolution itself, preserving the bounded handoff boundary.
 #[test]
-fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materialization() {
+fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
     let context = HermeticTestContext::new();
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command
@@ -223,20 +222,15 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     let status = child.wait().expect("wait for detached Cook launcher");
     let stdout = std::fs::read_to_string(&stdout_path).expect("read detached Cook stdout");
     let stderr = std::fs::read_to_string(&stderr_path).expect("read detached Cook stderr");
-    assert!(!status.success(), "{stdout}");
+    assert!(status.success(), "{stdout}\n{stderr}");
     assert!(
         !stdout.contains("cannot detach after handoff with --placement local"),
         "{stdout}"
     );
-    assert!(!stdout.contains("worktree provider"), "{stdout}");
+    assert!(stdout.contains("\"state\": \"accepted\""), "{stdout}");
     assert!(
-        stdout.contains("detached Cook exited before materializing an executable plan"),
-        "{stdout}\n{stderr}"
-    );
-    assert!(stdout.contains("empty_detached_plan"), "{stdout}");
-    assert!(
-        !stderr.contains("durable run id `local-detach-exits-before-attempt`"),
-        "a rejected empty plan must never be announced as durable: {stderr}"
+        stdout.contains("local-detach-exits-before-attempt-attempt-1-"),
+        "{stdout}"
     );
     let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
     status.args([
@@ -248,9 +242,10 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);
     assert!(
-        !status.status.success(),
-        "a rejected empty plan must not remain externally visible: {status_stdout}"
+        status.status.success(),
+        "durable attempt must be visible: {status_stdout}"
     );
+    assert!(status_stdout.contains("local-detach-exits-before-attempt"));
 }
 
 #[test]
@@ -1022,12 +1017,8 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
         "Cook admission must not wait for stale daemon recovery"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!output.status.success(), "{stdout}");
-    assert!(
-        stdout.contains("detached Cook exited before materializing an executable plan"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("empty_detached_plan"), "{stdout}");
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("\"state\": \"accepted\""), "{stdout}");
 
     let store = ObservationStore::open_initialized_at(&database).expect("reopen fixture store");
     assert!(store
