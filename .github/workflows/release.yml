@@ -765,6 +765,7 @@ jobs:
       tag-flag: ${{ format('--tag={0}', needs.prepare.outputs['release-tag']) }}
       expected-assets: ${{ steps.plan.outputs.expected-assets }}
       draft-complete: ${{ steps.draft-probe.outputs.draft-complete }}
+      release-exists: ${{ steps.draft-probe.outputs.release-exists }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -848,29 +849,39 @@ jobs:
           set +e
           set -uo pipefail
           COMPLETE=false
+          RELEASE_EXISTS=unknown
           REASON=''
 
           if ! gh release view "${RELEASE_TAG}" --json isDraft,assets > draft.json 2> draft.err; then
-            REASON="the inventory for ${RELEASE_TAG} could not be read"
-            sed 's/^/gh: /' draft.err >&2 || true
-          elif [ "$(jq -r '.isDraft' draft.json)" != "true" ]; then
-            REASON="${RELEASE_TAG} is not an unpublished draft"
-          else
-            WANTED="$(jq -Sc 'unique' <<< "${EXPECTED_ASSETS}")"
-            USABLE="$(jq -Sc '[.assets[] | select(.state == "uploaded" and .size > 0) | .name] | unique' draft.json)"
-            TOTAL="$(jq -r '.assets | length' draft.json)"
-            WANTED_COUNT="$(jq -r 'length' <<< "${WANTED}")"
-            # Exact inventory: every expected asset usable, and nothing else
-            # present. `TOTAL` catches duplicates and strays that `unique`
-            # would otherwise collapse away.
-            if [ "${USABLE}" = "${WANTED}" ] && [ "${TOTAL}" = "${WANTED_COUNT}" ]; then
-              COMPLETE=true
+            if grep -Fq 'release not found' draft.err; then
+              RELEASE_EXISTS=false
+              REASON="no GitHub Release exists for ${RELEASE_TAG} yet"
             else
-              REASON="the inventory differs (expected ${WANTED_COUNT}: ${WANTED}; usable: ${USABLE}; total on release: ${TOTAL})"
+              REASON="the inventory for ${RELEASE_TAG} could not be read"
+            fi
+            sed 's/^/gh: /' draft.err >&2 || true
+          else
+            RELEASE_EXISTS=true
+            if [ "$(jq -r '.isDraft' draft.json)" != "true" ]; then
+              REASON="${RELEASE_TAG} is not an unpublished draft"
+            else
+              WANTED="$(jq -Sc 'unique' <<< "${EXPECTED_ASSETS}")"
+              USABLE="$(jq -Sc '[.assets[] | select(.state == "uploaded" and .size > 0) | .name] | unique' draft.json)"
+              TOTAL="$(jq -r '.assets | length' draft.json)"
+              WANTED_COUNT="$(jq -r 'length' <<< "${WANTED}")"
+              # Exact inventory: every expected asset usable, and nothing else
+              # present. `TOTAL` catches duplicates and strays that `unique`
+              # would otherwise collapse away.
+              if [ "${USABLE}" = "${WANTED}" ] && [ "${TOTAL}" = "${WANTED_COUNT}" ]; then
+                COMPLETE=true
+              else
+                REASON="the inventory differs (expected ${WANTED_COUNT}: ${WANTED}; usable: ${USABLE}; total on release: ${TOTAL})"
+              fi
             fi
           fi
 
           echo "draft-complete=${COMPLETE}" >> "$GITHUB_OUTPUT"
+          echo "release-exists=${RELEASE_EXISTS}" >> "$GITHUB_OUTPUT"
           if [ "${COMPLETE}" = "true" ]; then
             echo "::notice::${RELEASE_TAG} already holds every expected asset; skipping the cross-platform rebuild and re-upload, and going straight to draft adoption (#10519)"
             {
@@ -1164,6 +1175,16 @@ jobs:
           name: homeboy-binary
           path: .homeboy-bin
 
+      - name: Require resolved recovery release routing
+        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'
+        env:
+          RELEASE_EXISTS: ${{ needs.plan.outputs.release-exists }}
+        run: |
+          if [ "${RELEASE_EXISTS}" != "true" ] && [ "${RELEASE_EXISTS}" != "false" ]; then
+            echo "::error::Could not determine whether the recovery tag already has a GitHub Release. Refusing to bypass byte-preserving existing-release recovery or run remote reconciliation against an absent Release."
+            exit 1
+          fi
+
       - name: Create fresh artifact source-authority manifest
         if: needs.prepare.outputs.recovery-release != 'true' && needs.plan.outputs.draft-complete != 'true'
         env:
@@ -1179,7 +1200,7 @@ jobs:
             --commit "$(git rev-parse "${RELEASE_TAG}^{commit}")"
 
       - name: Preserve existing published asset bytes
-        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'
+        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.release-exists == 'true' && needs.plan.outputs.draft-complete != 'true'
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
@@ -1257,7 +1278,7 @@ jobs:
             '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, artifacts: $artifacts}' > artifacts/manifest.json
 
       - name: Reconcile rebuilt recovery assets
-        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'
+        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.release-exists == 'true' && needs.plan.outputs.draft-complete != 'true'
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
