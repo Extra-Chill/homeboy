@@ -1,0 +1,93 @@
+# Weekly workflow action-pin staleness sweep.
+#
+# A commit-pinned reusable workflow or action freezes another repository at a
+# point in time, and nothing expires that freeze. The failure mode is silent: a
+# fix exists, is released, is believed to be running, and is not.
+#
+# That is not hypothetical. This repository's CI pinned homeboy-action at
+# bf6b7072 -- four releases and fourteen commits behind -- for long enough that
+# the differential Test gate ran a revision predating its own per-test identity
+# design, and rejected changes it could not have been caused by. The
+# homeboy-extensions pin beside it was 93 commits and nine days stale, holding
+# back a released fix the gate depended on. Nothing in the repository could see
+# either one (#13437).
+#
+# Advisory, like audit-debt.yml, and for the same reason: this repository
+# already has one required gate that nothing can pass, and adding a second
+# always-red check teaches the same lesson as no check at all. Enforcement is
+# one flag away -- `--max-commits-behind N` exits non-zero -- once a threshold
+# has been agreed.
+#
+# Deliberately does NOT run through .homeboy-action. The pins this checks
+# include the action itself, so routing the check through them would let a
+# sufficiently stale pin disable its own detector.
+
+name: Pin Staleness
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+    inputs:
+      max-commits-behind:
+        description: 'Exit non-zero when any pin is at least this many commits behind. Empty = advisory.'
+        required: false
+        default: ''
+
+concurrency:
+  group: pin-staleness
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pins:
+    name: Workflow pin staleness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Report pin staleness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_BEHIND: ${{ github.event.inputs.max-commits-behind || '' }}
+        run: |
+          set -euo pipefail
+          args=(review ci pins --path .)
+          if [ -n "${MAX_BEHIND}" ]; then
+            args+=(--max-commits-behind "${MAX_BEHIND}")
+          fi
+          cargo run -q -p homeboy --bin homeboy -- "${args[@]}" | tee pins.json
+
+          python3 - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json, pathlib
+          report = json.loads(pathlib.Path("pins.json").read_text())
+          data = report.get("data", report)
+          pins = data.get("pins", [])
+          print("## Workflow pin staleness\n")
+          print(
+              f"{data.get('scanned_files', 0)} workflow file(s) · "
+              f"**{data.get('behind', 0)} behind** · "
+              f"{data.get('unresolved', 0)} unresolved · "
+              f"{data.get('floating', 0)} floating (tags and branches, omitted)\n"
+          )
+          if not pins:
+              print("Every commit pin is at its upstream release.")
+          else:
+              print("| status | location | repository | detail |")
+              print("|---|---|---|---|")
+              for pin in pins:
+                  print(
+                      f"| `{pin['status']}` "
+                      f"| `{pin['file']}:{pin['line']}` "
+                      f"| `{pin.get('repository', '—')}` "
+                      f"| {pin['detail']} |"
+                  )
+          print(
+              "\n> Advisory. Run `homeboy review ci pins --max-commits-behind N` "
+              "to enforce a threshold."
+          )
+          PY
