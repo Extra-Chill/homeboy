@@ -293,6 +293,7 @@ Find issues matching filters (dedup primitive)
 | Option | Value | Description |
 | --- | --- | --- |
 | `-t`, `--title` | `<TITLE>` | Exact title match |
+| `--search` | `<SEARCH>` | GitHub issue search query |
 | `-l`, `--label` | `<LABEL>` | Required label (repeatable — all labels must be present) |
 | `-s`, `--state` | `<STATE>` | State filter: open (default), closed, all |
 | `--limit` | `<LIMIT>` | Max results (default 30) |

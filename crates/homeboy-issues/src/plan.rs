@@ -51,7 +51,6 @@ pub struct TrackedIssue {
     pub body: String,
     pub url: String,
     pub state: TrackedIssueState,
-    pub labels: Vec<String>,
 }
 
 /// Tracker-agnostic issue state. Maps directly onto GitHub's
@@ -99,57 +98,39 @@ fn default_refresh_closed() -> bool {
     true
 }
 
-/// One concrete action the reconciler decided on. Order matters in the plan:
-/// dedupe-closes run before file-new so race-condition duplicates don't
-/// inflate the new-issue count.
+/// One concrete action against a component's rolling findings issue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReconcileAction {
     /// File a new issue.
     FileNew {
-        command: String,
         component_id: String,
-        category: String,
         title: String,
         body: String,
         labels: Vec<String>,
-        count: usize,
     },
-    /// Update an existing OPEN issue's title + body to reflect latest count.
+    /// Update an existing open issue's title and independently owned sections.
     Update {
         number: u64,
         title: String,
         body: String,
-        category: String,
-        count: usize,
     },
     /// Refresh a closed-not_planned issue's body. Stays closed.
-    UpdateClosed {
-        number: u64,
-        body: String,
-        category: String,
-        count: usize,
-    },
+    UpdateClosed { number: u64, body: String },
     /// Close an issue whose findings dropped to zero. Reason is always
     /// `completed` for this action — caller intent is "the underlying
     /// problem was resolved."
-    Close {
-        number: u64,
-        category: String,
-        comment: String,
-    },
-    /// Close a duplicate of another open issue for the same category.
+    Close { number: u64, comment: String },
+    /// Close a duplicate of the component's canonical rolling issue.
     /// Reason is always `not_planned` — caller intent is "this is the same
     /// thing as #N." Caller keeps the lowest-numbered match.
     CloseDuplicate {
         number: u64,
         keep: u64,
-        category: String,
         comment: String,
     },
-    /// Skip this group. Diagnostic — never produces a tracker call.
+    /// Skip tracker mutation. Diagnostic only.
     Skip {
-        category: String,
         component_id: String,
         reason: ReconcileSkipReason,
     },
@@ -298,39 +279,18 @@ fn action_kind(action: &ReconcileAction) -> &'static str {
 
 fn action_label(action: &ReconcileAction) -> String {
     match action {
-        ReconcileAction::FileNew {
-            command,
-            component_id,
-            category,
-            count,
-            ..
-        } => format!("File new {command} issue for {category} in {component_id} ({count})"),
-        ReconcileAction::Update {
-            number,
-            category,
-            count,
-            ..
-        } => format!("Update {category} issue #{number} ({count})"),
-        ReconcileAction::UpdateClosed {
-            number,
-            category,
-            count,
-            ..
-        } => format!("Refresh closed {category} issue #{number} ({count})"),
-        ReconcileAction::Close {
-            number, category, ..
-        } => {
-            format!("Close resolved {category} issue #{number}")
+        ReconcileAction::FileNew { component_id, .. } => {
+            format!("File rolling findings issue for {component_id}")
         }
-        ReconcileAction::CloseDuplicate {
-            number,
-            keep,
-            category,
-            ..
-        } => format!("Close duplicate {category} issue #{number}, keeping #{keep}"),
-        ReconcileAction::Skip {
-            category, reason, ..
-        } => format!("Skip {category} ({:?})", reason),
+        ReconcileAction::Update { number, .. } => format!("Update findings issue #{number}"),
+        ReconcileAction::UpdateClosed { number, .. } => {
+            format!("Refresh closed findings issue #{number}")
+        }
+        ReconcileAction::Close { number, .. } => format!("Close resolved findings issue #{number}"),
+        ReconcileAction::CloseDuplicate { number, keep, .. } => {
+            format!("Close duplicate findings issue #{number}, keeping #{keep}")
+        }
+        ReconcileAction::Skip { reason, .. } => format!("Skip findings ({reason:?})"),
     }
 }
 
@@ -353,16 +313,12 @@ mod tests {
     fn planned_actions_are_projected_from_homeboy_plan_steps() {
         let actions = vec![
             ReconcileAction::FileNew {
-                command: "audit".to_string(),
                 component_id: "homeboy".to_string(),
-                category: "missing_method".to_string(),
                 title: "audit: missing method".to_string(),
                 body: "body".to_string(),
                 labels: vec!["audit".to_string()],
-                count: 2,
             },
             ReconcileAction::Skip {
-                category: "resolved".to_string(),
                 component_id: "homeboy".to_string(),
                 reason: ReconcileSkipReason::NoFindingsNoIssue,
             },
@@ -385,7 +341,6 @@ mod tests {
     fn issue_reconcile_steps_keep_public_action_input_json() {
         let action = ReconcileAction::Close {
             number: 42,
-            category: "resolved".to_string(),
             comment: "Resolved by latest run.".to_string(),
         };
 
@@ -397,7 +352,6 @@ mod tests {
             Some(&json!({
                 "kind": "close",
                 "number": 42,
-                "category": "resolved",
                 "comment": "Resolved by latest run."
             }))
         );
@@ -410,11 +364,8 @@ mod tests {
                 number: 7,
                 title: "audit: refreshed".to_string(),
                 body: "new body".to_string(),
-                category: "stale".to_string(),
-                count: 4,
             },
             ReconcileAction::Skip {
-                category: "clean".to_string(),
                 component_id: "homeboy".to_string(),
                 reason: ReconcileSkipReason::NoFindingsNoIssue,
             },
@@ -430,7 +381,6 @@ mod tests {
     fn issue_reconcile_serializes_actions_from_homeboy_plan_steps() {
         let action = ReconcileAction::Close {
             number: 42,
-            category: "resolved".to_string(),
             comment: "Resolved by latest run.".to_string(),
         };
         let mut plan = ReconcilePlan::new("homeboy", vec![action]);

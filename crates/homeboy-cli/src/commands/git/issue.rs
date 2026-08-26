@@ -59,6 +59,7 @@ pub(super) fn run_issue(args: IssueArgs) -> CmdResult<GitCommandOutput> {
         IssueCommand::Find {
             component_id,
             title,
+            search,
             label,
             state,
             limit,
@@ -70,6 +71,7 @@ pub(super) fn run_issue(args: IssueArgs) -> CmdResult<GitCommandOutput> {
                 Some(&component_id),
                 IssueFindOptions {
                     title,
+                    search,
                     labels: label,
                     state,
                     limit,
