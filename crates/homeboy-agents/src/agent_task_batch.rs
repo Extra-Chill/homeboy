@@ -16,6 +16,9 @@ use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use crate::agent_task_service;
 use homeboy_core::{paths, Error, ErrorCode, Result};
+use homeboy_lab_runner_contract::{
+    ExecutionPlacementDecision, ExecutionPlacementOutcome, RunnerSelectionSource,
+};
 
 mod types;
 
@@ -121,6 +124,7 @@ where
                 task_id: task.task_id.clone(),
                 run_id: run_id.clone(),
                 state: AgentTaskRunState::Queued,
+                placement: None,
             })
             .collect(),
         metadata: batch_metadata(plan),
@@ -244,6 +248,7 @@ pub fn persist_fanout_run_batch_in_store(
                     task_id: child.task_id.clone(),
                     run_id: child.run_id.clone(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 })
                 .collect(),
             metadata,
@@ -581,11 +586,15 @@ where
         let commands = commands(&batch.batch_id);
         let admission_blocker = batch.metadata["terminal_failure"].clone();
         let expected = batch.child_runs.len();
-        let admitted = batch
-            .child_runs
-            .iter()
-            .filter(|child| lifecycle_record_exists(&child.run_id).unwrap_or(false))
-            .count();
+        let mut admitted = 0;
+        for child in &mut batch.child_runs {
+            if lifecycle_record_exists(&child.run_id).unwrap_or(false) {
+                admitted += 1;
+                if let Ok(record) = child_status(&child.run_id) {
+                    child.placement = child_placement(&record);
+                }
+            }
+        }
         let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
         if let Some(command) = admission_blocker
             .pointer("/failure/next_action")
@@ -631,6 +640,7 @@ where
                 if child.state != record.state {
                     child.state = record.state;
                 }
+                child.placement = child_placement(&record);
                 if record
                     .totals
                     .as_ref()
@@ -1141,6 +1151,53 @@ fn child_plan(
     });
     child.rebuild_homeboy_plan();
     child
+}
+
+fn child_placement(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<AgentTaskBatchChildPlacement> {
+    let decision: ExecutionPlacementDecision =
+        serde_json::from_value(record.metadata.get("execution_placement_decision")?.clone())
+            .ok()?;
+    let outcome = record
+        .metadata
+        .get("execution_placement_outcome")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ExecutionPlacementOutcome>(value).ok())
+        .filter(|outcome| outcome.decision_id == decision.decision_id);
+    let authority = if decision.override_authorization.authorized {
+        "operator_overridable"
+    } else if decision.runner.as_ref().map(|runner| runner.source)
+        == Some(RunnerSelectionSource::Explicit)
+    {
+        "operator_pinned"
+    } else if decision.requested == homeboy_lab_runner_contract::Placement::Auto
+        || decision.runner.as_ref().map(|runner| runner.source)
+            == Some(RunnerSelectionSource::Policy)
+    {
+        "policy_pinned"
+    } else {
+        "recipe_pinned"
+    };
+    Some(AgentTaskBatchChildPlacement {
+        requested: decision.requested,
+        required: decision.required,
+        selected: decision.selected,
+        effective: outcome.as_ref().map(|outcome| outcome.effective),
+        runner_id: outcome
+            .as_ref()
+            .and_then(|outcome| outcome.runner_id.clone())
+            .or_else(|| {
+                decision
+                    .runner
+                    .as_ref()
+                    .map(|runner| runner.runner_id.clone())
+            }),
+        runner_source: decision.runner.as_ref().map(|runner| runner.source),
+        authority: authority.to_string(),
+        decision_id: decision.decision_id,
+        outcome_decision_id: outcome.map(|outcome| outcome.decision_id),
+    })
 }
 
 fn batch_metadata(plan: &AgentTaskPlan) -> Value {
@@ -1929,6 +1986,7 @@ mod tests {
             task_id: "orphan".to_string(),
             run_id: "batch_restart-orphan".to_string(),
             state: AgentTaskRunState::Running,
+            placement: None,
         });
         batch.task_count = batch.child_runs.len();
         batch_store
@@ -2742,11 +2800,13 @@ mod tests {
                     task_id: "a".to_string(),
                     run_id: "a-run".to_string(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 },
                 AgentTaskBatchChildRun {
                     task_id: "b".to_string(),
                     run_id: "b-run".to_string(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 },
             ],
             metadata: json!({

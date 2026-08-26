@@ -44,7 +44,12 @@ use homeboy::agents::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
 };
 use homeboy::core::error::{ActionSafety, ExecutableAction};
+use homeboy::core::parsed_command_preflight::PlacementDirective;
 use homeboy::core::{config, worktree, Error, ErrorCode, Result};
+use homeboy_lab_runner_contract::{
+    EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+    ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+};
 
 use crate::cli_surface::Placement;
 use crate::commands::utils::response::{CommandNextAction, CommandNextActionKind};
@@ -86,6 +91,59 @@ pub(crate) fn fanout_with_placement(
         AgentTaskFanoutCommand::Artifacts(status_args) => batch_artifacts(status_args),
         AgentTaskFanoutCommand::RunPlan(run_args) => run_batch_cook_fanout(run_args, placement),
     }
+}
+
+fn invocation_placement_directive(placement: Placement) -> PlacementDirective {
+    if let Some(preflight) = homeboy::core::parsed_command_preflight::captured_result() {
+        if preflight.placement.requested == placement {
+            return preflight.placement;
+        }
+    }
+    let required = if placement == Placement::Lab {
+        ExecutionPlacementRequirement::Lab
+    } else {
+        ExecutionPlacementRequirement::Either
+    };
+    PlacementDirective {
+        requested: placement,
+        required,
+        selected: if placement == Placement::Lab {
+            EffectiveExecutionPlacement::Lab
+        } else {
+            EffectiveExecutionPlacement::Local
+        },
+        runner: None,
+        fallback: ExecutionPlacementFallback {
+            local_allowed: matches!(placement, Placement::Auto | Placement::LabOrLocal),
+            reason: None,
+        },
+        override_authorization: ExecutionPlacementOverrideAuthorization {
+            authorized: placement == Placement::Local,
+            authority: (placement == Placement::Local)
+                .then(|| "operator --placement local".to_string()),
+        },
+    }
+}
+
+fn fanout_placement_preflight(placement: Option<&PlacementDirective>) -> Value {
+    let Some(placement) = placement else {
+        return Value::Null;
+    };
+    let admission_deferred = placement.selected == EffectiveExecutionPlacement::Lab;
+    serde_json::json!({
+        "schema": "homeboy/fanout-placement-preflight/v1",
+        "requested": placement.requested,
+        "required": placement.required,
+        "selected": placement.selected,
+        "runner": placement.runner,
+        "fallback": placement.fallback,
+        "override_authorization": placement.override_authorization,
+        "admission": {
+            "state": if admission_deferred { "deferred" } else { "confirmed" },
+            "revalidate_before_execution": admission_deferred,
+            "deferred_to": admission_deferred.then_some("child_attempt_dispatch"),
+        },
+    })
 }
 
 type CookAttemptDispatcherFactory = dyn Fn(
@@ -255,7 +313,7 @@ struct CoordinatorHeartbeat {
 }
 
 impl CoordinatorHeartbeat {
-    fn start(batch_id: String, claim_id: String) -> Result<Self> {
+    fn start(batch_id: String, claim_id: String, status_command: String) -> Result<Self> {
         // Claim admission before preflight, then renew it synchronously before
         // any potentially slow gate, workspace, recipe, or provider work.
         batch::heartbeat_fanout_run_batch(&batch_id, &claim_id)?;
@@ -276,9 +334,7 @@ impl CoordinatorHeartbeat {
                             serde_json::to_string(&record.metadata["coordinator"]["stage"])
                                 .expect("coordinator stage serializes"),
                             record.child_runs.len(),
-                            serde_json::to_string(&format!(
-                                "homeboy agent-task fanout status {batch_id}"
-                            ))
+                            serde_json::to_string(&status_command)
                             .expect("status command serializes"),
                         );
                     }
@@ -1393,6 +1449,7 @@ fn run_batch_cook_fanout(
     placement: Placement,
 ) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input, true)?;
+    plan.ensure_placement(invocation_placement_directive(placement))?;
     plan.apply_ai_tool_override(args.ai_tool.as_deref());
     plan.apply_max_concurrency_override(args.max_concurrency.map(|value| value as usize));
     plan.apply_max_duration_override(args.max_duration);
@@ -1411,6 +1468,7 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher_and_placement(
     placement: Placement,
 ) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(&args.input, true)?;
+    plan.ensure_placement(invocation_placement_directive(placement))?;
     plan.apply_ai_tool_override(args.ai_tool.as_deref());
     plan.apply_max_concurrency_override(args.max_concurrency.map(|value| value as usize));
     plan.apply_max_duration_override(args.max_duration);
@@ -1418,6 +1476,13 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher_and_placement(
         plan.rekey(record_run_id);
     }
     admit_batch_provider_routes(&mut plan)?;
+    if plan
+        .placement
+        .as_ref()
+        .is_some_and(|placement| placement.selected == EffectiveExecutionPlacement::Local)
+    {
+        return run_batch_cook_fanout_plan_with_placement(plan, placement);
+    }
     run_batch_cook_fanout_plan_with_attempt_dispatcher_and_placement(
         plan,
         attempt_dispatcher,
@@ -1449,6 +1514,7 @@ fn persist_fanout_run_batch_record(
         serde_json::json!({
             "source": "fanout-run-plan",
             "durable_child_runs": true,
+            "placement": plan.placement,
             "replan_command": secure_batch_plan_execution(&plan.fanout_id, placement),
             "dependency_graph": plan.dependency_graph_metadata()?,
         }),
@@ -1462,9 +1528,11 @@ fn claim_fanout_run_batch_coordinator(
 ) -> Result<(String, bool)> {
     let retry = persist_fanout_run_batch_record(plan, placement)?;
     if let Some(claim_id) = batch::claim_fanout_run_batch(&plan.fanout_id)? {
+        let status_command = fanout_command(placement, "status", &plan.fanout_id);
         eprintln!(
-            "{{\"event\":\"coordinator_admission_claimed\",\"phase\":\"admitting\",\"children_total\":{},\"next_action\":\"homeboy agent-task fanout status {}\"}}",
-            plan.cooks.len(), plan.fanout_id,
+            "{{\"event\":\"coordinator_admission_claimed\",\"phase\":\"admitting\",\"children_total\":{},\"next_action\":{}}}",
+            plan.cooks.len(),
+            serde_json::to_string(&status_command).expect("status command serializes"),
         );
         return Ok((claim_id, retry));
     }
@@ -1484,14 +1552,16 @@ fn record_batch_failure(plan: &BatchCookFanoutPlan, claim_id: &str, stage: &str,
         serde_json::json!({ "message": error.message, "details": error.details }),
     );
     if recorded.is_ok() {
+        let placement = plan
+            .placement
+            .as_ref()
+            .map(|placement| placement.requested)
+            .unwrap_or(Placement::Auto);
         eprintln!(
             "{{\"event\":\"coordinator_failed\",\"phase\":{},\"children_total\":{},\"next_action\":{}}}",
             serde_json::to_string(stage).expect("stage serializes"),
             plan.cooks.len(),
-            serde_json::to_string(&format!(
-                "homeboy agent-task fanout resume {}",
-                plan.fanout_id
-            ))
+            serde_json::to_string(&fanout_command(placement, "resume", &plan.fanout_id))
             .expect("resume command serializes"),
         );
     }
@@ -1538,7 +1608,11 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
         .then(|| durable_terminal_worktree_paths(&plan))
         .transpose()?;
     let outcome = (|| {
-        let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone())?;
+        let heartbeat = CoordinatorHeartbeat::start(
+            plan.fanout_id.clone(),
+            claim_id.clone(),
+            fanout_command(placement, "status", &plan.fanout_id),
+        )?;
         persist_batch_cook_recipes(&plan, |options| {
             record_gate_contract_validation(options, &gate_contract_validation);
             options.attempt_dispatcher = Some(attempt_dispatcher(options));
@@ -1606,7 +1680,11 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
         .then(|| durable_terminal_worktree_paths(&plan))
         .transpose()?;
     let outcome = (|| {
-        let heartbeat = CoordinatorHeartbeat::start(plan.fanout_id.clone(), claim_id.clone())?;
+        let heartbeat = CoordinatorHeartbeat::start(
+            plan.fanout_id.clone(),
+            claim_id.clone(),
+            fanout_command(placement, "status", &plan.fanout_id),
+        )?;
         persist_batch_cook_recipes(&plan, |options| {
             record_gate_contract_validation(options, &gate_contract_validation);
         })?;
@@ -1878,6 +1956,7 @@ fn compile_batch_cooks(
                     component_id,
                 )?;
             }
+            attach_fanout_placement_decision(plan, &mut options)?;
             if let Some(executor) = options
                 .initial_plan
                 .tasks
@@ -1895,9 +1974,72 @@ fn compile_batch_cooks(
             }
             options.harvest_context = harvest_context.clone();
             configure(&mut options);
+            enforce_fanout_placement(&options)?;
             Ok(options)
         })
         .collect()
+}
+
+fn enforce_fanout_placement(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    if options.attempt_dispatcher.is_some() {
+        return Ok(());
+    }
+    let decision = options
+        .initial_plan
+        .metadata
+        .get("execution_placement_decision")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<homeboy_lab_runner_contract::ExecutionPlacementDecision>(value)
+                .ok()
+        });
+    if decision.is_some_and(|decision| decision.required == ExecutionPlacementRequirement::Lab) {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            "required Lab fanout placement has no child attempt dispatcher; no provider workload executed locally",
+            Some("lab".to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn attach_fanout_placement_decision(
+    plan: &BatchCookFanoutPlan,
+    options: &mut AgentTaskCookServiceOptions,
+) -> Result<()> {
+    let Some(directive) = plan.placement.as_ref() else {
+        return Ok(());
+    };
+    let task = options.initial_plan.tasks.first().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "placement",
+            "fanout child plan has no task identity for placement finalization",
+            Some(options.cook_id.clone()),
+            None,
+        )
+    })?;
+    let source_path = task.workspace.root.as_deref().map(Path::new);
+    let identity = ExecutionPlacementIdentity {
+        repository: source_path
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "runner-resident-or-unmaterialized".to_string()),
+        workspace: source_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "runner-resident-or-unmaterialized".to_string()),
+        task: task.task_id.clone(),
+        candidate: source_path.and_then(homeboy::core::git::head_sha),
+        base: source_path.and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
+    };
+    options.initial_plan.metadata["execution_placement_decision"] =
+        serde_json::to_value(directive.finalize(identity)).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize fanout child placement decision".to_string()),
+            )
+        })?;
+    Ok(())
 }
 
 /// Resolve how many children this batch may run at once.
@@ -1938,6 +2080,11 @@ fn batch_cook_result(
     result: agent_task_service::AgentTaskRunResult<agent_task_service::AgentTaskCookBatchReport>,
     concurrency: &BatchConcurrencyDecision,
 ) -> (Value, i32) {
+    let placement = plan
+        .placement
+        .as_ref()
+        .map(|placement| placement.requested)
+        .unwrap_or(Placement::Auto);
     let report = result.value;
     let cooks = report
         .cooks
@@ -1994,8 +2141,8 @@ fn batch_cook_result(
             },
             "cooks": cooks,
             "commands": {
-                "status": format!("homeboy agent-task fanout status {}", plan.fanout_id),
-                "artifacts": format!("homeboy agent-task fanout artifacts {}", plan.fanout_id),
+                "status": fanout_command(placement, "status", &plan.fanout_id),
+                "artifacts": fanout_command(placement, "artifacts", &plan.fanout_id),
             },
         }),
         result.exit_code,
@@ -2030,6 +2177,7 @@ fn cook_batch_inner(
     // materialized workspace or a live runtime remain deferred.
     resolve_and_validate_effective_backend(&mut args)?;
     let mut plan = build_cook_batch_plan(&args)?;
+    plan.ensure_placement(invocation_placement_directive(placement))?;
     let replay_args = pin_cook_batch_replay(&args, &plan.fanout_id);
     let plan_ref = batch_plan_reference(&plan)?;
     let plan_has_private_gates = plan
@@ -2202,6 +2350,7 @@ fn cook_batch_inner(
                 "provider_readiness_command": provider_readiness_command(&args),
                 "provider_selection": provider_selection_preflight(&args, args.dry_run),
                 "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
+                "placement": fanout_placement_preflight(plan.placement.as_ref()),
                 "deterministic_gates": effective_batch_cook_gates(&plan)
                 },
                 "worktrees": worktrees,
@@ -2361,11 +2510,12 @@ fn cook_batch_dry_run(
     )?;
     args = selected_args;
     let static_args = args.clone();
-    let plan = planner.run_bounded(
+    let mut plan = planner.run_bounded(
         "issues_and_gates",
         "supplied issue URLs and gate declarations",
         move || build_static_cook_batch_plan(&static_args),
     )?;
+    plan.ensure_placement(invocation_placement_directive(placement))?;
     let replay_args = pin_cook_batch_replay(&args, &plan.fanout_id);
     let plan_ref = batch_plan_reference(&plan)?;
     let workspace_args = args.clone();
@@ -2402,6 +2552,7 @@ fn cook_batch_dry_run(
                 "provider_readiness_command": provider_readiness_command(&args),
                 "provider_selection": provider_selection_preflight(&args, true),
                 "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
+                "placement": fanout_placement_preflight(plan.placement.as_ref()),
                 "deterministic_gates": effective_batch_cook_gates(&plan),
             },
             "worktrees": worktrees,
@@ -2729,18 +2880,7 @@ fn cook_batch_argv_with_placement(
     if let Some(base) = &args.base {
         command.extend(["--base".to_string(), base.clone()]);
     }
-    if placement != Placement::Auto {
-        command.splice(
-            1..1,
-            [
-                "--placement".to_string(),
-                clap::ValueEnum::to_possible_value(&placement)
-                    .expect("placement has a clap value")
-                    .get_name()
-                    .to_string(),
-            ],
-        );
-    }
+    command.splice(1..1, fanout_global_placement_args(placement));
     for (flag, values) in [
         ("--verify", &args.gates.verify),
         ("--verify-file", &args.gates.verify_file),
@@ -3705,11 +3845,38 @@ struct BatchCookFanoutPlan {
     /// absolute deadline once, when the batch starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_duration_seconds: Option<u64>,
+    /// Resolved routing authority captured before planning. Child identities are
+    /// bound later, but requested/effective/fallback policy must survive replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement: Option<PlacementDirective>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     metadata: Value,
 }
 
 impl BatchCookFanoutPlan {
+    fn ensure_placement(&mut self, placement: PlacementDirective) -> Result<()> {
+        if let Some(planned) = self.placement.as_ref() {
+            let explicit_runner_changed = placement.runner.as_ref().is_some_and(|runner| {
+                runner.source == homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
+                    && planned.runner.as_ref() != Some(runner)
+            });
+            if planned.requested != placement.requested || explicit_runner_changed {
+                return Err(Error::validation_invalid_argument(
+                    "placement",
+                    "run-plan placement conflicts with the durable fanout placement policy",
+                    Some(format!("requested {:?}", placement.requested)),
+                    Some(vec![
+                        "Replay the plan with its original global placement and runner arguments."
+                            .to_string(),
+                    ]),
+                ));
+            }
+            return Ok(());
+        }
+        self.placement = Some(placement);
+        Ok(())
+    }
+
     fn from_value(value: Value, args: &AgentTaskFanoutInputArgs) -> Result<Self> {
         reject_generic_fanout_inputs(&value)?;
         let mut plan: BatchCookFanoutPlan = serde_json::from_value(value).map_err(|error| {
@@ -4455,6 +4622,7 @@ fn build_cook_batch_plan_with_profiles(
         cooks,
         max_concurrency: args.max_concurrency.map(|value| value as usize),
         max_duration_seconds: args.max_duration,
+        placement: None,
         metadata: serde_json::json!({
             "source": "agent-task fanout cook-batch",
             "issue_count": args.issues.len(),
@@ -5220,18 +5388,7 @@ fn private_artifact_run_command_with_placement(
         "--input".to_string(),
         format!("@{}", path.display()),
     ];
-    if placement != Placement::Auto {
-        command.splice(
-            1..1,
-            [
-                "--placement".to_string(),
-                clap::ValueEnum::to_possible_value(&placement)
-                    .expect("placement has a clap value")
-                    .get_name()
-                    .to_string(),
-            ],
-        );
-    }
+    command.splice(1..1, fanout_global_placement_args(placement));
     quote_args(&command)
 }
 
@@ -5243,18 +5400,7 @@ fn fanout_command(placement: Placement, command: &str, fanout_id: &str) -> Strin
         command.to_string(),
         fanout_id.to_string(),
     ];
-    if placement != Placement::Auto {
-        argv.splice(
-            1..1,
-            [
-                "--placement".to_string(),
-                clap::ValueEnum::to_possible_value(&placement)
-                    .expect("placement has a clap value")
-                    .get_name()
-                    .to_string(),
-            ],
-        );
-    }
+    argv.splice(1..1, fanout_global_placement_args(placement));
     quote_args(&argv)
 }
 
@@ -5266,19 +5412,32 @@ fn run_next_command(placement: Placement, fanout_id: &str) -> String {
         "--fanout".to_string(),
         fanout_id.to_string(),
     ];
-    if placement != Placement::Auto {
-        argv.splice(
-            1..1,
-            [
-                "--placement".to_string(),
-                clap::ValueEnum::to_possible_value(&placement)
-                    .expect("placement has a clap value")
-                    .get_name()
-                    .to_string(),
-            ],
-        );
-    }
+    argv.splice(1..1, fanout_global_placement_args(placement));
     quote_args(&argv)
+}
+
+fn fanout_global_placement_args(placement: Placement) -> Vec<String> {
+    let mut args = Vec::new();
+    if placement != Placement::Auto {
+        args.extend([
+            "--placement".to_string(),
+            clap::ValueEnum::to_possible_value(&placement)
+                .expect("placement has a clap value")
+                .get_name()
+                .to_string(),
+        ]);
+    }
+    if let Some(runner_id) = homeboy::core::parsed_command_preflight::captured_result()
+        .filter(|preflight| preflight.placement.requested == placement)
+        .and_then(|preflight| preflight.placement.runner)
+        .filter(|runner| {
+            runner.source == homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
+        })
+        .map(|runner| runner.runner_id)
+    {
+        args.extend(["--runner".to_string(), runner_id]);
+    }
+    args
 }
 
 #[cfg(test)]
@@ -5338,10 +5497,14 @@ fn cook_batch_commands_with_placement(
             "resume_from_plan": "[unavailable until Homeboy binds and persists the private plan]",
         });
     }
+    let resume_from_plan = format!(
+        "save .plan to JSON and run {}",
+        private_artifact_run_command_with_placement(Path::new("batch-cook-plan.json"), placement,)
+    );
     serde_json::json!({
         "plan": cook_batch_plan_command(args, placement),
         "run": cook_batch_run_command_with_placement(args, placement),
-        "resume_from_plan": "save .plan to JSON and run homeboy agent-task fanout run-plan --input @batch-cook-plan.json",
+        "resume_from_plan": resume_from_plan,
     })
 }
 
@@ -7259,6 +7422,210 @@ fi
         }
     }
 
+    fn placement_fixture(
+        requested: Placement,
+        selected: EffectiveExecutionPlacement,
+    ) -> PlacementDirective {
+        let runner = (selected == EffectiveExecutionPlacement::Lab).then(|| {
+            homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
+                runner_id: "test-lab".to_string(),
+                source: homeboy_lab_runner_contract::RunnerSelectionSource::Policy,
+            }
+        });
+        PlacementDirective {
+            requested,
+            required: if requested == Placement::Lab {
+                ExecutionPlacementRequirement::Lab
+            } else {
+                ExecutionPlacementRequirement::Either
+            },
+            selected,
+            runner,
+            fallback: ExecutionPlacementFallback {
+                local_allowed: requested == Placement::Auto,
+                reason: None,
+            },
+            override_authorization: ExecutionPlacementOverrideAuthorization {
+                authorized: requested == Placement::Local,
+                authority: (requested == Placement::Local)
+                    .then(|| "operator --placement local".to_string()),
+            },
+        }
+    }
+
+    fn materialize_test_child(options: &mut AgentTaskCookServiceOptions) {
+        options.initial_plan.tasks = vec![serde_json::from_value(serde_json::json!({
+            "task_id": options.cook_id,
+            "executor": { "backend": "test" },
+            "instructions": "test fanout placement",
+            "workspace": { "root": env!("CARGO_MANIFEST_DIR") },
+        }))
+        .expect("materialized test task")];
+        options.initial_plan.rebuild_homeboy_plan();
+    }
+
+    #[test]
+    fn placement_round_trips_through_plan_replay_recipe_lifecycle_and_status() {
+        with_isolated_home(|_| {
+            for (requested, selected, name, authority) in [
+                (
+                    Placement::Local,
+                    EffectiveExecutionPlacement::Local,
+                    "local",
+                    "operator_overridable",
+                ),
+                (
+                    Placement::Lab,
+                    EffectiveExecutionPlacement::Lab,
+                    "lab",
+                    "policy_pinned",
+                ),
+                (
+                    Placement::Auto,
+                    EffectiveExecutionPlacement::Lab,
+                    "automatic",
+                    "policy_pinned",
+                ),
+            ] {
+                let mut plan = test_batch_plan();
+                plan.cooks.truncate(1);
+                plan.rekey(format!("placement-round-trip-{name}"));
+                plan.ensure_placement(placement_fixture(requested, selected))
+                    .expect("bind plan placement");
+                let encoded = serde_json::to_value(&plan).expect("serialize placement plan");
+                let decoded: BatchCookFanoutPlan =
+                    serde_json::from_value(encoded).expect("deserialize placement plan");
+                assert_eq!(decoded.placement, plan.placement, "{name}: plan policy");
+                let preflight = fanout_placement_preflight(decoded.placement.as_ref());
+                assert_eq!(preflight["requested"], serde_json::json!(requested));
+                assert_eq!(preflight["selected"], serde_json::json!(selected));
+                assert_eq!(
+                    preflight["admission"]["state"],
+                    if selected == EffectiveExecutionPlacement::Lab {
+                        "deferred"
+                    } else {
+                        "confirmed"
+                    }
+                );
+
+                let replay = cook_batch_run_command_with_placement(&cook_batch_args(), requested);
+                let cli = Cli::try_parse_from(shlex::split(&replay).expect("split replay"))
+                    .expect("parse replay");
+                assert_eq!(cli.placement, requested, "{name}: replay policy");
+
+                let mut options = decoded.cooks[0]
+                    .to_cook_invocation(&decoded)
+                    .expect("compile child invocation")
+                    .options;
+                materialize_test_child(&mut options);
+                attach_fanout_placement_decision(&decoded, &mut options)
+                    .expect("bind child placement");
+                if selected == EffectiveExecutionPlacement::Lab {
+                    options.attempt_dispatcher = Some(Arc::new(LabRecipeDispatcher));
+                }
+                enforce_fanout_placement(&options).expect("admit child placement");
+                let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
+                    serde_json::from_value(
+                        options.initial_plan.metadata["execution_placement_decision"].clone(),
+                    )
+                    .expect("canonical child decision");
+                assert_eq!(decision.requested, requested, "{name}: requested");
+                assert_eq!(decision.selected, selected, "{name}: selected");
+
+                agent_task_service::persist_initial_recipe(&options)
+                    .expect("persist placement-bound recipe");
+                let recipe = agent_task_service::load_recipe(&options.cook_id)
+                    .expect("load placement-bound recipe");
+                assert_eq!(
+                    recipe.attempts[0].plan.metadata["execution_placement_decision"]["decision_id"],
+                    decision.decision_id,
+                    "{name}: recipe decision"
+                );
+
+                let run_id = format!("placement-round-trip-{name}-run");
+                agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id))
+                    .expect("submit durable child");
+                let outcome = decision
+                    .outcome(
+                        selected,
+                        (selected == EffectiveExecutionPlacement::Lab)
+                            .then(|| "test-lab".to_string()),
+                    )
+                    .expect("verified placement outcome");
+                agent_task_lifecycle::record_execution_placement_outcome(&run_id, outcome)
+                    .expect("record placement outcome");
+                batch::persist_fanout_run_batch(
+                    &decoded.fanout_id,
+                    &decoded.fanout_id,
+                    &[batch::FanoutRunBatchChild {
+                        task_id: decoded.cooks[0].cook_id.clone(),
+                        run_id: run_id.clone(),
+                    }],
+                    serde_json::json!({ "placement": decoded.placement }),
+                )
+                .expect("persist placement batch");
+                let status = batch::status(&decoded.fanout_id).expect("fanout placement status");
+                let placement = status.batch.child_runs[0]
+                    .placement
+                    .as_ref()
+                    .expect("child placement projection");
+                assert_eq!(placement.requested, requested, "{name}: status requested");
+                assert_eq!(placement.selected, selected, "{name}: status selected");
+                assert_eq!(
+                    placement.effective,
+                    Some(selected),
+                    "{name}: status effective"
+                );
+                assert_eq!(placement.authority, authority, "{name}: status authority");
+                assert_eq!(placement.decision_id, decision.decision_id);
+                assert_eq!(placement.outcome_decision_id, Some(decision.decision_id));
+
+                let claim_id = batch::claim_fanout_run_batch(&decoded.fanout_id)
+                    .expect("claim placement batch")
+                    .expect("placement batch claim id");
+                batch::record_fanout_run_batch_failure(
+                    &decoded.fanout_id,
+                    &claim_id,
+                    "test",
+                    serde_json::json!({ "message": "terminal coordinator fixture" }),
+                )
+                .expect("record terminal coordinator fixture");
+                assert!(batch::status(&decoded.fanout_id)
+                    .expect("failed fanout placement status")
+                    .batch
+                    .child_runs[0]
+                    .placement
+                    .is_some());
+            }
+        });
+    }
+
+    #[test]
+    fn explicit_lab_plan_fails_closed_without_a_child_dispatcher() {
+        let mut plan = test_batch_plan();
+        plan.ensure_placement(placement_fixture(
+            Placement::Lab,
+            EffectiveExecutionPlacement::Lab,
+        ))
+        .expect("bind plan placement");
+        let replay_error = plan
+            .ensure_placement(placement_fixture(
+                Placement::Auto,
+                EffectiveExecutionPlacement::Local,
+            ))
+            .expect_err("omitting explicit Lab on replay must fail closed");
+        assert!(replay_error.message.contains("conflicts"));
+        let mut options = plan.cooks[0]
+            .to_cook_invocation(&plan)
+            .expect("compile child invocation")
+            .options;
+        materialize_test_child(&mut options);
+        attach_fanout_placement_decision(&plan, &mut options).expect("bind child placement");
+        let error = enforce_fanout_placement(&options)
+            .expect_err("required Lab must not compile onto the local executor");
+        assert!(error.message.contains("no child attempt dispatcher"));
+    }
+
     #[test]
     fn correction_command_preserves_explicit_placement() {
         let mut args = cook_batch_args();
@@ -8743,6 +9110,7 @@ fi
             fanout_id: "legacy".to_string(),
             max_concurrency: None,
             max_duration_seconds: None,
+            placement: None,
             cooks: vec![BatchCookSpec {
                 cook_id: "issue-6453".to_string(),
                 ..plan.cooks[0].clone()
@@ -10126,10 +10494,14 @@ fi
                 .clone();
 
             std::thread::sleep(std::time::Duration::from_millis(2));
-            CoordinatorHeartbeat::start(batch_id.to_string(), claim_id)
-                .expect("start heartbeat before preflight")
-                .finish()
-                .expect("finish heartbeat");
+            CoordinatorHeartbeat::start(
+                batch_id.to_string(),
+                claim_id,
+                format!("homeboy agent-task fanout status {batch_id}"),
+            )
+            .expect("start heartbeat before preflight")
+            .finish()
+            .expect("finish heartbeat");
 
             assert_ne!(
                 batch::read_batch_record(batch_id)

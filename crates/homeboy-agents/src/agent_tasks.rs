@@ -308,8 +308,9 @@ pub mod lifecycle {
         aggregate_source, artifacts, cancel_run, cook_index, durable_local_read,
         fail_detached_cook_handoff_parent, list_records, load_plan, logs, persisted_status,
         reconcile_terminal_artifact_projection, record_cook_finalization,
-        recover_unmaterialized_cook_input_publication, retry, run_id_for_aggregate_path,
-        run_record_exists, run_record_exists_readonly, run_status, submit_plan,
+        record_execution_placement_outcome, recover_unmaterialized_cook_input_publication, retry,
+        run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, run_status,
+        submit_plan,
     };
     pub use super::super::agent_task_lifecycle::{
         cancel, claim_cook_operation_in_store, claim_local_cook_retry_launch_in_store,

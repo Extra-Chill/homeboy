@@ -2150,9 +2150,21 @@ fn run_split_placement_fanout(
                 .first()
                 .map(|task| task.task_id.as_str())
                 .unwrap_or("fanout-provider-attempt");
+            let placement_decision = options
+                .initial_plan
+                .metadata
+                .get("execution_placement_decision")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_else(|| finalize_placement(&directive, task, source_path.as_deref()));
+            let selected_runner_id = placement_decision
+                .runner
+                .as_ref()
+                .map(|runner| runner.runner_id.clone())
+                .unwrap_or_else(|| runner_id.clone());
             Arc::new(LabCookAttemptDispatcher {
-                runner_id: runner_id.clone(),
-                placement_decision: finalize_placement(&directive, task, source_path.as_deref()),
+                runner_id: selected_runner_id,
+                placement_decision,
                 allow_local_fallback: false,
                 allow_dirty_lab_workspace,
                 skip_deps_hydration,
