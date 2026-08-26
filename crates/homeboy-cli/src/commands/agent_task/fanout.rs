@@ -5007,6 +5007,18 @@ fn resolve_and_validate_effective_backend_with_catalog(
     args: &mut AgentTaskFanoutCookBatchArgs,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
+    resolve_and_validate_effective_backend_with_catalog_and_default(
+        args,
+        catalog,
+        provider::default_backend_for_component,
+    )
+}
+
+fn resolve_and_validate_effective_backend_with_catalog_and_default(
+    args: &mut AgentTaskFanoutCookBatchArgs,
+    catalog: &AgentTaskProviderCatalog,
+    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
+) -> Result<()> {
     let command = fanout_provider_dispatch_command(
         Some(args.repo.clone()),
         args.backend.clone(),
@@ -5017,7 +5029,7 @@ fn resolve_and_validate_effective_backend_with_catalog(
     );
     let request = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
         command,
-        provider::default_backend_for_component,
+        default_backend,
         catalog,
     )
     .map_err(with_provider_admission_remediation)?;
