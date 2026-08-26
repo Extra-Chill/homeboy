@@ -192,6 +192,7 @@ Continue a detached Cook from its durable Cook ID or provider attempt ID. The pe
 | `--preflight` | flag | Validate continuation admission without dispatching a provider or mutating lifecycle state |
 | `--rearm` | flag | Explicitly rearm one failed terminal continuation before consuming it |
 | `--artifact-id` | `<ID>` | Select the patch artifact to promote when the durable attempt produced more than one patch candidate. This resumes controller-side promotion without dispatching another provider execution |
+| `--timeout-ms` | `<MS>` | Explicitly increase the provider timeout for a new retry attempt. The override and its operator authority are retained in the Cook recipe |
 | `--full` | flag | Include the complete Cook report rather than the compact lifecycle view |
 
 ## `homeboy agent-task loop`
@@ -957,6 +958,7 @@ Promote a completed generic patch artifact into a managed worktree
 | `--artifact-id` | `<ARTIFACT_ID>` | _no help text_ |
 | `--dry-run` | flag | _no help text_ |
 | `--full` | flag | Include complete promotion and gate evidence |
+| `--gates-from-cook-recipe` | flag | Replay the exact gate policy from the source run's durable Cook recipe. Homeboy-generated review commands use this reference so private gate programs remain outside reviewer-facing command output |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
