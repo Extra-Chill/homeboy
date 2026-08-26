@@ -51,11 +51,31 @@ run_case() {
   printf 'PASS: %s\n' "${label}"
 }
 
+run_lazy_case() {
+  local expected="$1" label="$2"
+  rm -f "${tmp}/output"
+  set +e
+  PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ARTIFACT_KEY=fixture-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=candidate-failure PR_ACTIVE=false GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null 2>&1
+  local actual=$?
+  set -e
+  if [ "${actual}" -ne "${expected}" ]; then
+    printf 'FAIL: %s (expected exit %s, got %s)\n' "${label}" "${expected}" "${actual}"
+    exit 1
+  fi
+  printf 'PASS: %s\n' "${label}"
+}
+
 payload_pass='{"success":true,"data":{"test_counts":{"failed":0,"errors":0}}}'
 payload_one='{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}'
 
 rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"pass"}' "${payload_pass}"; write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
 run_case 0 'merged PR still reconciles matching immutable passing phases'
+
+rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"pass"}' "${payload_pass}"
+run_lazy_case 0 'passing candidate does not require a baseline artifact'
+
+rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"
+run_lazy_case 1 'failing candidate still requires a baseline artifact'
 
 rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
 run_case 1 'introduced candidate failure remains blocking'
@@ -104,16 +124,16 @@ for field in repository candidate_sha base_sha command action_revision cli_revis
   run_case 1 "${field} provenance mismatch fails closed"
 done
 
-# Candidate and baseline have identical dependencies, so rerunning either job
-# does not implicitly rerun the other phase or reuse its checkout.
+# Baseline starts only after candidate evidence exists, so a passing candidate
+# can skip the duplicate command while failed evidence remains comparable.
 grep -F '  candidate:' "${WORKFLOW}" >/dev/null
 grep -F '  baseline:' "${WORKFLOW}" >/dev/null
 grep -F 'needs: [binary, plan]' "${WORKFLOW}" >/dev/null
-if grep -A3 '^  baseline:' "${WORKFLOW}" | grep -q 'candidate'; then
-  printf 'FAIL: baseline phase depends on candidate and cannot be retried independently\n'
-  exit 1
-fi
-printf 'PASS: workflow keeps candidate and baseline retries independent\n'
+grep -A3 '^  baseline:' "${WORKFLOW}" | grep -F 'needs: [binary, plan, candidate]' >/dev/null || { printf 'FAIL: baseline can start before candidate evidence exists\n'; exit 1; }
+grep -F 'name: Select baseline execution' "${WORKFLOW}" >/dev/null || { printf 'FAIL: baseline does not select execution from candidate evidence\n'; exit 1; }
+grep -F "if: steps.baseline-policy.outputs.run == 'true'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: baseline command is not gated by candidate status\n'; exit 1; }
+grep -F "'candidate-failure' || 'false'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: reconciliation does not derive lazy baseline necessity\n'; exit 1; }
+printf 'PASS: workflow runs baseline only after a non-passing candidate\n'
 
 # shellcheck disable=SC2016
 if grep -F 'results="${RESULTS:-{}}"' "${WORKFLOW}" >/dev/null \

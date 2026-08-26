@@ -175,7 +175,7 @@ assert_equals \
 
 HOMEBOY_DIFFERENTIAL_GATING="true"
 assert_equals \
-  "homeboy --placement local --output /tmp/workspace/out.json review test data-machine --path /tmp/workspace" \
+  "homeboy --placement local --output /tmp/workspace/out.json review test data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review test" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "GitHub Actions differential baseline test selects local placement"
 unset HOMEBOY_DIFFERENTIAL_GATING
@@ -224,17 +224,17 @@ HOMEBOY_DIFFERENTIAL_GATING="true"
 # base is red too, so both sides fail and the gate downgrades to `baseline_red`
 # -- 32.7 minutes to publish a green check carrying no verdict (#11751 W1-2).
 #
-# `test` keeps the exemption; its scope rides the extension's
-# HOMEBOY_TEST_SCOPE_* contract rather than a CLI flag.
+# `test` needs the same changed ref so Homeboy can materialize the extension's
+# exact changed-test selection instead of silently running the full suite.
 assert_equals \
   "homeboy review audit data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
   "differential audit is changed-scoped"
 
 assert_equals \
-  "homeboy review test data-machine --path /tmp/workspace" \
+  "homeboy review test data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
-  "differential test uses full scope"
+  "differential test uses changed scope"
 
 assert_equals \
   "homeboy review lint data-machine --path /tmp/workspace --changed-since origin/main" \
@@ -247,9 +247,9 @@ assert_equals \
   "differential review audit is changed-scoped"
 
 assert_equals \
-  "homeboy review test data-machine --path /tmp/workspace" \
+  "homeboy review test data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review test" "${COMPONENT}" "${WORKSPACE}")" \
-  "differential review test uses full scope"
+  "differential review test uses changed scope"
 
 assert_equals \
   "homeboy review lint data-machine --path /tmp/workspace --changed-since origin/main" \

@@ -82,6 +82,6 @@ printf 'PASS: malformed producer provenance fails before publication with repair
   || { printf 'FAIL: differential producers bypass manifest validation\n'; exit 1; }
 grep -F "if: always() && steps.provenance.outcome == 'success'" "${WORKFLOW}" >/dev/null \
   || { printf 'FAIL: candidate publication is not gated by provenance validation\n'; exit 1; }
-grep -F "if: always() && matrix.baseline == 'true' && steps.provenance.outcome == 'success'" "${WORKFLOW}" >/dev/null \
+grep -F "if: always() && steps.baseline-policy.outputs.run == 'true' && steps.provenance.outcome == 'success'" "${WORKFLOW}" >/dev/null \
   || { printf 'FAIL: baseline publication is not gated by provenance validation\n'; exit 1; }
 printf 'PASS: every differential publication is gated by the owning producer contract\n'

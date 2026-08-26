@@ -134,7 +134,18 @@ candidate_results="$(jq -c '.results' "${candidate_manifest}")"
 candidate_output="${candidate_dir}/homeboy-ci-results"
 [ -d "${candidate_output}" ] || fail_closed "Candidate result payload is missing."
 
-if [ "${REQUIRE_BASELINE:-false}" = "true" ]; then
+require_baseline=false
+case "${REQUIRE_BASELINE:-false}" in
+  true) require_baseline=true ;;
+  candidate-failure)
+    candidate_status="$(jq -r --arg command "${command}" '.[$command]' <<< "${candidate_results}")"
+    [ "${candidate_status}" = pass ] || require_baseline=true
+    ;;
+  false) ;;
+  *) fail_closed "Unknown baseline requirement policy '${REQUIRE_BASELINE}'." ;;
+esac
+
+if [ "${require_baseline}" = "true" ]; then
   manifest_for baseline
   baseline_manifest="${RESOLVED_MANIFEST}"
   baseline_artifact_name="${RESOLVED_ARTIFACT_NAME}"
@@ -183,7 +194,7 @@ if [ ! -f "${baseline_status}" ]; then
 fi
 fi
 
-if [ "${REQUIRE_BASELINE:-false}" = "true" ]; then
+if [ "${require_baseline}" = "true" ]; then
   results="$(python3 "${action_root}/scripts/core/apply-differential-gate.py" "${candidate_results}" "${candidate_output}" "${baseline_output}")"
 else
   results="${candidate_results}"
