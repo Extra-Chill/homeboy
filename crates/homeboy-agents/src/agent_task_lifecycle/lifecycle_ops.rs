@@ -2640,7 +2640,12 @@ where
         metadata,
     };
     let mut preserved_controller_runtime = None;
+    let mut pre_execution_runtime_recovery = false;
     if let Ok(existing) = lifecycle_store.read_record(&run_id) {
+        pre_execution_runtime_recovery = execution_runner_id.is_none()
+            && crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
+                &existing,
+            );
         // A runner may re-submit the plan after the controller reserved a
         // side-effect claim. Claims are durable exactly-once ownership, not
         // plan-derived state, so replacing the record must retain them.
@@ -2729,7 +2734,7 @@ where
             // it once more before recording runtime provenance or dispatching
             // any provider work in case cancellation won immediately after.
             if let Ok(cancelled) = lifecycle_store.read_record(&run_id) {
-                if cancelled.state.is_terminal() {
+                if cancelled.state.is_terminal() && !pre_execution_runtime_recovery {
                     return Ok(cancelled);
                 }
             }
@@ -2746,7 +2751,12 @@ where
                     [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                     admission.runtime();
             }
-            lifecycle_store.write_record(&record)?;
+            if pre_execution_runtime_recovery {
+                record = lifecycle_store
+                    .rearm_pre_execution_record_with_runtime(&record, admission.runtime())?;
+            } else {
+                lifecycle_store.write_record(&record)?;
+            }
         }
         Err(error) => {
             // Cancellation is persisted before removing a queue entry. Do not
