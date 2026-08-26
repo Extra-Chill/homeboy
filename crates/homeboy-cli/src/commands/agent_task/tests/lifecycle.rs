@@ -1439,6 +1439,149 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
 }
 
 #[test]
+fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions() {
+    with_temp_home(|| {
+        let root = tempfile::tempdir().expect("workspace root");
+        let primary = root.path().join("primary");
+        let workspace = root.path().join("runtime-recovery");
+        std::fs::create_dir(&primary).expect("create primary checkout");
+        init_runtime_component_checkout(&primary);
+        let remote_status = std::process::Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary path"),
+                "remote",
+                "add",
+                "origin",
+                primary.to_str().expect("UTF-8 primary path"),
+            ])
+            .status()
+            .expect("git remote command runs");
+        assert!(remote_status.success(), "configure fixture origin");
+        let worktree_status = std::process::Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary path"),
+                "worktree",
+                "add",
+                "-b",
+                "fixture-runtime-recovery",
+                workspace.to_str().expect("UTF-8 worktree path"),
+            ])
+            .status()
+            .expect("git worktree command runs");
+        assert!(worktree_status.success(), "create linked worktree");
+        let cook_id = "cook-pre-execution-runtime-recovery";
+        let run_id = "cook-pre-execution-runtime-recovery-attempt-1";
+        let plan = AgentTaskPlan::new(
+            "cook-pre-execution-runtime-recovery-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture", "model": "fixture-model" },
+                "instructions": "recover with the current controller runtime",
+                "workspace": { "root": &workspace }
+            }))
+            .expect("provider task")],
+        );
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: "fixture@pre-execution-runtime-recovery".to_string(),
+            source_worktree_path: Some(workspace.clone()),
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 1,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Pre-execution runtime recovery".to_string(),
+            commit_message: "Pre-execution runtime recovery".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: Some("fixture-model".to_string()),
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("bind attempt to Cook");
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "local_retry_supervisor",
+            &Error::internal_unexpected("launcher exited before provider execution")
+                .with_retryable(true),
+        )
+        .expect("record retryable pre-execution failure");
+        let recipe_path = homeboy::core::paths::homeboy_data()
+            .expect("data root")
+            .join("agent-task-cooks")
+            .join(cook_id)
+            .join("recipe.json");
+        let mut persisted_recipe: Value =
+            serde_json::from_slice(&std::fs::read(&recipe_path).expect("read persisted recipe"))
+                .expect("parse persisted recipe");
+        persisted_recipe["runtime_generation"] = "homeboy 0.1.0+historical".into();
+        persisted_recipe["promotion_transport"]["attempt_dispatch"] = json!({ "kind": "local" });
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec_pretty(&persisted_recipe).expect("encode historical recipe"),
+        )
+        .expect("persist historical local recipe");
+
+        let executor = Arc::new(CountingCookExecutor::default());
+        let retried = retry_with(
+            RetryArgs {
+                run_id: run_id.to_string(),
+                new_run_id: None,
+                run: true,
+                force: false,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .expect("queued retry recovers under the current runtime");
+
+        assert_eq!(
+            executor.executions.load(Ordering::SeqCst),
+            1,
+            "{retried:#?}"
+        );
+        let recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
+            .expect("read recovered recipe");
+        let recovered = test_lifecycle_store()
+            .read_record(&recipe.attempts.last().expect("replacement attempt").run_id)
+            .expect("read recovered replacement");
+        assert_eq!(recovered.metadata["retry_of"], run_id);
+        assert_eq!(recovered.metadata["provider_executions_consumed"], 1);
+        assert_eq!(
+            recovered.metadata["controller_identity"],
+            homeboy::core::build_identity::current().display
+        );
+        assert!(
+            !homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+                &recipe, &recovered, false,
+            ),
+            "provider execution restores the strict historical runtime fence"
+        );
+    });
+}
+
+#[test]
 fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_recipe_once() {
     with_temp_home(|| {
         let workspace = tempfile::tempdir().expect("workspace");
