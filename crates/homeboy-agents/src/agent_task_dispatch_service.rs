@@ -229,6 +229,26 @@ fn dispatch_with_provider_catalog(
     )
 }
 
+/// Validate every provider declaration needed to dispatch this request without
+/// running live runtime or workspace readiness probes.
+pub fn preflight_dispatch_provider_admission(
+    request: &AgentTaskDispatchRequest,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<()> {
+    preflight_provider_credentials_for_backend(
+        catalog.providers(),
+        &request.backend,
+        request.selector.as_deref(),
+    )?;
+    let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
+        catalog.provider_requires_cwd_git_checkout(backend, selector)
+    })?;
+    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    catalog.validate_selected_models(&plan)?;
+    preflight_dispatch_provider_secrets(&plan)?;
+    preflight_plan_provider_config_with_providers(&plan, catalog.providers())
+}
+
 pub fn dispatch_with_provider_requirements(
     request: AgentTaskDispatchRequest,
     executor: SharedAgentTaskExecutor,
@@ -568,6 +588,20 @@ pub fn resolve_dispatch_request_with_default(
         default_backend,
         config_default_backend,
     )
+}
+
+/// Resolve a dispatch request against one observed provider catalog.
+///
+/// Admission callers use this when the selected route and the remediation
+/// choices must come from the same catalog snapshot.
+pub fn resolve_dispatch_request_with_default_and_catalog(
+    command: AgentTaskDispatchCommand,
+    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<AgentTaskDispatchRequest> {
+    resolve_dispatch_request_with_sources(command, default_backend, config_default_backend, || {
+        catalog.backends()
+    })
 }
 
 /// The configured Homeboy-config `agent_task.default_backend`, when set. Read via

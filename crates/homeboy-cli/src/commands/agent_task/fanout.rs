@@ -26,7 +26,7 @@ use homeboy::agents::agent_tasks::dependency_graph::{
     dependency_graph_readiness, AgentTaskDependencyNode,
 };
 use homeboy::agents::agent_tasks::dispatch_service::{
-    AgentTaskDispatchCommand, DispatchCoreInputs,
+    self as dispatch_service, AgentTaskDispatchCommand, DispatchCoreInputs,
 };
 use homeboy::agents::agent_tasks::fanout_supervisor as supervisor;
 use homeboy::agents::agent_tasks::gate::{
@@ -43,6 +43,7 @@ use homeboy::agents::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
 };
+use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::{config, worktree, Error, ErrorCode, Result};
 
 use crate::cli_surface::Placement;
@@ -1398,6 +1399,7 @@ fn run_batch_cook_fanout(
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
     }
+    admit_batch_provider_routes(&mut plan)?;
     run_batch_cook_fanout_plan_with_placement(plan, placement)
 }
 
@@ -1415,6 +1417,7 @@ pub(crate) fn run_batch_cook_fanout_with_attempt_dispatcher_and_placement(
     if let Some(record_run_id) = args.record_run_id {
         plan.rekey(record_run_id);
     }
+    admit_batch_provider_routes(&mut plan)?;
     run_batch_cook_fanout_plan_with_attempt_dispatcher_and_placement(
         plan,
         attempt_dispatcher,
@@ -2023,14 +2026,8 @@ fn cook_batch_inner(
     normalize_cook_batch_repo_with_placement(&mut args, placement)?;
     resolve_cook_batch_default_branch(&mut args)?;
     apply_provider_profile(&mut args);
-    // Resolve the effective backend (explicit --backend or the configured
-    // default) and validate it up front (#7717). Otherwise an omitted
-    // --backend silently rode a configured default all the way to
-    // provider execution, where each child cook failed late with a
-    // provider-shaped `no extension agent-task provider found for backend`
-    // error instead of an early, actionable configuration failure. Making the
-    // effective backend explicit here also surfaces it in the preflight and
-    // pins every child cook to the same resolved backend.
+    // Planning and execution share this admission. Only checks that require a
+    // materialized workspace or a live runtime remain deferred.
     resolve_and_validate_effective_backend(&mut args)?;
     let mut plan = build_cook_batch_plan(&args)?;
     let replay_args = pin_cook_batch_replay(&args, &plan.fanout_id);
@@ -2202,9 +2199,10 @@ fn cook_batch_inner(
                 "causal_failures": causal_failures,
                 "preflight": {
                     "default_branch": args.base_resolution.clone(),
-                    "provider_readiness_command": provider_readiness_command(&args),
-                    "provider_selection": provider_selection_preflight(&args, args.dry_run),
-                    "deterministic_gates": effective_batch_cook_gates(&plan)
+                "provider_readiness_command": provider_readiness_command(&args),
+                "provider_selection": provider_selection_preflight(&args, args.dry_run),
+                "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
+                "deterministic_gates": effective_batch_cook_gates(&plan)
                 },
                 "worktrees": worktrees,
                 "worktree_resolution": worktree_resolution,
@@ -2403,6 +2401,7 @@ fn cook_batch_dry_run(
                 "default_branch": args.base_resolution.clone(),
                 "provider_readiness_command": provider_readiness_command(&args),
                 "provider_selection": provider_selection_preflight(&args, true),
+                "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
                 "deterministic_gates": effective_batch_cook_gates(&plan),
             },
             "worktrees": worktrees,
@@ -4826,96 +4825,172 @@ fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
     }
 }
 
-/// Resolve the effective execution backend for the batch and fail early when it
-/// has no installed provider (#7717).
-///
-/// When `--backend` is omitted the effective backend comes from component-scoped
-/// policy and then the configured global fallback. We pin it onto `args.backend`
-/// so it is visible in preflight and carried identically to every child cook.
+/// Admit the provider route using the same catalog-backed contract for static
+/// planning and live execution. Runtime probes remain a separate live check.
 fn resolve_and_validate_effective_backend(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
     let catalog = AgentTaskProviderCatalog::discover();
-    resolve_and_validate_effective_backend_with_providers(args, catalog.providers())
+    resolve_and_validate_effective_backend_with_catalog(args, &catalog)
 }
 
-fn resolve_and_validate_effective_backend_with_providers(
+fn resolve_and_validate_effective_backend_with_catalog(
     args: &mut AgentTaskFanoutCookBatchArgs,
-    providers: &[provider::AgentTaskExecutorProvider],
+    catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
-    resolve_and_validate_effective_backend_with_providers_and_default(
-        args,
-        providers,
+    let command = fanout_provider_dispatch_command(
+        Some(args.repo.clone()),
+        args.backend.clone(),
+        args.selector.clone(),
+        args.model.clone(),
+        args.secret_env.clone(),
+        args.provider_config.clone(),
+    );
+    let request = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
+        command,
         provider::default_backend_for_component,
+        catalog,
     )
+    .map_err(with_provider_admission_remediation)?;
+    validate_provider_route(&request, catalog).map_err(with_provider_admission_remediation)?;
+
+    args.backend = Some(request.backend);
+    args.selector = request.selector;
+    args.model = request.model;
+    Ok(())
 }
 
-fn resolve_and_validate_effective_backend_with_providers_and_default(
-    args: &mut AgentTaskFanoutCookBatchArgs,
-    providers: &[provider::AgentTaskExecutorProvider],
-    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
-) -> Result<()> {
-    let effective = match args.backend.as_deref() {
-        Some(backend) if !backend.trim().is_empty() => backend.trim().to_string(),
-        _ => match default_backend(args.component.as_deref()).map_err(|error| {
-            invalid_fanout(&format!("could not resolve default backend: {error}"))
-        })? {
-            Some(backend) => backend,
-            // No explicit backend and no configured default: leave resolution to
-            // the existing per-cook/component defaulting and its own diagnostics.
-            None => return Ok(()),
-        },
-    };
+fn with_provider_admission_remediation(error: Error) -> Error {
+    error.with_action(ExecutableAction::new(
+        "inspect-agent-task-provider-readiness",
+        "Inspect dispatchable agent-task providers",
+        "homeboy",
+        ["agent-task", "providers", "--validate-readiness"],
+        ActionSafety::ReadOnly,
+    ))
+}
 
-    // Validate against installed providers only when the batch will actually
-    // execute. Dry-run/planning legitimately runs where no provider is installed
-    // (e.g. CI compiling the plan), so a hard provider check there would reject
-    // valid planning. Execution is where an unresolved backend fails late, so
-    // that is exactly where we fail early instead.
-    let will_execute = args.run_plan && !args.dry_run;
-    if will_execute {
-        let selector = args.selector.as_deref();
-        match provider::resolve_provider_for_backend(providers, &effective, selector) {
-            provider::ProviderResolution::Resolved(_) => {}
-            provider::ProviderResolution::SelectorMismatch { available_ids, .. } => {
-                let selector = selector.expect("selector mismatch requires a selector");
-                return Err(invalid_fanout(&format!(
-                    "agent-task fanout backend '{effective}' is installed, but --selector '{selector}' does not match it. \
-                     Available selector IDs for backend '{effective}': {}. --selector selects a Homeboy executor provider, not a worktree or nested runtime provider.",
-                    available_ids.join(", ")
-                )));
-            }
-            provider::ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
-                return Err(invalid_fanout(&format!(
-                    "agent-task fanout backend alias '{effective}' matches multiple installed providers. \
-                     Pass --selector with one of: {}.",
-                    candidate_ids.join(", ")
-                )));
-            }
-            provider::ProviderResolution::NotFound => {
-                let mut available: Vec<String> =
-                    providers.iter().map(|p| p.backend.clone()).collect();
-                available.sort();
-                available.dedup();
-                let available_hint = if available.is_empty() {
-                    "no agent-task provider backends are installed; install a provider extension (e.g. opencode)".to_string()
+fn fanout_provider_dispatch_command(
+    repo: Option<String>,
+    backend: Option<String>,
+    selector: Option<String>,
+    model: Option<String>,
+    secret_env: Vec<String>,
+    provider_config: Option<String>,
+) -> AgentTaskDispatchCommand {
+    AgentTaskDispatchCommand {
+        prompt: Some("Validate fanout provider admission declarations.".to_string()),
+        prompt_is_literal: true,
+        repo,
+        backend,
+        selector,
+        model,
+        secret_env,
+        core: DispatchCoreInputs {
+            provider_config,
+            ..DispatchCoreInputs::default()
+        },
+        ..AgentTaskDispatchCommand::default()
+    }
+}
+
+fn validate_provider_route(
+    request: &dispatch_service::AgentTaskDispatchRequest,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<()> {
+    match provider::resolve_provider_for_backend(
+        catalog.providers(),
+        &request.backend,
+        request.selector.as_deref(),
+    ) {
+        provider::ProviderResolution::Resolved(_) => {}
+        provider::ProviderResolution::SelectorMismatch { available_ids, .. } => {
+            return Err(Error::validation_invalid_argument(
+                "selector",
+                format!(
+                    "--selector does not select a provider for backend `{}`",
+                    request.backend
+                ),
+                request.selector.clone(),
+                Some(
+                    available_ids
+                        .iter()
+                        .map(|id| {
+                            format!("Pass --selector {id} with --backend {}.", request.backend)
+                        })
+                        .collect(),
+                ),
+            ));
+        }
+        provider::ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
+            return Err(Error::validation_invalid_argument(
+                "selector",
+                format!(
+                    "backend alias `{}` matches multiple providers",
+                    request.backend
+                ),
+                None,
+                Some(
+                    candidate_ids
+                        .iter()
+                        .map(|id| format!("Pass --selector {id}."))
+                        .collect(),
+                ),
+            ));
+        }
+        provider::ProviderResolution::NotFound => {
+            let available = catalog.backends();
+            return Err(Error::validation_invalid_argument(
+                "backend",
+                format!(
+                    "agent-task fanout backend `{}` has no installed provider",
+                    request.backend
+                ),
+                Some(request.backend.clone()),
+                Some(if available.is_empty() {
+                    vec![
+                        "Run `homeboy agent-task providers` to diagnose provider discovery."
+                            .to_string(),
+                    ]
                 } else {
-                    format!("installed backends: {}", available.join(", "))
-                };
-                let source = if args.backend.is_some() {
-                    "requested via --backend"
-                } else {
-                    "resolved from component/default backend policy"
-                };
-                return Err(invalid_fanout(&format!(
-                "agent-task fanout backend '{effective}' ({source}) has no installed provider. \
-                 Pass --backend <installed> explicitly, or set agent_task.default_backend to an installed backend. {available_hint}"
-            )));
-            }
+                    available
+                        .iter()
+                        .map(|candidate| format!("Pass --backend {candidate}."))
+                        .collect()
+                }),
+            ));
         }
     }
+    dispatch_service::preflight_dispatch_provider_admission(request, catalog)
+}
 
-    // Pin the resolved backend so the preflight and every child cook use it,
-    // making an otherwise-implicit default visible and consistent.
-    args.backend = Some(effective);
+fn admit_batch_provider_routes(plan: &mut BatchCookFanoutPlan) -> Result<()> {
+    let catalog = AgentTaskProviderCatalog::discover();
+    admit_batch_provider_routes_with_catalog(plan, &catalog)
+}
+
+fn admit_batch_provider_routes_with_catalog(
+    plan: &mut BatchCookFanoutPlan,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<()> {
+    for cook in &mut plan.cooks {
+        let command = fanout_provider_dispatch_command(
+            cook.repo.clone(),
+            cook.backend.clone(),
+            cook.selector.clone(),
+            cook.model.clone(),
+            cook.secret_env.clone(),
+            cook.provider_config.clone(),
+        );
+        let request = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
+            command,
+            provider::default_backend_for_component,
+            catalog,
+        )
+        .map_err(with_provider_admission_remediation)?;
+        validate_provider_route(&request, catalog).map_err(with_provider_admission_remediation)?;
+        cook.backend = Some(request.backend);
+        cook.selector = request.selector;
+        cook.model = request.model;
+    }
     Ok(())
 }
 
@@ -8782,20 +8857,39 @@ fi
         args.dry_run = false;
         args.run_plan = true;
 
-        let error = resolve_and_validate_effective_backend(&mut args)
+        let catalog = AgentTaskProviderCatalog::default();
+        let error = resolve_and_validate_effective_backend_with_catalog(&mut args, &catalog)
             .expect_err("an executing batch with an unresolved backend must fail early");
-        assert_eq!(error.details["field"], "input");
+        assert_eq!(error.details["field"], "backend");
         assert!(
             error.message.contains("codebox-nonexistent")
                 && error.message.contains("no installed provider"),
             "error must name the backend and the missing provider: {}",
             error.message
         );
-        assert!(
-            error.message.contains("--backend"),
-            "error must be actionable: {}",
-            error.message
-        );
+        assert!(error.details["tried"]
+            .as_array()
+            .is_some_and(|tried| !tried.is_empty()));
+    }
+
+    #[test]
+    fn loaded_run_plan_admits_every_child_before_coordination() {
+        let mut plan = test_batch_plan();
+        for cook in &mut plan.cooks {
+            cook.backend = Some("unavailable-loaded-plan-backend".to_string());
+            cook.selector = None;
+            cook.secret_env.clear();
+        }
+
+        let error = admit_batch_provider_routes_with_catalog(
+            &mut plan,
+            &AgentTaskProviderCatalog::default(),
+        )
+        .expect_err("a loaded plan must be admitted before coordinator effects");
+
+        assert_eq!(error.details["field"], "backend");
+        assert_eq!(error.details["id"], "unavailable-loaded-plan-backend");
+        assert_eq!(error.details["_homeboy_actions"][0]["safety"], "read_only");
     }
 
     #[test]
@@ -8805,38 +8899,172 @@ fi
         args.selector = Some("dmc".to_string());
         args.dry_run = false;
         args.run_plan = true;
-        let providers = vec![serde_json::from_value(serde_json::json!({
-            "id": "opencode.agent-task-executor",
-            "backend": "opencode",
-            "extension_id": "opencode.extension",
-            "runtime_id": "opencode-runtime",
-        }))
-        .expect("provider fixture")];
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "opencode.agent-task-executor",
+                "backend": "opencode",
+                "extension_id": "opencode.extension",
+                "runtime_id": "opencode-runtime",
+            }))
+            .expect("provider fixture")],
+            ..AgentTaskProviderCatalog::default()
+        };
 
-        let error = resolve_and_validate_effective_backend_with_providers(&mut args, &providers)
+        let error = resolve_and_validate_effective_backend_with_catalog(&mut args, &catalog)
             .expect_err("an unknown selector must fail early");
 
-        assert!(error.message.contains("backend 'opencode' is installed"));
-        assert!(error.message.contains("--selector 'dmc'"));
-        assert!(error.message.contains("opencode.agent-task-executor"));
-        assert!(error
-            .message
-            .contains("not a worktree or nested runtime provider"));
+        assert_eq!(error.details["field"], "selector");
+        assert_eq!(error.details["id"], "dmc");
+        assert!(error.details["tried"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("opencode.agent-task-executor")));
     }
 
     #[test]
-    fn dry_run_batch_pins_the_backend_without_requiring_a_provider() {
-        // Dry-run/planning must not require an installed provider — it only
-        // builds the plan. The effective backend is still pinned so it is
-        // visible and carried consistently.
-        let mut args = cook_batch_args();
-        args.backend = Some("sandbox".to_string());
-        args.dry_run = true;
-        args.run_plan = false;
+    fn dry_run_and_live_provider_admission_reject_the_same_unavailable_backend() {
+        let catalog = AgentTaskProviderCatalog::default();
+        let mut dry_run = cook_batch_args();
+        dry_run.backend = Some("sandbox".to_string());
+        dry_run.dry_run = true;
+        dry_run.run_plan = false;
+        let mut live = dry_run.clone();
+        live.dry_run = false;
+        live.run_plan = true;
 
-        resolve_and_validate_effective_backend(&mut args)
-            .expect("dry-run planning must not require an installed provider");
-        assert_eq!(args.backend.as_deref(), Some("sandbox"));
+        let dry_error = resolve_and_validate_effective_backend_with_catalog(&mut dry_run, &catalog)
+            .expect_err("dry-run must reject an unavailable backend");
+        let live_error = resolve_and_validate_effective_backend_with_catalog(&mut live, &catalog)
+            .expect_err("live admission must reject an unavailable backend");
+
+        assert_eq!(dry_error.code, live_error.code);
+        assert_eq!(dry_error.message, live_error.message);
+        assert_eq!(dry_error.details, live_error.details);
+        assert_eq!(dry_error.details["field"], "backend");
+        assert!(dry_error.details["tried"].is_array());
+    }
+
+    #[test]
+    fn dry_run_and_live_provider_admission_reject_the_same_unsupported_model() {
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "opencode.agent-task-executor",
+                "backend": "opencode",
+                "cli": {
+                    "profiles": [{ "name": "sol", "model": "openai/gpt-5.6-sol" }]
+                }
+            }))
+            .expect("provider fixture")],
+            ..AgentTaskProviderCatalog::default()
+        };
+        let mut dry_run = cook_batch_args();
+        dry_run.backend = Some("opencode".to_string());
+        dry_run.selector = None;
+        dry_run.model = Some("openai/unsupported".to_string());
+        dry_run.secret_env.clear();
+        dry_run.dry_run = true;
+        dry_run.run_plan = false;
+        let mut live = dry_run.clone();
+        live.dry_run = false;
+        live.run_plan = true;
+
+        let dry_error = resolve_and_validate_effective_backend_with_catalog(&mut dry_run, &catalog)
+            .expect_err("dry-run must reject an unsupported model");
+        let live_error = resolve_and_validate_effective_backend_with_catalog(&mut live, &catalog)
+            .expect_err("live admission must reject an unsupported model");
+
+        assert_eq!(dry_error.code, live_error.code);
+        assert_eq!(dry_error.message, live_error.message);
+        assert_eq!(dry_error.details, live_error.details);
+        assert_eq!(dry_error.details["field"], "model");
+        assert!(dry_error.details["tried"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("openai/gpt-5.6-sol")));
+    }
+
+    #[test]
+    fn dry_run_and_live_provider_admission_reject_the_same_missing_declared_credential() {
+        with_isolated_home(|_| {
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![serde_json::from_value(serde_json::json!({
+                    "id": "opencode.agent-task-executor",
+                    "backend": "opencode"
+                }))
+                .expect("provider fixture")],
+                ..AgentTaskProviderCatalog::default()
+            };
+            let mut dry_run = cook_batch_args();
+            dry_run.backend = Some("opencode".to_string());
+            dry_run.selector = None;
+            dry_run.model = None;
+            dry_run.secret_env = vec!["HOMEBOY_TEST_FANOUT_MISSING_CREDENTIAL_13589".to_string()];
+            dry_run.dry_run = true;
+            dry_run.run_plan = false;
+            let mut live = dry_run.clone();
+            live.dry_run = false;
+            live.run_plan = true;
+
+            let dry_error =
+                resolve_and_validate_effective_backend_with_catalog(&mut dry_run, &catalog)
+                    .expect_err("dry-run must reject a missing declared credential");
+            let live_error =
+                resolve_and_validate_effective_backend_with_catalog(&mut live, &catalog)
+                    .expect_err("live admission must reject a missing declared credential");
+
+            assert_eq!(dry_error.code, live_error.code);
+            assert_eq!(dry_error.message, live_error.message);
+            assert_eq!(dry_error.details, live_error.details);
+            assert_eq!(dry_error.details["field"], "secret_env");
+        });
+    }
+
+    #[test]
+    fn dry_run_and_live_provider_admission_share_typed_missing_default_remediation() {
+        with_isolated_home(|_| {
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![serde_json::from_value(serde_json::json!({
+                    "id": "opencode.agent-task-executor",
+                    "backend": "opencode",
+                    "extension_id": "opencode.extension",
+                    "runtime_id": "opencode-runtime",
+                }))
+                .expect("provider fixture")],
+                ..AgentTaskProviderCatalog::default()
+            };
+            let mut dry_run = cook_batch_args();
+            dry_run.repo = "unregistered-provider-parity".to_string();
+            dry_run.backend = None;
+            dry_run.dry_run = true;
+            dry_run.run_plan = false;
+            let mut live = dry_run.clone();
+            live.dry_run = false;
+            live.run_plan = true;
+
+            let dry_error =
+                resolve_and_validate_effective_backend_with_catalog(&mut dry_run, &catalog)
+                    .expect_err("dry-run must require backend selection");
+            let live_error =
+                resolve_and_validate_effective_backend_with_catalog(&mut live, &catalog)
+                    .expect_err("live admission must require backend selection");
+
+            assert_eq!(dry_error.code, live_error.code);
+            assert_eq!(dry_error.message, live_error.message);
+            assert_eq!(dry_error.details, live_error.details);
+            assert_eq!(dry_error.details["field"], "backend");
+            assert_eq!(dry_error.details["selection_required"], true);
+            assert_eq!(
+                dry_error.details["_homeboy_actions"][0]["program"],
+                "homeboy"
+            );
+            assert_eq!(
+                dry_error.details["_homeboy_actions"][0]["args"],
+                serde_json::json!(["agent-task", "providers", "--validate-readiness"])
+            );
+            assert!(dry_error.details["tried"]
+                .as_array()
+                .is_some_and(|tried| tried
+                    .iter()
+                    .any(|hint| hint.as_str().is_some_and(|hint| hint.contains("--backend")))));
+        });
     }
 
     #[test]
@@ -8848,9 +9076,17 @@ fi
         args.dry_run = true;
         args.run_plan = false;
 
-        resolve_and_validate_effective_backend_with_providers_and_default(
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "component-policy.agent-task-executor",
+                "backend": "component-policy"
+            }))
+            .expect("provider fixture")],
+            ..AgentTaskProviderCatalog::default()
+        };
+        resolve_and_validate_effective_backend_with_catalog_and_default(
             &mut args,
-            &[],
+            &catalog,
             |component| {
                 assert_eq!(component, Some("php-transformer"));
                 Ok(Some("component-policy".to_string()))
