@@ -17784,6 +17784,148 @@ fn empty_intentional_no_change_remediation_preserves_applied_candidate_recovery(
 }
 
 #[test]
+fn interrupted_attempt_does_not_change_the_only_substantive_disclosure() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-11252-interrupted";
+        let first_run_id = cook_id;
+        let second_run_id = "cook-11252-interrupted-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = first_run_id.to_string();
+        options.initial_plan.tasks[0].executor.backend = "second-provider".to_string();
+        options.initial_plan.tasks[0].executor.model = Some("second-model".to_string());
+        options.gates.verify = vec!["cargo test --locked agent_task_promotion --lib".to_string()];
+        persist_initial_recipe(&options).expect("persist interrupted recipe");
+        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &options.initial_plan)
+            .expect("persist substantive retry");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(first_run_id))
+            .expect("materialize interrupted attempt");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(second_run_id))
+            .expect("materialize substantive retry");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            first_run_id,
+        )
+        .expect("index interrupted attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            2,
+            second_run_id,
+        )
+        .expect("index substantive retry");
+        seed_review_form_aggregate(second_run_id, &options.initial_plan);
+
+        let mut backend = CaptureBackend::default();
+        finalize_cook_pr_with_backend(
+            &options,
+            second_run_id,
+            &promotion(second_run_id),
+            &mut backend,
+        )
+        .expect("finalize the only authenticated implementation");
+
+        assert!(
+            backend.body.contains("Homeboy (second-provider)")
+                && backend.body.contains("openai/gpt-5.6-terra"),
+            "{}",
+            backend.body
+        );
+        assert!(
+            backend.body.contains(options.ai_used_for.as_str()),
+            "{}",
+            backend.body
+        );
+        assert!(
+            !backend.body.contains("Implementation 1:"),
+            "{}",
+            backend.body
+        );
+    });
+}
+
+#[test]
+fn substantive_retry_discloses_each_authenticated_contribution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-11252-contributions";
+        let first_run_id = "cook-11252-contributions-attempt-1";
+        let second_run_id = "cook-11252-contributions-attempt-2";
+        let patch_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = first_run_id.to_string();
+        options.initial_plan.tasks[0].executor.backend = "first-provider".to_string();
+        options.initial_plan.tasks[0].executor.model = Some("first-model".to_string());
+        options.gates.verify = vec!["cargo test --locked agent_task_promotion --lib".to_string()];
+        let first_plan = options.initial_plan.clone();
+        persist_initial_recipe(&options).expect("persist contribution recipe");
+
+        let mut second_plan = first_plan.clone();
+        second_plan.tasks[0].executor.backend = "second-provider".to_string();
+        second_plan.tasks[0].executor.model = Some("second-model".to_string());
+        second_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
+            "source_run_id": first_run_id,
+            "source_task_id": first_plan.tasks[0].task_id,
+            "source_patch_artifact_sha256": patch_sha,
+        });
+        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &second_plan)
+            .expect("persist bound substantive retry");
+        agent_task_lifecycle::submit_plan(&first_plan, Some(first_run_id))
+            .expect("materialize first contribution");
+        agent_task_lifecycle::submit_plan(&second_plan, Some(second_run_id))
+            .expect("materialize second contribution");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            first_run_id,
+        )
+        .expect("index first contribution");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            2,
+            second_run_id,
+        )
+        .expect("index second contribution");
+        seed_review_form_aggregate(first_run_id, &first_plan);
+        seed_review_form_aggregate(second_run_id, &second_plan);
+
+        let mut first_promotion = promotion(first_run_id);
+        first_promotion.source.task_id = first_plan.tasks[0].task_id.clone();
+        first_promotion.patch_artifact.sha256 = Some(patch_sha.to_string());
+        agent_task_lifecycle::record_promotion(
+            first_run_id,
+            serde_json::to_value(first_promotion).unwrap(),
+        )
+        .expect("persist authenticated source promotion");
+
+        let mut backend = CaptureBackend::default();
+        finalize_cook_pr_with_backend(
+            &options,
+            second_run_id,
+            &promotion(second_run_id),
+            &mut backend,
+        )
+        .expect("finalize contribution chain");
+
+        for expected in [
+            "Implementation 1: Homeboy (first-provider)",
+            "Implementation 2: Homeboy (second-provider)",
+            "Implementation 1: first-model",
+            "Implementation 2: second-model",
+            "authored an authenticated contribution retained in the delivered candidate",
+        ] {
+            assert!(
+                backend.body.contains(expected),
+                "missing {expected}: {}",
+                backend.body
+            );
+        }
+    });
+}
+
+#[test]
 fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-10980-normal";
