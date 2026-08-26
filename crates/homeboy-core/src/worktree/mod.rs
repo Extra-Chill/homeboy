@@ -59,6 +59,21 @@ pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
 }
 
+pub(crate) fn list_workspace_refs() -> Result<Vec<WorkspaceRefRecord>> {
+    let mut records = list()?
+        .worktrees
+        .into_iter()
+        .map(WorkspaceRefRecord::Task)
+        .collect::<Vec<_>>();
+    records.extend(
+        list_adopted_with_store(&adopted_metadata_dir()?)?
+            .into_iter()
+            .map(WorkspaceRefRecord::Adopted),
+    );
+    records.sort_by(|left, right| left.handle().cmp(right.handle()));
+    Ok(records)
+}
+
 pub fn inventory(
     options: WorktreeInventoryOptions,
     authority: &dyn WorktreeReconciliationAuthority,
@@ -115,7 +130,7 @@ pub fn persist_terminal_workspace_authority(
 pub fn finalize_provider_lifecycle(
     id: &str,
     owner_run_ref: &str,
-    disposition: crate::worktree_providers::WorktreeProviderTerminalDisposition,
+    disposition: crate::worktree_provider::WorktreeTerminalDisposition,
 ) -> Result<TaskWorktreeRecord> {
     with_task_worktree_registry_write_lock(|| {
         let store = metadata_dir()?;
@@ -139,13 +154,12 @@ pub fn finalize_provider_lifecycle(
             }
             return Ok(record);
         }
-        record.cleanup_policy = if disposition
-            == crate::worktree_providers::WorktreeProviderTerminalDisposition::Succeeded
-        {
-            CleanupPolicy::RemoveWhenSafe
-        } else {
-            CleanupPolicy::PreserveOnFailure
-        };
+        record.cleanup_policy =
+            if disposition == crate::worktree_provider::WorktreeTerminalDisposition::Succeeded {
+                CleanupPolicy::RemoveWhenSafe
+            } else {
+                CleanupPolicy::PreserveOnFailure
+            };
         record.terminal_disposition = Some(disposition.as_str().to_string());
         record.lifecycle_revision = record.lifecycle_revision.checked_add(1).ok_or_else(|| {
             Error::validation_invalid_argument(

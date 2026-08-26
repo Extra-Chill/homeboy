@@ -13,9 +13,9 @@ use crate::defaults::HomeboyConfig;
 use crate::error::StorageExhaustedDetails;
 use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
-use crate::worktree_provider::cleanup_configured_worktree_providers_from_config;
-use crate::worktree_providers::{
-    WorktreeProviderCleanupEffects, WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
+use crate::worktree_provider::{
+    cleanup_worktrees_from_config, ConfiguredWorktreeCleanupOutput, WorktreeCleanupEffects,
+    WorktreeCleanupRequest, WorktreeCleanupScope,
 };
 use crate::{git, Error, Result};
 
@@ -386,7 +386,7 @@ pub enum ArtifactCleanupSort {
 pub struct ResourceCleanupOptions {
     pub intent: ResourceCleanupIntent,
     pub artifacts: Option<ArtifactCleanupOptions>,
-    pub worktree_providers: Option<WorktreeProviderCleanupOptions>,
+    pub worktree_providers: Option<WorktreeCleanupRequest>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -404,13 +404,13 @@ pub struct ResourceCleanupOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree_providers: Option<WorktreeProviderCleanupOutput>,
+    pub worktree_providers: Option<ConfiguredWorktreeCleanupOutput>,
     /// Normalized provider effects, projected from the untyped provider
     /// payloads and also summed into the counts above (#9825). `None` when no
     /// provider sweep ran; absent fields inside mean the provider did not
     /// report that effect — never that nothing happened.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree_provider_effects: Option<WorktreeProviderCleanupEffects>,
+    pub worktree_provider_effects: Option<WorktreeCleanupEffects>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1411,10 +1411,9 @@ pub fn cleanup_resources_from_config(
 
     if let Some(mut provider_options) = options.worktree_providers.take() {
         provider_options.apply = apply;
-        providers = Some(cleanup_configured_worktree_providers_from_config(
-            provider_options,
-            &config,
-        )?);
+        provider_options.scope = WorktreeCleanupScope::Configured;
+        let cleanup = cleanup_worktrees_from_config(&provider_options, &config)?;
+        providers = cleanup.configured;
     }
 
     let candidate_count = artifacts
@@ -3217,11 +3216,12 @@ mod tests {
                     min_age_days: None,
                     include_active_worktrees: false,
                 }),
-                worktree_providers: Some(WorktreeProviderCleanupOptions {
-                    provider: vec!["fixture".to_string()],
-                    all_providers: false,
+                worktree_providers: Some(WorktreeCleanupRequest {
+                    providers: vec!["fixture".to_string()],
+                    all_configured_providers: false,
                     apply: true,
                     timeout: None,
+                    ..WorktreeCleanupRequest::default()
                 }),
             },
             config_with_provider(WorktreeProviderConfig {
@@ -3280,11 +3280,12 @@ mod tests {
                     min_age_days: None,
                     include_active_worktrees: false,
                 }),
-                worktree_providers: Some(WorktreeProviderCleanupOptions {
-                    provider: vec!["fixture".to_string()],
-                    all_providers: false,
+                worktree_providers: Some(WorktreeCleanupRequest {
+                    providers: vec!["fixture".to_string()],
+                    all_configured_providers: false,
                     apply: false,
                     timeout: None,
+                    ..WorktreeCleanupRequest::default()
                 }),
             },
             config_with_provider(WorktreeProviderConfig {

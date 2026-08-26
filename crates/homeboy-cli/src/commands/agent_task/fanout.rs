@@ -1710,16 +1710,17 @@ fn finalize_provider_worktrees(
             continue;
         }
         let disposition = if cell.exit_code == 0 {
-            homeboy::core::worktree_providers::WorktreeProviderTerminalDisposition::Succeeded
+            homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded
         } else {
-            homeboy::core::worktree_providers::WorktreeProviderTerminalDisposition::Failed
+            homeboy::core::worktree_provider::WorktreeTerminalDisposition::Failed
         };
         let finalization = homeboy::core::worktree_provider::finalize_worktree_from_config(
             &cook.to_worktree,
-            &homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
+            &homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
                 purpose: "agent_task_cook".to_string(),
                 owner_run_ref: cook.run_id(),
-                cleanup_policy: homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+                cleanup_policy:
+                    homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
             },
             disposition,
             &config,
@@ -2876,10 +2877,10 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                 task_ref: cook.task_url.clone(),
                 run_id: Some(cook.run_id()),
                 provider_lifecycle: provider_workspace_creation.then(|| {
-                    homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
+                    homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
                         purpose: "agent_task_cook".to_string(),
                         owner_run_ref: cook.run_id(),
-                        cleanup_policy: homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+                        cleanup_policy: homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
                     }
                 }),
             }).collect(),
@@ -3220,7 +3221,7 @@ fn with_workspace_owner_repair_commands(
         else {
             continue;
         };
-        let intent = homeboy::core::worktree_providers::WorktreeProviderCreateIntent {
+        let intent = homeboy::core::worktree_provider::WorktreeProvisionIntent {
             handle: row.handle.clone(),
             repo: args.repo.clone(),
             base: cook_batch_from(args).to_string(),
@@ -3230,11 +3231,11 @@ fn with_workspace_owner_repair_commands(
                 .clone()
                 .expect("generated cooks have task URLs"),
         };
-        let lifecycle = homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
+        let lifecycle = homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
             purpose: "agent_task_cook".to_string(),
             owner_run_ref: cook.run_id(),
             cleanup_policy:
-                homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+                homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
         };
         row.command =
             homeboy::core::worktree_provider::configured_worktree_lifecycle_ensure_argv_from_config(

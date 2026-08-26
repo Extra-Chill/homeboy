@@ -420,89 +420,12 @@ pub struct WorktreeProviderSplitResolution {
     pub safety: WorktreeProviderSafetyAttestation,
 }
 
-/// Explicit destination inputs required to create a managed worktree without
-/// inferring repository or branch policy from a product-specific provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeProviderCreateIntent {
-    pub handle: String,
-    pub repo: String,
-    pub base: String,
-    pub head: String,
-    pub task_url: String,
-}
-
-/// Typed lifecycle intent attached to a provider-owned workspace request.
-/// Providers own any product-specific interpretation; Homeboy only preserves
-/// this generic ownership contract through argv substitution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeProviderLifecycleIntent {
-    pub purpose: String,
-    pub owner_run_ref: String,
-    pub cleanup_policy: WorktreeProviderCleanupPolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorktreeProviderCleanupPolicy {
-    RemoveOnSuccess,
-    PreserveOnFailure,
-}
-
-impl WorktreeProviderCleanupPolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::RemoveOnSuccess => "remove_on_success",
-            Self::PreserveOnFailure => "preserve_on_failure",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorktreeProviderTerminalDisposition {
-    Succeeded,
-    Failed,
-    Cancelled,
-    TimedOut,
-    Interrupted,
-}
-
-impl WorktreeProviderTerminalDisposition {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::TimedOut => "timed_out",
-            Self::Interrupted => "interrupted",
-        }
-    }
-
-    pub(crate) fn owner_outcome(self) -> &'static str {
-        match self {
-            Self::Succeeded => "success",
-            Self::Failed | Self::Cancelled | Self::TimedOut | Self::Interrupted => "failure",
-        }
-    }
-
-    pub(crate) fn lifecycle_state(self) -> &'static str {
-        match self {
-            Self::Succeeded => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::TimedOut => "timed_out",
-            Self::Interrupted => "interrupted",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeProviderFinalization {
-    pub provider_id: String,
-    pub handle: String,
-    pub disposition: WorktreeProviderTerminalDisposition,
-    pub owner_outcome: String,
-    pub lifecycle_state: String,
-    pub inspection_path: String,
-}
+pub type WorktreeProviderCreateIntent = crate::worktree_provider::WorktreeProvisionIntent;
+pub type WorktreeProviderLifecycleIntent = crate::worktree_provider::WorktreeProvisionLifecycle;
+pub type WorktreeProviderCleanupPolicy = crate::worktree_provider::WorktreeCleanupPolicy;
+pub type WorktreeProviderTerminalDisposition =
+    crate::worktree_provider::WorktreeTerminalDisposition;
+pub type WorktreeProviderFinalization = crate::worktree_provider::WorktreeFinalization;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeProviderProvision {

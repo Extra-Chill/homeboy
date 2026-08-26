@@ -23,9 +23,11 @@ use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::defaults;
 use homeboy::core::engine::shell::quote_args;
-use homeboy::core::worktree_provider::{self, WorktreeProvisionPlan, WorktreeTaskAttachmentStatus};
-use homeboy::core::worktree_providers::{
-    WorktreeProviderCleanupPolicy, WorktreeProviderCreateIntent, WorktreeProviderLifecycleIntent,
+use homeboy::core::worktree_provider::{
+    self, WorktreeCleanupPolicy as WorktreeProviderCleanupPolicy,
+    WorktreeProvisionIntent as WorktreeProviderCreateIntent,
+    WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent, WorktreeProvisionPlan,
+    WorktreeTaskAttachmentStatus,
 };
 
 use super::super::agent_task_dispatch::DispatchArgs;

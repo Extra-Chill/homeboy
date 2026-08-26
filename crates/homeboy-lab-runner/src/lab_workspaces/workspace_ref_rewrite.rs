@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use homeboy_core::{worktree, Error, Result};
+use homeboy_core::worktree_provider::{self, WorktreeWorkspaceKind};
+use homeboy_core::{Error, Result};
 
 use super::*;
 
@@ -162,7 +163,7 @@ pub(super) fn maybe_resolve_workspace_ref(
     let Some((handle, subpath)) = parse_workspace_ref(value) else {
         return Ok(None);
     };
-    let record = worktree::resolve_workspace_ref(&handle).map_err(|_| {
+    let ownership = worktree_provider::resolve_worktree_ownership(&handle).map_err(|_| {
         Error::validation_invalid_argument(
             "workspace_ref",
             format!("Lab offload workspace ref `{value}` does not match a known workspace handle"),
@@ -172,21 +173,7 @@ pub(super) fn maybe_resolve_workspace_ref(
             ]),
         )
     })?;
-    if record.state() != &TaskWorktreeState::Active {
-        return Err(Error::validation_invalid_argument(
-            "workspace_ref",
-            format!(
-                "Lab offload workspace ref `{value}` points at a stale {}",
-                record.source_kind()
-            ),
-            Some(record.handle().to_string()),
-            Some(vec![
-                "Use an active workspace handle or adopt an existing path before Lab offload."
-                    .to_string(),
-            ]),
-        ));
-    }
-    let workspace_path = PathBuf::from(record.path());
+    let workspace_path = PathBuf::from(&ownership.path);
     let mut resolved = workspace_path.clone();
     if let Some(subpath) = subpath.as_deref() {
         resolved.push(subpath);
@@ -206,8 +193,13 @@ pub(super) fn maybe_resolve_workspace_ref(
         raw_ref: value.to_string(),
         handle,
         subpath,
-        source_kind: record.source_kind().to_string(),
-        source_provenance: record.provenance().cloned(),
+        source_kind: match ownership.kind {
+            WorktreeWorkspaceKind::TaskWorktree => "task_worktree",
+            WorktreeWorkspaceKind::AdoptedWorkspace => "adopted_workspace",
+            WorktreeWorkspaceKind::Configured => "configured_worktree",
+        }
+        .to_string(),
+        source_provenance: ownership.provenance,
         workspace_path,
         resolved_path: resolved.clone(),
     });

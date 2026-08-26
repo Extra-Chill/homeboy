@@ -1017,7 +1017,7 @@ fn unpushed_branch_commit_count(source: &Path, branch: &str, base_ref: &str) -> 
     })
 }
 
-fn list_adopted_with_store(store_dir: &Path) -> Result<Vec<AdoptedWorkspaceRecord>> {
+pub(super) fn list_adopted_with_store(store_dir: &Path) -> Result<Vec<AdoptedWorkspaceRecord>> {
     if !store_dir.exists() {
         return Ok(Vec::new());
     }

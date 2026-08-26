@@ -8,17 +8,15 @@ use homeboy::core::cleanup::{
 };
 use homeboy::core::worktree::{
     self, CleanupPolicy, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions, WorktreeAdoptOutput,
-    WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeListOutput,
-    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
-    WorktreeRemoveOutput, WorktreeStatusOutput,
+    WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeInventoryOptions,
+    WorktreeInventoryOutput, WorktreeListOutput, WorktreeQueueCreateOptions,
+    WorktreeQueueCreateOutput, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 use homeboy::core::worktree_provider::{
-    self, ConfiguredWorktreeCreateEvidence, WorktreeProviderCreateOutput, WorktreeProviderIdentity,
-    WorktreeProviderSafety, WorktreeProviderWorkspace,
-};
-use homeboy::core::worktree_providers::{
-    WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
+    self, ConfiguredWorktreeCleanupOutput as WorktreeProviderCleanupOutput,
+    ConfiguredWorktreeCreateEvidence, WorktreeCleanupRequest, WorktreeCleanupScope,
+    WorktreeProviderCreateOutput, WorktreeProviderIdentity, WorktreeProviderSafety,
+    WorktreeProviderWorkspace, WorktreeStatusEvidence,
 };
 
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
@@ -248,7 +246,8 @@ pub struct ProviderWorktreeOutput {
     pub provider: String,
     pub handle: String,
     pub path: String,
-    pub branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -522,19 +521,14 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             retry_after_seconds,
         })?),
         WorktreeCommand::List => {
-            let native = worktree::list()?;
-            let provider_worktrees = worktree_provider::list_worktree_provider_inventory()?
+            let report = worktree_provider::list_worktrees()?;
+            let provider_worktrees = report
+                .provider_worktrees
                 .into_iter()
-                .filter(|workspace| {
-                    matches!(
-                        &workspace.ownership.provider,
-                        WorktreeProviderIdentity::Configured(_)
-                    )
-                })
                 .map(ProviderWorktreeOutput::from)
                 .collect();
             WorktreeOutput::List(WorktreeListCommandOutput {
-                native,
+                native: report.native,
                 provider_worktrees,
             })
         }
@@ -553,12 +547,14 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             &AgentTaskAuthority(std::sync::Mutex::new(std::collections::HashMap::new())),
         )?),
         WorktreeCommand::Status { id } => {
-            let status = if worktree::resolve_if_present(&id)?.is_some() {
-                WorktreeStatusCommandOutput::Native(worktree::status(&id)?)
-            } else {
-                WorktreeStatusCommandOutput::Provider {
-                    provider_worktree: worktree_provider::observe_worktree_provider_workspace(&id)?
-                        .into(),
+            let status = match worktree_provider::worktree_status(&id)? {
+                WorktreeStatusEvidence::Native(status) => {
+                    WorktreeStatusCommandOutput::Native(status)
+                }
+                WorktreeStatusEvidence::Provider(workspace) => {
+                    WorktreeStatusCommandOutput::Provider {
+                        provider_worktree: workspace.into(),
+                    }
                 }
             };
             WorktreeOutput::Status(status)
@@ -583,24 +579,25 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
         } => {
             let apply = mutation.is_apply();
             let deprecated_dry_run = mutation.dry_run;
-            let dry_run = cleanup_is_dry_run(apply);
-            let worktrees =
-                worktree_provider::cleanup_native_worktree_provider(WorktreeCleanupOptions {
+            let cleanup = worktree_provider::cleanup_worktrees_from_config(
+                &WorktreeCleanupRequest {
+                    scope: WorktreeCleanupScope::All,
+                    providers: Vec::new(),
+                    all_configured_providers: true,
+                    apply,
                     force,
-                    dry_run,
                     cleanup_branches,
                     allow_unmerged_branches,
-                })?;
-            let provider_worktrees =
-                worktree_provider::cleanup_configured_worktree_providers_from_config(
-                    WorktreeProviderCleanupOptions {
-                        provider: Vec::new(),
-                        all_providers: true,
-                        apply,
-                        timeout: None,
-                    },
-                    &homeboy::core::defaults::load_config(),
-                )?;
+                    timeout: None,
+                },
+                &homeboy::core::defaults::load_config(),
+            )?;
+            let worktrees = cleanup
+                .native
+                .expect("all-provider cleanup includes the built-in provider");
+            let provider_worktrees = cleanup
+                .configured
+                .expect("all-provider cleanup includes configured providers");
             exit_code = (provider_worktrees.failure_count > 0) as i32;
             let provider_worktrees =
                 (provider_worktrees.provider_count > 0).then_some(provider_worktrees);
@@ -648,6 +645,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
     Ok((output, exit_code))
 }
 
+#[cfg(test)]
 fn cleanup_is_dry_run(apply: bool) -> bool {
     !apply
 }
@@ -782,8 +780,10 @@ mod tests {
                                 ),
                                 handle: "fixture@branch".to_string(),
                                 path: "/tmp/fixture@branch".to_string(),
-                                branch: "branch".to_string(),
+                                kind: homeboy::core::worktree_provider::WorktreeWorkspaceKind::Configured,
+                                branch: Some("branch".to_string()),
                                 task_url: Some("https://example.test/1".to_string()),
+                                provenance: None,
                             },
                             exact_identity: None,
                         },
@@ -822,7 +822,7 @@ mod tests {
             provider: "fixture-provider".to_string(),
             handle: "fixture@unsafe".to_string(),
             path: "/tmp/fixture@unsafe".to_string(),
-            branch: "unsafe".to_string(),
+            branch: Some("unsafe".to_string()),
             task_url: None,
             repository: None,
             owner_run_ref: None,

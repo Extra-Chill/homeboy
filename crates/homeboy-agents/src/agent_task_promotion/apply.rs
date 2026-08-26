@@ -448,7 +448,7 @@ impl ExternalPromotionWorkspaceProvider {
             .trusted_unpushed_candidate_destination
             .as_ref()
             .map(
-                |trusted| homeboy_core::worktree_providers::TrustedUnpushedWorktree {
+                |trusted| homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
                     path: trusted.path.clone(),
                     head: trusted.head.clone(),
                 },
