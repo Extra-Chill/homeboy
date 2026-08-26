@@ -12,7 +12,7 @@ use crate::agent_task::{
     AGENT_TOOL_RESULT_SCHEMA,
 };
 use homeboy_core::stream_capture::StreamCaptureMetadata;
-use homeboy_core::{git, worktree};
+use homeboy_core::{git, worktree, worktree_provider};
 
 pub const AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA: &str = "homeboy/agent-tool-dispatch-evidence/v1";
 
@@ -720,16 +720,14 @@ mod workspace_paths {
     }
 
     pub(crate) fn latest_active_worktree_path(component_id: &str) -> Option<String> {
-        worktree::list()
+        worktree_provider::list_worktree_provider_inventory()
             .ok()?
-            .worktrees
             .into_iter()
-            .filter(|record| {
-                record.component_id == component_id
-                    && record.state == worktree::TaskWorktreeState::Active
+            .filter(|workspace| {
+                workspace.repository.as_deref() == Some(component_id) && !workspace.safety.missing
             })
             .max_by(|left, right| left.created_at.cmp(&right.created_at))
-            .map(|record| record.worktree_path)
+            .map(|workspace| workspace.ownership.path)
     }
 
     pub(crate) fn workspace_file_path(

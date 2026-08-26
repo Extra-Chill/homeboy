@@ -3258,10 +3258,10 @@ fn configured_provider_workspace_creation() -> Result<bool> {
 }
 
 fn active_registered_worktree_path(handle: &str) -> Option<String> {
-    if let Ok(status) = worktree::status(handle) {
-        return (status.record.state == worktree::TaskWorktreeState::Active
-            && !status.safety.worktree_missing)
-            .then_some(status.record.worktree_path);
+    if let Ok(workspace) =
+        homeboy::core::worktree_provider::observe_worktree_provider_workspace(handle)
+    {
+        return (!workspace.safety.missing).then_some(workspace.ownership.path);
     }
     match worktree::resolve_workspace_ref_if_present(handle)
         .ok()
