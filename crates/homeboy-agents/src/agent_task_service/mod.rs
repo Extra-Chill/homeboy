@@ -31,6 +31,8 @@ pub mod process_activity;
 mod promotion_service;
 mod reconcile;
 mod status_support;
+/// Shared daemon lifecycle for newly submitted orchestration work.
+mod work_job;
 
 pub use cook::*;
 pub use cook_activity::{CookActivityProbe, CookProviderActivity};
@@ -51,6 +53,7 @@ pub use execution::*;
 pub use promotion_service::*;
 pub use reconcile::*;
 pub use status_support::*;
+pub use work_job::*;
 
 #[cfg(test)]
 mod tests;

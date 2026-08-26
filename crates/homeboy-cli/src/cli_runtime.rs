@@ -457,6 +457,10 @@ fn register_startup_providers_after_reconcile(
     crate::agents::agent_task_service::register_orchestration_driver();
     crate::commands::route::register_unmaterialized_cook_replay_driver();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
+    // New orchestration submissions share one versioned lifecycle driver. The
+    // domain registrations below also retain their v1 recovery adapters for
+    // persisted jobs admitted before the migration.
+    crate::agents::agent_task_service::register_work_job_driver();
     // A locally-placed detached Cook is a daemon-owned durable job: the daemon
     // owns its record, checkpointing, cancellation and HTTP inspection, while
     // the launcher-spawned child keeps the operator's execution environment.
