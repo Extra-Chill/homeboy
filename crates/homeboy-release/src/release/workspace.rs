@@ -53,8 +53,6 @@ impl ReleaseWorkspace {
 
         let config = defaults::load_config();
         let source_sha = verified_remote_default_sha(component)?;
-        let default_branch = git::default_branch_name(Path::new(&component.local_path))
-            .unwrap_or_else(|| "main".to_string());
         let owner_run_ref = format!("release/{}", Uuid::new_v4());
         let lifecycle = WorktreeProviderLifecycleIntent {
             purpose: "release_staging".to_string(),
@@ -63,10 +61,10 @@ impl ReleaseWorkspace {
         };
         let handle = format!("release-{}-{}", component.id, &source_sha[..12]);
         let mut intent = WorktreeProviderCreateIntent {
-            handle,
+            handle: handle.clone(),
             repo: component.id.clone(),
-            base: default_branch,
-            head: source_sha.clone(),
+            base: source_sha.clone(),
+            head: handle,
             task_url: owner_run_ref,
         };
         let planned =
@@ -704,6 +702,116 @@ mod tests {
             assert_eq!(
                 git::status_porcelain(Path::new(&workspace.component.local_path)).as_deref(),
                 Some("")
+            );
+        });
+    }
+
+    #[test]
+    fn detached_tag_checkout_stages_from_verified_remote_default_sha() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let remote = home.path().join("origin.git");
+            let source = home.path().join("source");
+            std::fs::create_dir(&source).expect("source checkout");
+            assert!(Command::new("git")
+                .args(["init", "--bare", remote.to_str().expect("remote path")])
+                .status()
+                .expect("bare remote")
+                .success());
+            for args in [
+                vec!["init", "--quiet", "--initial-branch", "main"],
+                vec!["config", "user.email", "test@example.invalid"],
+                vec!["config", "user.name", "Homeboy Test"],
+                vec![
+                    "remote",
+                    "add",
+                    "origin",
+                    remote.to_str().expect("remote path"),
+                ],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git")
+                    .success());
+            }
+            std::fs::write(source.join("README.md"), "tagged\n").expect("source file");
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "tagged"],
+                vec!["tag", "v1.0.0"],
+                vec!["push", "-u", "origin", "main", "--tags"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git")
+                    .success());
+            }
+            std::fs::write(source.join("README.md"), "advanced\n").expect("advanced file");
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "advance main"],
+                vec!["push", "origin", "main"],
+                vec!["checkout", "--quiet", "--detach", "v1.0.0"],
+                vec!["branch", "-D", "main"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git")
+                    .success());
+            }
+            let remote_main = git::run_git(
+                &source,
+                &["rev-parse", "origin/main"],
+                "resolve remote main",
+            )
+            .expect("remote main")
+            .trim()
+            .to_string();
+            assert_ne!(
+                git::head_sha(&source).as_deref(),
+                Some(remote_main.as_str())
+            );
+
+            let components = home.path().join(".config/homeboy/components");
+            std::fs::create_dir_all(&components).expect("component registry");
+            std::fs::write(
+                components.join("fixture.json"),
+                serde_json::json!({
+                    "id": "fixture",
+                    "local_path": source,
+                    "remote_path": "fixture"
+                })
+                .to_string(),
+            )
+            .expect("component registration");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: source.display().to_string(),
+                remote_path: "fixture".to_string(),
+                remote_url: Some(remote.display().to_string()),
+                ..Default::default()
+            };
+
+            let workspace = ReleaseWorkspace::select(&test_roots(), &component)
+                .expect("detached release staging");
+
+            assert_eq!(workspace.output.kind, "provider_owned");
+            assert_eq!(
+                workspace.output.source_sha.as_deref(),
+                Some(remote_main.as_str())
+            );
+            assert_eq!(
+                git::head_sha(Path::new(&workspace.component.local_path)).as_deref(),
+                Some(remote_main.as_str())
+            );
+            assert!(
+                git::current_branch(Path::new(&workspace.component.local_path))
+                    .is_some_and(|branch| branch.starts_with("release-fixture-"))
             );
         });
     }
