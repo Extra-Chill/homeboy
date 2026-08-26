@@ -72,6 +72,24 @@ FIRST_RESULTS='' COMMANDS='review audit,review test' HOMEBOY_SETUP_RESULT_FILE="
 assert_equals '{"review audit":"not_run","review test":"not_run","setup":"fail"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "setup failure preserves ownership and marks commands not_run"
 grep -Fq 'Homeboy extension setup failed during install Homeboy extension' "${TMP_DIR}/setup-selection.log" || { printf 'FAIL: setup reconciliation omitted the owning subsystem\n'; exit 1; }
 
+# A run superseded by a newer push writes no setup result and has no verdict.
+# Fabricating `fail` for every expected command made that indistinguishable from
+# a real failure -- a red gate naming no rule and producing no findings.
+: > "${TMP_DIR}/output"
+rm -f "${TMP_DIR}/cancel-setup.json"
+FIRST_RESULTS='' COMMANDS='review audit,review test' HOMEBOY_RUN_CANCELLED=true \
+  HOMEBOY_SETUP_RESULT_FILE="${TMP_DIR}/cancel-setup.json" GITHUB_OUTPUT="${TMP_DIR}/output" \
+  GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >"${TMP_DIR}/cancelled.log"
+assert_equals '{"review audit":"not_run","review test":"not_run"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "a cancelled run marks commands not_run instead of fail"
+grep -Fq 'not reporting cancellation as command failure' "${TMP_DIR}/cancelled.log" || { printf 'FAIL: cancelled selection did not say why\n'; exit 1; }
+
+# A cancellation must not mask a setup failure that already wrote its evidence.
+: > "${TMP_DIR}/output"
+FIRST_RESULTS='' COMMANDS='review audit,review test' HOMEBOY_RUN_CANCELLED=true \
+  HOMEBOY_SETUP_RESULT_FILE="${TMP_DIR}/setup.json" GITHUB_OUTPUT="${TMP_DIR}/output" \
+  GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
+assert_equals '{"review audit":"not_run","review test":"not_run","setup":"fail"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "recorded setup failure still wins over cancellation"
+
 : > "${TMP_DIR}/output"
 FIRST_RESULTS='{"review test":"pass"}' COMMANDS='review test' GITHUB_OUTPUT="${TMP_DIR}/output" \
   GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
