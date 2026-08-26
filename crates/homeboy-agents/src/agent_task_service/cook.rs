@@ -4029,10 +4029,15 @@ pub fn preflight_cook_continuation_admission(options: &AgentTaskCookServiceOptio
         });
         return Err(error);
     }
-    // Continuation can lead directly to promotion/finalization. Apply the same
-    // durable model-provenance boundary after terminal-form eligibility so
-    // preflight reports the same first authoritative denial as execution.
-    super::cook_promotion::validate_cook_attempt_model_provenance(&options.initial_run_id)?;
+    // Attempts that can bypass provider execution need durable model evidence
+    // before they can reach promotion or finalization. A retryable
+    // pre-execution failure has no executed model yet by definition.
+    if record
+        .as_ref()
+        .is_none_or(cook_continuation_requires_model_provenance)
+    {
+        super::cook_promotion::validate_cook_attempt_model_provenance(&options.initial_run_id)?;
+    }
     let authenticated_historical_review_continuation =
         authenticated_historical_review_form_workspace_with_trace(options, false)?;
     if review_form_continuation && !authenticated_historical_review_continuation {
@@ -6689,6 +6694,12 @@ fn cook_attempt_needs_execution(run_id: &str) -> bool {
     agent_task_lifecycle::status(run_id)
         .map(|record| cook_run_record_needs_execution(&record))
         .unwrap_or(true)
+}
+
+pub fn cook_continuation_requires_model_provenance(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    !cook_run_record_needs_execution(record)
 }
 
 fn cook_attempt_needs_execution_with_store(
