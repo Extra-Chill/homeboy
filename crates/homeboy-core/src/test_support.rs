@@ -20,8 +20,6 @@ const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
 /// cancelled, so a daemon must not create a detached session that escapes it.
 pub const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
 
-static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
-static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
 #[cfg(unix)]
 static SHARED_CONTROLLER_RUNTIME_VERSION_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
@@ -1395,57 +1393,25 @@ pub fn write_source_extension(home: &std::path::Path, id: &str, file_extension: 
 }
 
 pub fn shared_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
-    shared_git_repo_fixture_from_template(name, shared_empty_git_repo_template())
+    git_repo_fixture(name, false)
 }
 
 pub fn shared_committed_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
-    shared_git_repo_fixture_from_template(name, shared_committed_git_repo_template())
+    git_repo_fixture(name, true)
 }
 
-fn shared_git_repo_fixture_from_template(name: &str, template: &Path) -> (TempDir, PathBuf) {
+fn git_repo_fixture(name: &str, committed: bool) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("git fixture tempdir");
     let repo = temp.path().join(name);
-    copy_dir_all(template, &repo).expect("copy git fixture template");
-    (temp, repo)
-}
-
-fn shared_empty_git_repo_template() -> &'static Path {
-    SHARED_EMPTY_GIT_REPO_TEMPLATE
-        .get_or_init(|| {
-            let temp = TempDir::new().expect("git template tempdir");
-            run_git_template_command(temp.path(), &["init", "-q"]);
-            temp
-        })
-        .path()
-}
-
-fn shared_committed_git_repo_template() -> &'static Path {
-    SHARED_COMMITTED_GIT_REPO_TEMPLATE
-        .get_or_init(|| {
-            let temp = TempDir::new().expect("committed git template tempdir");
-            run_git_template_command(temp.path(), &["init", "-q"]);
-            std::fs::write(temp.path().join("README.md"), "# homeboy test fixture\n")
-                .expect("git template readme");
-            run_git_template_command(temp.path(), &["add", "README.md"]);
-            run_git_template_command(temp.path(), &["commit", "-q", "-m", "test fixture"]);
-            temp
-        })
-        .path()
-}
-
-fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let target = to.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_all(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target)?;
-        }
+    std::fs::create_dir_all(&repo).expect("git fixture repo");
+    run_git_template_command(&repo, &["init", "-q", "-b", "main"]);
+    if committed {
+        std::fs::write(repo.join("README.md"), "# homeboy test fixture\n")
+            .expect("git fixture readme");
+        run_git_template_command(&repo, &["add", "README.md"]);
+        run_git_template_command(&repo, &["commit", "-q", "-m", "test fixture"]);
     }
-    Ok(())
+    (temp, repo)
 }
 
 pub fn run_git_fixture_command(repo: &Path, args: &[&str]) {

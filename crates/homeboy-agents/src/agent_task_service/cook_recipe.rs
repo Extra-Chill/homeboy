@@ -1828,10 +1828,31 @@ pub fn reconstruct_options_with_dispatcher(
 /// Reconstruct immutable Cook inputs for a lifecycle-validated local placement
 /// transition. The caller proves the transition against the durable run record;
 /// this only relaxes reconstruction of the superseded Lab transport.
-pub(crate) fn reconstruct_options_with_local_placement_override(
+pub fn reconstruct_options_with_local_placement_override(
     recipe: &AgentTaskCookRecipe,
 ) -> Result<AgentTaskCookServiceOptions> {
     reconstruct_recipe_options(recipe, None, true, false)
+}
+
+/// Reconstruct an attempt that failed before any provider execution. There is
+/// no executed provider behavior to preserve, so a current controller may
+/// replace the stale runtime and local dispatcher under continuation admission.
+pub fn reconstruct_options_for_pre_execution_recovery(
+    recipe: &AgentTaskCookRecipe,
+) -> Result<AgentTaskCookServiceOptions> {
+    reconstruct_recipe_options(recipe, None, false, false)
+}
+
+/// Whether an attempt that never reached provider execution may be rebuilt by
+/// the current controller without replaying a historical external transport.
+pub fn local_pre_execution_runtime_recovery_is_eligible(
+    recipe: &AgentTaskCookRecipe,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    explicit_local_override: bool,
+) -> bool {
+    super::cook_pre_execution::retryable_pre_execution_failure(record)
+        && (explicit_local_override
+            || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local"))
 }
 
 /// Reconstruct the policy used to adopt an already-prepared candidate. Adoption

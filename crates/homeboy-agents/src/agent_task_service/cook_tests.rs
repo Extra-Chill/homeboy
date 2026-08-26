@@ -10539,6 +10539,26 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
 }
 
 #[test]
+fn existing_recipe_pre_execution_recovery_does_not_reapply_runtime_pin() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-pre-execution-runtime-recovery";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        super::super::persist_initial_recipe(&options).expect("persist current recipe");
+        let mut recipe = super::super::load_recipe(cook_id).expect("load recipe");
+        recipe.runtime_generation = "homeboy 0.1.0+historical".to_string();
+
+        let strict = reconstruct_existing_cook_options(&recipe, None, false, false, false)
+            .expect_err("ordinary continuation retains runtime pinning");
+        assert!(strict.message.contains("pinned to Homeboy runtime"));
+
+        let recovered = reconstruct_existing_cook_options(&recipe, None, false, true, false)
+            .expect("pre-execution continuation uses the current runtime");
+        assert_eq!(recovered.initial_run_id, options.initial_run_id);
+        assert!(recovered.attempt_dispatcher.is_none());
+    });
+}
+
+#[test]
 fn cook_persists_materialization_failure_without_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temp source root");

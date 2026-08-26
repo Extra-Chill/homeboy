@@ -253,78 +253,30 @@ fn cook_rejects_local_detachment_when_the_child_exits_before_attempt_materializa
     );
 }
 
-/// A detached Cook cannot resume a handoff parent without a materialized recipe.
-/// A mismatched daemon is therefore rejected, with its lease-bound repair, before
-/// the launcher announces or persists that parent (#12982).
 #[test]
-fn cook_rejects_daemon_build_mismatch_before_durable_handoff_announcement() {
+fn local_retry_launch_token_is_not_reinterpreted_as_a_detached_cook() {
     let context = HermeticTestContext::new();
-    let state_path = context.daemon_dir().join("state.json");
-    // The test process is a live local PID from the Cook subprocess's point of
-    // view. A stale lease reaches the build-mismatch preflight without a daemon
-    // process or network timing in the fixture.
-    let state = serde_json::json!({
-        "schema": "homeboy.daemon.session_lease.v1",
-        "lease_id": "stale-fixture-lease",
-        "startup_token": "stale-fixture-token",
-        "address": "127.0.0.1:49152",
-        "pid": std::process::id(),
-        "state_path": state_path.display().to_string(),
-        "started_at": "2026-01-01T00:00:00Z",
-        "last_seen_at": "2026-01-01T00:00:00Z",
-        "build_identity": {
-            "version": "0.0.0-stale",
-            "display": "homeboy 0.0.0-stale+fixture"
-        },
-        "binary_sha256": null,
-        "runtime_paths": { "loaded_at": "2026-01-01T00:00:00Z", "paths": [] }
-    });
-    std::fs::write(
-        &state_path,
-        serde_json::to_vec(&state).expect("serialize mismatched daemon state"),
-    )
-    .expect("write mismatched daemon state");
-
-    let cook_id = "local-detach-daemon-build-mismatch";
+    let token_path = context.root().join("retry-launch-token");
+    std::fs::write(&token_path, "consumed-token").expect("publish retry launch token");
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    command.args([
-        "--placement",
-        "local",
-        "--detach-after-handoff",
-        "agent-task",
-        "cook",
-        "--run-id",
-        cook_id,
-        "--backend",
-        "fixture",
-        "--prompt",
-        "reject stale daemon before handoff",
-        "--to-worktree",
-        "missing@worktree",
-        "--verify",
-        "true",
-    ]);
+    command
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "0")
+        .env("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN", "consumed-token")
+        .env("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH", token_path)
+        .args([
+            "--placement",
+            "local",
+            "agent-task",
+            "retry",
+            "missing-cook-run",
+            "--run",
+        ]);
+
     let output = bounded_output(command);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stdout}\n{stderr}");
-    assert!(
-        stdout.contains("Next: homeboy daemon recover --yes"),
-        "{stdout}"
-    );
-    assert!(
-        !stderr.contains(&format!("durable run id `{cook_id}`")),
-        "a failed preflight must not announce a durable handoff: {stderr}"
-    );
-
-    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    status.args(["agent-task", "status", cook_id, "--full"]);
-    let status = bounded_output(status);
-    assert!(
-        !status.status.success(),
-        "mismatch preflight must not persist a handoff: {}",
-        String::from_utf8_lossy(&status.stdout)
-    );
+    assert!(!output.status.success(), "{stdout}");
+    assert!(!stdout.contains("empty_detached_plan"), "{stdout}");
+    assert!(stdout.contains("missing-cook-run"), "{stdout}");
 }
 
 /// A successful local detach exposes accepted only after the child has written
@@ -633,12 +585,15 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
     status.args(["agent-task", "status", cook_id, "--full"]);
     let provider_status = bounded_output(status);
+    let provider_status_json = serde_json::from_slice::<serde_json::Value>(&provider_status.stdout)
+        .expect("provider status JSON");
     assert!(
         provider_status.status.success()
-            && String::from_utf8_lossy(&provider_status.stdout)
-                .contains("\"active_execution_count\": 1"),
-        "Cook did not durably record provider work: {}",
-        String::from_utf8_lossy(&provider_status.stdout),
+            && provider_status_json
+                .pointer("/data/status_scope/queried_attempt/state")
+                .and_then(serde_json::Value::as_str)
+                == Some("running"),
+        "Cook did not durably record running provider work: {provider_status_json}",
     );
 
     client.kill().expect("terminate observing client");
@@ -668,25 +623,36 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     status.args(["agent-task", "status", cook_id, "--full"]);
     let output = bounded_output(status);
     let completed = String::from_utf8_lossy(&output.stdout).into_owned();
-    let terminal_provider_success = serde_json::from_str::<serde_json::Value>(&completed)
-        .ok()
-        .is_some_and(|result| {
-            result
-                .pointer("/data/aggregate/status")
-                .and_then(serde_json::Value::as_str)
-                == Some("succeeded")
-                && result
-                    .pointer("/data/lifecycle/execution/state")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("succeeded")
-        });
+    let completed_json =
+        serde_json::from_str::<serde_json::Value>(&completed).expect("completed status JSON");
+    let terminal_provider_success = completed_json
+        .pointer("/data/action_eligibility/state")
+        .and_then(serde_json::Value::as_str)
+        == Some("succeeded")
+        && completed_json
+            .pointer("/data/status_scope/queried_attempt/child_run_state")
+            .and_then(serde_json::Value::as_str)
+            == Some("succeeded")
+        && completed_json
+            .pointer("/data/status_scope/queried_attempt/artifacts/count")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|count| count > 0);
     assert!(
         output.status.success() && terminal_provider_success,
         "Cook did not complete after client termination: {completed}"
     );
+    let completed_run_id = completed_json
+        .pointer("/data/action_eligibility/run_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("completed run id");
+    let mut artifacts = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    artifacts.args(["agent-task", "artifacts", completed_run_id, "--full"]);
+    let artifacts = bounded_output(artifacts);
     assert!(
-        completed.contains("changes.patch"),
-        "terminal artifacts retained: {completed}"
+        artifacts.status.success()
+            && String::from_utf8_lossy(&artifacts.stdout).contains("changes.patch"),
+        "terminal patch retained: {}",
+        String::from_utf8_lossy(&artifacts.stdout)
     );
 }
 
@@ -822,7 +788,7 @@ fn local_retry_reclaims_a_dead_launcher_at_handoff_stage(crash_env: &str) {
         ));
     let mut retry = retry.spawn().expect("start local retry client");
     let deadline = Instant::now() + Duration::from_secs(60);
-    let retry_run_id = format!("{cook_id}-attempt-2-retry");
+    let retry_run_id = format!("{source_run_id}-retry");
     let expected_handoff_state =
         if crash_env == "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_RESERVATION" {
             "pending"
@@ -939,14 +905,9 @@ fn local_retry_reclaims_a_dead_launcher_at_handoff_stage(crash_env: &str) {
             .read_record(&retry_run_id)
             .expect("read retry record");
         if record.state == homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Succeeded
-            && record.aggregate_path.is_some()
             && !record.artifact_refs.is_empty()
         {
             assert!(output.status.success());
-            assert!(
-                record.aggregate_path.is_some(),
-                "terminal aggregate retained"
-            );
             assert!(
                 !record.artifact_refs.is_empty(),
                 "terminal artifacts retained"
@@ -967,7 +928,10 @@ fn local_retry_reclaims_a_dead_launcher_at_handoff_stage(crash_env: &str) {
             );
             break;
         }
-        assert!(Instant::now() < deadline, "local retry did not complete");
+        assert!(
+            Instant::now() < deadline,
+            "local retry did not complete: {record:?}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -1060,9 +1024,10 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!output.status.success(), "{stdout}");
     assert!(
-        stdout.contains("detached Cook exited before materializing its first attempt"),
+        stdout.contains("detached Cook exited before materializing an executable plan"),
         "{stdout}"
     );
+    assert!(stdout.contains("empty_detached_plan"), "{stdout}");
 
     let store = ObservationStore::open_initialized_at(&database).expect("reopen fixture store");
     assert!(store

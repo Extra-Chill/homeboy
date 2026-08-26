@@ -400,7 +400,11 @@ pub fn submit_plan_in_store(
             homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
                 &runtime_root,
                 run_id,
-                || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+                || {
+                    Ok(crate::agent_task_service::cook_pre_execution::runtime_admission_cancellation_requested(
+                        &lifecycle_store.read_record(run_id)?,
+                    ))
+                },
             )
         },
     )

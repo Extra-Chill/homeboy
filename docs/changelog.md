@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.5] - 2026-08-25
+
+### Fixed
+- consume isolated test sidecars
+- exclude environments from process status
+- adopt clean unpushed cwd candidates
+
+## [0.361.4] - 2026-08-25
+
+### Fixed
+- stream local setup progress
+- reject empty detached handoffs
+- recover idle stale daemon
+- name the inventory rejection that invalidated runtime evidence
+
 ## [0.361.3] - 2026-08-25
 
 ### Fixed
