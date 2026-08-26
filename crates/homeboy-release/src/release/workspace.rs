@@ -39,9 +39,10 @@ impl ReleaseWorkspace {
     pub(super) fn select(
         roots: &homeboy_core::paths::PathRoots,
         component: &Component,
+        head_release: bool,
     ) -> Result<Self> {
         let store = OperationRecordStore::in_roots(roots);
-        if in_place_eligible(component) {
+        if in_place_eligible(component, head_release) {
             return Ok(Self {
                 component: component.clone(),
                 output: ReleaseWorkspaceOutput::in_place(&component.local_path),
@@ -53,8 +54,6 @@ impl ReleaseWorkspace {
 
         let config = defaults::load_config();
         let source_sha = verified_remote_default_sha(component)?;
-        let default_branch = git::default_branch_name(Path::new(&component.local_path))
-            .unwrap_or_else(|| "main".to_string());
         let owner_run_ref = format!("release/{}", Uuid::new_v4());
         let lifecycle = WorktreeProviderLifecycleIntent {
             purpose: "release_staging".to_string(),
@@ -63,10 +62,10 @@ impl ReleaseWorkspace {
         };
         let handle = format!("release-{}-{}", component.id, &source_sha[..12]);
         let mut intent = WorktreeProviderCreateIntent {
-            handle,
+            handle: handle.clone(),
             repo: component.id.clone(),
-            base: default_branch,
-            head: source_sha.clone(),
+            base: source_sha.clone(),
+            head: handle,
             task_url: owner_run_ref,
         };
         let planned =
@@ -484,16 +483,19 @@ fn finalize_record(
     }
 }
 
-fn in_place_eligible(component: &Component) -> bool {
+fn in_place_eligible(component: &Component, head_release: bool) -> bool {
     let path = Path::new(&component.local_path);
-    if !git::is_git_repo(&component.local_path)
-        || git::status_porcelain(path).as_deref() != Some("")
-    {
+    if !git::is_git_repo(&component.local_path) {
         return false;
     }
-    let Some(branch) = git::current_branch(path) else {
+    if head_release {
+        return git::head_sha(path).is_some();
+    }
+    if git::status_porcelain(path).as_deref() != Some("") {
         return false;
-    };
+    }
+    let branch = git::current_branch(path);
+    let Some(branch) = branch else { return false };
     let default_branch = git::default_branch_name(path).unwrap_or_else(|| "main".to_string());
     if branch != default_branch {
         return false;
@@ -623,9 +625,9 @@ mod tests {
             local_path: path.to_string_lossy().to_string(),
             ..Default::default()
         };
-        assert!(in_place_eligible(&component));
+        assert!(in_place_eligible(&component, false));
         std::fs::write(path.join("README.md"), "dirty\n").expect("dirty");
-        assert!(!in_place_eligible(&component));
+        assert!(!in_place_eligible(&component, false));
     }
 
     #[test]
@@ -691,7 +693,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let workspace = ReleaseWorkspace::select(&test_roots(), &component)
+            let workspace = ReleaseWorkspace::select(&test_roots(), &component, false)
                 .expect("built-in provider staging");
 
             assert_eq!(workspace.output.kind, "provider_owned");
@@ -704,6 +706,133 @@ mod tests {
             assert_eq!(
                 git::status_porcelain(Path::new(&workspace.component.local_path)).as_deref(),
                 Some("")
+            );
+        });
+    }
+
+    #[test]
+    fn detached_tag_checkout_preserves_head_release_source_authority() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let remote = home.path().join("origin.git");
+            let source = home.path().join("source");
+            std::fs::create_dir(&source).expect("source checkout");
+            assert!(Command::new("git")
+                .args(["init", "--bare", remote.to_str().expect("remote path")])
+                .status()
+                .expect("bare remote")
+                .success());
+            for args in [
+                vec!["init", "--quiet", "--initial-branch", "main"],
+                vec!["config", "user.email", "test@example.invalid"],
+                vec!["config", "user.name", "Homeboy Test"],
+                vec![
+                    "remote",
+                    "add",
+                    "origin",
+                    remote.to_str().expect("remote path"),
+                ],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git")
+                    .success());
+            }
+            std::fs::write(source.join("README.md"), "tagged\n").expect("source file");
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "tagged"],
+                vec!["tag", "v1.0.0"],
+                vec!["push", "-u", "origin", "main", "--tags"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git")
+                    .success());
+            }
+            std::fs::write(source.join("README.md"), "advanced\n").expect("advanced file");
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "advance main"],
+                vec!["push", "origin", "main"],
+                vec!["checkout", "--quiet", "--detach", "v1.0.0"],
+                vec!["branch", "-D", "main"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git")
+                    .success());
+            }
+            let remote_main = git::run_git(
+                &source,
+                &["rev-parse", "origin/main"],
+                "resolve remote main",
+            )
+            .expect("remote main")
+            .trim()
+            .to_string();
+            assert_ne!(
+                git::head_sha(&source).as_deref(),
+                Some(remote_main.as_str())
+            );
+            std::fs::write(
+                source.join("release-notes.md"),
+                "persisted recovery notes\n",
+            )
+            .expect("recovery notes");
+            assert_ne!(git::status_porcelain(&source).as_deref(), Some(""));
+
+            let components = home.path().join(".config/homeboy/components");
+            std::fs::create_dir_all(&components).expect("component registry");
+            std::fs::write(
+                components.join("fixture.json"),
+                serde_json::json!({
+                    "id": "fixture",
+                    "local_path": source,
+                    "remote_path": "fixture"
+                })
+                .to_string(),
+            )
+            .expect("component registration");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: source.display().to_string(),
+                remote_path: "fixture".to_string(),
+                remote_url: Some(remote.display().to_string()),
+                ..Default::default()
+            };
+
+            let tagged_sha = git::head_sha(&source).expect("tagged head");
+            let head_workspace = ReleaseWorkspace::select(&test_roots(), &component, true)
+                .expect("detached head release");
+
+            assert_eq!(head_workspace.output.kind, "in_place");
+            assert_eq!(head_workspace.component.local_path, component.local_path);
+            assert_eq!(
+                git::head_sha(Path::new(&head_workspace.component.local_path)).as_deref(),
+                Some(tagged_sha.as_str())
+            );
+
+            let workspace = ReleaseWorkspace::select(&test_roots(), &component, false)
+                .expect("detached normal release staging");
+
+            assert_eq!(workspace.output.kind, "provider_owned");
+            assert_eq!(
+                workspace.output.source_sha.as_deref(),
+                Some(remote_main.as_str())
+            );
+            assert_eq!(
+                git::head_sha(Path::new(&workspace.component.local_path)).as_deref(),
+                Some(remote_main.as_str())
+            );
+            assert!(
+                git::current_branch(Path::new(&workspace.component.local_path))
+                    .is_some_and(|branch| branch.starts_with("release-fixture-"))
             );
         });
     }
