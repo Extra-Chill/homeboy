@@ -17,7 +17,7 @@ case "$*" in
     printf '%s\n' '## Failure Digest'
     ;;
   *"runs findings reconcile"*)
-    printf '%s\n' '{"data":{"plan_lines":["file lint finding"],"result":{"executions":[{"outcome":{"outcome":"filed"}}]}}}'
+    printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"runs","operation":"findings reconcile","success":true,"exit_code":0,"status":"succeeded","data":{"variant":"findings_reconcile","payload":{"plan_lines":["file lint finding"],"result":{"executions":[{"outcome":{"outcome":"filed"}}]}}}}'
     ;;
   *"review lint"*)
     while [ "$#" -gt 0 ]; do
@@ -85,6 +85,7 @@ GITHUB_RUN_ID='1' \
 bash "${ROOT_DIR}/scripts/issues/auto-file-categorized-issues.sh" > "${TMP_DIR}/categorize.log" 2>&1
 grep -F "Source: ${RESULTS_DIR}/review-lint.json" "${TMP_DIR}/categorize.log" >/dev/null
 grep -F 'file lint finding' "${TMP_DIR}/categorize.log" >/dev/null
+grep -F 'Issues created: 1' "${TMP_DIR}/categorize.log" >/dev/null
 if grep -Fq 'without producing structured output' "${TMP_DIR}/categorize.log"; then
   printf 'FAIL: categorizer treated the failed lint envelope as missing\n'
   exit 1
