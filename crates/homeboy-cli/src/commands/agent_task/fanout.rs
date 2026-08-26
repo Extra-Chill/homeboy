@@ -2959,10 +2959,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                 ));
             }
             let path = workspace.path.clone();
-            homeboy::core::worktree_providers::validate_task_worktree_root(
-                &path,
-                &cook.to_worktree,
-            )?;
+            homeboy::core::worktree_provider::validate_worktree_root(&path, &cook.to_worktree)?;
             let base = homeboy::core::git::run_git(
                 &path,
                 &[
@@ -3025,8 +3022,8 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                     }
                     if workspace.task_url.as_deref().is_some_and(|task_url| {
                         cook.task_url.as_deref().is_none_or(|expected| {
-                            homeboy::core::worktree_providers::normalize_task_url(task_url)
-                                != homeboy::core::worktree_providers::normalize_task_url(expected)
+                            homeboy::core::worktree_provider::normalize_worktree_task_url(task_url)
+                                != homeboy::core::worktree_provider::normalize_worktree_task_url(expected)
                         })
                     }) {
                         return Err(Error::validation_invalid_argument(
@@ -3240,7 +3237,7 @@ fn with_workspace_owner_repair_commands(
                 homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
         };
         row.command =
-            homeboy::core::worktree_providers::worktree_provider_lifecycle_ensure_argv_from_config(
+            homeboy::core::worktree_provider::configured_worktree_lifecycle_ensure_argv_from_config(
                 &intent, &lifecycle, &config,
             )?;
     }
@@ -3261,18 +3258,13 @@ fn active_registered_worktree_path(handle: &str) -> Option<String> {
     {
         return (!workspace.safety.missing).then_some(workspace.ownership.path);
     }
-    match worktree::resolve_workspace_ref_if_present(handle)
-        .ok()
-        .flatten()?
-    {
-        worktree::WorkspaceRefRecord::Adopted(record)
-            if record.state == worktree::TaskWorktreeState::Active
-                && std::path::Path::new(&record.path).is_dir() =>
-        {
-            Some(record.path)
-        }
-        _ => None,
-    }
+    homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
+        handle,
+        homeboy::core::worktree_provider::WorktreeMutationContext::default(),
+    )
+    .ok()
+    .flatten()
+    .map(|target| target.path.display().to_string())
 }
 
 fn preflight_batch_cook_recipes(

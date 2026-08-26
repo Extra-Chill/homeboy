@@ -617,12 +617,19 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     None,
                 )
             })?;
-            crate::worktree_providers::provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
-                &crate::worktree_providers::WorktreeProviderCreateIntent {
-                    handle: handle.clone(), repo: options.repo.clone(), base: options.from.clone(),
-                    head: request.branch.clone(), task_url,
-                }, lifecycle, &crate::defaults::load_config(),
-            ).map(|provision| provision.resolution.worktree.path)
+            crate::worktree_provider::ensure_worktree_provision_from_config(
+                &crate::worktree_provider::WorktreeProvisionIntent {
+                    handle: handle.clone(),
+                    repo: options.repo.clone(),
+                    base: options.from.clone(),
+                    head: request.branch.clone(),
+                    task_url,
+                },
+                lifecycle,
+                None,
+                &crate::defaults::load_config(),
+            )
+            .map(|provision| provision.destination.ownership.path)
         } else {
             create(WorktreeCreateOptions {
                 component_id: options.repo.clone(),

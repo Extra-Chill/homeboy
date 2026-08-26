@@ -243,9 +243,7 @@ fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> 
             None,
         )
     })?;
-    homeboy::core::worktree_providers::validate_active_workspace_creation_provider_contracts(
-        &config,
-    )?;
+    homeboy::core::worktree_provider::validate_configured_worktree_creation_contracts(&config)?;
 
     // Save the config
     defaults::save_config(&config)?;
@@ -343,9 +341,7 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
             None,
         )
     })?;
-    homeboy::core::worktree_providers::validate_active_workspace_creation_provider_contracts(
-        &config,
-    )?;
+    homeboy::core::worktree_provider::validate_configured_worktree_creation_contracts(&config)?;
 
     // Save the config
     defaults::save_config(&config)?;

@@ -15360,9 +15360,9 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         // persisted when their child was admitted; they do not retain a CWD.
         options.source_worktree_path = None;
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "workspace_identity": homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            "workspace_identity": homeboy_core::worktree_provider::resolve_configured_worktree_exact_identity_from_config(
                 &options.to_worktree,
-                "fixture",
+                Some("fixture"),
                 &config,
             )
             .expect("persisted provider identity")

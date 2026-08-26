@@ -4693,7 +4693,7 @@ pub fn cook_failure_context(
     let pre_execution_diagnostic = record.as_ref().and_then(|record| {
         let failure = record.metadata.get("pre_execution_failure")?;
         let details = failure.get("details")?;
-        homeboy_core::worktree_providers::compact_provider_failure_details(details).map(
+        homeboy_core::worktree_provider::compact_worktree_provider_failure_details(details).map(
             |evidence| {
                 serde_json::json!({
                     "code": failure.get("error_code"),

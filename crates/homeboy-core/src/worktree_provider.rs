@@ -39,6 +39,10 @@ pub trait WorktreeProvider {
     fn resolve(&self, handle: &str) -> Result<WorktreeProviderLookup>;
 }
 
+pub trait WorktreePathProvider {
+    fn resolve_path(&self, path: &Path) -> Result<Option<WorktreeMutationTarget>>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeProviderSafety {
     pub dirty: bool,
@@ -84,6 +88,7 @@ pub struct WorktreeMutationTarget {
     pub provider: WorktreeProviderIdentity,
     pub handle: String,
     pub path: PathBuf,
+    pub source_kind: Option<String>,
     pub branch: Option<String>,
     pub task_url: Option<String>,
     pub safety: Option<WorktreeProviderSafety>,
@@ -110,6 +115,60 @@ pub trait WorktreeMutationProvider {
         reference: &str,
         context: WorktreeMutationContext<'_>,
     ) -> Result<WorktreeMutationLookup>;
+}
+
+pub type WorktreeExactIdentity = worktree_providers::WorktreeProviderExactIdentity;
+pub type WorktreeSafetyAttestation = worktree_providers::WorktreeProviderSafetyAttestation;
+pub type WorktreeConvergence = worktree_providers::WorktreeProviderConvergence;
+pub type WorktreeTaskAttachment = worktree_providers::WorktreeProviderTaskAttachment;
+pub type WorktreeTaskAttachmentStatus = worktree_providers::WorktreeProviderTaskAttachmentStatus;
+pub type WorktreeSelfRepairContract = worktree_providers::WorktreeProviderSelfRepairContract;
+pub type WorktreeCommandControl = worktree_providers::WorktreeProviderCommandControl;
+
+/// Optional opaque identity and safety-attestation capability. Exact provider
+/// identity is deliberately separate from mutable safety evidence so durable
+/// continuations can pin authority before revalidating current state.
+pub trait WorktreeIdentityProvider {
+    fn resolve_exact_identity(
+        &self,
+        handle: &str,
+        selected_provider: Option<&str>,
+    ) -> Result<WorktreeExactIdentity>;
+
+    fn resolve_exact_identity_by_path(&self, path: &Path) -> Result<Option<WorktreeExactIdentity>>;
+
+    fn attest_safety(&self, identity: &WorktreeExactIdentity) -> Result<WorktreeSafetyAttestation>;
+}
+
+/// Optional provider-owned preparation mutations used before task execution.
+/// Every operation preserves provider identity and revalidates its postcondition.
+pub trait WorktreePreparationProvider {
+    fn converge_to_base(&self, handle: &str, base_sha: &str) -> Result<WorktreeConvergence>;
+
+    fn materialize(&self, identity: &WorktreeExactIdentity) -> Result<WorktreeExactIdentity>;
+
+    fn preview_task_attachment(
+        &self,
+        handle: &str,
+        task_url: &str,
+    ) -> Result<Option<WorktreeTaskAttachment>>;
+
+    fn apply_task_attachment(
+        &self,
+        assessment: &WorktreeTaskAttachment,
+    ) -> Result<WorktreeTaskAttachment>;
+}
+
+/// Optional discovery and configured ownership metadata capability.
+pub trait WorktreeDiscoveryProvider {
+    fn find_by_task(
+        &self,
+        task_url: &str,
+        head: Option<&str>,
+    ) -> Result<Option<WorktreeMutationTarget>>;
+
+    fn self_repair_contract(&self, provider_id: &str)
+        -> Result<Option<WorktreeSelfRepairContract>>;
 }
 
 /// Exact creation request shared by native and configured worktree providers.
@@ -389,6 +448,7 @@ impl WorktreeMutationProvider for NativeWorktreeProvider {
             provider: WorktreeProviderIdentity::Native,
             handle: record.handle().to_string(),
             path,
+            source_kind: Some(record.source_kind().to_string()),
             branch: match &record {
                 worktree::WorkspaceRefRecord::Task(record) => Some(record.branch.clone()),
                 worktree::WorkspaceRefRecord::Adopted(_) => None,
@@ -571,6 +631,15 @@ impl WorktreeProvider for CommandWorktreeProvider<'_> {
     }
 }
 
+impl WorktreePathProvider for CommandWorktreeProvider<'_> {
+    fn resolve_path(&self, path: &Path) -> Result<Option<WorktreeMutationTarget>> {
+        Ok(
+            worktree_providers::resolve_worktree_provider_path_from_config(path, self.config)?
+                .map(command_mutation_target),
+        )
+    }
+}
+
 impl WorktreeInventoryProvider for CommandWorktreeProvider<'_> {
     fn list(&self) -> Result<Vec<WorktreeProviderWorkspace>> {
         Ok(
@@ -650,21 +719,130 @@ impl WorktreeMutationProvider for CommandWorktreeProvider<'_> {
             }
         };
         Ok(match resolution {
-            Some(resolution) => WorktreeMutationLookup::Found(WorktreeMutationTarget {
-                provider: WorktreeProviderIdentity::Configured(resolution.provider_id),
-                handle: resolution.worktree.handle,
-                path: PathBuf::from(resolution.worktree.path),
-                branch: Some(resolution.worktree.branch),
-                task_url: resolution.worktree.task_url,
-                safety: Some(WorktreeProviderSafety {
-                    dirty: resolution.worktree.safety.dirty,
-                    unpushed: resolution.worktree.safety.unpushed,
-                    primary: resolution.worktree.safety.primary,
-                    missing: false,
-                }),
-            }),
+            Some(resolution) => WorktreeMutationLookup::Found(command_mutation_target(resolution)),
             None => WorktreeMutationLookup::NotFound,
         })
+    }
+}
+
+impl WorktreeIdentityProvider for CommandWorktreeProvider<'_> {
+    fn resolve_exact_identity(
+        &self,
+        handle: &str,
+        selected_provider: Option<&str>,
+    ) -> Result<WorktreeExactIdentity> {
+        match selected_provider {
+            Some(provider_id) => {
+                worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+                    handle,
+                    provider_id,
+                    self.config,
+                )
+            }
+            None => worktree_providers::resolve_apply_enabled_worktree_provider_identity_from_config(
+                handle,
+                self.config,
+            ),
+        }
+    }
+
+    fn resolve_exact_identity_by_path(&self, path: &Path) -> Result<Option<WorktreeExactIdentity>> {
+        worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_path_from_config(
+            path,
+            self.config,
+        )
+    }
+
+    fn attest_safety(&self, identity: &WorktreeExactIdentity) -> Result<WorktreeSafetyAttestation> {
+        worktree_providers::attest_apply_enabled_worktree_provider_safety_from_config(
+            identity,
+            self.config,
+        )
+    }
+}
+
+impl WorktreePreparationProvider for CommandWorktreeProvider<'_> {
+    fn converge_to_base(&self, handle: &str, base_sha: &str) -> Result<WorktreeConvergence> {
+        worktree_providers::converge_apply_enabled_worktree_provider_to_base_from_config(
+            handle,
+            base_sha,
+            self.config,
+        )
+    }
+
+    fn materialize(&self, identity: &WorktreeExactIdentity) -> Result<WorktreeExactIdentity> {
+        worktree_providers::materialize_apply_enabled_worktree_provider_identity_from_config(
+            identity,
+            self.config,
+        )
+    }
+
+    fn preview_task_attachment(
+        &self,
+        handle: &str,
+        task_url: &str,
+    ) -> Result<Option<WorktreeTaskAttachment>> {
+        worktree_providers::preview_apply_enabled_worktree_provider_task_attachment_from_config(
+            handle,
+            task_url,
+            self.config,
+        )
+    }
+
+    fn apply_task_attachment(
+        &self,
+        assessment: &WorktreeTaskAttachment,
+    ) -> Result<WorktreeTaskAttachment> {
+        worktree_providers::apply_worktree_provider_task_attachment_from_config(
+            assessment,
+            self.config,
+        )
+    }
+}
+
+impl WorktreeDiscoveryProvider for CommandWorktreeProvider<'_> {
+    fn find_by_task(
+        &self,
+        task_url: &str,
+        head: Option<&str>,
+    ) -> Result<Option<WorktreeMutationTarget>> {
+        Ok(
+            worktree_providers::find_apply_enabled_worktree_provider_by_task_url_and_head_from_config(
+                task_url,
+                head,
+                self.config,
+            )?
+            .map(command_mutation_target),
+        )
+    }
+
+    fn self_repair_contract(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<WorktreeSelfRepairContract>> {
+        worktree_providers::worktree_provider_self_repair_contract_from_config(
+            provider_id,
+            self.config,
+        )
+    }
+}
+
+fn command_mutation_target(
+    resolution: worktree_providers::WorktreeProviderResolution,
+) -> WorktreeMutationTarget {
+    WorktreeMutationTarget {
+        provider: WorktreeProviderIdentity::Configured(resolution.provider_id),
+        handle: resolution.worktree.handle,
+        path: PathBuf::from(resolution.worktree.path),
+        source_kind: None,
+        branch: Some(resolution.worktree.branch),
+        task_url: resolution.worktree.task_url,
+        safety: Some(WorktreeProviderSafety {
+            dirty: resolution.worktree.safety.dirty,
+            unpushed: resolution.worktree.safety.unpushed,
+            primary: resolution.worktree.safety.primary,
+            missing: false,
+        }),
     }
 }
 
@@ -752,15 +930,7 @@ impl WorktreeProvisionProvider for CommandWorktreeProvider<'_> {
             lifecycle,
             self.config,
         )?;
-        Ok(WorktreeProvision {
-            destination: command_provision_destination(provision.resolution),
-            action: if provision.action == "ensured" {
-                WorktreeProvisionAction::Ensured
-            } else {
-                WorktreeProvisionAction::Admitted
-            },
-            idempotency_key: provision.idempotency_key,
-        })
+        Ok(command_provision(provision))
     }
 }
 
@@ -817,6 +987,20 @@ fn command_provision_destination(
     }
 }
 
+fn command_provision(
+    provision: worktree_providers::WorktreeProviderProvision,
+) -> WorktreeProvision {
+    WorktreeProvision {
+        destination: command_provision_destination(provision.resolution),
+        action: if provision.action == "ensured" {
+            WorktreeProvisionAction::Ensured
+        } else {
+            WorktreeProvisionAction::Admitted
+        },
+        idempotency_key: provision.idempotency_key,
+    }
+}
+
 /// Resolve through the single ordered provider boundary used by consumers.
 pub fn resolve_worktree_ownership(handle: &str) -> Result<WorktreeOwnership> {
     resolve_worktree_ownership_from_config(handle, &defaults::load_config())
@@ -839,6 +1023,17 @@ pub fn resolve_worktree_ownership_from_config(
     Err(worktree_providers::worktree_provider_not_found_error(
         handle, config, false,
     ))
+}
+
+pub fn resolve_configured_worktree_path(path: &Path) -> Result<Option<WorktreeMutationTarget>> {
+    resolve_configured_worktree_path_from_config(path, &defaults::load_config())
+}
+
+pub fn resolve_configured_worktree_path_from_config(
+    path: &Path,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeMutationTarget>> {
+    CommandWorktreeProvider::new(config).resolve_path(path)
 }
 
 pub fn list_worktree_provider_inventory() -> Result<Vec<WorktreeProviderWorkspace>> {
@@ -936,6 +1131,18 @@ pub fn resolve_worktree_mutation_target_from_config(
     ))
 }
 
+pub fn resolve_native_worktree_mutation_target(
+    reference: &str,
+    context: WorktreeMutationContext<'_>,
+) -> Result<Option<WorktreeMutationTarget>> {
+    Ok(
+        match NativeWorktreeProvider.resolve_for_mutation(reference, context)? {
+            WorktreeMutationLookup::Found(target) => Some(target),
+            WorktreeMutationLookup::NotFound => None,
+        },
+    )
+}
+
 /// Resolve a mutation target through configured command-provider authority
 /// only. This is used when durable task evidence already selected configured
 /// ownership and native fallback would violate that binding.
@@ -950,6 +1157,142 @@ pub fn resolve_configured_worktree_mutation_target_from_config(
             worktree_providers::worktree_provider_not_found_error(reference, config, true),
         ),
     }
+}
+
+pub fn resolve_configured_worktree_exact_identity_from_config(
+    handle: &str,
+    selected_provider: Option<&str>,
+    config: &HomeboyConfig,
+) -> Result<WorktreeExactIdentity> {
+    CommandWorktreeProvider::new(config).resolve_exact_identity(handle, selected_provider)
+}
+
+pub fn resolve_configured_worktree_exact_identity_by_path_from_config(
+    path: &Path,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeExactIdentity>> {
+    CommandWorktreeProvider::new(config).resolve_exact_identity_by_path(path)
+}
+
+pub fn attest_configured_worktree_safety_from_config(
+    identity: &WorktreeExactIdentity,
+    config: &HomeboyConfig,
+) -> Result<WorktreeSafetyAttestation> {
+    CommandWorktreeProvider::new(config).attest_safety(identity)
+}
+
+pub fn converge_configured_worktree_to_base_from_config(
+    handle: &str,
+    base_sha: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeConvergence> {
+    CommandWorktreeProvider::new(config).converge_to_base(handle, base_sha)
+}
+
+pub fn materialize_configured_worktree_from_config(
+    identity: &WorktreeExactIdentity,
+    config: &HomeboyConfig,
+) -> Result<WorktreeExactIdentity> {
+    CommandWorktreeProvider::new(config).materialize(identity)
+}
+
+pub fn preview_configured_worktree_task_attachment_from_config(
+    handle: &str,
+    task_url: &str,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeTaskAttachment>> {
+    CommandWorktreeProvider::new(config).preview_task_attachment(handle, task_url)
+}
+
+pub fn apply_configured_worktree_task_attachment_from_config(
+    assessment: &WorktreeTaskAttachment,
+    config: &HomeboyConfig,
+) -> Result<WorktreeTaskAttachment> {
+    CommandWorktreeProvider::new(config).apply_task_attachment(assessment)
+}
+
+pub fn find_configured_worktree_by_task_from_config(
+    task_url: &str,
+    head: Option<&str>,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeMutationTarget>> {
+    CommandWorktreeProvider::new(config).find_by_task(task_url, head)
+}
+
+pub fn configured_worktree_self_repair_contract_from_config(
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeSelfRepairContract>> {
+    CommandWorktreeProvider::new(config).self_repair_contract(provider_id)
+}
+
+pub fn configured_worktree_path_requires_materialization(path: &str) -> bool {
+    worktree_providers::worktree_provider_path_requires_materialization(path)
+}
+
+pub fn unsupported_configured_worktree_task_attachment_error(
+    handle: &str,
+    task_url: &str,
+) -> Error {
+    worktree_providers::unsupported_worktree_provider_task_attachment_error(handle, task_url)
+}
+
+pub fn configured_worktree_lifecycle_ensure_argv_from_config(
+    intent: &WorktreeProvisionIntent,
+    lifecycle: &WorktreeProvisionLifecycle,
+    config: &HomeboyConfig,
+) -> Result<Vec<String>> {
+    worktree_providers::worktree_provider_lifecycle_ensure_argv_from_config(
+        intent, lifecycle, config,
+    )
+}
+
+pub fn with_configured_worktree_command_control<T>(
+    control: WorktreeCommandControl,
+    run: impl FnOnce() -> T,
+) -> T {
+    worktree_providers::with_worktree_provider_command_control(control, run)
+}
+
+pub fn validate_worktree_root(path: &Path, handle: &str) -> Result<()> {
+    worktree_providers::validate_task_worktree_root(path, handle)
+}
+
+pub fn validate_worktree_repository_identity(
+    path: &Path,
+    expected_remote: Option<&str>,
+    expected_repository_name: Option<&str>,
+) -> Result<()> {
+    worktree_providers::validate_task_worktree_repository_identity(
+        path,
+        expected_remote,
+        expected_repository_name,
+    )
+}
+
+pub fn normalize_worktree_task_url(task_url: &str) -> String {
+    worktree_providers::normalize_task_url(task_url)
+}
+
+pub fn compact_worktree_provider_failure_details(
+    details: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    worktree_providers::compact_provider_failure_details(details)
+}
+
+pub fn validate_configured_worktree_creation_contracts(config: &HomeboyConfig) -> Result<()> {
+    worktree_providers::validate_active_workspace_creation_provider_contracts(config)
+}
+
+/// Compatibility for persisted Cook recipes created before lifecycle ownership
+/// fields were recorded. New provisioning always uses `ensure_worktree_provision_from_config`.
+pub fn ensure_legacy_configured_worktree_from_config(
+    intent: &WorktreeProvisionIntent,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProvision> {
+    let provision =
+        worktree_providers::provision_apply_enabled_worktree_provider_from_config(intent, config)?;
+    Ok(command_provision(provision))
 }
 
 /// Admit an existing destination through native ownership first, then through
@@ -1570,6 +1913,33 @@ mod tests {
                     missing: false,
                 })
             );
+            let by_path = resolve_configured_worktree_path_from_config(workspace.path(), &config)
+                .expect("configured path facade")
+                .expect("provider owns path");
+            assert_eq!(by_path.handle, "fixture@command");
+            let identity = resolve_configured_worktree_exact_identity_from_config(
+                "fixture@command",
+                None,
+                &config,
+            )
+            .expect("configured identity facade");
+            let safety = attest_configured_worktree_safety_from_config(&identity, &config)
+                .expect("configured safety facade");
+            assert!(safety.fresh);
+            assert!(!safety.dirty);
+            assert_eq!(
+                materialize_configured_worktree_from_config(&identity, &config)
+                    .expect("local identity needs no materialization"),
+                identity
+            );
+            let task_owned = find_configured_worktree_by_task_from_config(
+                "https://example.test/issues/8017",
+                Some("command-branch"),
+                &config,
+            )
+            .expect("configured task discovery facade")
+            .expect("task-owned worktree");
+            assert_eq!(task_owned.handle, "fixture@command");
             assert_provision_admission_conformance(
                 &CommandWorktreeProvider::new(&config),
                 "fixture@command",
