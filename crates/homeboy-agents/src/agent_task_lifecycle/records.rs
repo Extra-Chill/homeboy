@@ -897,10 +897,9 @@ impl AgentTaskRunRecord {
                 .is_some_and(|runner_id| self.runner_id() == Some(runner_id))
     }
 
-    /// A controller-owned pre-provider phase is live only while its heartbeat
-    /// is fresh. Once runner submission begins, runner identity remains the
-    /// fail-closed ownership boundary.
-    pub(crate) fn has_fresh_controller_pre_provider_heartbeat(&self) -> bool {
+    /// Whether Cook is still in the controller-owned phase before runner or
+    /// provider execution can supply its own durable identity.
+    pub(crate) fn is_controller_pre_provider_phase(&self) -> bool {
         self.runner_job_id().is_none()
             && self.provider_handles.is_empty()
             && matches!(
@@ -909,7 +908,13 @@ impl AgentTaskRunRecord {
                     .and_then(Value::as_str),
                 Some("worktree_provider_lookup" | "worktree_provider_ensure")
             )
-            && self.has_fresh_update()
+    }
+
+    /// A controller-owned pre-provider phase is live only while its heartbeat
+    /// is fresh. Once runner submission begins, runner identity remains the
+    /// fail-closed ownership boundary.
+    pub(crate) fn has_fresh_controller_pre_provider_heartbeat(&self) -> bool {
+        self.is_controller_pre_provider_phase() && self.has_fresh_update()
     }
 
     /// A run is runner-backed when its durable record carries a runner id or
