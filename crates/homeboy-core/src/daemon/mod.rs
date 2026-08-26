@@ -3942,7 +3942,7 @@ fn controller_job_id_from_path(path: &str, suffix: &str) -> Result<Uuid> {
     })
 }
 
-fn hex_digest(value: &serde_json::Value) -> Result<String> {
+pub(crate) fn hex_digest(value: &serde_json::Value) -> Result<String> {
     let encoded =
         serde_json::to_vec(value).map_err(|error| Error::internal_unexpected(error.to_string()))?;
     Ok(content_hash::sha256_hex(&encoded))
