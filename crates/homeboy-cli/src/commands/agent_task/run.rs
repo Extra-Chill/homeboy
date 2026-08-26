@@ -2450,6 +2450,13 @@ fn apply_explicit_local_continuation(
         run_id,
         decision.clone(),
     )?;
+    apply_local_continuation_decision(options, decision)
+}
+
+fn apply_local_continuation_decision(
+    options: &mut homeboy::agents::agent_task_service::AgentTaskCookServiceOptions,
+    decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+) -> homeboy::core::Result<()> {
     options.initial_plan.metadata["execution_placement_decision"] = serde_json::to_value(decision)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     options.attempt_dispatcher = None;
@@ -2607,7 +2614,13 @@ where
             })?
             .plan,
     )?;
-    let dispatcher = if local_override.is_some() {
+    let pre_execution_runtime_recovery =
+        agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+            &recipe,
+            &record,
+            local_override.is_some(),
+        );
+    let dispatcher = if pre_execution_runtime_recovery || local_override.is_some() {
         None
     } else {
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
@@ -2628,6 +2641,10 @@ where
         agent_task_service::terminal_review_form_continuation_is_eligible(&attempt.plan, &record)?;
     let mut options = if terminal_review_form_continuation {
         agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)?
+    } else if pre_execution_runtime_recovery {
+        agent_task_service::reconstruct_options_for_pre_execution_recovery(&recipe)?
+    } else if local_override.is_some() {
+        agent_task_service::reconstruct_options_with_local_placement_override(&recipe)?
     } else {
         agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)?
     };
@@ -2813,10 +2830,10 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     // before reconciliation can enqueue a continuation or reserve promotion.
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    if lifecycle_store
-        .read_record(&run_id)
-        .is_ok_and(|record| record.state.is_terminal())
-    {
+    if lifecycle_store.read_record(&run_id).is_ok_and(|record| {
+        record.state.is_terminal()
+            && agent_task_service::cook_continuation_requires_model_provenance(&record)
+    }) {
         if let Err(error) =
             agent_task_service_direct::validate_cook_attempt_model_provenance(&run_id)
         {
@@ -2875,9 +2892,39 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             1,
         ));
     }
-    let dispatcher = match crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
-        &recipe.promotion_transport["attempt_dispatch"],
-    ) {
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .expect("continuation selection is recipe-bound");
+    let local_override = match explicit_local_continuation_decision(&attempt.plan) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    candidate_fingerprint,
+                    phases,
+                    "transport",
+                    &error,
+                ),
+                1,
+            ))
+        }
+    };
+    let pre_execution_runtime_recovery =
+        agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+            &recipe,
+            &record,
+            local_override.is_some(),
+        );
+    let dispatcher = match if pre_execution_runtime_recovery || local_override.is_some() {
+        Ok(None)
+    } else {
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
+            &recipe.promotion_transport["attempt_dispatch"],
+        )
+    } {
         Ok(dispatcher) => {
             phases.push(
                 serde_json::json!({ "phase": "transport", "status": "passed", "reason": "ok" }),
@@ -2897,11 +2944,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ))
         }
     };
-    let attempt = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == run_id)
-        .expect("continuation selection is recipe-bound");
     let terminal_review =
         agent_task_service::terminal_review_form_continuation_is_eligible(&attempt.plan, &record)?;
     let historical_terminal =
@@ -2911,6 +2953,10 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         );
     let mut options = match if terminal_review || historical_terminal {
         agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)
+    } else if pre_execution_runtime_recovery {
+        agent_task_service::reconstruct_options_for_pre_execution_recovery(&recipe)
+    } else if local_override.is_some() {
+        agent_task_service::reconstruct_options_with_local_placement_override(&recipe)
     } else {
         agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
     } {
@@ -2930,6 +2976,20 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     };
     options.initial_run_id = attempt.run_id.clone();
     options.initial_plan = attempt.plan.clone();
+    if let Some(decision) = local_override {
+        if let Err(error) = apply_local_continuation_decision(&mut options, decision) {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    candidate_fingerprint,
+                    phases,
+                    "transport",
+                    &error,
+                ),
+                1,
+            ));
+        }
+    }
     if let Err(error) = agent_task_service::preflight_cook_continuation_admission(&options) {
         return Ok((
             cook_continuation_preflight_report(
@@ -4278,14 +4338,13 @@ fn cook_components_for_repository_name(
         return Ok(vec![component]);
     }
     let repository_name = normalize_repository_name(repository_name);
-    let matches = homeboy::core::component::registered()?
+    let matches = homeboy::core::component::inventory::registered_base()?
         .into_iter()
         .filter(|component| {
-            component.id.eq_ignore_ascii_case(&repository_name)
-                || component
-                    .aliases
-                    .iter()
-                    .any(|alias| normalize_repository_name(alias) == repository_name)
+            component
+                .aliases
+                .iter()
+                .any(|alias| normalize_repository_name(alias) == repository_name)
                 || component
                     .remote_url
                     .as_deref()
@@ -4415,7 +4474,14 @@ pub(super) fn cook_repository_identities_for_workspace(
         })
         .collect::<Vec<_>>();
     let configured = match requested_repository {
-        Some(repository) => cook_components_for_repository_name(repository)?,
+        Some(repository) => {
+            let matches = cook_components_for_repository_name(repository)?;
+            if matches.is_empty() {
+                homeboy::core::component::inventory::registered_base()?
+            } else {
+                matches
+            }
+        }
         None => homeboy::core::component::registered()?,
     };
     let mut identities = Vec::new();
@@ -4441,6 +4507,21 @@ pub(super) fn cook_repository_identities_for_workspace(
                     provenance: format!("{flag}:git-remote:{remote_name}"),
                 });
             }
+        }
+        if requested_repository.is_some()
+            && !identities
+                .iter()
+                .any(|identity| identity.remote_identity == remote_identity)
+        {
+            let repository_name = normalize_repository_name(&remote_url);
+            identities.push(CookRepositoryIdentity {
+                repository_name: repository_name.clone(),
+                slug: repository_name,
+                aliases: Vec::new(),
+                remote_identity,
+                workspace_path: git_root.clone(),
+                provenance: format!("{flag}:git-remote:{remote_name}"),
+            });
         }
     }
     Ok(identities)
