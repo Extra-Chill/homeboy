@@ -928,7 +928,10 @@ fn local_retry_reclaims_a_dead_launcher_at_handoff_stage(crash_env: &str) {
             );
             break;
         }
-        assert!(Instant::now() < deadline, "local retry did not complete");
+        assert!(
+            Instant::now() < deadline,
+            "local retry did not complete: {record:?}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 
