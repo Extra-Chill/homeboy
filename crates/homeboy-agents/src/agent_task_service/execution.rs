@@ -1658,6 +1658,29 @@ struct CookRetryReservation {
     created: bool,
 }
 
+fn local_cook_retry_reservation_metadata(
+    cook_id: &str,
+    retry_run_id: &str,
+    lease_started_at: chrono::DateTime<chrono::Utc>,
+    launcher_pid: u32,
+    launcher_start_identity: homeboy_core::process::ProcessStartIdentity,
+) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([
+        ("cook_id".to_string(), json!(cook_id)),
+        (
+            "local_cook_supervisor".to_string(),
+            json!({
+                "state": "pending",
+                "pinned_run_id": retry_run_id,
+                "lease_started_at": lease_started_at.to_rfc3339(),
+                "lease_expires_at": (lease_started_at + chrono::Duration::seconds(agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
+                "launcher_pid": launcher_pid,
+                "launcher_process_start_identity": launcher_start_identity,
+            }),
+        ),
+    ])
+}
+
 fn reserve_cook_retry_lifecycle(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     source: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -1695,17 +1718,13 @@ fn reserve_cook_retry_lifecycle(
                     &source.run_id,
                     Some(retry_run_id),
                     force,
-                    serde_json::Map::from_iter([(
-                        "local_cook_supervisor".to_string(),
-                        json!({
-                            "state": "pending",
-                            "pinned_run_id": retry_run_id,
-                            "lease_started_at": lease_started_at.to_rfc3339(),
-                            "lease_expires_at": (lease_started_at + chrono::Duration::seconds(agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
-                            "launcher_pid": launcher_pid,
-                            "launcher_process_start_identity": launcher_start_identity,
-                        }),
-                    )]),
+                    local_cook_retry_reservation_metadata(
+                        &retry.cook_id,
+                        retry_run_id,
+                        lease_started_at,
+                        launcher_pid,
+                        launcher_start_identity,
+                    ),
                     preflight,
                 )?;
             let result = json!({ "run_id": retry_run_id });
@@ -2836,6 +2855,39 @@ mod tests {
             homeboy_core::ErrorCode::ValidationInvalidArgument
         );
         assert!(error.message.contains("cleanup_deadline_ms"));
+    }
+
+    #[test]
+    fn local_retry_reservation_is_live_before_recipe_binding() {
+        let run_id = "local-retry-reservation";
+        let started_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("lease timestamp")
+            .with_timezone(&chrono::Utc);
+        let launcher_pid = std::process::id();
+        let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
+            .expect("inspect launcher identity")
+            .expect("launcher is live");
+        let metadata = local_cook_retry_reservation_metadata(
+            "local-retry-cook",
+            run_id,
+            started_at,
+            launcher_pid,
+            launcher_start_identity,
+        );
+        let record: agent_task_lifecycle::AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": run_id,
+            "plan_id": "local-retry-plan",
+            "state": "queued",
+            "submitted_at": started_at.to_rfc3339(),
+            "plan_path": "plan.json",
+            "metadata": metadata,
+        }))
+        .expect("reservation record");
+
+        assert_eq!(record.metadata["cook_id"], "local-retry-cook");
+        assert!(record
+            .has_live_pending_local_cook_supervisor(started_at + chrono::Duration::seconds(1)));
     }
 
     #[test]
