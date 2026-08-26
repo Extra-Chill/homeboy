@@ -1309,11 +1309,26 @@ fn scope_cleanup_report(
     // in /proc are diagnostic host noise, not evidence that this run survived.
     // Without a discovered target, unreadable entries can plausibly hide an
     // escaped descendant that removed its marker.
+    //
+    // That rationale is conditioned on unreadable entries EXISTING, and the
+    // guard must be too. When every same-owner `/proc` environment was read and
+    // none carried this scope, an empty target set is a measured zero: there is
+    // no unread entry left for an escapee to be hiding in. Requiring a marker
+    // regardless made the ordinary case -- a command whose processes all exited
+    // before teardown began -- indistinguishable from an escape, which is the
+    // #13128 contract `scope_cleanup_keeps_unreadable_same_owner_environments_as_diagnostics`
+    // has been asserting, red, on `main` (#13570).
+    //
+    // A command that exits FAST is the case that trips it in production: the
+    // `/proc` scan finds nothing because the process is already reaped, so its
+    // real error is discarded and replaced by a containment complaint about an
+    // escape that did not happen.
     let marker_scope_was_observed = !targets.pids.is_empty();
     let leader_reaped_cleanly =
         context == ProcessContainmentCleanupContext::LeaderReapedAfterSuccess;
-    let complete =
-        survivors.pids.is_empty() && (marker_scope_was_observed || leader_reaped_cleanly);
+    let discovery_was_complete = unreadable == 0;
+    let complete = survivors.pids.is_empty()
+        && (marker_scope_was_observed || leader_reaped_cleanly || discovery_was_complete);
     let detail = (!complete).then(|| {
         if !survivors.pids.is_empty() {
             format!(
@@ -1893,10 +1908,14 @@ mod tests {
         assert!(clean_with_unrelated_unreadables.complete);
         assert!(clean_with_unrelated_unreadables.forced);
         assert!(clean_with_unrelated_unreadables.detail.is_none());
+        // Asserted on the substring the message actually carries. `unrelated
+        // /proc` was prose this module stopped emitting; every live message here
+        // says `same-owner /proc environment entries`, and pinning wording no
+        // producer uses is how this expectation sat red without anyone reading it.
         assert!(clean_with_unrelated_unreadables
             .warning
             .as_deref()
-            .is_some_and(|warning| warning.contains("unrelated /proc")));
+            .is_some_and(|warning| warning.contains("same-owner /proc environment entries")));
 
         // A known run-owned survivor remains fail-closed even after a clean
         // leader exit.
@@ -1999,6 +2018,66 @@ mod tests {
         );
     }
 
+    /// A command that exits before teardown looks must not be reported as an
+    /// escape (#13570).
+    ///
+    /// This is keyed on the FAILING exit path on purpose. A fast non-zero exit
+    /// gets `LeaderMayBeRunning` — the context is chosen from the exit code, not
+    /// from whether the leader was reaped — so it reaches this function with no
+    /// observed marker and no clean-leader claim. Before this was fixed, that
+    /// combination discarded the command's real error and replaced it with a
+    /// containment complaint, which is how an archive-policy refusal surfaced as
+    /// "an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".
+    ///
+    /// The distinction that makes it safe is `unreadable`: every same-owner
+    /// `/proc` environment was read, so there is nowhere an escapee could be
+    /// hiding. The ambiguous case one test above — same shape, one unreadable
+    /// entry — must stay fail-closed, and does.
+    #[test]
+    fn scope_cleanup_accepts_a_command_that_exited_before_discovery_looked() {
+        let fast_failure = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 0,
+            },
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 0,
+            },
+            false,
+            ProcessContainmentCleanupContext::LeaderMayBeRunning,
+        );
+
+        assert!(
+            fast_failure.complete,
+            "a fully-read scope with no members is a measured zero, not an escape: {:?}",
+            fast_failure.detail
+        );
+        assert_eq!(
+            fast_failure.detail, None,
+            "a complete cleanup must not attach a detail a caller will render as an error"
+        );
+
+        // The guard it must not weaken: one unreadable entry restores the
+        // fail-closed contract, because now something could be hidden.
+        let hidden_possible = scope_cleanup_report(
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            LinuxScopeDiscovery {
+                pids: Vec::new(),
+                unreadable_environments: 1,
+            },
+            false,
+            ProcessContainmentCleanupContext::LeaderMayBeRunning,
+        );
+        assert!(
+            !hidden_possible.complete,
+            "an unread /proc environment can still hide an escapee and must fail closed"
+        );
+    }
+
     #[test]
     fn scope_cleanup_fails_closed_for_confirmed_run_owned_survivors() {
         let cleanup = scope_cleanup_report(
@@ -2016,10 +2095,13 @@ mod tests {
 
         assert!(!cleanup.complete);
         assert!(cleanup.forced);
+        // `surviving pids:` is the phrasing every other survivor message in this
+        // module uses; this expectation was the last one still pinning an older
+        // wording, and it named a pid the assertion above already proves.
         assert!(cleanup
             .detail
             .as_deref()
-            .is_some_and(|detail| detail.contains("run-owned survivors: 43")));
+            .is_some_and(|detail| detail.contains("surviving pids: 43")));
         assert!(cleanup.diagnostic.is_some());
     }
 
