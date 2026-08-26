@@ -589,7 +589,9 @@ mod tests {
             .expect("lifecycle store")
     }
     use super::*;
-    use homeboy_core::test_support::with_isolated_home;
+    use homeboy_core::api_jobs::JobEventKind;
+    use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness};
+    use std::sync::Arc;
 
     const IDENTITY: ProcessStartIdentity = ProcessStartIdentity::Linux {
         starttime_ticks: 4242,
@@ -790,6 +792,46 @@ mod tests {
             job.resume_disposition(),
             CookJobResumeDisposition::ObserveTerminalOutcome
         );
+    }
+
+    #[test]
+    fn execute_supervises_through_the_controller_job_handle() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-controller-harness";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            let mut request = request_of(cook_id, u32::MAX);
+            request["phase"] = json!("queued");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CookJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+            let prepared = driver.prepare(request).expect("prepare cook job");
+
+            let result = driver
+                .execute(prepared, harness.handle())
+                .expect("supervise dead child to durable outcome");
+
+            assert_eq!(result["terminal_state"], "failed");
+            assert_eq!(result["phase"], "completed");
+            let checkpoint = harness
+                .checkpoint()
+                .expect("read checkpoint")
+                .expect("supervision checkpoint");
+            assert_eq!(checkpoint["phase"], "supervising");
+            let progress = harness
+                .events()
+                .expect("read controller events")
+                .into_iter()
+                .find(|event| event.kind == JobEventKind::Progress)
+                .and_then(|event| event.data)
+                .expect("projected supervision progress");
+            assert_eq!(progress["phase"], "supervising");
+            assert_eq!(progress["cook_id"], cook_id);
+            assert!(progress.get("durable_run_id").is_none());
+        });
     }
 
     /// A child that ended without ever publishing durable identity is not a
