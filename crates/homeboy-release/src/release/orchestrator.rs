@@ -38,7 +38,8 @@ pub(crate) fn run_with_plan(
     // cleanup, and the deploy checkpoint. A release therefore cannot package
     // into one home and then record its state against another (#7505).
     let component = super::context::load_component(component_id, options)?;
-    let mut workspace = super::workspace::ReleaseWorkspace::select(roots, &component)?;
+    let mut workspace =
+        super::workspace::ReleaseWorkspace::select(roots, &component, options.pipeline.head)?;
     let mut workspace_options = options.clone();
     workspace_options.path_override = Some(workspace.component.local_path.clone());
     let checkout_guard =
