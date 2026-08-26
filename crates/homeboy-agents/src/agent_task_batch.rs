@@ -306,6 +306,33 @@ pub fn heartbeat_fanout_run_batch(batch_id: &str, claim_id: &str) -> Result<()> 
     AgentTaskBatchStore::from_current_data_root()?.heartbeat_fanout_run_batch(batch_id, claim_id)
 }
 
+/// Leave admission once child execution is ready to begin.
+pub fn start_fanout_run_batch(batch_id: &str, claim_id: &str) -> Result<()> {
+    AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, |batch| {
+        if batch.metadata["coordinator"]["claim_id"].as_str() != Some(claim_id) {
+            return Err(Error::validation_invalid_argument(
+                "claim_id",
+                "fanout coordinator claim is stale",
+                Some(batch_id.to_string()),
+                None,
+            ));
+        }
+        if batch.state != AgentTaskBatchState::Admitting {
+            return Ok(());
+        }
+        let coordinator = batch
+            .metadata
+            .get_mut("coordinator")
+            .and_then(Value::as_object_mut)
+            .expect("validated coordinator object");
+        coordinator.insert("stage".to_string(), json!("running"));
+        coordinator.insert("heartbeat_at".to_string(), json!(now_timestamp()));
+        batch.state = AgentTaskBatchState::Running;
+        batch.updated_at = Some(now_timestamp());
+        Ok(())
+    })
+}
+
 pub fn heartbeat_fanout_run_batch_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
@@ -1621,6 +1648,36 @@ pub fn record_child_finalization_in_store(
     finalization: Value,
 ) -> Result<()> {
     store.mutate_batch(batch_id, |batch| {
+        let terminal_state = finalization
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .filter(|terminal| *terminal)
+            .and_then(|_| finalization.get("lifecycle_status"))
+            .cloned()
+            .and_then(|state| {
+                serde_json::from_value::<homeboy_core::run_lifecycle_status::RunLifecycleStatus>(
+                    state,
+                )
+                .ok()
+            })
+            .and_then(|state| {
+                use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
+                Some(match state {
+                    RunLifecycleStatus::Succeeded => AgentTaskRunState::Succeeded,
+                    RunLifecycleStatus::CandidateRecoverable => {
+                        AgentTaskRunState::CandidateRecoverable
+                    }
+                    RunLifecycleStatus::PartialRecoverable => AgentTaskRunState::PartialRecoverable,
+                    RunLifecycleStatus::PartialFailure => AgentTaskRunState::PartialFailure,
+                    RunLifecycleStatus::Cancelled => AgentTaskRunState::Cancelled,
+                    RunLifecycleStatus::Failed
+                    | RunLifecycleStatus::TimedOut
+                    | RunLifecycleStatus::Stale => AgentTaskRunState::Failed,
+                    RunLifecycleStatus::Queued
+                    | RunLifecycleStatus::Running
+                    | RunLifecycleStatus::Unknown => return None,
+                })
+            });
         let metadata = match &mut batch.metadata {
             Value::Object(map) => map,
             other => {
@@ -1638,6 +1695,34 @@ pub fn record_child_finalization_in_store(
             .as_object_mut()
             .expect("child_finalizations is an object")
             .insert(child_run_id.to_string(), finalization);
+        if let Some(state) = terminal_state {
+            if let Some(child) = batch
+                .child_runs
+                .iter_mut()
+                .find(|child| child.run_id == child_run_id)
+            {
+                child.state = state;
+            }
+            let all_terminal = batch
+                .child_runs
+                .iter()
+                .all(|child| child.state.is_terminal());
+            batch.state = aggregate_state(&totals_for_children(&batch.child_runs));
+            if let Some(coordinator) = batch
+                .metadata
+                .get_mut("coordinator")
+                .and_then(Value::as_object_mut)
+            {
+                coordinator.insert(
+                    "stage".to_string(),
+                    json!(if all_terminal {
+                        "completed"
+                    } else {
+                        "terminalizing"
+                    }),
+                );
+            }
+        }
         batch.updated_at = Some(now_timestamp());
         Ok(())
     })

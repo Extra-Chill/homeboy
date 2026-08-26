@@ -1627,7 +1627,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
         // re-binds this same absolute instant, so the budget covers the batch
         // rather than restarting per child.
         let result = with_current_cook_deadline(plan.cook_deadline(), || {
-            batch::heartbeat_fanout_run_batch(&plan.fanout_id, &claim_id)?;
+            batch::start_fanout_run_batch(&plan.fanout_id, &claim_id)?;
             agent_task_service::run_cook_batch_with_control(
                 agent_task_service::AgentTaskCookBatchOptions {
                     batch_id: plan.fanout_id.clone(),
@@ -1696,7 +1696,7 @@ fn run_batch_cook_fanout_plan_with_executor_claim(
         // See the sibling runner: the budget is resolved once and bound for the
         // whole batch so it does not restart per child.
         let result = with_current_cook_deadline(plan.cook_deadline(), || {
-            batch::heartbeat_fanout_run_batch(&plan.fanout_id, &claim_id)?;
+            batch::start_fanout_run_batch(&plan.fanout_id, &claim_id)?;
             agent_task_service::run_cook_batch_with_control(
                 agent_task_service::AgentTaskCookBatchOptions {
                     batch_id: plan.fanout_id.clone(),
@@ -1727,6 +1727,9 @@ fn cook_batch_coordinator_control(
 ) -> agent_task_service::AgentTaskCookBatchControl {
     let mut control = agent_task_service::detached_batch_coordinator_control(fanout_id);
     control.skip_durably_terminal_children |= retry;
+    // The batch record is the shared foreground/durable projection for every
+    // fanout, not only daemon-owned waves.
+    control.publish_child_terminalization = true;
     control
 }
 

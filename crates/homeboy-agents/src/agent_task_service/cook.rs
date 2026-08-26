@@ -2794,24 +2794,21 @@ pub fn run_cook_batch_with_control(
                                         error: Some(AgentTaskCookCellError::from_error(&error)),
                                     },
                                 };
-                                // Published as each child terminalizes rather
-                                // than once at the end, so a durable owner can
-                                // checkpoint against real progress instead of
-                                // learning everything at once when the
-                                // coordinator returns — or nothing at all if it
-                                // never does.
-                                if control.publish_child_terminalization {
-                                    let _ = crate::agent_task_batch::record_child_finalization(
-                                        &batch_id,
-                                        &cell.initial_run_id,
-                                        child_finalization_value(&cell),
-                                    );
-                                }
                                 cell
                             }
                             ClaimDisposition::AlreadyTerminal(cell)
                             | ClaimDisposition::Cancelled(cell) => cell,
                         };
+                        // Publish both freshly completed and durably observed
+                        // children. A replay that skips an unrecoverable child
+                        // must still terminalize its batch slot.
+                        if control.publish_child_terminalization {
+                            let _ = crate::agent_task_batch::record_child_finalization(
+                                &batch_id,
+                                &cell.initial_run_id,
+                                child_finalization_value(&cell),
+                            );
+                        }
                         let _ = tx.send((index, cell));
                     })
                 })
@@ -2860,6 +2857,16 @@ fn claim_disposition(
 ) -> ClaimDisposition {
     if control.skip_durably_terminal_children {
         if let Some(state) = durably_terminal_child_state(&cook.cook_id) {
+            if matches!(
+                state,
+                agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                    | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+            ) {
+                // Terminal provider work is not terminal Cook work. Re-entering
+                // Cook harvests the durable candidate through promotion, gates,
+                // and finalization without redispatching the provider.
+                return ClaimDisposition::Run;
+            }
             return ClaimDisposition::AlreadyTerminal(observed_child_cell(cook, state));
         }
     }

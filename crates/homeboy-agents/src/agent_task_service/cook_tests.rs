@@ -19411,6 +19411,124 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
 }
 
 #[test]
+fn fanout_coordinator_converges_recoverable_and_failed_terminal_children() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary task worktree root");
+        let workspace = temporary.path().join("task-worktree");
+        let source = std::env::current_dir().expect("test repository checkout");
+        assert!(Command::new("git")
+            .args(["worktree", "add", "--detach"])
+            .arg(&workspace)
+            .arg("HEAD")
+            .current_dir(source)
+            .status()
+            .expect("create linked task worktree")
+            .success());
+
+        let recoverable = stage_terminal_batch_child(
+            "cook-13591-recoverable",
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
+            true,
+            &workspace,
+        );
+        let failed = stage_terminal_batch_child(
+            "cook-13591-failed",
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
+            false,
+            &workspace,
+        );
+        let batch_id = "batch-13591-terminal-children";
+        let children = [recoverable.clone(), failed.clone()]
+            .into_iter()
+            .map(|run_id| crate::agent_task_batch::FanoutRunBatchChild {
+                task_id: run_id.clone(),
+                run_id,
+            })
+            .collect::<Vec<_>>();
+        crate::agent_task_batch::persist_fanout_run_batch(
+            batch_id,
+            batch_id,
+            &children,
+            serde_json::json!({}),
+        )
+        .expect("persist batch");
+        let claim = crate::agent_task_batch::claim_fanout_run_batch(batch_id)
+            .expect("claim batch")
+            .expect("coordinator claim");
+        crate::agent_task_batch::start_fanout_run_batch(batch_id, &claim).expect("leave admission");
+
+        let cooks: Vec<_> = [recoverable.clone(), failed.clone()]
+            .into_iter()
+            .map(|cook_id| {
+                let recipe = super::super::load_recipe(&cook_id).expect("load child recipe");
+                super::super::reconstruct_options_with_dispatcher(
+                    &recipe,
+                    Some(Arc::new(RecordingDetachedAttemptDispatcher {
+                        dispatches: Arc::new(AtomicUsize::new(0)),
+                    })),
+                )
+                .expect("reconstruct child")
+            })
+            .collect();
+        let run = || {
+            run_cook_batch_with_control(
+                AgentTaskCookBatchOptions {
+                    batch_id: batch_id.to_string(),
+                    cooks: cooks.clone(),
+                    max_concurrency: 2,
+                },
+                Arc::new(UnusedExecutor),
+                AgentTaskCookBatchControl {
+                    skip_durably_terminal_children: true,
+                    publish_child_terminalization: true,
+                    ..Default::default()
+                },
+            )
+            .expect("terminal children converge")
+        };
+
+        let first = run();
+        assert_eq!(first.value.status, "partial_failure", "{:#?}", first.value);
+        assert_eq!(first.value.succeeded, 1);
+        assert_eq!(first.value.failed, 1);
+        assert_eq!(
+            first.value.cooks[0]
+                .result
+                .as_ref()
+                .map(|report| report.status.as_str()),
+            Some("review_ready"),
+            "the recoverable child must be harvested, not merely observed"
+        );
+
+        let record = crate::agent_task_batch::read_batch_record(batch_id).expect("read batch");
+        assert_eq!(
+            record.state,
+            crate::agent_task_batch::AgentTaskBatchState::PartialFailure,
+            "{record:#?}"
+        );
+        assert_eq!(record.metadata["coordinator"]["stage"], "completed");
+        assert_eq!(
+            record.metadata["child_finalizations"]
+                .as_object()
+                .expect("terminal checkpoints")
+                .len(),
+            2
+        );
+
+        let second = run();
+        assert_eq!(second.value.status, "partial_failure");
+        let record = crate::agent_task_batch::read_batch_record(batch_id).expect("read replay");
+        assert_eq!(
+            record.metadata["child_finalizations"]
+                .as_object()
+                .expect("idempotent terminal checkpoints")
+                .len(),
+            2
+        );
+    });
+}
+
+#[test]
 fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_attempt() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
