@@ -134,53 +134,67 @@ pub struct ResolvedTarget {
     pub synthetic: bool,
 }
 
-/// Classify a filesystem target against persisted component primary checkouts.
-///
-/// This intentionally recognizes only an exact registered primary as a usable
-/// identity. Related checkouts are returned as candidates so callers that need
-/// a primary-owned operation can reject worktrees and adopted clones before
-/// they derive or mutate child resources.
+/// Canonical identities that can help correct a rejected repository path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegisteredPathCandidates {
+    pub repositories: Vec<String>,
+    pub components: Vec<String>,
+}
+
+/// Typed result of classifying a filesystem target against persisted ownership.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegisteredPrimaryPathResolution {
     Primary(String),
-    Related(Vec<String>),
-    Unknown,
+    MissingPath,
+    NonGitPath,
+    UnregisteredRepository(RegisteredPathCandidates),
+    StaleRegistry(RegisteredPathCandidates),
+    AmbiguousNestedComponent(RegisteredPathCandidates),
 }
 
 /// Resolve a path to a registered primary component identity.
 ///
-/// A path must canonicalize and exactly equal a registered `local_path` to
-/// resolve as [`RegisteredPrimaryPathResolution::Primary`]. A checkout sharing
-/// a git common directory, the conventional component-worktree name, or its
-/// origin URL is related but not a primary.
+/// Resolution reads only persisted registrations and bounded Git metadata. It
+/// never invokes Git or enriches component checkouts, so deterministic identity
+/// failures cannot inherit a caller's planner timeout.
 pub fn resolve_registered_primary_path(input: &str) -> Result<RegisteredPrimaryPathResolution> {
     let expanded = shellexpand::tilde(input);
-    let path = Path::new(expanded.as_ref()).canonicalize();
-    let Ok(path) = path else {
-        return Ok(RegisteredPrimaryPathResolution::Unknown);
+    let Ok(path) = Path::new(expanded.as_ref()).canonicalize() else {
+        return Ok(RegisteredPrimaryPathResolution::MissingPath);
     };
-    let components = crate::component::registered()?;
+    let Some(input_git) = static_git_checkout(&path) else {
+        return Ok(RegisteredPrimaryPathResolution::NonGitPath);
+    };
+    let components = crate::component::registered_base()?;
     let mut primary = Vec::new();
-    let mut related = Vec::new();
-    let input_remote = crate::git::remote_origin_url(&path);
+    let mut nested = Vec::new();
+    let mut remote_matches = Vec::new();
+    let mut stale = Vec::new();
 
     for component in components {
         let registered_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
         let Ok(registered_path) = registered_path.canonicalize() else {
+            let configured_path = crate::paths::normalize_local_path(&registered_path);
+            if configured_path.starts_with(&input_git.root)
+                || remotes_match(input_git.remote.as_deref(), component.remote_url.as_deref())
+            {
+                stale.push(component.id);
+            }
             continue;
         };
         if registered_path == path {
             primary.push(component.id);
             continue;
         }
-
-        let remote_matches = input_remote.is_some()
-            && input_remote == crate::git::remote_origin_url(&registered_path);
-        if same_git_common_dir(&registered_path, &path)
-            || is_named_component_worktree(&component.id, &registered_path, &path)
-            || remote_matches
-        {
-            related.push(component.id);
+        if let Some(registered_git) = static_git_checkout(&registered_path) {
+            if registered_git.root == input_git.root {
+                nested.push(component.id);
+            } else if remotes_match(
+                input_git.remote.as_deref(),
+                registered_git.remote.as_deref(),
+            ) {
+                remote_matches.push(component.id);
+            }
         }
     }
 
@@ -190,14 +204,155 @@ pub fn resolve_registered_primary_path(input: &str) -> Result<RegisteredPrimaryP
         return Ok(RegisteredPrimaryPathResolution::Primary(primary.remove(0)));
     }
     if !primary.is_empty() {
-        return Ok(RegisteredPrimaryPathResolution::Related(primary));
+        return Ok(RegisteredPrimaryPathResolution::AmbiguousNestedComponent(
+            path_candidates(&input_git, primary),
+        ));
     }
-    related.sort();
-    related.dedup();
-    if related.is_empty() {
-        Ok(RegisteredPrimaryPathResolution::Unknown)
-    } else {
-        Ok(RegisteredPrimaryPathResolution::Related(related))
+    nested.sort();
+    nested.dedup();
+    if !nested.is_empty() {
+        nested.extend(remote_matches);
+        nested.extend(stale);
+        nested.sort();
+        nested.dedup();
+        return Ok(RegisteredPrimaryPathResolution::AmbiguousNestedComponent(
+            path_candidates(&input_git, nested),
+        ));
+    }
+    remote_matches.sort();
+    remote_matches.dedup();
+    if !remote_matches.is_empty() {
+        remote_matches.extend(stale);
+        remote_matches.sort();
+        remote_matches.dedup();
+        return Ok(RegisteredPrimaryPathResolution::UnregisteredRepository(
+            path_candidates(&input_git, remote_matches),
+        ));
+    }
+    stale.sort();
+    stale.dedup();
+    if !stale.is_empty() {
+        return Ok(RegisteredPrimaryPathResolution::StaleRegistry(
+            path_candidates(&input_git, stale),
+        ));
+    }
+    Ok(RegisteredPrimaryPathResolution::UnregisteredRepository(
+        path_candidates(&input_git, Vec::new()),
+    ))
+}
+
+const MAX_STATIC_GIT_METADATA_BYTES: u64 = 1024 * 1024;
+
+struct StaticGitCheckout {
+    root: PathBuf,
+    remote: Option<String>,
+}
+
+fn static_git_checkout(path: &Path) -> Option<StaticGitCheckout> {
+    let start = if path.is_dir() { path } else { path.parent()? };
+    for root in start.ancestors() {
+        let marker = root.join(".git");
+        let Ok(metadata) = std::fs::metadata(&marker) else {
+            continue;
+        };
+        let git_dir = if metadata.is_dir() {
+            marker
+        } else if metadata.is_file() && metadata.len() <= MAX_STATIC_GIT_METADATA_BYTES {
+            let value = std::fs::read_to_string(&marker).ok()?;
+            let git_dir = value.trim().strip_prefix("gitdir:")?.trim();
+            let git_dir = PathBuf::from(git_dir);
+            if git_dir.is_absolute() {
+                git_dir
+            } else {
+                root.join(git_dir)
+            }
+        } else {
+            return None;
+        };
+        if !git_dir.is_dir() || !git_dir.join("HEAD").is_file() {
+            return None;
+        }
+        let common_dir = bounded_text_file(&git_dir.join("commondir"))
+            .map(|value| {
+                let common = PathBuf::from(value.trim());
+                if common.is_absolute() {
+                    common
+                } else {
+                    git_dir.join(common)
+                }
+            })
+            .unwrap_or(git_dir);
+        return Some(StaticGitCheckout {
+            root: root.to_path_buf(),
+            remote: bounded_text_file(&common_dir.join("config"))
+                .and_then(|config| origin_url_from_git_config(&config)),
+        });
+    }
+    None
+}
+
+fn bounded_text_file(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_STATIC_GIT_METADATA_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+fn origin_url_from_git_config(config: &str) -> Option<String> {
+    let mut origin = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            origin = line
+                .to_ascii_lowercase()
+                .strip_prefix("[remote")
+                .and_then(|line| line.strip_suffix(']'))
+                .is_some_and(|line| line.trim().trim_matches('"') == "origin");
+        } else if origin {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("url") {
+                    return Some(value.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn remotes_match(left: Option<&str>, right: Option<&str>) -> bool {
+    left.zip(right)
+        .is_some_and(|(left, right)| normalize_git_remote(left) == normalize_git_remote(right))
+}
+
+fn normalize_git_remote(remote: &str) -> String {
+    remote
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_ascii_lowercase()
+}
+
+fn repository_name(remote: &str) -> Option<String> {
+    let normalized = normalize_git_remote(remote);
+    normalized
+        .rsplit(['/', ':'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+fn path_candidates(git: &StaticGitCheckout, components: Vec<String>) -> RegisteredPathCandidates {
+    let repositories = git
+        .remote
+        .as_deref()
+        .and_then(repository_name)
+        .or_else(|| git.root.file_name()?.to_str().map(str::to_string))
+        .into_iter()
+        .collect();
+    RegisteredPathCandidates {
+        repositories,
+        components,
     }
 }
 
@@ -1507,6 +1662,7 @@ mod tests {
             let primary = root.path().join("primary");
             let link = root.path().join("primary-link");
             fs::create_dir(&primary).expect("primary directory");
+            git(&primary, &["init"]);
             write_standalone_registration(home.path(), "fixture", &primary);
             #[cfg(unix)]
             std::os::unix::fs::symlink(&primary, &link).expect("primary symlink");
@@ -1522,7 +1678,14 @@ mod tests {
                     root.path().join("unknown").to_str().expect("path")
                 )
                 .expect("resolve unknown"),
-                RegisteredPrimaryPathResolution::Unknown
+                RegisteredPrimaryPathResolution::MissingPath
+            );
+            let non_git = root.path().join("non-git");
+            fs::create_dir(&non_git).expect("non-Git directory");
+            assert_eq!(
+                resolve_registered_primary_path(non_git.to_str().expect("path"))
+                    .expect("classify non-Git path"),
+                RegisteredPrimaryPathResolution::NonGitPath
             );
         });
     }
@@ -1553,10 +1716,62 @@ mod tests {
             assert_eq!(
                 resolve_registered_primary_path(adopted.to_str().expect("path"))
                     .expect("resolve related checkout"),
-                RegisteredPrimaryPathResolution::Related(vec![
-                    "fixture-a".to_string(),
-                    "fixture-b".to_string(),
-                ])
+                RegisteredPrimaryPathResolution::UnregisteredRepository(RegisteredPathCandidates {
+                    repositories: vec!["fixture".to_string()],
+                    components: vec!["fixture-a".to_string(), "fixture-b".to_string()],
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn registered_primary_path_resolution_distinguishes_nested_and_stale_candidates() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("repository root");
+            git(root.path(), &["init"]);
+            git(
+                root.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/org/blocks-engine.git",
+                ],
+            );
+            let nested = root.path().join("packages/php-transformer");
+            fs::create_dir_all(&nested).expect("nested component");
+            write_standalone_registration(home.path(), "php-transformer", &nested);
+
+            assert_eq!(
+                resolve_registered_primary_path(root.path().to_str().expect("path"))
+                    .expect("classify repository root"),
+                RegisteredPrimaryPathResolution::AmbiguousNestedComponent(
+                    RegisteredPathCandidates {
+                        repositories: vec!["blocks-engine".to_string()],
+                        components: vec!["php-transformer".to_string()],
+                    }
+                )
+            );
+
+            fs::remove_dir_all(&nested).expect("make registration stale");
+            let registration = home
+                .path()
+                .join(".config/homeboy/components/php-transformer.json");
+            fs::write(
+                registration,
+                serde_json::json!({
+                    "local_path": nested
+                })
+                .to_string(),
+            )
+            .expect("stale registration");
+            assert_eq!(
+                resolve_registered_primary_path(root.path().to_str().expect("path"))
+                    .expect("classify stale registration"),
+                RegisteredPrimaryPathResolution::StaleRegistry(RegisteredPathCandidates {
+                    repositories: vec!["blocks-engine".to_string()],
+                    components: vec!["php-transformer".to_string()],
+                })
             );
         });
     }

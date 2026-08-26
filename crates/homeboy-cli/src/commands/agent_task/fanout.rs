@@ -2293,6 +2293,7 @@ fn cook_batch_dry_run(
     mut args: AgentTaskFanoutCookBatchArgs,
     placement: Placement,
 ) -> CmdResult<Value> {
+    normalize_static_cook_batch_repo_with_placement(&mut args, placement)?;
     let mut planner = DryRunPlanner::new(&args, placement);
     planner.begin("gate_inputs");
     if args.issues.len() > DRY_RUN_MAX_ISSUES {
@@ -2343,7 +2344,6 @@ fn cook_batch_dry_run(
     let mut normalized_args = args.clone();
     normalized_args =
         planner.run_bounded("repository", "registered primary repository", move || {
-            normalize_static_cook_batch_repo_with_placement(&mut normalized_args, placement)?;
             resolve_cook_batch_default_branch(&mut normalized_args)?;
             Ok(normalized_args)
         })?;
@@ -2452,25 +2452,23 @@ fn static_repeatable_inputs_are_bounded(args: &AgentTaskFanoutCookBatchArgs) -> 
 }
 
 /// Dry-run accepts a registered primary path because it can be normalized from
-/// local component registration without touching Git, providers, or worktrees.
+/// registration and bounded Git metadata without invoking Git or a provider.
 fn normalize_static_cook_batch_repo_with_placement(
     args: &mut AgentTaskFanoutCookBatchArgs,
     placement: Placement,
 ) -> Result<()> {
-    if !std::path::Path::new(&args.repo).is_absolute() {
+    let expanded = shellexpand::tilde(&args.repo);
+    let path = std::path::Path::new(expanded.as_ref());
+    if !path.is_absolute() && !args.repo.contains(std::path::MAIN_SEPARATOR) && !path.exists() {
         return normalize_named_cook_batch_repo(args);
     }
-    match homeboy::core::component::resolve_registered_primary_path(&args.repo)? {
+    let resolution = homeboy::core::component::resolve_registered_primary_path(&args.repo)?;
+    match resolution {
         homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
             args.repo = id;
             normalize_named_cook_batch_repo(args)
         }
-        homeboy::core::component::RegisteredPrimaryPathResolution::Related(candidates) => {
-            Err(invalid_cook_batch_repo(args, candidates, placement))
-        }
-        homeboy::core::component::RegisteredPrimaryPathResolution::Unknown => {
-            Err(invalid_cook_batch_repo(args, Vec::new(), placement))
-        }
+        resolution => Err(invalid_cook_batch_repo_path(args, resolution, placement)),
     }
 }
 
@@ -2526,17 +2524,13 @@ fn normalize_cook_batch_repo_with_placement(
         return Err(invalid_cook_batch_repo(args, candidates, placement));
     }
 
-    match homeboy::core::component::resolve_registered_primary_path(&args.repo)? {
+    let resolution = homeboy::core::component::resolve_registered_primary_path(&args.repo)?;
+    match resolution {
         homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
             args.repo = id;
             normalize_named_cook_batch_repo(args)
         }
-        homeboy::core::component::RegisteredPrimaryPathResolution::Related(candidates) => {
-            Err(invalid_cook_batch_repo(args, candidates, placement))
-        }
-        homeboy::core::component::RegisteredPrimaryPathResolution::Unknown => {
-            Err(invalid_cook_batch_repo(args, Vec::new(), placement))
-        }
+        resolution => Err(invalid_cook_batch_repo_path(args, resolution, placement)),
     }
 }
 
@@ -2546,6 +2540,34 @@ fn normalize_named_cook_batch_repo(args: &mut AgentTaskFanoutCookBatchArgs) -> R
     args.repo = repository;
     args.component = Some(component);
     Ok(())
+}
+
+fn invalid_cook_batch_repo_path(
+    args: &AgentTaskFanoutCookBatchArgs,
+    resolution: homeboy::core::component::RegisteredPrimaryPathResolution,
+    placement: Placement,
+) -> Error {
+    use homeboy::core::component::{RegisteredPathCandidates, RegisteredPrimaryPathResolution};
+
+    let (classification, candidates) = match resolution {
+        RegisteredPrimaryPathResolution::MissingPath => {
+            ("missing_path", RegisteredPathCandidates::default())
+        }
+        RegisteredPrimaryPathResolution::NonGitPath => {
+            ("non_git_path", RegisteredPathCandidates::default())
+        }
+        RegisteredPrimaryPathResolution::UnregisteredRepository(candidates) => {
+            ("unregistered_repository", candidates)
+        }
+        RegisteredPrimaryPathResolution::StaleRegistry(candidates) => {
+            ("stale_registry", candidates)
+        }
+        RegisteredPrimaryPathResolution::AmbiguousNestedComponent(candidates) => {
+            ("ambiguous_nested_component", candidates)
+        }
+        RegisteredPrimaryPathResolution::Primary(_) => unreachable!("primary handled by caller"),
+    };
+    invalid_cook_batch_repo_with_identity(args, classification, candidates, placement, false)
 }
 
 fn resolve_cook_batch_default_branch(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
@@ -2588,24 +2610,55 @@ fn invalid_cook_batch_repo(
     candidates: Vec<String>,
     placement: Placement,
 ) -> Error {
-    let correction_command =
-        (candidates.len() == 1 && !has_private_gate_declaration(args)).then(|| {
-            let mut corrected = args.clone();
-            corrected.repo = candidates[0].clone();
-            quote_args(&cook_batch_argv_with_placement(&corrected, placement))
-        });
-    let secure_reentry = (candidates.len() == 1 && has_private_gate_declaration(args)).then(|| {
+    invalid_cook_batch_repo_with_identity(
+        args,
+        "invalid_repository_identity",
+        homeboy::core::component::RegisteredPathCandidates {
+            repositories: Vec::new(),
+            components: candidates,
+        },
+        placement,
+        true,
+    )
+}
+
+fn invalid_cook_batch_repo_with_identity(
+    args: &AgentTaskFanoutCookBatchArgs,
+    classification: &'static str,
+    candidates: homeboy::core::component::RegisteredPathCandidates,
+    placement: Placement,
+    allow_component_correction: bool,
+) -> Error {
+    let component_candidates = candidates.components;
+    let correction_command = (allow_component_correction
+        && component_candidates.len() == 1
+        && !has_private_gate_declaration(args))
+    .then(|| {
+        let mut corrected = args.clone();
+        corrected.repo = component_candidates[0].clone();
+        quote_args(&cook_batch_argv_with_placement(&corrected, placement))
+    });
+    let secure_reentry = (allow_component_correction
+        && component_candidates.len() == 1
+        && has_private_gate_declaration(args)).then(|| {
         format!(
             "re-run the original private Cook-batch invocation with --repo {}; Homeboy will queue, bind, and persist the executable private plan before returning its run-plan command",
-            candidates[0]
+            component_candidates[0]
         )
     });
-    let message = if candidates.is_empty() {
-        "--repo must be a registered repo slug or an exact registered primary path"
-    } else if candidates.len() == 1 {
-        "--repo identifies a related checkout, not a registered primary path"
-    } else {
-        "--repo matches multiple registered component identities"
+    let message = match classification {
+        "missing_path" => "--repo path does not exist",
+        "non_git_path" => "--repo path is not inside a Git repository",
+        "unregistered_repository" => "--repo Git repository is not a registered Homeboy component primary",
+        "stale_registry" => "--repo matches a component whose registered primary path is stale",
+        "ambiguous_nested_component" => "--repo is a repository root containing registered nested components, not a registered component primary",
+        _ if component_candidates.is_empty() => {
+            "--repo must be a registered repo slug or an exact registered primary path"
+        }
+        _ if component_candidates.len() == 1 => {
+            "--repo identifies a related checkout, not a registered primary path"
+        }
+        _ => "--repo matches multiple registered component identities",
     };
     Error::new(
         ErrorCode::ValidationInvalidArgument,
@@ -2613,7 +2666,11 @@ fn invalid_cook_batch_repo(
         serde_json::json!({
             "provided": args.repo,
             "expected_kind": "registered_repo_slug_or_primary_path",
-            "resolved_candidates": candidates,
+            "identity_classification": classification,
+            "repository_candidates": candidates.repositories,
+            "component_candidates": component_candidates.clone(),
+            "resolved_candidates": component_candidates,
+            "identity_separation_tracker": "https://github.com/Extra-Chill/homeboy/issues/12844",
             "correction_command": correction_command,
             "secure_reentry": secure_reentry,
         }),
@@ -7268,6 +7325,7 @@ fi
         with_isolated_home(|home| {
             let primary = home.path().join("primary");
             std::fs::create_dir(&primary).expect("primary directory");
+            git(&primary, &["init"]);
             write_component_registration(home.path(), "fixture", &primary);
 
             let mut slug = cook_batch_args();
@@ -7288,6 +7346,7 @@ fi
             let private_sentinel = "PRIVATE_GATE_SENTINEL_INVALID_REPO";
             let primary = home.path().join("primary");
             std::fs::create_dir(&primary).expect("primary directory");
+            git(&primary, &["init"]);
             write_component_registration(home.path(), "fixture", &primary);
 
             let mut handle = cook_batch_args();
@@ -7398,8 +7457,141 @@ fi
             let error =
                 normalize_cook_batch_repo(&mut unknown).expect_err("unknown path is rejected");
             assert_eq!(error.details["provided"], unknown.repo);
+            assert_eq!(error.details["identity_classification"], "missing_path");
             assert_eq!(error.details["resolved_candidates"], json!([]));
             assert!(error.details["correction_command"].is_null());
+
+            let non_git_path = home.path().join("non-git");
+            std::fs::create_dir(&non_git_path).expect("non-Git path");
+            let mut non_git = cook_batch_args();
+            non_git.repo = non_git_path.display().to_string();
+            let error = normalize_cook_batch_repo(&mut non_git).expect_err("non-Git path");
+            assert_eq!(error.details["identity_classification"], "non_git_path");
+
+            let unregistered_path = home.path().join("unregistered-repository");
+            std::fs::create_dir(&unregistered_path).expect("unregistered repository");
+            git(&unregistered_path, &["init"]);
+            git(
+                &unregistered_path,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/acme/unregistered-repository.git",
+                ],
+            );
+            let mut unregistered = cook_batch_args();
+            unregistered.repo = unregistered_path.display().to_string();
+            let error = normalize_cook_batch_repo(&mut unregistered)
+                .expect_err("unregistered repository is rejected");
+            assert_eq!(
+                error.details["identity_classification"],
+                "unregistered_repository"
+            );
+            assert_eq!(
+                error.details["repository_candidates"],
+                json!(["unregistered-repository"])
+            );
+
+            let stale_path = unregistered_path.join("packages/stale-component");
+            std::fs::write(
+                home.path()
+                    .join(".config/homeboy/components/stale-component.json"),
+                serde_json::json!({ "local_path": stale_path }).to_string(),
+            )
+            .expect("stale component registration");
+            let error = normalize_cook_batch_repo(&mut unregistered)
+                .expect_err("stale registration is rejected");
+            assert_eq!(error.details["identity_classification"], "stale_registry");
+            assert_eq!(
+                error.details["component_candidates"],
+                json!(["stale-component"])
+            );
+        });
+    }
+
+    #[test]
+    fn fanout_repository_identity_fails_before_any_configured_planner_deadline() {
+        with_isolated_home(|home| {
+            let repository = home.path().join("blocks-engine");
+            let component = repository.join("packages/php-transformer");
+            std::fs::create_dir_all(&component).expect("nested component");
+            git(&repository, &["init"]);
+            git(
+                &repository,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/Extra-Chill/blocks-engine.git",
+                ],
+            );
+            write_component_registration(home.path(), "php-transformer", &component);
+            let blocking_registration =
+                home.path().join(".config/homeboy/components/blocking.json");
+            assert!(Command::new("mkfifo")
+                .arg(&blocking_registration)
+                .status()
+                .expect("create blocking registration")
+                .success());
+
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&bin).expect("fake Git bin");
+            let fake_git = bin.join("git");
+            let git_invoked = home.path().join("git-invoked");
+            std::fs::write(
+                &fake_git,
+                format!("#!/bin/sh\n: > '{}'\nsleep 5\n", git_invoked.display()),
+            )
+            .expect("sleeping Git");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
+                    .expect("executable fake Git");
+            }
+            let previous_path = std::env::var_os("PATH");
+            let mut path = std::ffi::OsString::from(bin.as_os_str());
+            path.push(":");
+            path.push(previous_path.unwrap_or_default());
+            let _path = homeboy::core::test_support::EnvVarGuard::set("PATH", path);
+
+            for (repo, timeout) in [
+                (repository.display().to_string(), 1),
+                ("~/blocks-engine".to_string(), 60),
+            ] {
+                let mut args = cook_batch_args();
+                args.repo = repo;
+                args.dry_run_planner_timeout_seconds = Some(timeout);
+                let started = Instant::now();
+                let error = cook_batch(args).expect_err("unregistered repository root");
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "{timeout}-second planner setting delayed static identity failure: {error}"
+                );
+                assert_eq!(
+                    error.details["identity_classification"],
+                    "ambiguous_nested_component"
+                );
+                assert_eq!(
+                    error.details["repository_candidates"],
+                    json!(["blocks-engine"])
+                );
+                assert_eq!(
+                    error.details["component_candidates"],
+                    json!(["php-transformer"])
+                );
+                assert!(error.details["correction_command"].is_null());
+                assert_eq!(
+                    error.details["identity_separation_tracker"],
+                    "https://github.com/Extra-Chill/homeboy/issues/12844"
+                );
+                assert!(error.details["reason"].is_null());
+            }
+            assert!(
+                !git_invoked.exists(),
+                "static identity resolution must not invoke Git"
+            );
         });
     }
 
@@ -9037,6 +9229,24 @@ fi
         with_isolated_home(|home| {
             let primary = home.path().join("primary");
             std::fs::create_dir_all(&primary).expect("primary directory");
+            git(&primary, &["init", "-b", "main"]);
+            git(
+                &primary,
+                &[
+                    "-c",
+                    "user.name=Homeboy Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ],
+            );
+            git(
+                &primary,
+                &["update-ref", "refs/remotes/origin/main", "HEAD"],
+            );
             std::fs::write(
                 primary.join("homeboy.json"),
                 r#"{"scripts":{"lint":["check"],"test":["check"]}}"#,
