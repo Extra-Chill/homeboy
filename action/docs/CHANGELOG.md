@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.19] - 2026-08-26
+
+### Changed
+- delegate findings run reconciliation
+
+### Fixed
+- restore findings script executable mode
+
 ## [2.15.18] - 2026-08-26
 
 ### Fixed
