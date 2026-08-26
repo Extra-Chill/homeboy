@@ -209,6 +209,7 @@ pub fn resume_promoted_patch(
         &observation_store,
         false,
         None,
+        None,
     )
 }
 
@@ -225,17 +226,19 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
         observation_store,
         false,
         None,
+        None,
     )
 }
 
 /// Re-run corrected gates against an already-applied candidate while preserving
 /// all candidate, base, target, source, and artifact resume validation.
-pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
+pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
     options: AgentTaskPromotionOptions,
     target_path: &Path,
     previous: &Value,
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
+    before_gates: impl FnOnce() -> Result<()> + 'a,
 ) -> Result<AgentTaskPromotionReport> {
     resume_promoted_patch_internal(
         options,
@@ -244,16 +247,18 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
         observation_store,
         true,
         gate_workspace,
+        Some(Box::new(before_gates)),
     )
 }
 
-fn resume_promoted_patch_internal(
+fn resume_promoted_patch_internal<'a>(
     options: AgentTaskPromotionOptions,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
     replacement_gates: bool,
     gate_workspace: Option<&Path>,
+    before_gates: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
 ) -> Result<AgentTaskPromotionReport> {
     validate_resume_provenance(&options, target_path, previous)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
@@ -327,6 +332,9 @@ fn resume_promoted_patch_internal(
                 None,
             )
         })?;
+    if let Some(before_gates) = before_gates {
+        before_gates()?;
+    }
     let gates = run_promotion_gates(
         &options,
         &mut provider,

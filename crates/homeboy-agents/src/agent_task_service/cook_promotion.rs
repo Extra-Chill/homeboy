@@ -1249,11 +1249,8 @@ fn verify_replacement_gates_owned(
         .pointer("/resume_contract/inputs")
         .or_else(|| original.provenance.pointer("/resume_inputs"));
     let (source, source_path) = promotion_source(&run_id)?;
+    let source = bind_persisted_promotion_artifact(source, &original)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
-    // This fence is deliberately irreversible. Shell gates can have external
-    // side effects, so a dead owner after this point must recover with external
-    // candidate-bound proof rather than replaying an unknown partial execution.
-    mark_replacement_gate_execution_started(lifecycle_store, run_id)?;
     let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
         AgentTaskPromotionOptions {
@@ -1285,6 +1282,11 @@ fn verify_replacement_gates_owned(
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
         replacement_gate_workspace.as_deref(),
         &observation_store,
+        || {
+            // This fence is deliberately irreversible. Artifact hydration and
+            // candidate validation are retryable; shell gates are not.
+            mark_replacement_gate_execution_started(lifecycle_store, run_id)
+        },
     )?;
     // #11290's import boundary requires command evidence for each green gate.
     // The shared gate runner retains that evidence in detailed gate reports, so
@@ -1307,7 +1309,68 @@ fn verify_replacement_gates_owned(
     record_replacement_gate_proof(&run_id, replacement, Some(external_authorization))
 }
 
-fn replacement_gate_execution_started(
+fn bind_persisted_promotion_artifact(
+    source: String,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<String> {
+    let mut source_value: Value = serde_json::from_str(&source).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("deserialize replacement gate promotion source".to_string()),
+        )
+    })?;
+    let outcome = if let Some(outcomes) = source_value
+        .get_mut("outcomes")
+        .and_then(Value::as_array_mut)
+    {
+        outcomes
+            .iter_mut()
+            .find(|outcome| {
+                outcome.get("task_id").and_then(Value::as_str)
+                    == Some(promotion.source.task_id.as_str())
+            })
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "promotion.source.task_id",
+                    "replacement gate source aggregate has no outcome for the persisted promotion",
+                    Some(promotion.source.task_id.clone()),
+                    None,
+                )
+            })?
+    } else {
+        &mut source_value
+    };
+    let artifacts = outcome
+        .get_mut("artifacts")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.source.artifacts",
+                "replacement gate source outcome has no artifact inventory",
+                Some(promotion.source.task_id.clone()),
+                None,
+            )
+        })?;
+    if !artifacts.iter().any(|artifact| {
+        artifact.get("id").and_then(Value::as_str) == Some(promotion.patch_artifact.id.as_str())
+    }) {
+        artifacts.push(json!({
+            "id": promotion.patch_artifact.id,
+            "kind": promotion.patch_artifact.kind,
+            "path": promotion.patch_artifact.path,
+            "sha256": promotion.patch_artifact.sha256,
+            "metadata": {
+                "actionable": true,
+                "role": "patch",
+                "source": "persisted_promotion",
+            },
+        }));
+    }
+    serde_json::to_string(&source_value)
+        .map_err(|error| Error::internal_json(error.to_string(), None))
+}
+
+pub(crate) fn replacement_gate_execution_started(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<bool> {
