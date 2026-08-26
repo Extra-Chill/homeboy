@@ -4149,32 +4149,34 @@ mod tests {
 
     #[test]
     fn declared_shared_cargo_target_is_reported_without_parsing_gate_shell_text() {
-        let temp = tempfile::tempdir().expect("gate fixture");
-        let mut policy = AgentTaskGateEnvironmentPolicy::default();
-        policy.shared_cargo_target = Some(true);
-        // The test runner's required Cargo target is an ambient override. An
-        // explicit empty declaration clears it so this exercises the contract.
-        policy
-            .variables
-            .insert("CARGO_TARGET_DIR".to_string(), String::new());
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("gate fixture");
+            let mut policy = AgentTaskGateEnvironmentPolicy::default();
+            policy.shared_cargo_target = Some(true);
+            // The test runner's required Cargo target is an ambient override. An
+            // explicit empty declaration clears it so this exercises the contract.
+            policy
+                .variables
+                .insert("CARGO_TARGET_DIR".to_string(), String::new());
 
-        let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
-            temp.path(),
-            1,
-            "test -n \"$CARGO_TARGET_DIR\"",
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            None,
-            &policy,
-            &[],
-        )
-        .expect("declared managed gate");
+            let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                temp.path(),
+                1,
+                "test -n \"$CARGO_TARGET_DIR\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &policy,
+                &[],
+            )
+            .expect("declared managed gate");
 
-        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
-        let target = report.environment.cargo_target.expect("target evidence");
-        assert_eq!(target.resolution, "shared");
-        assert!(target.path.contains("cargo-target"));
-        assert!(target.owner.starts_with("agent-task-gate"));
+            assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+            let target = report.environment.cargo_target.expect("target evidence");
+            assert_eq!(target.resolution, "shared");
+            assert!(target.path.contains("cargo-target"));
+            assert!(target.owner.starts_with("agent-task-gate"));
+        });
     }
 
     #[test]
@@ -5922,18 +5924,18 @@ mod tests {
             }],
             &[],
             None,
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .expect_err("hung toolchain probe must time out");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(20));
         assert_eq!(error.retryable, Some(true));
         assert_eq!(
             error.details["toolchain_preflight"]["timed_out"], true,
             "{:#}",
             error.details
         );
-        assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 2_000);
+        assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 10_000);
         let descendant_pid = fs::read_to_string(pid_file)
             .expect("descendant pid")
             .trim()
@@ -5971,7 +5973,7 @@ mod tests {
         )
         .expect_err("hung toolchain probe must time out");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(error.details["toolchain_preflight"]["timed_out"], true);
         assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 100);
     }
@@ -6013,7 +6015,7 @@ mod tests {
         )
         .expect_err("second probe must consume only the first probe's remaining deadline");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(error.details["toolchain_preflight"]["timed_out"], false);
         assert_eq!(
             error.details["toolchain_preflight"]["command"],

@@ -958,6 +958,16 @@ mod tests {
                 AgentTaskGateEnvironment::default(),
             );
             gate.status = AgentTaskGateStatus::Failed;
+            gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+                classification: AgentTaskGateFailureClassification::CandidateCode,
+                summary: "candidate gate failed".to_string(),
+                command: command.to_string(),
+                exit_code: 1,
+                stdout_tail: String::new(),
+                stderr_tail: candidate_output.to_string(),
+                agent_feedback: "Repair the candidate gate failure.".to_string(),
+                diagnostics: Vec::new(),
+            });
             promotion.deterministic_gates.push(gate);
 
             let result = compare_gate_failures_to_verified_base(

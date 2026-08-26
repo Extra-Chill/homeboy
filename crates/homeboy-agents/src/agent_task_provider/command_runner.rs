@@ -1223,6 +1223,8 @@ fn run_materialized_provider_command_once_contained(
                 &status,
                 &stdout,
                 &stderr,
+                stdout_capture.total_bytes,
+                stderr_capture.total_bytes,
                 &provider_output_redactions(request, provider),
             ),
         );
@@ -1287,6 +1289,8 @@ fn run_materialized_provider_command_once_contained(
                 &status,
                 &stdout,
                 &stderr,
+                stdout_capture.total_bytes,
+                stderr_capture.total_bytes,
                 &provider_output_redactions(request, provider),
             ),
         ),
@@ -1299,10 +1303,11 @@ fn provider_cargo_target(
     environment: &[(String, String)],
 ) -> homeboy_core::Result<Option<homeboy_core::ManagedCargoTarget>> {
     let Some(cwd) = cwd else { return Ok(None) };
-    let enabled =
-        homeboy_core::component::resolve_effective(None, Some(&cwd.to_string_lossy()), None)
-            .map(|component| component.managed_execution.shared_cargo_target)
-            .unwrap_or(false);
+    // Attempt worktrees execute from their own portable checkout state. Ambient
+    // registry resolution can scan unrelated registered repositories and cannot
+    // authoritatively configure this runner-local snapshot.
+    let enabled = homeboy_core::component::try_discover_from_portable(cwd)?
+        .is_some_and(|component| component.managed_execution.shared_cargo_target);
     if !enabled {
         return Ok(None);
     }
@@ -1804,6 +1809,8 @@ fn executor_process_diagnostic_data(
     status: &std::process::ExitStatus,
     stdout: &str,
     stderr: &str,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
     redactions: &[String],
 ) -> Value {
     let command = redact_sensitive_text(command, redactions);
@@ -1816,11 +1823,11 @@ fn executor_process_diagnostic_data(
         "exit_code": status.code(),
         "signal": exit_signal(status),
         "stdout": bounded_executor_output(&stdout),
-        "stdout_bytes": stdout.len(),
-        "stdout_truncated": stdout.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stdout_bytes": stdout_bytes,
+        "stdout_truncated": stdout_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
         "stderr": bounded_executor_output(&stderr),
-        "stderr_bytes": stderr.len(),
-        "stderr_truncated": stderr.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stderr_bytes": stderr_bytes,
+        "stderr_truncated": stderr_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
         "remediation_hints": provider_process_remediation_hints(&stdout, &stderr),
     })
 }
@@ -1927,6 +1934,8 @@ fn signal_termination_outcome(
         status,
         stdout,
         stderr,
+        stdout.len() as u64,
+        stderr.len() as u64,
         &provider_output_redactions(request, provider),
     );
     if let Some(object) = data.as_object_mut() {
@@ -2027,6 +2036,8 @@ fn surface_provider_process_failure(
         status,
         stdout,
         stderr,
+        stdout.len() as u64,
+        stderr.len() as u64,
         &redactions,
     );
     let exit_description = status
