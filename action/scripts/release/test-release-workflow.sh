@@ -60,7 +60,7 @@ assert_not_contains 'gh release create' "${WORKFLOW}" "release workflow does not
 assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not parse changelog notes"
 
 # GitHub-hosted workflow dependencies must use Node 24-capable action majors (#321).
-assert_count 'actions/checkout@v6' '15' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v6 for every checkout"
+assert_count 'actions/checkout@v6' '16' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v6 for every checkout"
 assert_count 'actions/cache@v5' '1' "${CI_WORKFLOW}" "reusable CI workflow owns one candidate build cache"
 assert_count 'actions/cache@v5' '3' "${ROOT_DIR}/action.yml" "composite action owns release, source-build, and extension caches"
 assert_count 'actions/upload-artifact@v7' '8' "${CI_WORKFLOW}" "reusable CI workflow uses artifact upload v7"

@@ -37,6 +37,27 @@ def install_pair(directory: Path, prefix: str) -> None:
     shutil.copy(FIXTURES / f"{prefix}-inventory.json", directory / f"{STEM}.test-inventory.json")
 
 
+def write_inventory(directory: Path, payload: dict) -> None:
+    canonical = {
+        "command": payload["command"],
+        "execution_fingerprint": payload["execution_fingerprint"],
+        "runner": payload["runner"],
+        "runner_fingerprint": payload["runner_fingerprint"],
+        "schema": payload["schema"],
+        "tests": sorted(payload["tests"], key=lambda item: item["id"]),
+        "workspace_fingerprint": payload["workspace_fingerprint"],
+    }
+    payload["inventory_fingerprint"] = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    (directory / f"{STEM}.test-inventory.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    outcomes_path = directory / f"{STEM}.test-outcomes.json"
+    outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    outcomes["inventory_fingerprint"] = payload["inventory_fingerprint"]
+    outcomes_path.write_text(json.dumps(outcomes), encoding="utf-8")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -53,6 +74,17 @@ def main() -> None:
         payload["failed_test_ids"] = ["nondeterministic", "stable"]
         (baseline / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")
         assert gate(current, baseline) == {COMMAND: "baseline_red"}, "#435 equivalent failures must reconcile"
+
+        inventory = json.loads((current / f"{STEM}.test-inventory.json").read_text(encoding="utf-8"))
+        inventory["tests"].append({"id": "new_passing_test"})
+        write_inventory(current, inventory)
+        assert gate(current, baseline) == {COMMAND: "baseline_red"}, "#449 passing inventory growth must reconcile"
+
+        outcomes_path = current / f"{STEM}.test-outcomes.json"
+        outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))
+        outcomes["failed_test_ids"].append("new_passing_test")
+        outcomes_path.write_text(json.dumps(outcomes), encoding="utf-8")
+        assert gate(current, baseline) == {COMMAND: "fail"}, "#449 a newly failing added test must block"
 
         for path in current.iterdir():
             path.unlink()
