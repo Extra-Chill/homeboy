@@ -814,10 +814,9 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
     // verify gate that touches autoloaded deps fatals on missing deps
     // instead of reporting a real pass/fail. Promotion must run the
     // component's dependency install step against the worktree before the
-    // verify gate executes. This uses a runtime-agnostic component `deps`
-    // script (no composer/npm binary required) to prove the install ran.
+    // verify gate executes. This uses a runtime-agnostic dependency provider
+    // manifest (no composer/npm binary required) to prove the install ran.
     homeboy_core::test_support::with_isolated_home(|_| {
-        homeboy_extension::component_script::register_component_script_runner();
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
 
@@ -825,11 +824,13 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
         std::fs::create_dir_all(&worktree_path).expect("worktree dir");
         let deps_marker = worktree_path.join("deps-installed.txt");
         std::fs::write(
-            worktree_path.join("homeboy.json"),
+            worktree_path.join("homeboy-deps.json"),
             serde_json::json!({
-                "id": "deps-worktree",
-                "scripts": {
-                    "deps": ["sh -c 'printf installed > deps-installed.txt'"]
+                "provider": "fixture-provider",
+                "commands": {
+                    "install": {
+                        "argv": ["sh", "-c", "printf installed > deps-installed.txt"]
+                    }
                 }
             })
             .to_string(),
@@ -858,6 +859,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                     verify: vec!["true".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                    hydrate_dependencies: true,
                     ..Default::default()
                 },
                 provider_command: None,

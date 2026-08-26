@@ -202,7 +202,8 @@ pub struct AgentTaskLimits {
     pub execution_deadline_unix_ms: Option<u64>,
     /// Per-attempt liveness deadline: if the provider produces no
     /// stdout/stderr progress within this window, the attempt is killed and
-    /// classified as stalled/rate_limited so rotation can advance.
+    /// classified as stalled/rate_limited so rotation can advance. Defaults to
+    /// five minutes when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1044,10 +1044,15 @@ fn run_materialized_provider_command_once_contained(
         let _ = Write::write_all(&mut stdin, &input);
     }
 
-    let liveness_timeout = request
-        .limits
-        .liveness_timeout_ms
-        .map(Duration::from_millis);
+    let liveness_timeout_ms = crate::agent_task_timeout::effective_provider_liveness_timeout_ms(
+        request.limits.liveness_timeout_ms,
+    );
+    // The provider receives `requested_timeout_ms` and gets the process grace
+    // specifically to serialize its timeout outcome. A liveness deadline that
+    // is equal to or later than that provider deadline must not consume the
+    // grace first and misclassify the attempt as stalled.
+    let liveness_timeout = (liveness_timeout_ms < requested_timeout_ms)
+        .then_some(Duration::from_millis(liveness_timeout_ms));
     let (status, killed_for_liveness, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (Some(status), false, false),
@@ -1056,15 +1061,15 @@ fn run_materialized_provider_command_once_contained(
                 if elapsed >= process_timeout {
                     break (None, false, true);
                 }
-                if let Some(liveness) = liveness_timeout {
+                if let Some(liveness_timeout) = liveness_timeout {
                     let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
                         last_progress_ms.load(Ordering::SeqCst),
                     ));
-                    if progress_age >= liveness {
+                    if progress_age >= liveness_timeout {
                         break (None, true, false);
                     }
                     // Wake up at the earlier of process timeout and liveness deadline.
-                    let remaining_liveness = liveness.saturating_sub(progress_age);
+                    let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
                     let sleep_for = remaining_liveness
                         .min(process_timeout - elapsed)
                         .min(Duration::from_millis(50));
@@ -1114,7 +1119,7 @@ fn run_materialized_provider_command_once_contained(
             &stderr,
             &provider.id,
             liveness_timeout
-                .expect("liveness kill requires a configured liveness deadline")
+                .expect("liveness kill requires an earlier liveness deadline")
                 .as_millis(),
         );
         return failure_outcome(
@@ -1129,7 +1134,7 @@ fn run_materialized_provider_command_once_contained(
                 "deadline": "liveness",
                 "timeout_ms": requested_timeout_ms,
                 "process_timeout_ms": process_timeout.as_millis(),
-                "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+                "liveness_timeout_ms": liveness_timeout_ms,
                 "stdout_bytes": stdout_capture.total_bytes,
                 "stderr_bytes": stderr_capture.total_bytes,
             }),
@@ -1160,6 +1165,7 @@ fn run_materialized_provider_command_once_contained(
                 run_id,
                 requested_timeout_ms,
                 process_timeout.as_millis(),
+                liveness_timeout_ms,
                 cancellation_acknowledged,
                 &stdout_capture,
                 &stderr_capture,
@@ -1197,7 +1203,7 @@ fn run_materialized_provider_command_once_contained(
                     elapsed_ms: started.elapsed().as_millis(),
                     requested_timeout_ms,
                     process_timeout_ms: process_timeout.as_millis(),
-                    liveness_timeout_ms: request.limits.liveness_timeout_ms,
+                    liveness_timeout_ms: Some(liveness_timeout_ms),
                     execution_deadline_unix_ms: request.limits.execution_deadline_unix_ms,
                 },
             );
@@ -1217,6 +1223,8 @@ fn run_materialized_provider_command_once_contained(
                 &status,
                 &stdout,
                 &stderr,
+                stdout_capture.total_bytes,
+                stderr_capture.total_bytes,
                 &provider_output_redactions(request, provider),
             ),
         );
@@ -1281,6 +1289,8 @@ fn run_materialized_provider_command_once_contained(
                 &status,
                 &stdout,
                 &stderr,
+                stdout_capture.total_bytes,
+                stderr_capture.total_bytes,
                 &provider_output_redactions(request, provider),
             ),
         ),
@@ -1293,10 +1303,11 @@ fn provider_cargo_target(
     environment: &[(String, String)],
 ) -> homeboy_core::Result<Option<homeboy_core::ManagedCargoTarget>> {
     let Some(cwd) = cwd else { return Ok(None) };
-    let enabled =
-        homeboy_core::component::resolve_effective(None, Some(&cwd.to_string_lossy()), None)
-            .map(|component| component.managed_execution.shared_cargo_target)
-            .unwrap_or(false);
+    // Attempt worktrees execute from their own portable checkout state. Ambient
+    // registry resolution can scan unrelated registered repositories and cannot
+    // authoritatively configure this runner-local snapshot.
+    let enabled = homeboy_core::component::try_discover_from_portable(cwd)?
+        .is_some_and(|component| component.managed_execution.shared_cargo_target);
     if !enabled {
         return Ok(None);
     }
@@ -1683,6 +1694,7 @@ fn provider_timeout_diagnostic_data(
     run_id: Option<&str>,
     timeout_ms: u64,
     process_timeout_ms: u128,
+    liveness_timeout_ms: u64,
     cancellation_acknowledged: bool,
     stdout: &ProviderOutputCapture,
     stderr: &ProviderOutputCapture,
@@ -1719,7 +1731,7 @@ fn provider_timeout_diagnostic_data(
         "deadline": "wall_clock",
         "timeout_ms": timeout_ms,
         "process_timeout_ms": process_timeout_ms,
-        "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+        "liveness_timeout_ms": liveness_timeout_ms,
         "output_event_count": stdout.events.saturating_add(stderr.events),
         "stdout_bytes": stdout.total_bytes,
         "stderr_bytes": stderr.total_bytes,
@@ -1797,6 +1809,8 @@ fn executor_process_diagnostic_data(
     status: &std::process::ExitStatus,
     stdout: &str,
     stderr: &str,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
     redactions: &[String],
 ) -> Value {
     let command = redact_sensitive_text(command, redactions);
@@ -1809,11 +1823,11 @@ fn executor_process_diagnostic_data(
         "exit_code": status.code(),
         "signal": exit_signal(status),
         "stdout": bounded_executor_output(&stdout),
-        "stdout_bytes": stdout.len(),
-        "stdout_truncated": stdout.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stdout_bytes": stdout_bytes,
+        "stdout_truncated": stdout_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
         "stderr": bounded_executor_output(&stderr),
-        "stderr_bytes": stderr.len(),
-        "stderr_truncated": stderr.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stderr_bytes": stderr_bytes,
+        "stderr_truncated": stderr_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
         "remediation_hints": provider_process_remediation_hints(&stdout, &stderr),
     })
 }
@@ -1920,6 +1934,8 @@ fn signal_termination_outcome(
         status,
         stdout,
         stderr,
+        stdout.len() as u64,
+        stderr.len() as u64,
         &provider_output_redactions(request, provider),
     );
     if let Some(object) = data.as_object_mut() {
@@ -2020,6 +2036,8 @@ fn surface_provider_process_failure(
         status,
         stdout,
         stderr,
+        stdout.len() as u64,
+        stderr.len() as u64,
         &redactions,
     );
     let exit_description = status
