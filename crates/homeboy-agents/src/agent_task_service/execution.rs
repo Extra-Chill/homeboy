@@ -1845,10 +1845,8 @@ fn retryable_cook_attempt(
             .is_some_and(|selection| {
                 selection.run_id == source.run_id && selection.selected_artifact_id.is_none()
             });
-    if !retryable_pre_execution_failure && !failed_provider_without_candidate && !acceptance_repair
-    {
-        return Ok(None);
-    }
+    let source_is_retryable =
+        retryable_pre_execution_failure || failed_provider_without_candidate || acceptance_repair;
     let replaces_source_attempt = source.metadata["pre_execution_failure"].is_object()
         && source.metadata["provider_executions_consumed"]
             .as_u64()
@@ -1969,6 +1967,9 @@ fn retryable_cook_attempt(
             recipe_replacement: materialized_attempt_seen,
             replaces_source_attempt: false,
         }));
+    }
+    if !source_is_retryable {
+        return Ok(None);
     }
     let max_attempts = recipe
         .retry_budget
