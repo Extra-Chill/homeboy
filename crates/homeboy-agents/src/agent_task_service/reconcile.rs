@@ -522,7 +522,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
 /// `reconcile_stale_active_runs` used to have exactly two callers — `cleanup`
 /// and `agent-task active --reconcile --apply` — both of which require a human
 /// to type them. A detached cook whose owner died therefore stayed `running`
-/// forever. Controller wait resolution had no automatic caller at all.
+/// forever. Loop Work jobs now own controller wait advancement.
 struct AgentTaskOrchestrationDriver;
 
 impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrchestrationDriver {
@@ -542,12 +542,6 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
                 run.stale_reason.as_deref(),
             );
         }
-        serde_json::to_value(&report)
-            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
-    }
-
-    fn reconcile_controller_waits(&self) -> Result<serde_json::Value> {
-        let report = crate::agent_task_controller_service::reconcile_waiting_controllers()?;
         serde_json::to_value(&report)
             .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
     }
@@ -1599,10 +1593,7 @@ mod tests {
             register_orchestration_driver();
             let runs = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("run pass");
-            let waits = homeboy_core::daemon::orchestration::reconcile_controller_waits()
-                .expect("wait pass");
             assert_eq!(runs["reconciled"], 0, "{runs}");
-            assert_eq!(waits["changed"], 0, "{waits}");
         });
     }
 
