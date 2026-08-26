@@ -800,7 +800,7 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
             backend: Some("fallback".to_string()),
             ..AgentTaskProviderRotationEntry::default()
         }],
-        liveness_timeout_ms: Some(50),
+        liveness_timeout_ms: Some(5_000),
         ..AgentTaskProviderRotationPolicy::default()
     });
 

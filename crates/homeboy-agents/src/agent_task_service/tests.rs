@@ -2153,7 +2153,7 @@ fn dead_owner_process_run_is_classified_stale_and_reconciled() {
             // runner job (local controller-owned run). A very large PID is not
             // a live process on this host.
             record.metadata = serde_json::json!({
-                "runner_pid": u32::MAX,
+                "runner_pid": i32::MAX as u32,
             });
         })
         .expect("dead-owner record stored");
