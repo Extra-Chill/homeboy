@@ -4335,6 +4335,7 @@ fn run_cook_reported(
                 if error.details["cook_materialized_by_invocation"] == true
                     && store.data_root() == lifecycle_store.data_root()
                     && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+                    && record.plan_id == failure_options.initial_plan.plan_id
                 {
                     let phase = pre_execution_failure_phase(&error, None);
                     record_pre_execution_failure(
@@ -4746,7 +4747,11 @@ fn run_cook_spine(
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
-        validate_cook_workspace(&options).map_err(|mut error| {
+        validate_cook_workspace_with_adopted_candidate(
+            &options,
+            options.source_worktree_path.is_some() && !cook_uses_explicit_cwd_workspace(&options),
+        )
+        .map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
             error
         })?;
@@ -4770,7 +4775,11 @@ fn run_cook_spine(
         && !cook_workspace_lookup_pending(&options.initial_plan)
         && (options.attempt_dispatcher.is_none() || options.source_worktree_path.is_some())
     {
-        let workspace_base = validate_cook_workspace(&options).map_err(|mut error| {
+        let workspace_base = validate_cook_workspace_with_adopted_candidate(
+            &options,
+            options.source_worktree_path.is_some() && !cook_uses_explicit_cwd_workspace(&options),
+        )
+        .map_err(|mut error| {
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
             error
         })?;
@@ -5219,7 +5228,11 @@ fn run_cook_spine(
                 let workspace_base = if options.attempt_dispatcher.is_none()
                     || options.source_worktree_path.is_some()
                 {
-                    validate_cook_workspace(&options)?
+                    validate_cook_workspace_with_adopted_candidate(
+                        &options,
+                        options.source_worktree_path.is_some()
+                            && !cook_uses_explicit_cwd_workspace(&options),
+                    )?
                 } else {
                     None
                 };
@@ -6755,6 +6768,13 @@ fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRe
 fn validate_cook_workspace(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
+    validate_cook_workspace_with_adopted_candidate(options, false)
+}
+
+fn validate_cook_workspace_with_adopted_candidate(
+    options: &AgentTaskCookServiceOptions,
+    adopted_dirty_candidate: bool,
+) -> Result<Option<CookWorkspaceBaseValidation>> {
     let continuation = tracked_promotion_continuation(options)?;
     let source = options.source_worktree_path.as_deref();
     let target = if let Some(source) = source {
@@ -6877,7 +6897,7 @@ fn validate_cook_workspace(
             ));
         }
     }
-    preflight_cook_workspace_base_ancestry_with_provider(&target, options)
+    preflight_cook_workspace_base_ancestry_with_provider(&target, options, adopted_dirty_candidate)
         .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))
 }
 
@@ -7072,10 +7092,23 @@ fn pin_cook_workspace_base_at(
 fn preflight_cook_workspace_base_ancestry_with_provider(
     target: &Path,
     options: &AgentTaskCookServiceOptions,
+    adopted_dirty_candidate: bool,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
-    let base = options.task_base_sha.as_deref().unwrap_or(&options.base);
+    // Explicit CWDs are caller-owned and must remain untouched. Resolve their
+    // declared ref into an isolated scheduler snapshot instead of treating the
+    // persisted pin as authority to converge the caller's checkout.
+    let base = if cook_uses_explicit_cwd_workspace(options) {
+        &options.base
+    } else {
+        options.task_base_sha.as_deref().unwrap_or(&options.base)
+    };
     let ignored_evidence = explicit_cook_evidence_paths(options, target);
-    match preflight_cook_workspace_base_ancestry(target, base, &ignored_evidence) {
+    match preflight_cook_workspace_base_ancestry(
+        target,
+        base,
+        &ignored_evidence,
+        adopted_dirty_candidate,
+    ) {
         Ok(snapshot) => Ok(snapshot.map(CookWorkspaceBaseValidation::Snapshot)),
         Err(error)
             if error.details["workspace_base_ancestry"]["direction"] == "behind"
@@ -7099,16 +7132,21 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                 base,
                 &config,
             )?;
-            let snapshot = preflight_cook_workspace_base_ancestry(target, base, &ignored_evidence)
-                .map_err(|mut error| {
-                    error.details["workspace_base_ancestry"]["convergence"] = serde_json::json!({
-                        "provider_id": convergence.provider_id,
-                        "handle": convergence.handle,
-                        "path": convergence.path,
-                        "base_sha": convergence.base_sha,
-                    });
-                    error
-                })?;
+            let snapshot = preflight_cook_workspace_base_ancestry(
+                target,
+                base,
+                &ignored_evidence,
+                adopted_dirty_candidate,
+            )
+            .map_err(|mut error| {
+                error.details["workspace_base_ancestry"]["convergence"] = serde_json::json!({
+                    "provider_id": convergence.provider_id,
+                    "handle": convergence.handle,
+                    "path": convergence.path,
+                    "base_sha": convergence.base_sha,
+                });
+                error
+            })?;
             Ok(Some(match snapshot {
                 Some(snapshot) => CookWorkspaceBaseValidation::Snapshot(snapshot),
                 None => CookWorkspaceBaseValidation::Convergence(serde_json::json!({
@@ -7135,6 +7173,7 @@ fn preflight_cook_workspace_base_ancestry(
     target: &Path,
     base: &str,
     ignored_evidence: &[String],
+    adopted_dirty_candidate: bool,
 ) -> Result<Option<Value>> {
     let AgentTaskPromotionCandidate::Git { fingerprint } =
         candidate_fingerprint(target.to_string_lossy().as_ref())?
@@ -7203,7 +7242,7 @@ fn preflight_cook_workspace_base_ancestry(
         .map(|entry| entry.strip_prefix("?? ").unwrap_or(entry))
         .filter(|path| !ignored_evidence.iter().any(|evidence| evidence == path))
         .collect::<Vec<_>>();
-    if !dirty_paths.is_empty() {
+    if !dirty_paths.is_empty() && !adopted_dirty_candidate {
         let mut error = Error::validation_invalid_argument(
             "workspace",
             "Cook destination has uncommitted changes; refusing provider execution",
@@ -7878,11 +7917,11 @@ fn materialize_pending_cook_workspace(
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
+    validate_pending_cook_repository_identity(&options.initial_plan, &target)?;
     // Deferred provider materialization has no checkout at initial recipe
     // persistence. Capture and persist this immutable boundary before Cook can
     // admit or dispatch the materialized destination.
     pin_cook_workspace_base_at(options, &target)?;
-    validate_pending_cook_repository_identity(&options.initial_plan, &target)?;
     for task in &mut options.initial_plan.tasks {
         task.workspace.root = Some(target.display().to_string());
         task.metadata["cook_workspace_identity"] =

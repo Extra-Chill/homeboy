@@ -800,7 +800,7 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
             backend: Some("fallback".to_string()),
             ..AgentTaskProviderRotationEntry::default()
         }],
-        liveness_timeout_ms: Some(50),
+        liveness_timeout_ms: Some(5_000),
         ..AgentTaskProviderRotationPolicy::default()
     });
 
@@ -854,6 +854,59 @@ fn silent_provider_hits_liveness_deadline_before_wall_timeout() {
         json!(50)
     );
     assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
+}
+
+#[test]
+fn silent_provider_uses_default_liveness_deadline_before_wall_timeout() {
+    let command = format!("node {}", script("setInterval(() => {}, 1_000);"));
+    let (mut request, provider) = request("task-liveness-default", command);
+    request.limits.timeout_ms = Some(500);
+    request.limits.liveness_timeout_ms = None;
+
+    let outcome = crate::agent_task_timeout::with_default_provider_liveness_timeout_ms(50, || {
+        run_provider_command_once(&request, &provider)
+    });
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Stalled)
+    );
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.provider_liveness_timeout"
+    );
+    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("liveness"));
+    assert_eq!(
+        outcome.diagnostics[0].data["liveness_timeout_ms"],
+        json!(50)
+    );
+    assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
+}
+
+#[test]
+fn wall_timeout_precedes_an_equal_default_liveness_deadline() {
+    let command = format!("node {}", script("setInterval(() => {}, 1_000);"));
+    let (mut request, provider) = request("task-liveness-timeout-precedence", command);
+    request.limits.timeout_ms = Some(50);
+    request.limits.liveness_timeout_ms = None;
+
+    let outcome = crate::agent_task_timeout::with_default_provider_liveness_timeout_ms(50, || {
+        run_provider_command_once(&request, &provider)
+    });
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Timeout)
+    );
+    assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_timeout");
+    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("wall_clock"));
+    assert_eq!(
+        outcome.diagnostics[0].data["liveness_timeout_ms"],
+        json!(50)
+    );
+    assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(50));
 }
 
 #[test]

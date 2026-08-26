@@ -284,7 +284,11 @@ jobs:
     # result filenames, so a multi-word command no longer reads
     # `review test.json` while the writer emits `review-test.json`), #433
     # (bounded action setup subprocesses), #448 (equivalent failed test identity
-    # evidence), and suffixed measurement commands.
+    # evidence), #450 (live-base resolution and passing inventory growth), and
+    # suffixed measurement commands.
+    # v2.15.16 restores changed-test routing under differential gating, runs a
+    # baseline only after a non-passing candidate, and uses composite-safe
+    # cancellation detection (#11751 W1-3/W1-10).
     #
     # v2.15.16 additionally carries the two halves of the phantom-red-gate
     # diagnosis: 73ffaa1/#445 attributes a failed or timed-out setup to its
@@ -293,10 +297,12 @@ jobs:
     # #13510 (a realistic from-source build budget) those are the reasons
     # `Audit` has been red on this repository with no findings and no digest.
     # Also picks up #450 (differential tests compared against the live base).
+    # v2.15.17 runs a non-passing candidate's baseline at full scope so its
+    # failed-test identities remain comparable when candidate scope is changed.
     #
     # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, #13437,
     # #13536, #445, #450, and #451.
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@afc603872df61607f24f9356985da80cb00c03f5
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@a55a1dde4d52d00656ac9b01ad06d1be2e5b4378
     with:
       commands: review test
       # `review test` defaults to running the extension's pre-test lint, which
@@ -315,7 +321,7 @@ jobs:
       # workflow checks out to run the gate itself — it is what surfaces as
       # `ACTION_REVISION` in the Test job — so leaving it behind would keep the
       # old `apply-differential-gate.py` even with a newer workflow.
-      action-ref: afc603872df61607f24f9356985da80cb00c03f5
+      action-ref: a55a1dde4d52d00656ac9b01ad06d1be2e5b4378
       # rust v1.37.4. Must move with the action pin, not after it: the action consumes
       # per-test identities, and homeboy-extensions#2699 (`fix(rust): canonicalize
       # failed test identities`, released in rust v1.37.2) is what produces them.

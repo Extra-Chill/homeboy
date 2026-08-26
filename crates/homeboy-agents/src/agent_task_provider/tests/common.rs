@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SCRIPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Wall-clock budget for provider subprocess tests. Generous on purpose: these
 /// tests spawn real `node` processes, and the suite runs at default parallelism
@@ -10,7 +13,7 @@ pub(super) fn script(body: &str) -> String {
     let path = std::env::temp_dir().join(format!(
         "homeboy-agent-task-provider-{}-{}.js",
         std::process::id(),
-        body.len()
+        SCRIPT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::write(&path, body).expect("script written");
     path.to_string_lossy().to_string()

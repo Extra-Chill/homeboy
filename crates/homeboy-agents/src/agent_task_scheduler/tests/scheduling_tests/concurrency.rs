@@ -738,16 +738,27 @@ pub(super) mod concurrency_tests {
             );
             std::thread::sleep(Duration::from_millis(2));
         }
-        let scratch: Value = serde_json::from_str::<Value>(
-            &fs::read_to_string(scratch_index).expect("scratch index"),
-        )
-        .expect("scratch index JSON")["resources"]
-            .as_array()
-            .expect("scratch resources")
-            .iter()
-            .find(|resource| resource["path"] == scratch_root.display().to_string())
-            .cloned()
-            .expect("released scratch resource");
+        let scratch_deadline = Instant::now() + Duration::from_secs(30);
+        let scratch = loop {
+            let index: Value =
+                serde_json::from_str(&fs::read_to_string(&scratch_index).expect("scratch index"))
+                    .expect("scratch index JSON");
+            let scratch = index["resources"]
+                .as_array()
+                .expect("scratch resources")
+                .iter()
+                .find(|resource| resource["path"] == scratch_root.display().to_string())
+                .cloned()
+                .expect("scratch resource");
+            if scratch["terminal_reason"] == "scheduler_timeout_completion" {
+                break scratch;
+            }
+            assert!(
+                Instant::now() < scratch_deadline,
+                "deferred scratch release did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        };
         assert_eq!(scratch["terminal_reason"], "scheduler_timeout_completion");
         assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
             .as_array()

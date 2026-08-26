@@ -5309,7 +5309,7 @@ mod recovery_action_tests {
             "checkpoint-mismatch-attempt-1",
             true,
             false,
-            false,
+            true,
             true,
             Vec::new(),
             None,
