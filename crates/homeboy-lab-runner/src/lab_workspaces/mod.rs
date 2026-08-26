@@ -1419,9 +1419,9 @@ fn fanout_workspace_candidate_path(value: &str, source_path: &Path) -> Option<Pa
             return Some(source_relative);
         }
     }
-    homeboy_core::worktree::resolve(value)
+    homeboy_core::worktree_provider::observe_worktree_provider_workspace(value)
         .ok()
-        .map(|record| PathBuf::from(record.worktree_path))
+        .map(|workspace| PathBuf::from(workspace.ownership.path))
         .filter(|path| path.is_dir())
 }
 

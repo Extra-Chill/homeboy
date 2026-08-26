@@ -636,10 +636,9 @@ pub(crate) fn promote_or_load_attempt_in_store(
             let target_path = promotion.target.path.as_deref().or_else(|| {
                 promotion.provenance.get("worktree_path").and_then(Value::as_str)
             }).map(PathBuf::from).or_else(|| {
-                homeboy_core::worktree::resolve_if_present(&promotion.to_worktree)
+                homeboy_core::worktree_provider::observe_worktree_provider_workspace(&promotion.to_worktree)
                     .ok()
-                    .flatten()
-                    .map(|record| PathBuf::from(record.worktree_path))
+                    .map(|workspace| PathBuf::from(workspace.ownership.path))
             }).ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "promotion.target.path",
@@ -1226,10 +1225,9 @@ fn verify_replacement_gates_owned(
     let target_path = original.target.path.as_deref().or_else(|| {
         original.provenance.get("worktree_path").and_then(Value::as_str)
     }).map(PathBuf::from).or_else(|| {
-        homeboy_core::worktree::resolve_if_present(&original.to_worktree)
+        homeboy_core::worktree_provider::observe_worktree_provider_workspace(&original.to_worktree)
             .ok()
-            .flatten()
-            .map(|record| PathBuf::from(record.worktree_path))
+            .map(|workspace| PathBuf::from(workspace.ownership.path))
     }).ok_or_else(|| Error::validation_invalid_argument(
         "promotion.target.path",
         "replacement gates require the failed promotion's durable candidate worktree path or registered worktree handle",
