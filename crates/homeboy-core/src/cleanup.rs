@@ -1655,8 +1655,18 @@ fn apply_artifact_candidate(
     active: &ActiveWorktrees,
     run_ref: &str,
 ) -> ArtifactCleanupCandidateApplyOutcome {
-    // The enclosing registry read lease blocks Homeboy admission from changing
-    // liveness between this final check and deletion.
+    apply_artifact_candidate_with_before_remove(candidate, active, run_ref, || {})
+}
+
+fn apply_artifact_candidate_with_before_remove(
+    candidate: &ArtifactCleanupCandidate,
+    active: &ActiveWorktrees,
+    run_ref: &str,
+    before_remove: impl FnOnce(),
+) -> ArtifactCleanupCandidateApplyOutcome {
+    // The enclosing registry read lease blocks Homeboy admission changes. This
+    // early check avoids slow safety work for targets that are already active;
+    // Cargo lock liveness is checked again at the deletion boundary below.
     if candidate.kind == "rust_target" {
         match active.liveness(Path::new(&candidate.worktree)) {
             LIVENESS_IDLE => {}
@@ -1739,6 +1749,17 @@ fn apply_artifact_candidate(
         .pressure_eligible
         .then(|| filesystem_available_bytes(path.parent().unwrap_or(path)))
         .flatten();
+    before_remove();
+    // Git and controller probes above can take long enough for a Cargo build to
+    // start after the initial liveness check.
+    if candidate.kind == "rust_target"
+        && active.liveness(Path::new(&candidate.worktree)) == LIVENESS_ACTIVE_BUILD
+    {
+        return ArtifactCleanupCandidateApplyOutcome::Skipped(format!(
+            "active_build: a Cargo build holds the target lock in {} — deleting it now would be regenerated immediately",
+            candidate.worktree
+        ));
+    }
     match remove_artifact_path(path) {
         Ok(()) => ArtifactCleanupCandidateApplyOutcome::Applied(Box::new(applied_row(
             candidate,
@@ -2414,7 +2435,7 @@ mod tests {
         }
 
         /// Hold the lock the way Cargo does, for the life of the returned file.
-        fn hold(lock: &std::path::Path) -> std::fs::File {
+        pub(super) fn hold(lock: &std::path::Path) -> std::fs::File {
             let file = std::fs::File::open(lock).expect("open lock");
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             assert_eq!(rc, 0, "test must be able to take the lock");
@@ -3068,6 +3089,55 @@ mod tests {
                     if reason.contains("gained tracked or staged source changes")
             ));
             assert!(repo.path().join("target/operator-note.txt").exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_rechecks_cargo_lock_immediately_before_removal() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let lock = repo.path().join("target/debug/.cargo-lock");
+            write_file(&repo.path().join("target/debug/app"), "artifact");
+            write_file(&lock, "");
+            let scan = collect_worktree_candidates(
+                &WorktreeInfo {
+                    path: repo.path().to_path_buf(),
+                },
+                &ArtifactCleanupOptions::default(),
+                &ActiveWorktrees::default(),
+                &ProtectedControllerExecutables::default(),
+                None,
+                None,
+                None,
+            )
+            .expect("candidate discovery");
+            let candidate = scan
+                .candidates
+                .into_iter()
+                .find(|candidate| candidate.relative_path == "target")
+                .expect("target candidate");
+            assert_eq!(
+                ActiveWorktrees::default().liveness(repo.path()),
+                LIVENESS_IDLE,
+                "the build must begin after initial eligibility"
+            );
+            let mut held = None;
+
+            let outcome = apply_artifact_candidate_with_before_remove(
+                &candidate,
+                &ActiveWorktrees::default(),
+                "test-run",
+                || held = Some(active_build_lock_tests::hold(&lock)),
+            );
+
+            assert!(matches!(
+                outcome,
+                ArtifactCleanupCandidateApplyOutcome::Skipped(reason)
+                    if reason.starts_with("active_build:")
+            ));
+            assert!(repo.path().join("target/debug/app").exists());
+            drop(held);
         });
     }
 
