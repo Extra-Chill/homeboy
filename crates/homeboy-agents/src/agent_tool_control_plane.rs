@@ -532,14 +532,25 @@ mod tools {
     ) -> Result<Value, AgentTaskDiagnostic> {
         let repo = required_string(input, &["repo", "component_id", "name"])?;
         let branch = required_string(input, &["branch"])?;
-        to_value(worktree::create(worktree::WorktreeCreateOptions {
+        let created = worktree_provider::create_worktree(worktree::WorktreeCreateOptions {
             component_id: component_slug(repo).to_string(),
             branch: branch.to_string(),
             from: optional_string(input, &["from", "base_ref"]).map(str::to_string),
             task_url: optional_string(input, &["task_url"]).map(str::to_string),
             run_id: optional_string(input, &["run_id", "task_ref"]).map(str::to_string),
             cleanup_policy: None,
-        }))
+        })
+        .map_err(|error| AgentTaskDiagnostic {
+            class: "agent_tool.homeboy_error".to_string(),
+            message: error.to_string(),
+            data: Value::Null,
+        })?;
+        match created {
+            worktree_provider::WorktreeProviderCreateOutput::Native(output) => to_value(Ok(output)),
+            worktree_provider::WorktreeProviderCreateOutput::Configured(output) => to_value(Ok(
+                worktree_provider::ConfiguredWorktreeCreateEvidence::from(output),
+            )),
+        }
     }
 
     pub(crate) fn github_issue_get(

@@ -14,7 +14,8 @@ use homeboy::core::worktree::{
     WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 use homeboy::core::worktree_provider::{
-    self, WorktreeProviderIdentity, WorktreeProviderSafety, WorktreeProviderWorkspace,
+    self, ConfiguredWorktreeCreateEvidence, WorktreeProviderCreateOutput, WorktreeProviderIdentity,
+    WorktreeProviderSafety, WorktreeProviderWorkspace,
 };
 use homeboy::core::worktree_providers::{
     WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
@@ -197,7 +198,7 @@ impl From<CliCleanupPolicy> for CleanupPolicy {
 #[derive(Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WorktreeOutput {
-    Create(WorktreeCreateOutput),
+    Create(WorktreeCreateCommandOutput),
     Adopt(WorktreeAdoptOutput),
     QueueCreate(WorktreeQueueCreateOutput),
     List(WorktreeListCommandOutput),
@@ -207,6 +208,22 @@ pub enum WorktreeOutput {
     Cleanup(WorktreeCleanupCommandOutput),
     QuarantineList(Vec<TaskWorktreeRegistryQuarantine>),
     QuarantineClear(TaskWorktreeRegistryQuarantine),
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum WorktreeCreateCommandOutput {
+    Native(WorktreeCreateOutput),
+    Configured(ConfiguredWorktreeCreateEvidence),
+}
+
+impl From<WorktreeProviderCreateOutput> for WorktreeCreateCommandOutput {
+    fn from(output: WorktreeProviderCreateOutput) -> Self {
+        match output {
+            WorktreeProviderCreateOutput::Native(output) => Self::Native(output),
+            WorktreeProviderCreateOutput::Configured(output) => Self::Configured(output.into()),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -446,14 +463,17 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             task_url,
             run_id,
             cleanup_policy,
-        } => WorktreeOutput::Create(worktree::create(WorktreeCreateOptions {
-            component_id,
-            branch,
-            from,
-            task_url,
-            run_id,
-            cleanup_policy: cleanup_policy.map(Into::into),
-        })?),
+        } => WorktreeOutput::Create(
+            worktree_provider::create_worktree(WorktreeCreateOptions {
+                component_id,
+                branch,
+                from,
+                task_url,
+                run_id,
+                cleanup_policy: cleanup_policy.map(Into::into),
+            })?
+            .into(),
+        ),
         WorktreeCommand::Adopt {
             handle,
             path,
@@ -669,10 +689,14 @@ mod tests {
     };
 
     use crate::cli_surface::{Cli, Commands};
+    use homeboy::core::worktree_provider::{
+        WorktreeOwnership, WorktreeProviderIdentity, WorktreeProvisionDestination,
+    };
 
     use super::{
         cleanup_is_dry_run, ProviderWorktreeOutput, ProviderWorktreeSafetyOutput, WorktreeCommand,
-        WorktreeListCommandOutput, WorktreeOutput, WorktreeStatusCommandOutput,
+        WorktreeCreateCommandOutput, WorktreeListCommandOutput, WorktreeOutput,
+        WorktreeStatusCommandOutput,
     };
 
     fn create_output(reconciliation: Option<WorktreeCreateReconciliation>) -> WorktreeCreateOutput {
@@ -706,10 +730,14 @@ mod tests {
 
     #[test]
     fn worktree_create_serialization_preserves_outer_action_and_adds_restore_detail() {
-        let created = serde_json::to_value(WorktreeOutput::Create(create_output(None)))
-            .expect("serialize created output");
-        let existing = serde_json::to_value(WorktreeOutput::Create(create_output(None)))
-            .expect("serialize existing output");
+        let created = serde_json::to_value(WorktreeOutput::Create(
+            WorktreeCreateCommandOutput::Native(create_output(None)),
+        ))
+        .expect("serialize created output");
+        let existing = serde_json::to_value(WorktreeOutput::Create(
+            WorktreeCreateCommandOutput::Native(create_output(None)),
+        ))
+        .expect("serialize existing output");
         let evidence = WorktreeCreateEvidence {
             task_worktree_id: "fixture@branch".to_string(),
             component_id: "fixture".to_string(),
@@ -723,14 +751,15 @@ mod tests {
             .expect("workspace identity"),
             git_registration: "registered".to_string(),
         };
-        let restored = serde_json::to_value(WorktreeOutput::Create(create_output(Some(
-            WorktreeCreateReconciliation {
-                action: WorktreeCreateAction::Restored,
-                previous: evidence.clone(),
-                current: evidence,
-            },
-        ))))
-        .expect("serialize restored output");
+        let restored =
+            serde_json::to_value(WorktreeOutput::Create(WorktreeCreateCommandOutput::Native(
+                create_output(Some(WorktreeCreateReconciliation {
+                    action: WorktreeCreateAction::Restored,
+                    previous: evidence.clone(),
+                    current: evidence,
+                })),
+            )))
+            .expect("serialize restored output");
 
         assert_eq!(created["action"], "create");
         assert_eq!(existing["action"], "create");
@@ -738,6 +767,38 @@ mod tests {
         assert!(existing.get("reconciliation").is_none());
         assert_eq!(restored["action"], "create");
         assert_eq!(restored["reconciliation"]["action"], "restored");
+    }
+
+    #[test]
+    fn configured_worktree_create_serialization_exposes_provider_evidence() {
+        let output =
+            serde_json::to_value(WorktreeOutput::Create(WorktreeCreateCommandOutput::from(
+                homeboy::core::worktree_provider::WorktreeProviderCreateOutput::Configured(
+                    homeboy::core::worktree_provider::WorktreeProvision {
+                        destination: WorktreeProvisionDestination {
+                            ownership: WorktreeOwnership {
+                                provider: WorktreeProviderIdentity::Configured(
+                                    "fixture-provider".to_string(),
+                                ),
+                                handle: "fixture@branch".to_string(),
+                                path: "/tmp/fixture@branch".to_string(),
+                                branch: "branch".to_string(),
+                                task_url: Some("https://example.test/1".to_string()),
+                            },
+                            exact_identity: None,
+                        },
+                        action: homeboy::core::worktree_provider::WorktreeProvisionAction::Ensured,
+                        idempotency_key: "fixture-key".to_string(),
+                    },
+                ),
+            )))
+            .expect("serialize configured create output");
+
+        assert_eq!(output["action"], "create");
+        assert_eq!(output["provider"], "fixture-provider");
+        assert_eq!(output["provision_action"], "ensured");
+        assert_eq!(output["idempotency_key"], "fixture-key");
+        assert!(output.get("record").is_none());
     }
 
     #[test]

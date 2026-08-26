@@ -154,6 +154,45 @@ pub enum WorktreeProvisionAction {
     Ensured,
 }
 
+#[derive(Debug, Clone)]
+pub enum WorktreeProviderCreateOutput {
+    Native(worktree::WorktreeCreateOutput),
+    Configured(WorktreeProvision),
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConfiguredWorktreeCreateEvidence {
+    pub provider: String,
+    pub handle: String,
+    pub path: String,
+    pub branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    pub provision_action: &'static str,
+    pub idempotency_key: String,
+}
+
+impl From<WorktreeProvision> for ConfiguredWorktreeCreateEvidence {
+    fn from(provision: WorktreeProvision) -> Self {
+        let provider = match provision.destination.ownership.provider {
+            WorktreeProviderIdentity::Native => "native".to_string(),
+            WorktreeProviderIdentity::Configured(provider) => provider,
+        };
+        Self {
+            provider,
+            handle: provision.destination.ownership.handle,
+            path: provision.destination.ownership.path,
+            branch: provision.destination.ownership.branch,
+            task_url: provision.destination.ownership.task_url,
+            provision_action: match provision.action {
+                WorktreeProvisionAction::Admitted => "admitted",
+                WorktreeProvisionAction::Ensured => "ensured",
+            },
+            idempotency_key: provision.idempotency_key,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeProvision {
     pub destination: WorktreeProvisionDestination,
@@ -973,6 +1012,77 @@ pub fn ensure_worktree_provision_from_config(
     }
 }
 
+/// Create through the selected provider while preserving the built-in
+/// provider's stable output. Configured creation requires explicit task and run
+/// ownership before any provider mutation is invoked.
+pub fn create_worktree_from_config(
+    options: worktree::WorktreeCreateOptions,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderCreateOutput> {
+    let handle = worktree::handle_for_branch(&options.component_id, &options.branch);
+    let intent = WorktreeProvisionIntent {
+        handle,
+        repo: options.component_id.clone(),
+        base: options.from.clone().unwrap_or_else(|| "HEAD".to_string()),
+        head: options.branch.clone(),
+        task_url: options.task_url.clone().unwrap_or_default(),
+    };
+    let configured_creation = configured_provisioning_declared(config);
+    if configured_creation && intent.task_url.trim().is_empty() {
+        return Err(Error::validation_missing_argument(vec![
+            "--task-url is required for configured-provider worktree creation".to_string(),
+        ]));
+    }
+    if configured_creation && options.run_id.is_none() {
+        return Err(Error::validation_missing_argument(vec![
+            "--run-id is required for configured-provider worktree creation".to_string(),
+        ]));
+    }
+    let selected = select_worktree_provision_provider_from_config(&intent, config)?;
+    if selected == WorktreeProviderIdentity::Native {
+        return worktree::create(options).map(WorktreeProviderCreateOutput::Native);
+    }
+
+    let owner_run_ref = options.run_id.clone().ok_or_else(|| {
+        Error::internal_unexpected("configured worktree creation lost its validated owner run")
+    })?;
+    let cleanup_policy = match options
+        .cleanup_policy
+        .unwrap_or(worktree::CleanupPolicy::PreserveOnFailure)
+    {
+        worktree::CleanupPolicy::RemoveWhenSafe => {
+            worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess
+        }
+        worktree::CleanupPolicy::PreserveOnFailure => {
+            worktree_providers::WorktreeProviderCleanupPolicy::PreserveOnFailure
+        }
+    };
+    let lifecycle = WorktreeProvisionLifecycle {
+        purpose: "worktree_create".to_string(),
+        owner_run_ref,
+        cleanup_policy,
+    };
+    let provision =
+        ensure_worktree_provision_from_config(&intent, &lifecycle, Some(&selected), config)?;
+    let admitted = admit_worktree_provision_from_config(&intent.handle, Some(&selected), config)?
+        .into_admitted(&intent.handle)?;
+    if admitted != provision.destination {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "configured provider postcondition does not match its ensured destination",
+            Some(intent.handle),
+            None,
+        ));
+    }
+    Ok(WorktreeProviderCreateOutput::Configured(provision))
+}
+
+pub fn create_worktree(
+    options: worktree::WorktreeCreateOptions,
+) -> Result<WorktreeProviderCreateOutput> {
+    create_worktree_from_config(options, &defaults::load_config())
+}
+
 /// Finalize through native ownership first, then configured ownership. Absence
 /// and unsupported optional finalization are explicit non-error outcomes.
 pub fn finalize_worktree_from_config(
@@ -1449,6 +1559,22 @@ mod tests {
                 worktree_providers: providers,
                 ..HomeboyConfig::default()
             };
+            let missing_ownership = create_worktree_from_config(
+                worktree::WorktreeCreateOptions {
+                    component_id: "fixture".to_string(),
+                    branch: "planned".to_string(),
+                    from: Some("main".to_string()),
+                    task_url: None,
+                    run_id: None,
+                    cleanup_policy: None,
+                },
+                &config,
+            )
+            .expect_err("configured creation requires durable ownership");
+            assert_eq!(
+                missing_ownership.details["args"][0],
+                "--task-url is required for configured-provider worktree creation"
+            );
             let intent = WorktreeProvisionIntent {
                 handle: "fixture@planned".to_string(),
                 repo: "fixture".to_string(),
