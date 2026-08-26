@@ -445,8 +445,8 @@ candidate_inventory_scopes="$(grep -A30 'name: Configure candidate Test shards' 
 [ "${candidate_inventory_scopes}" -eq 1 ] || { printf 'FAIL: candidate inventory planning must preserve caller scope, got %s calls\n' "${candidate_inventory_scopes}"; exit 1; }
 replay_scopes="$(grep -A30 -E 'name: Run candidate Test shard' "${WORKFLOW}" | grep -c 'scope: full')"
 [ "${replay_scopes}" -eq 1 ] || { printf 'FAIL: candidate manifest replay must use full scope, got %s calls\n' "${replay_scopes}"; exit 1; }
-if [ "$(grep -c 'scope: full' "${WORKFLOW}")" -ne 1 ]; then
-  printf 'FAIL: only immutable manifest replay may force full scope\n'; exit 1
+if [ "$(grep -c 'scope: full' "${WORKFLOW}")" -ne 2 ]; then
+  printf 'FAIL: only immutable manifest replay and differential baseline comparison may force full scope\n'; exit 1
 fi
 grep -F 'prepare-test-shard-workspace.sh prepare .homeboy-action' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate binary setup does not isolate the action checkout\n'; exit 1; }
 grep -F "steps.prepare-binary-workspace.outcome == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate binary setup does not always restore its exact Git exclusions\n'; exit 1; }
