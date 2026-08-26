@@ -919,7 +919,7 @@ fn promote_with_provider_and_checkpoint_internal(
     // no patch applied and no durable post-apply state recorded, so the same
     // artifact/target can be retried with a corrected base (#9400).
     let pre_apply_verified_base = if !options.dry_run {
-        match resolve_promotion_target_path(&options.to_worktree)? {
+        match resolve_promotion_target_path(&options.to_worktree, None)? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
             // No provider-owned pre-apply target path resolves; fall back to
             // validating against the applied worktree below.
@@ -1611,11 +1611,25 @@ fn promote_committed_changes(
     )?
     .unwrap_or_else(|| committed_patch.patch_path.clone());
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let trusted_unpushed_candidate_destination =
+        options
+            .candidate_ref
+            .as_ref()
+            .map(|_| TrustedUnpushedCandidateDestination {
+                path: options
+                    .source_worktree_path
+                    .clone()
+                    .expect("candidate has source workspace"),
+                head: committed_patch.candidate.clone(),
+            });
     // Keep committed-change promotion on the same atomic base-validation
     // boundary as artifact promotion: no apply or checkpoint may precede a
     // failed declared base lookup.
     let pre_apply_verified_base = if !options.dry_run {
-        match resolve_promotion_target_path(&options.to_worktree)? {
+        match resolve_promotion_target_path(
+            &options.to_worktree,
+            trusted_unpushed_candidate_destination.as_ref(),
+        )? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
             None => None,
         }
@@ -1644,15 +1658,7 @@ fn promote_committed_changes(
         changed_files: normalized_patch.changed_files.clone(),
         gate_feedback_baseline,
         dry_run: options.dry_run,
-        trusted_unpushed_candidate_destination: options.candidate_ref.as_ref().map(|_| {
-            TrustedUnpushedCandidateDestination {
-                path: options
-                    .source_worktree_path
-                    .clone()
-                    .expect("candidate has source workspace"),
-                head: committed_patch.candidate.clone(),
-            }
-        }),
+        trusted_unpushed_candidate_destination,
     })?;
     command_evidence.extend(target.command_evidence);
     let applied_worktree_path = (!options.dry_run).then_some(target.path);
@@ -2371,14 +2377,26 @@ fn promotion_source(
 /// Resolve a provider-owned target before the patch is applied, so the declared
 /// base can be validated against it without mutating the working tree (#9400).
 /// Genuinely unmanaged destinations retain the post-apply validation fallback.
-fn resolve_promotion_target_path(to_worktree: &str) -> Result<Option<PathBuf>> {
+fn resolve_promotion_target_path(
+    to_worktree: &str,
+    trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
+) -> Result<Option<PathBuf>> {
     if Path::new(to_worktree).is_dir() {
         return Ok(None);
     }
+    let trusted_unpushed_destination = trusted_unpushed_candidate_destination.map(|trusted| {
+        homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
+            path: trusted.path.clone(),
+            head: trusted.head.clone(),
+        }
+    });
     match homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
         to_worktree,
         &homeboy_core::defaults::load_config(),
-        homeboy_core::worktree_provider::WorktreeMutationContext::default(),
+        homeboy_core::worktree_provider::WorktreeMutationContext {
+            safety_baseline: None,
+            trusted_unpushed_destination: trusted_unpushed_destination.as_ref(),
+        },
     ) {
         Ok(target) => Ok(target.path.is_dir().then_some(target.path)),
         Err(error) if error.details["worktree_provider_lookup"] == "not_found" => Ok(None),
