@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.6] - 2026-08-26
+
+### Changed
+- isolate stdin snapshot fixture
+
+### Fixed
+- recover adopted candidate artifacts
+- bound explicit repository resolution
+- readmit pre-execution retries
+- preserve pre-execution recovery
+- repair handoff release gate
+- recover pre-execution continuations
+- Fix detached token routing for local Cook retries
+- verify prepared artifact version
+
 ## [0.361.5] - 2026-08-25
 
 ### Fixed

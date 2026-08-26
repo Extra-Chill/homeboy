@@ -1080,6 +1080,7 @@ Attach authorized candidate-bound replacement gate proof after an infrastructure
 | --- | --- | --- |
 | `--promotion` | `<JSON|@FILE|->` | Complete typed promotion report from the replacement gate executor: inline JSON, `@FILE`, or `-` |
 | `--authorize-external-proof` | `<TEXT>` | Explicit operator authorization for externally produced proof |
+| `--accept-inherited-failures` | flag | Accept candidate failures proven identical against the immutable base |
 
 ## `homeboy agent-task verify-replacement`
 

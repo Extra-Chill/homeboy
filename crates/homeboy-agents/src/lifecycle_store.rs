@@ -310,6 +310,18 @@ impl AgentTaskLifecycleStore {
         super::lifecycle_ops::reserve_provider_execution_in_store(self, run_id, task, attempt)
     }
 
+    pub(crate) fn record_provider_launch_context(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        context: &crate::agent_task_provider::AgentTaskProviderLaunchContext,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_launch_context_in_store(
+            self, run_id, task_id, attempt, context,
+        )
+    }
+
     pub(crate) fn record_provider_execution_terminal(
         &self,
         run_id: &str,
@@ -816,6 +828,69 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub(crate) fn rearm_pre_execution_record_with_runtime(
+        &self,
+        record: &AgentTaskRunRecord,
+        runtime: Value,
+    ) -> Result<AgentTaskRunRecord> {
+        homeboy_core::controller_runtime::validate(&runtime)?;
+        self.with_config_lock(|| {
+            let existing = self.read_record(&record.run_id)?;
+            if !existing.state.is_terminal()
+                || !crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
+                    &existing,
+                )
+                || existing.metadata["provider_executions_consumed"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    != 0
+            {
+                return Err(Error::validation_invalid_argument(
+                    "controller_runtime_recovery",
+                    "controller runtime rebinding requires a retryable terminal pre-execution record with zero provider executions",
+                    Some(record.run_id.clone()),
+                    None,
+                ));
+            }
+            if record.state != AgentTaskRunState::Queued
+                || record.run_id != existing.run_id
+                || record.plan_id != existing.plan_id
+            {
+                return Err(Error::validation_invalid_argument(
+                    "controller_runtime_recovery",
+                    "controller runtime rebinding must preserve the durable run and plan identity while rearming it as queued",
+                    Some(record.run_id.clone()),
+                    None,
+                ));
+            }
+
+            let mut rebound = record.clone();
+            let previous = existing
+                .metadata
+                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+                .cloned()
+                .unwrap_or(Value::Null);
+            rebound.metadata["controller_runtime_recovery"] = serde_json::json!({
+                "schema": "homeboy/controller-runtime-pre-execution-recovery/v1",
+                "reason": "retryable_pre_execution_failure",
+                "previous": previous,
+                "current": runtime.clone(),
+                "provider_executions_consumed": 0,
+                "recovered_at": super::now_timestamp(),
+            });
+            rebound.metadata
+                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = runtime;
+            rebound.metadata["controller_identity"] =
+                serde_json::json!(homeboy_core::build_identity::current().display);
+            write_record_with_aggregate_without_workspace_authority_mode(
+                self,
+                &rebound,
+                read_mirrored_aggregate_in_store(self, &rebound.run_id)?,
+                false,
+            )
+        })
+    }
+
     /// Persist a record while the caller owns this store's config lock. Terminal
     /// authority is intentionally projected only after that lock is released.
     pub(crate) fn write_record_locked_without_terminal_projection(
@@ -1172,6 +1247,20 @@ fn write_record_with_aggregate_without_workspace_authority(
     record: &AgentTaskRunRecord,
     aggregate: Option<AgentTaskAggregate>,
 ) -> Result<AgentTaskRunRecord> {
+    write_record_with_aggregate_without_workspace_authority_mode(
+        lifecycle_store,
+        record,
+        aggregate,
+        true,
+    )
+}
+
+fn write_record_with_aggregate_without_workspace_authority_mode(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: Option<AgentTaskAggregate>,
+    preserve_terminal: bool,
+) -> Result<AgentTaskRunRecord> {
     #[cfg(any(test, feature = "test-support"))]
     if FAIL_NEXT_RECORD_WRITE.swap(false, Ordering::SeqCst) {
         return Err(Error::internal_io(
@@ -1193,9 +1282,12 @@ fn write_record_with_aggregate_without_workspace_authority(
             record.metadata["cook_operation_claims"] = claims;
         }
     }
-    let metadata_json =
+    let mut metadata_json =
         merge_observation_metadata(existing_metadata, observation_metadata(&record, aggregate)?);
-    store.upsert_imported_run_preserving_terminal(&RunRecord {
+    if !preserve_terminal {
+        metadata_json["agent_task_aggregate"] = Value::Null;
+    }
+    let projected = RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
         component_id: plan_id_component(&record),
@@ -1208,7 +1300,12 @@ fn write_record_with_aggregate_without_workspace_authority(
         git_sha: None,
         rig_id: None,
         metadata_json,
-    })?;
+    };
+    if preserve_terminal {
+        store.upsert_imported_run_preserving_terminal(&projected)?;
+    } else {
+        store.upsert_imported_run(&projected)?;
+    }
     let committed = store.get_run(&record.run_id)?.ok_or_else(|| {
         Error::internal_unexpected(format!(
             "committed agent-task run record is unavailable: {}",

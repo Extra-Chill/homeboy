@@ -1,9 +1,4 @@
-//! The pure reconcile decision function.
-//!
-//! See homeboy issue #1551 for the full behavior contract. The decision
-//! table is encoded in `reconcile_with_scope`, which [`reconcile_measured`]
-//! applies across every input group, gathering the resulting actions into a
-//! single plan.
+//! Pure reconciliation for one rolling findings issue per component.
 
 use std::collections::BTreeMap;
 
@@ -12,65 +7,16 @@ use super::plan::{
     TrackedIssueState,
 };
 
-/// Run the 8-row behavior contract over every group.
-///
-/// `groups` is the structured finding stream — one row per
-/// `(command, component, category)` tuple. `existing` is the tracker's
-/// matching issues for the same component+command label scope (caller
-/// fetches them with `state=all` so closed-not_planned is visible).
-///
-/// Pure: no I/O, no clock, no randomness. Same inputs → same plan.
-/// Test-only. Production reconciliation goes through `reconcile_measured`;
-/// this unmeasured variant has had no production caller. Gated rather than
-/// deleted so the surviving tests keep documenting the contract. See #11791.
-#[cfg(test)]
-pub(crate) fn reconcile(
-    groups: &[IssueGroup],
-    existing: &[TrackedIssue],
-    config: &ReconcileConfig,
-) -> ReconcilePlan {
-    reconcile_with_scope(groups, existing, config, None, true)
-}
+const ISSUE_KEY_PREFIX: &str = "<!-- homeboy:issues-reconcile-key=findings:";
+const LEGACY_KEY_PREFIX: &str = "<!-- homeboy:issues-reconcile-key=";
+const SECTION_PREFIX: &str = "<!-- homeboy:findings-section=";
+const ISSUE_LABEL: &str = "homeboy-findings";
 
-/// Reconcile within an explicit `(command, component)` scope.
+/// Reconcile one command's measurement into the component's rolling findings issue.
 ///
-/// The plain [`reconcile`] function can only act on categories present in the
-/// incoming group list. CI action runs also need to converge stale open issues
-/// whose category disappeared from the latest command output, including the
-/// all-green case where the group list is empty. The explicit scope tells the
-/// reconciler which existing tracker issues belong to the current command run.
-/// Test-only. See the note on `reconcile`. #11791.
-#[cfg(test)]
-pub(crate) fn reconcile_scoped(
-    groups: &[IssueGroup],
-    existing: &[TrackedIssue],
-    config: &ReconcileConfig,
-    command: &str,
-    component_id: &str,
-) -> ReconcilePlan {
-    reconcile_with_scope(
-        groups,
-        existing,
-        config,
-        Some((command, component_id)),
-        true,
-    )
-}
-
-/// Reconcile within a scope whose measurement may have been narrowed.
-///
-/// `complete_measurement` is the producing run's own declaration that it
-/// examined its whole surface. When it is false the reconciler still files and
-/// updates, but it will not retire a category that is merely absent — absence
-/// from a narrowed run is not evidence the findings are gone.
-///
-/// This is not hypothetical. `release.yml` runs `review audit --profile=pr`,
-/// and `AuditProfile::Pr` executes seven detector families; `core_boundary_leaks`
-/// and `source_policy` are deliberately excluded from it. A PR-profile run
-/// therefore *cannot* emit those categories at any debt level, and treating that
-/// silence as a fix closed 23 tracking issues — 409 findings in one of them — as
-/// "All findings have been resolved" 29 minutes after a full-tree sweep filed
-/// them. See homeboy #11298.
+/// Every finding category is stored in an independently keyed section. Complete
+/// measurements retire categories absent from the current command output;
+/// narrowed measurements update only categories they explicitly measured.
 pub fn reconcile_measured(
     groups: &[IssueGroup],
     existing: &[TrackedIssue],
@@ -79,340 +25,274 @@ pub fn reconcile_measured(
     component_id: &str,
     complete_measurement: bool,
 ) -> ReconcilePlan {
-    reconcile_with_scope(
-        groups,
-        existing,
-        config,
-        Some((command, component_id)),
-        complete_measurement,
-    )
-}
+    let mut related: Vec<&TrackedIssue> = existing
+        .iter()
+        .filter(|issue| issue_component(issue).as_deref() == Some(component_id))
+        .collect();
+    related.sort_by_key(|issue| issue.number);
 
-fn reconcile_with_scope(
-    groups: &[IssueGroup],
-    existing: &[TrackedIssue],
-    config: &ReconcileConfig,
-    scope: Option<(&str, &str)>,
-    complete_measurement: bool,
-) -> ReconcilePlan {
-    // Index existing issues by (command, component, category). New issues carry
-    // a stable hidden body key; legacy action-created issues fall back to the
-    // title shape `<command>: <label> in <component>`.
-    let mut by_category: BTreeMap<(String, String, String), Vec<&TrackedIssue>> = BTreeMap::new();
-    for issue in existing {
-        if let Some(key) = parse_issue_key(&issue.body).or_else(|| parse_category_key(&issue.title))
-        {
-            by_category.entry(key).or_default().push(issue);
-        }
-    }
+    let canonical: Vec<&TrackedIssue> = related
+        .iter()
+        .copied()
+        .filter(|issue| parse_canonical_component(&issue.body).as_deref() == Some(component_id))
+        .collect();
+    let mut sections = collect_sections(&canonical, &related, component_id);
+    merge_measurement(&mut sections, groups, command, complete_measurement);
 
-    let mut actions: Vec<ReconcileAction> = Vec::new();
-    let mut seen_keys: Vec<(String, String, String)> = Vec::new();
+    let open: Vec<&TrackedIssue> = related
+        .iter()
+        .copied()
+        .filter(|issue| issue.state.is_open())
+        .collect();
+    let closed_not_planned = canonical
+        .iter()
+        .copied()
+        .filter(|issue| issue.state == TrackedIssueState::ClosedNotPlanned)
+        .max_by_key(|issue| issue.number);
 
-    for group in groups {
-        let key = (
-            group.command.clone(),
-            group.component_id.clone(),
-            group.category.clone(),
-        );
-        seen_keys.push(key.clone());
-        let matches = collect_matches(&by_category, group, &key);
-
-        // Phase 2: dispatch on (existing-issue-shape, count).
-        let (open_matches, closed_matches): (Vec<_>, Vec<_>) =
-            matches.into_iter().partition(|i| i.state.is_open());
-
-        // Sort opens by issue number so dedupe is deterministic (lowest kept).
-        let mut open_matches = open_matches;
-        open_matches.sort_by_key(|i| i.number);
-
-        // Pick a closed issue to consider for state-reason precedence:
-        // not_planned beats completed (the muting signal is more interesting
-        // than the resolved signal), then most-recent (highest number) wins.
-        let preferred_closed = pick_preferred_closed(&closed_matches);
-
-        if group.count == 0 {
-            // No findings remaining for this category.
-            if let Some((_, rest)) = open_matches.split_first() {
-                let keep = open_matches[0].number;
-                // Close every open match (no reason to keep one if there are
-                // no findings — fold dedupes in for free).
-                actions.push(ReconcileAction::Close {
-                    number: keep,
-                    category: group.category.clone(),
-                    comment: close_resolved_comment(&group.label_or_category()),
-                });
-                for dup in rest {
-                    actions.push(ReconcileAction::CloseDuplicate {
-                        number: dup.number,
-                        keep,
-                        category: group.category.clone(),
-                        comment: close_dedupe_comment(keep),
-                    });
-                }
-            } else {
-                // Nothing to do — no findings, no existing issue.
-                actions.push(ReconcileAction::Skip {
-                    category: group.category.clone(),
-                    component_id: group.component_id.clone(),
-                    reason: ReconcileSkipReason::NoFindingsNoIssue,
-                });
-            }
-            continue;
-        }
-
-        // count > 0 from here.
-        if let Some(closed) =
-            preferred_closed.filter(|issue| issue.state == TrackedIssueState::ClosedNotPlanned)
-        {
-            // A human closing the category as not_planned is stronger than any
-            // open duplicate left behind by an older action run. Keep the
-            // closed issue as the canonical record and fold open dupes into it.
-            if config.refresh_closed_not_planned {
-                actions.push(ReconcileAction::UpdateClosed {
-                    number: closed.number,
-                    body: body_with_issue_key(group),
-                    category: group.category.clone(),
-                    count: group.count,
-                });
-            }
-            for dup in &open_matches {
-                actions.push(ReconcileAction::CloseDuplicate {
-                    number: dup.number,
-                    keep: closed.number,
-                    category: group.category.clone(),
-                    comment: close_dedupe_comment(closed.number),
-                });
-            }
-            if !config.refresh_closed_not_planned {
-                actions.push(ReconcileAction::Skip {
-                    category: group.category.clone(),
-                    component_id: group.component_id.clone(),
-                    reason: ReconcileSkipReason::ClosedNotPlannedNoRefresh,
-                });
-            }
-            continue;
-        }
-
-        if !open_matches.is_empty() {
-            // Update the lowest-numbered open match.
-            let keep = open_matches[0].number;
-            actions.push(ReconcileAction::Update {
-                number: keep,
-                title: render_title(group),
-                body: body_with_issue_key(group),
-                category: group.category.clone(),
-                count: group.count,
+    let mut actions = Vec::new();
+    if sections.is_empty() {
+        if let Some((keep, duplicates)) = open.split_first() {
+            actions.push(ReconcileAction::Close {
+                number: keep.number,
+                category: "findings".to_string(),
+                comment: "All Homeboy findings have been resolved. Closing automatically."
+                    .to_string(),
             });
-            // Close any other open dupes (race-condition consolidation).
-            for dup in &open_matches[1..] {
-                actions.push(ReconcileAction::CloseDuplicate {
-                    number: dup.number,
-                    keep,
-                    category: group.category.clone(),
-                    comment: close_dedupe_comment(keep),
-                });
-            }
-            continue;
+            close_duplicates(&mut actions, duplicates, keep.number);
+        } else {
+            actions.push(ReconcileAction::Skip {
+                category: "findings".to_string(),
+                component_id: component_id.to_string(),
+                reason: ReconcileSkipReason::NoFindingsNoIssue,
+            });
         }
-
-        // No open match. Check closed issue history before filing a fresh one.
-        if let Some(closed) = preferred_closed {
-            match closed.state {
-                TrackedIssueState::ClosedNotPlanned => {
-                    if !config.refresh_closed_not_planned {
-                        actions.push(ReconcileAction::Skip {
-                            category: group.category.clone(),
-                            component_id: group.component_id.clone(),
-                            reason: ReconcileSkipReason::ClosedNotPlannedNoRefresh,
-                        });
-                        continue;
-                    }
-                    actions.push(ReconcileAction::UpdateClosed {
-                        number: closed.number,
-                        body: body_with_issue_key(group),
-                        category: group.category.clone(),
-                        count: group.count,
-                    });
-                    continue;
-                }
-                TrackedIssueState::ClosedCompleted => {
-                    // Resolved-then-returned: file a fresh issue.
-                    push_file_new(&mut actions, group);
-                    continue;
-                }
-                TrackedIssueState::Open => unreachable!("partitioned above"),
-            }
-        }
-
-        // No issue ever existed (open or closed) for this category.
-        push_file_new(&mut actions, group);
+        return ReconcilePlan::new(component_id, actions);
     }
 
-    // Only a run that measured its whole surface may retire a category on
-    // absence. A narrowed run reports silence for everything it did not look at.
-    if let (Some((command, component_id)), true) = (scope, complete_measurement) {
-        close_absent_open_issues(
-            &mut actions,
-            &by_category,
-            &seen_keys,
-            command,
-            component_id,
-        );
+    let body = render_body(component_id, &sections);
+    let title = render_title(component_id);
+    let count = groups.iter().map(|group| group.count).sum();
+
+    if let Some(closed) = closed_not_planned {
+        if config.refresh_closed_not_planned {
+            actions.push(ReconcileAction::UpdateClosed {
+                number: closed.number,
+                body,
+                category: "findings".to_string(),
+                count,
+            });
+        }
+        close_duplicates(&mut actions, &open, closed.number);
+        if !config.refresh_closed_not_planned {
+            actions.push(ReconcileAction::Skip {
+                category: "findings".to_string(),
+                component_id: component_id.to_string(),
+                reason: ReconcileSkipReason::ClosedNotPlannedNoRefresh,
+            });
+        }
+        return ReconcilePlan::new(component_id, actions);
     }
 
-    let component_id = scope
-        .map(|(_, component_id)| component_id.to_string())
-        .or_else(|| groups.first().map(|group| group.component_id.clone()))
-        .or_else(|| {
-            existing.iter().find_map(|issue| {
-                parse_issue_key(&issue.body)
-                    .or_else(|| parse_category_key(&issue.title))
-                    .map(|(_, component_id, _)| component_id)
-            })
-        })
-        .unwrap_or_else(|| "unknown".to_string());
+    if let Some(keep) = preferred_open(&open) {
+        actions.push(ReconcileAction::Update {
+            number: keep.number,
+            title,
+            body,
+            category: "findings".to_string(),
+            count,
+        });
+        let duplicates: Vec<&TrackedIssue> = open
+            .iter()
+            .copied()
+            .filter(|issue| issue.number != keep.number)
+            .collect();
+        close_duplicates(&mut actions, &duplicates, keep.number);
+    } else {
+        actions.push(ReconcileAction::FileNew {
+            command: "findings".to_string(),
+            component_id: component_id.to_string(),
+            category: "findings".to_string(),
+            title,
+            body,
+            labels: vec![ISSUE_LABEL.to_string()],
+            count,
+        });
+    }
 
     ReconcilePlan::new(component_id, actions)
 }
 
-fn push_file_new(actions: &mut Vec<ReconcileAction>, group: &IssueGroup) {
-    actions.push(ReconcileAction::FileNew {
-        command: group.command.clone(),
-        component_id: group.component_id.clone(),
-        category: group.category.clone(),
-        title: render_title(group),
-        body: body_with_issue_key(group),
-        labels: vec![group.command.clone()],
-        count: group.count,
-    });
+fn preferred_open<'a>(open: &[&'a TrackedIssue]) -> Option<&'a TrackedIssue> {
+    open.iter().copied().min_by_key(|issue| {
+        (
+            parse_canonical_component(&issue.body).is_none(),
+            issue.number,
+        )
+    })
 }
 
-fn close_absent_open_issues(
-    actions: &mut Vec<ReconcileAction>,
-    by_category: &BTreeMap<(String, String, String), Vec<&TrackedIssue>>,
-    seen_keys: &[(String, String, String)],
-    command: &str,
-    component_id: &str,
-) {
-    for ((issue_command, issue_component, category), matches) in by_category {
-        if issue_command != command || issue_component != component_id {
+fn close_duplicates(actions: &mut Vec<ReconcileAction>, duplicates: &[&TrackedIssue], keep: u64) {
+    for issue in duplicates {
+        if issue.number == keep {
             continue;
         }
-        if seen_keys.contains(&(
-            issue_command.clone(),
-            issue_component.clone(),
-            category.clone(),
-        )) {
-            continue;
-        }
-        let mut open_matches: Vec<_> = matches
-            .iter()
-            .copied()
-            .filter(|issue| issue.state.is_open())
-            .collect();
-        if open_matches.is_empty() {
-            continue;
-        }
-
-        open_matches.sort_by_key(|issue| issue.number);
-        let keep = open_matches[0].number;
-        actions.push(ReconcileAction::Close {
-            number: keep,
-            category: category.clone(),
-            comment: close_resolved_comment(&category.replace('_', " ")),
+        actions.push(ReconcileAction::CloseDuplicate {
+            number: issue.number,
+            keep,
+            category: "findings".to_string(),
+            comment: format!(
+                "Closing as duplicate of #{keep}. Homeboy now maintains one rolling findings issue per component."
+            ),
         });
-        for dup in &open_matches[1..] {
-            actions.push(ReconcileAction::CloseDuplicate {
-                number: dup.number,
-                keep,
-                category: category.clone(),
-                comment: close_dedupe_comment(keep),
-            });
-        }
     }
 }
 
-fn collect_matches<'a>(
-    by_category: &BTreeMap<(String, String, String), Vec<&'a TrackedIssue>>,
-    group: &IssueGroup,
-    key: &(String, String, String),
-) -> Vec<&'a TrackedIssue> {
-    let mut matches = by_category.get(key).cloned().unwrap_or_default();
+fn collect_sections(
+    canonical: &[&TrackedIssue],
+    related: &[&TrackedIssue],
+    component_id: &str,
+) -> BTreeMap<String, String> {
+    let mut sections = BTreeMap::new();
 
-    // Legacy action-created issues did not carry the stable body key. If the
-    // displayed label does not round-trip to the canonical category (notably
-    // aggregate test failures: `_aggregate` -> `test failure (exit 101)`),
-    // recognize the old title-derived key once so the update path writes the
-    // stable key instead of filing a duplicate.
-    let legacy_category = group.label_or_category().replace(' ', "_");
-    if legacy_category != group.category {
-        let legacy_key = (
-            group.command.clone(),
-            group.component_id.clone(),
-            legacy_category,
-        );
-        if let Some(legacy_matches) = by_category.get(&legacy_key) {
-            let mut seen: Vec<u64> = matches.iter().map(|i| i.number).collect();
-            for issue in legacy_matches {
-                if !seen.contains(&issue.number) {
-                    matches.push(issue);
-                    seen.push(issue.number);
-                }
+    for issue in canonical {
+        if issue.state.is_open() || issue.state == TrackedIssueState::ClosedNotPlanned {
+            sections.extend(parse_sections(&issue.body));
+        }
+    }
+
+    // Migrate open category-level issues into the rolling document. The next
+    // plan deterministically keeps one issue and closes the rest as duplicates.
+    for issue in related
+        .iter()
+        .copied()
+        .filter(|issue| issue.state.is_open())
+    {
+        if parse_canonical_component(&issue.body).is_some() {
+            continue;
+        }
+        if let Some((command, component, category)) =
+            parse_legacy_key(&issue.body).or_else(|| parse_legacy_title(&issue.title))
+        {
+            if component == component_id {
+                sections
+                    .entry(section_key(&command, &category))
+                    .or_insert_with(|| strip_legacy_key(&issue.body));
             }
         }
     }
 
-    matches
+    sections
 }
 
-fn pick_preferred_closed<'a>(closed: &[&'a TrackedIssue]) -> Option<&'a TrackedIssue> {
-    // not_planned beats completed; otherwise highest number (most recent).
-    closed
+fn merge_measurement(
+    sections: &mut BTreeMap<String, String>,
+    groups: &[IssueGroup],
+    command: &str,
+    complete_measurement: bool,
+) {
+    let command_prefix = format!("{command}:");
+    let measured: Vec<String> = groups
         .iter()
-        .copied()
-        .max_by_key(|i| (i.state == TrackedIssueState::ClosedNotPlanned, i.number))
-}
+        .map(|group| section_key(command, &group.category))
+        .collect();
 
-fn render_title(group: &IssueGroup) -> String {
-    format!(
-        "{}: {} in {} ({})",
-        group.command,
-        group.label_or_category(),
-        group.component_id,
-        group.count
-    )
-}
+    if complete_measurement {
+        sections.retain(|key, _| !key.starts_with(&command_prefix) || measured.contains(key));
+    }
 
-const ISSUE_KEY_PREFIX: &str = "<!-- homeboy:issues-reconcile-key=";
-
-fn issue_key(command: &str, component: &str, category: &str) -> String {
-    format!("{}:{}:{}", command, component, category)
-}
-
-fn issue_key_marker(group: &IssueGroup) -> String {
-    format!(
-        "{}{} -->",
-        ISSUE_KEY_PREFIX,
-        issue_key(&group.command, &group.component_id, &group.category)
-    )
-}
-
-fn body_with_issue_key(group: &IssueGroup) -> String {
-    if group.body.contains(ISSUE_KEY_PREFIX) {
-        group.body.clone()
-    } else if group.body.is_empty() {
-        issue_key_marker(group)
-    } else {
-        format!("{}\n\n{}", issue_key_marker(group), group.body)
+    for group in groups {
+        let key = section_key(command, &group.category);
+        if group.count == 0 {
+            sections.remove(&key);
+        } else {
+            sections.insert(key, render_group(group));
+        }
     }
 }
 
-fn parse_issue_key(body: &str) -> Option<(String, String, String)> {
+fn render_group(group: &IssueGroup) -> String {
+    let label = if group.label.is_empty() {
+        group.category.replace('_', " ")
+    } else {
+        group.label.clone()
+    };
+    let mut body = strip_legacy_key(&group.body);
+    if body
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with("## "))
+    {
+        body = body.lines().skip(1).collect::<Vec<_>>().join("\n");
+    }
+    format!(
+        "## {}: {}\n\n{}",
+        title_case(&group.command),
+        label,
+        body.trim()
+    )
+    .trim_end()
+    .to_string()
+}
+
+fn render_body(component_id: &str, sections: &BTreeMap<String, String>) -> String {
+    let mut body = format!(
+        "{}{} -->\n\n# Homeboy findings for `{}`\n\nThis issue is updated automatically from lint, audit, and test runs.\n",
+        ISSUE_KEY_PREFIX, component_id, component_id
+    );
+    for (key, section) in sections {
+        body.push_str(&format!(
+            "\n<!-- homeboy:findings-section={key}:start -->\n{}\n<!-- homeboy:findings-section={key}:end -->\n",
+            section.trim()
+        ));
+    }
+    body
+}
+
+fn parse_sections(body: &str) -> BTreeMap<String, String> {
+    let mut sections = BTreeMap::new();
+    let lines: Vec<&str> = body.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some(key) = lines[index]
+            .strip_prefix(SECTION_PREFIX)
+            .and_then(|line| line.strip_suffix(":start -->"))
+        else {
+            index += 1;
+            continue;
+        };
+        let end = format!("{SECTION_PREFIX}{key}:end -->");
+        let start = index + 1;
+        index = start;
+        while index < lines.len() && lines[index] != end {
+            index += 1;
+        }
+        if index < lines.len() {
+            sections.insert(key.to_string(), lines[start..index].join("\n"));
+        }
+        index += 1;
+    }
+    sections
+}
+
+fn issue_component(issue: &TrackedIssue) -> Option<String> {
+    parse_canonical_component(&issue.body)
+        .or_else(|| parse_legacy_key(&issue.body).map(|(_, component, _)| component))
+        .or_else(|| parse_legacy_title(&issue.title).map(|(_, component, _)| component))
+}
+
+fn parse_canonical_component(body: &str) -> Option<String> {
     let start = body.find(ISSUE_KEY_PREFIX)? + ISSUE_KEY_PREFIX.len();
-    let rest = &body[start..];
-    let end = rest.find(" -->")?;
-    let key = &rest[..end];
+    let component = body[start..].split_once(" -->")?.0.trim();
+    (!component.is_empty()).then(|| component.to_string())
+}
+
+fn parse_legacy_key(body: &str) -> Option<(String, String, String)> {
+    let start = body.find(LEGACY_KEY_PREFIX)? + LEGACY_KEY_PREFIX.len();
+    let key = body[start..].split_once(" -->")?.0;
+    if key.starts_with("findings:") {
+        return None;
+    }
     let mut parts = key.splitn(3, ':');
     let command = parts.next()?.trim();
     let component = parts.next()?.trim();
@@ -420,830 +300,378 @@ fn parse_issue_key(body: &str) -> Option<(String, String, String)> {
     if command.is_empty() || component.is_empty() || category.is_empty() {
         return None;
     }
-    Some((
-        command.to_string(),
-        component.to_string(),
-        category.to_string(),
-    ))
+    Some((command.into(), component.into(), category.into()))
 }
 
-fn close_resolved_comment(label: &str) -> String {
-    format!(
-        "All **{}** findings have been resolved. Closing automatically.\n\n\
-         Resolved by `homeboy runs findings reconcile`. If findings reappear, a new \
-         issue will be filed.",
-        label
-    )
-}
-
-fn close_dedupe_comment(keep: u64) -> String {
-    format!(
-        "Closing as duplicate of #{} — consolidated by `homeboy runs findings reconcile`.\n\n\
-         Going forward, a single issue per category is maintained and updated \
-         on each CI run.",
-        keep
-    )
-}
-
-/// Parse `<command>: <label> in <component>` (with optional `(N)` suffix)
-/// out of an issue title. Returns `(command, component, category_key)`.
-///
-/// `category_key` is the underscore-form (`unreferenced_export`) reconstructed
-/// from the human label (`unreferenced export`). This mirrors the title shape
-/// `auto-file-categorized-issues.sh` has been writing.
-fn parse_category_key(title: &str) -> Option<(String, String, String)> {
-    // Match `command: label in component(... maybe (N) ...)`.
-    let colon = title.find(':')?;
-    let command = title[..colon].trim().to_string();
-    let rest = title[colon + 1..].trim();
-
-    // Strip optional trailing `(N)` count.
+fn parse_legacy_title(title: &str) -> Option<(String, String, String)> {
+    let (command, rest) = title.split_once(':')?;
+    let rest = rest.trim();
     let rest = match rest.rfind(" (") {
-        Some(idx) if rest.ends_with(')') => &rest[..idx],
+        Some(index) if rest.ends_with(')') => &rest[..index],
         _ => rest,
     };
-
-    // Split off ` in <component>` from the right.
-    let in_idx = rest.rfind(" in ")?;
-    let label = rest[..in_idx].trim().to_string();
-    let component = rest[in_idx + 4..].trim().to_string();
-
+    let index = rest.rfind(" in ")?;
+    let label = rest[..index].trim();
+    let component = rest[index + 4..].trim();
     if command.is_empty() || label.is_empty() || component.is_empty() {
         return None;
     }
-    let category = label.replace(' ', "_");
-    Some((command, component, category))
+    Some((
+        command.trim().to_string(),
+        component.to_string(),
+        label.replace(' ', "_"),
+    ))
 }
 
-impl IssueGroup {
-    fn label_or_category(&self) -> String {
-        if self.label.is_empty() {
-            self.category.replace('_', " ")
-        } else {
-            self.label.clone()
-        }
+fn strip_legacy_key(body: &str) -> String {
+    body.lines()
+        .filter(|line| !line.starts_with(LEGACY_KEY_PREFIX))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn section_key(command: &str, category: &str) -> String {
+    format!("{command}:{category}")
+}
+
+fn render_title(component_id: &str) -> String {
+    format!("Homeboy findings in {component_id}")
+}
+
+fn title_case(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests — the 8-row behavior table and edge cases
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_code_audit::FindingConfidence;
 
-    fn group(category: &str, count: usize) -> IssueGroup {
+    fn group(command: &str, category: &str, count: usize) -> IssueGroup {
         IssueGroup {
-            command: "audit".into(),
+            command: command.into(),
             component_id: "sample-plugin".into(),
             category: category.into(),
             count,
-            label: String::new(),
-            body: format!("count={}", count),
+            label: category.replace('_', " "),
+            body: format!("## {}\n\n{count} finding(s).", category.replace('_', " ")),
             confidence: None,
         }
     }
 
-    fn issue(
-        number: u64,
-        category_label: &str,
-        state: TrackedIssueState,
-        count: usize,
-    ) -> TrackedIssue {
+    fn tracked(number: u64, title: &str, body: &str, state: TrackedIssueState) -> TrackedIssue {
         TrackedIssue {
             number,
-            title: format!("audit: {} in sample-plugin ({})", category_label, count),
-            body: String::new(),
-            url: format!("https://github.com/o/r/issues/{}", number),
+            title: title.into(),
+            body: body.into(),
+            url: format!("https://example.test/issues/{number}"),
             state,
-            labels: vec!["audit".into()],
+            labels: Vec::new(),
         }
     }
 
-    fn issue_with_labels(
-        number: u64,
-        category_label: &str,
-        state: TrackedIssueState,
-        count: usize,
-        labels: &[&str],
-    ) -> TrackedIssue {
-        let mut iss = issue(number, category_label, state, count);
-        iss.labels = labels.iter().map(|s| s.to_string()).collect();
-        iss
+    fn config() -> ReconcileConfig {
+        ReconcileConfig::default()
     }
-
-    fn cfg() -> ReconcileConfig {
-        ReconcileConfig {
-            refresh_closed_not_planned: true,
-        }
-    }
-
-    // --------------------------------------------------------------- ROW 1
 
     #[test]
-    fn row1_no_issue_ever_with_findings_files_new() {
-        let groups = vec![group("unreferenced_export", 12)];
-        let plan = reconcile(&groups, &[], &cfg());
+    fn files_one_aggregate_issue_for_multiple_categories() {
+        let groups = vec![group("lint", "formatting", 9), group("lint", "other", 13)];
+        let plan = reconcile_measured(&groups, &[], &config(), "lint", "sample-plugin", true);
+
         assert_eq!(plan.actions.len(), 1);
         match &plan.actions[0] {
             ReconcileAction::FileNew {
                 title,
-                count,
+                body,
                 labels,
                 ..
             } => {
-                assert_eq!(*count, 12);
-                assert_eq!(title, "audit: unreferenced export in sample-plugin (12)");
-                assert_eq!(labels, &vec!["audit".to_string()]);
+                assert_eq!(title, "Homeboy findings in sample-plugin");
+                assert_eq!(labels, &["homeboy-findings"]);
+                assert!(body.contains("findings:sample-plugin"));
+                assert!(body.contains("findings-section=lint:formatting:start"));
+                assert!(body.contains("findings-section=lint:other:start"));
             }
-            other => panic!("expected FileNew, got {:?}", other),
-        }
-    }
-
-    // --------------------------------------------------------------- ROW 2
-
-    #[test]
-    fn row2_open_issue_with_findings_updates() {
-        let groups = vec![group("god_file", 23)];
-        let existing = vec![issue(675, "god file", TrackedIssueState::Open, 17)];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert_eq!(plan.actions.len(), 1);
-        match &plan.actions[0] {
-            ReconcileAction::Update {
-                number,
-                count,
-                title,
-                ..
-            } => {
-                assert_eq!(*number, 675);
-                assert_eq!(*count, 23);
-                assert_eq!(title, "audit: god file in sample-plugin (23)");
-            }
-            other => panic!("expected Update, got {:?}", other),
-        }
-    }
-
-    // --------------------------------------------------------------- ROW 3
-
-    #[test]
-    fn row3_open_issue_zero_findings_closes() {
-        let groups = vec![group("legacy_comment", 0)];
-        let existing = vec![issue(1449, "legacy comment", TrackedIssueState::Open, 1)];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert_eq!(plan.actions.len(), 1);
-        match &plan.actions[0] {
-            ReconcileAction::Close {
-                number,
-                category,
-                comment,
-            } => {
-                assert_eq!(*number, 1449);
-                assert_eq!(category, "legacy_comment");
-                assert!(comment.contains("legacy comment"));
-                assert!(comment.contains("Resolved"));
-            }
-            other => panic!("expected Close, got {:?}", other),
-        }
-    }
-
-    // --------------------------------------------------------------- ROW 4
-
-    #[test]
-    fn row4_closed_completed_with_findings_files_new() {
-        // The original issue auto-resolved. Findings came back.
-        // Same shape as Row 1 but with a closed-completed issue in history.
-        let groups = vec![group("unreferenced_export", 5)];
-        let existing = vec![issue(
-            684,
-            "unreferenced export",
-            TrackedIssueState::ClosedCompleted,
-            0,
-        )];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert_eq!(plan.actions.len(), 1);
-        assert!(matches!(&plan.actions[0], ReconcileAction::FileNew { count, .. } if *count == 5));
-    }
-
-    // --------------------------------------------------------------- ROW 5
-
-    #[test]
-    fn row5_closed_not_planned_with_findings_refreshes_body() {
-        // Human closed the issue saying "don't bug me about this, it's a
-        // false positive." Findings still produced. Refresh body, stay closed.
-        let groups = vec![group("missing_method", 164)];
-        let existing = vec![issue(
-            719,
-            "missing method",
-            TrackedIssueState::ClosedNotPlanned,
-            0,
-        )];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert_eq!(plan.actions.len(), 1);
-        match &plan.actions[0] {
-            ReconcileAction::UpdateClosed { number, count, .. } => {
-                assert_eq!(*number, 719);
-                assert_eq!(*count, 164);
-            }
-            other => panic!("expected UpdateClosed, got {:?}", other),
-        }
-    }
-
-    // --------------------------------------------------------------- ROW 6
-
-    #[test]
-    fn row6_closed_not_planned_with_labels_still_refreshes_body() {
-        let groups = vec![group("missing_test_method", 334)];
-        let existing = vec![issue_with_labels(
-            802,
-            "missing test method",
-            TrackedIssueState::ClosedNotPlanned,
-            0,
-            &["audit", "wontfix"],
-        )];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert_eq!(plan.actions.len(), 1);
-        match &plan.actions[0] {
-            ReconcileAction::UpdateClosed { number, count, .. } => {
-                assert_eq!(*number, 802);
-                assert_eq!(*count, 334);
-            }
-            other => panic!("expected UpdateClosed, got {:?}", other),
-        }
-    }
-
-    // --------------------------------------------------------------- ROW 7
-
-    #[test]
-    fn row7_open_issue_with_findings_updates_even_for_noisy_categories() {
-        let groups = vec![group("god_file", 99)];
-        let existing = vec![issue(675, "god file", TrackedIssueState::Open, 17)];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert_eq!(plan.actions.len(), 1);
-        match &plan.actions[0] {
-            ReconcileAction::Update { number, count, .. } => {
-                assert_eq!(*number, 675);
-                assert_eq!(*count, 99);
-            }
-            other => panic!("expected Update, got {:?}", other),
+            action => panic!("expected file_new, got {action:?}"),
         }
     }
 
     #[test]
-    fn heuristic_confidence_group_files_issue() {
-        let mut heuristic = group("extension_specific_hint", 3);
-        heuristic.confidence = Some(FindingConfidence::Heuristic);
-
-        let plan = reconcile(&[heuristic], &[], &cfg());
-
-        assert_eq!(plan.actions.len(), 1);
-        assert!(matches!(&plan.actions[0], ReconcileAction::FileNew { count, .. } if *count == 3));
-    }
-
-    // --------------------------------------------------------------- ROW 8
-
-    #[test]
-    fn row8_multiple_open_for_same_category_dedupes() {
-        let groups = vec![group("high_item_count", 52)];
-        let existing = vec![
-            issue(676, "high item count", TrackedIssueState::Open, 50),
-            issue(1253, "high item count", TrackedIssueState::Open, 50),
-        ];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert_eq!(plan.actions.len(), 2);
-        // First action: update the lowest-numbered (676).
-        match &plan.actions[0] {
-            ReconcileAction::Update { number, .. } => assert_eq!(*number, 676),
-            other => panic!("expected Update on #676, got {:?}", other),
-        }
-        // Second action: close-as-duplicate the higher-numbered (1253).
-        match &plan.actions[1] {
-            ReconcileAction::CloseDuplicate { number, keep, .. } => {
-                assert_eq!(*number, 1253);
-                assert_eq!(*keep, 676);
-            }
-            other => panic!("expected CloseDuplicate, got {:?}", other),
-        }
-    }
-
-    // ----------------------------------------------- precedence ladder
-
-    #[test]
-    fn open_issue_with_findings_updates_for_any_category() {
-        let groups = vec![group("x", 5)];
-        let existing = vec![issue(1, "x", TrackedIssueState::Open, 5)];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert!(matches!(&plan.actions[0], ReconcileAction::Update { .. }));
-    }
-
-    #[test]
-    fn labels_do_not_mute_open_issue_updates() {
-        let groups = vec![group("x", 5)];
-        let existing = vec![issue_with_labels(
-            1,
-            "x",
-            TrackedIssueState::Open,
-            3,
-            &["audit", "wontfix"],
-        )];
-        let plan = reconcile(&groups, &existing, &cfg());
-        assert!(matches!(&plan.actions[0], ReconcileAction::Update { .. }));
-    }
-
-    #[test]
-    fn precedence_refresh_disabled_for_closed_not_planned_skips() {
-        let mut config = cfg();
-        config.refresh_closed_not_planned = false;
-        let groups = vec![group("x", 5)];
-        let existing = vec![issue(1, "x", TrackedIssueState::ClosedNotPlanned, 0)];
-        let plan = reconcile(&groups, &existing, &config);
-        assert!(matches!(
-            &plan.actions[0],
-            ReconcileAction::Skip {
-                reason: ReconcileSkipReason::ClosedNotPlannedNoRefresh,
-                ..
-            }
-        ));
-    }
-
-    // ---------------------------------------------------- edge cases
-
-    #[test]
-    fn no_findings_no_issue_skips_silently() {
-        let groups = vec![group("x", 0)];
-        let plan = reconcile(&groups, &[], &cfg());
-        assert!(matches!(
-            &plan.actions[0],
-            ReconcileAction::Skip {
-                reason: ReconcileSkipReason::NoFindingsNoIssue,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn closed_not_planned_beats_closed_completed_when_both_exist() {
-        // Both closed in history. not_planned wins (the "do not re-file"
-        // signal is more specific than "we resolved it once").
-        let groups = vec![group("x", 5)];
-        let existing = vec![
-            issue(10, "x", TrackedIssueState::ClosedCompleted, 0),
-            issue(20, "x", TrackedIssueState::ClosedNotPlanned, 0),
-        ];
-        let plan = reconcile(&groups, &existing, &cfg());
-        match &plan.actions[0] {
-            ReconcileAction::UpdateClosed { number, .. } => assert_eq!(*number, 20),
-            other => panic!("expected UpdateClosed on #20, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn closed_not_planned_beats_later_open_duplicate() {
-        let groups = vec![group("dead_guard", 23)];
-        let existing = vec![
-            issue(1364, "dead guard", TrackedIssueState::ClosedNotPlanned, 23),
-            issue(1377, "dead guard", TrackedIssueState::Open, 23),
-        ];
-
-        let plan = reconcile(&groups, &existing, &cfg());
-
-        assert_eq!(plan.actions.len(), 2);
-        assert!(matches!(
-            &plan.actions[0],
-            ReconcileAction::UpdateClosed {
-                number: 1364,
-                category,
-                count: 23,
-                ..
-            } if category == "dead_guard"
-        ));
-        assert!(matches!(
-            &plan.actions[1],
-            ReconcileAction::CloseDuplicate {
-                number: 1377,
-                keep: 1364,
-                category,
-                ..
-            } if category == "dead_guard"
-        ));
-    }
-
-    #[test]
-    fn closed_not_planned_with_labels_updates_and_closes_later_open_duplicate() {
-        let groups = vec![group("unreferenced_export", 1)];
-        let existing = vec![
-            issue_with_labels(
-                1366,
-                "unreferenced export",
-                TrackedIssueState::ClosedNotPlanned,
-                1,
-                &["audit", "wontfix"],
-            ),
-            issue(1400, "unreferenced export", TrackedIssueState::Open, 1),
-        ];
-
-        let plan = reconcile(&groups, &existing, &cfg());
-
-        assert_eq!(plan.actions.len(), 2);
-        assert!(matches!(
-            &plan.actions[0],
-            ReconcileAction::UpdateClosed { number: 1366, .. }
-        ));
-        assert!(matches!(
-            &plan.actions[1],
-            ReconcileAction::CloseDuplicate {
-                number: 1400,
-                keep: 1366,
-                category,
-                ..
-            } if category == "unreferenced_export"
-        ));
-    }
-
-    #[test]
-    fn parse_category_key_round_trips() {
-        let title = "audit: unreferenced export in sample-plugin (57)";
-        let (cmd, comp, cat) = parse_category_key(title).unwrap();
-        assert_eq!(cmd, "audit");
-        assert_eq!(comp, "sample-plugin");
-        assert_eq!(cat, "unreferenced_export");
-    }
-
-    #[test]
-    fn parse_category_key_handles_missing_count_suffix() {
-        // Aggregate issues don't always carry `(N)`.
-        let title = "test: failures in homeboy";
-        let (cmd, comp, cat) = parse_category_key(title).unwrap();
-        assert_eq!(cmd, "test");
-        assert_eq!(comp, "homeboy");
-        assert_eq!(cat, "failures");
-    }
-
-    #[test]
-    fn issue_body_key_takes_precedence_over_title_label() {
-        let mut existing = issue(
-            1682,
-            "test failure (exit 101)",
-            TrackedIssueState::Open,
-            101,
+    fn command_run_preserves_other_command_sections() {
+        let existing_body = render_body(
+            "sample-plugin",
+            &BTreeMap::from([
+                (
+                    "audit:structural".into(),
+                    "## Audit: structural\n\nold audit".into(),
+                ),
+                (
+                    "lint:formatting".into(),
+                    "## Lint: formatting\n\nold lint".into(),
+                ),
+                (
+                    "test:test_failure".into(),
+                    "## Test: test failure\n\nold test".into(),
+                ),
+            ]),
         );
-        existing.title = "test: test failure (exit 101) in homeboy (101)".into();
-        existing.body =
-            "<!-- homeboy:issues-reconcile-key=test:homeboy:_aggregate -->\n\nold".into();
-        existing.labels = vec!["test".into()];
+        let existing = tracked(
+            10,
+            "Homeboy findings in sample-plugin",
+            &existing_body,
+            TrackedIssueState::Open,
+        );
 
-        let groups = vec![IssueGroup {
-            command: "test".into(),
-            component_id: "homeboy".into(),
-            category: "_aggregate".into(),
-            count: 101,
-            label: "test failure (exit 101)".into(),
-            body: "new body".into(),
-            confidence: None,
-        }];
+        let plan = reconcile_measured(
+            &[group("lint", "formatting", 2)],
+            &[existing],
+            &config(),
+            "lint",
+            "sample-plugin",
+            true,
+        );
 
-        let plan = reconcile(&groups, &[existing], &cfg());
-        assert_eq!(plan.actions.len(), 1);
         match &plan.actions[0] {
             ReconcileAction::Update { number, body, .. } => {
-                assert_eq!(*number, 1682);
-                assert!(body.contains("homeboy:issues-reconcile-key=test:homeboy:_aggregate"));
-                assert!(body.contains("new body"));
+                assert_eq!(*number, 10);
+                assert!(body.contains("old audit"));
+                assert!(body.contains("old test"));
+                assert!(!body.contains("old lint"));
+                assert!(body.contains("2 finding(s)"));
             }
-            other => panic!("expected Update, got {:?}", other),
+            action => panic!("expected update, got {action:?}"),
         }
     }
 
     #[test]
-    fn legacy_aggregate_title_updates_instead_of_filing_duplicate() {
-        let existing = TrackedIssue {
-            number: 1676,
-            title: "test: test failure (exit 101) in homeboy (101)".into(),
-            body: String::new(),
-            url: "https://github.com/o/r/issues/1676".into(),
-            state: TrackedIssueState::Open,
-            labels: vec!["test".into()],
+    fn complete_measurement_retires_absent_categories_but_narrowed_preserves_them() {
+        let existing_body = render_body(
+            "sample-plugin",
+            &BTreeMap::from([
+                ("audit:structural".into(), "structural".into()),
+                ("audit:source_policy".into(), "source policy".into()),
+            ]),
+        );
+        let existing = tracked(
+            10,
+            "Homeboy findings in sample-plugin",
+            &existing_body,
+            TrackedIssueState::Open,
+        );
+
+        let narrowed = reconcile_measured(
+            &[group("audit", "structural", 1)],
+            &[existing.clone()],
+            &config(),
+            "audit",
+            "sample-plugin",
+            false,
+        );
+        let complete = reconcile_measured(
+            &[group("audit", "structural", 1)],
+            &[existing],
+            &config(),
+            "audit",
+            "sample-plugin",
+            true,
+        );
+
+        let body = match &narrowed.actions[0] {
+            ReconcileAction::Update { body, .. } => body,
+            action => panic!("expected update, got {action:?}"),
         };
-        let groups = vec![IssueGroup {
-            command: "test".into(),
-            component_id: "homeboy".into(),
-            category: "_aggregate".into(),
-            count: 101,
-            label: "test failure (exit 101)".into(),
-            body: "fresh aggregate body".into(),
-            confidence: None,
-        }];
-
-        let plan = reconcile(&groups, &[existing], &cfg());
-        assert_eq!(plan.actions.len(), 1);
-        match &plan.actions[0] {
-            ReconcileAction::Update {
-                number,
-                title,
-                body,
-                category,
-                ..
-            } => {
-                assert_eq!(*number, 1676);
-                assert_eq!(title, "test: test failure (exit 101) in homeboy (101)");
-                assert_eq!(category, "_aggregate");
-                assert!(body
-                    .starts_with("<!-- homeboy:issues-reconcile-key=test:homeboy:_aggregate -->"));
-            }
-            other => panic!("expected Update, got {:?}", other),
-        }
+        assert!(body.contains("source policy"));
+        let body = match &complete.actions[0] {
+            ReconcileAction::Update { body, .. } => body,
+            action => panic!("expected update, got {action:?}"),
+        };
+        assert!(!body.contains("source policy"));
     }
 
     #[test]
-    fn file_new_body_includes_stable_issue_key() {
-        let groups = vec![IssueGroup {
-            command: "test".into(),
-            component_id: "homeboy".into(),
-            category: "_aggregate".into(),
-            count: 101,
-            label: "test failure (exit 101)".into(),
-            body: "body".into(),
-            confidence: None,
-        }];
+    fn closes_only_after_every_command_section_is_clear() {
+        let body = render_body(
+            "sample-plugin",
+            &BTreeMap::from([
+                ("lint:formatting".into(), "lint".into()),
+                ("test:test_failure".into(), "test".into()),
+            ]),
+        );
+        let existing = tracked(
+            10,
+            "Homeboy findings in sample-plugin",
+            &body,
+            TrackedIssueState::Open,
+        );
 
-        let plan = reconcile(&groups, &[], &cfg());
-        match &plan.actions[0] {
-            ReconcileAction::FileNew { body, .. } => {
-                assert!(body
-                    .starts_with("<!-- homeboy:issues-reconcile-key=test:homeboy:_aggregate -->"));
-                assert!(body.contains("body"));
-            }
-            other => panic!("expected FileNew, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn parse_category_key_returns_none_for_garbage() {
-        assert!(parse_category_key("not a homeboy issue").is_none());
-        assert!(parse_category_key("audit: missing component").is_none());
-    }
-
-    #[test]
-    fn empty_groups_produces_empty_plan() {
-        let plan = reconcile(&[], &[], &cfg());
-        assert!(plan.actions.is_empty());
-        assert!(plan.is_noop());
-    }
-
-    #[test]
-    fn scoped_empty_groups_close_all_open_issues_in_scope() {
-        let existing = vec![
-            issue(10, "dead guard", TrackedIssueState::Open, 4),
-            issue(20, "unreferenced export", TrackedIssueState::Open, 9),
-            issue(30, "closed thing", TrackedIssueState::ClosedCompleted, 0),
-        ];
-
-        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "sample-plugin");
-
-        assert_eq!(plan.actions.len(), 2);
+        let lint_clear = reconcile_measured(
+            &[],
+            &[existing.clone()],
+            &config(),
+            "lint",
+            "sample-plugin",
+            true,
+        );
         assert!(matches!(
-            &plan.actions[0],
-            ReconcileAction::Close {
-                number: 10,
-                category,
-                ..
-            } if category == "dead_guard"
+            lint_clear.actions[0],
+            ReconcileAction::Update { .. }
         ));
+
+        let lint_cleared_body = match &lint_clear.actions[0] {
+            ReconcileAction::Update { body, .. } => body.clone(),
+            _ => unreachable!(),
+        };
+        let after_lint = tracked(
+            10,
+            "Homeboy findings in sample-plugin",
+            &lint_cleared_body,
+            TrackedIssueState::Open,
+        );
+        let test_clear =
+            reconcile_measured(&[], &[after_lint], &config(), "test", "sample-plugin", true);
         assert!(matches!(
-            &plan.actions[1],
-            ReconcileAction::Close {
-                number: 20,
-                category,
-                ..
-            } if category == "unreferenced_export"
-        ));
-    }
-
-    #[test]
-    fn scoped_missing_category_closes_stale_open_issue() {
-        let groups = vec![group("dead_guard", 3)];
-        let existing = vec![
-            issue(10, "dead guard", TrackedIssueState::Open, 4),
-            issue(20, "unreferenced export", TrackedIssueState::Open, 9),
-        ];
-
-        let plan = reconcile_scoped(&groups, &existing, &cfg(), "audit", "sample-plugin");
-
-        assert_eq!(plan.actions.len(), 2);
-        assert!(matches!(
-            &plan.actions[0],
-            ReconcileAction::Update { number: 10, .. }
-        ));
-        assert!(matches!(
-            &plan.actions[1],
-            ReconcileAction::Close {
-                number: 20,
-                category,
-                ..
-            } if category == "unreferenced_export"
-        ));
-    }
-
-    #[test]
-    fn scoped_absent_issue_closes_duplicate_open_issues_deterministically() {
-        let existing = vec![
-            issue(20, "dead guard", TrackedIssueState::Open, 4),
-            issue(10, "dead guard", TrackedIssueState::Open, 4),
-        ];
-
-        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "sample-plugin");
-
-        assert_eq!(plan.actions.len(), 2);
-        assert!(matches!(
-            &plan.actions[0],
+            test_clear.actions[0],
             ReconcileAction::Close { number: 10, .. }
         ));
+    }
+
+    #[test]
+    fn unlabeled_canonical_issue_updates_in_place() {
+        let body = render_body(
+            "sample-plugin",
+            &BTreeMap::from([("lint:formatting".into(), "old".into())]),
+        );
+        let existing = tracked(
+            44,
+            "Homeboy findings in sample-plugin",
+            &body,
+            TrackedIssueState::Open,
+        );
+
+        let plan = reconcile_measured(
+            &[group("lint", "formatting", 3)],
+            &[existing],
+            &config(),
+            "lint",
+            "sample-plugin",
+            true,
+        );
         assert!(matches!(
-            &plan.actions[1],
-            ReconcileAction::CloseDuplicate {
-                number: 20,
-                keep: 10,
-                ..
-            }
+            plan.actions[0],
+            ReconcileAction::Update { number: 44, .. }
         ));
     }
 
     #[test]
-    fn narrowed_measurement_never_closes_absent_categories() {
-        // Regression for homeboy #11298. `release.yml` runs
-        // `review audit --profile=pr`, and `AuditProfile::Pr` does not execute
-        // the `core_boundary_leaks` or `source_policy` detector families at all.
-        // Their absence from its output is structural, not evidence of a fix —
-        // yet it closed 23 full-tree tracking issues as "All findings have been
-        // resolved", one of them carrying 409 findings.
-        let existing = vec![
-            issue(11298, "core boundary leak", TrackedIssueState::Open, 409),
-            issue(11300, "dead code", TrackedIssueState::Open, 147),
+    fn migrates_legacy_category_issues_and_dedupes_them() {
+        let lint = tracked(
+            30,
+            "lint: formatting in sample-plugin (9)",
+            "<!-- homeboy:issues-reconcile-key=lint:sample-plugin:formatting -->\n\nold lint",
+            TrackedIssueState::Open,
+        );
+        let audit = tracked(
+            20,
+            "audit: structural in sample-plugin (2)",
+            "<!-- homeboy:issues-reconcile-key=audit:sample-plugin:structural -->\n\nold audit",
+            TrackedIssueState::Open,
+        );
+
+        let plan = reconcile_measured(
+            &[group("lint", "formatting", 1)],
+            &[lint, audit],
+            &config(),
+            "lint",
+            "sample-plugin",
+            true,
+        );
+
+        assert!(matches!(
+            plan.actions[0],
+            ReconcileAction::Update { number: 20, .. }
+        ));
+        assert!(matches!(
+            plan.actions[1],
+            ReconcileAction::CloseDuplicate {
+                number: 30,
+                keep: 20,
+                ..
+            }
+        ));
+        let body = match &plan.actions[0] {
+            ReconcileAction::Update { body, .. } => body,
+            _ => unreachable!(),
+        };
+        assert!(body.contains("old audit"));
+        assert!(body.contains("1 finding(s)"));
+    }
+
+    #[test]
+    fn duplicate_canonical_issues_converge_to_lowest_number() {
+        let body = render_body(
+            "sample-plugin",
+            &BTreeMap::from([("test:test_failure".into(), "failed".into())]),
+        );
+        let issues = vec![
+            tracked(12, "Homeboy findings", &body, TrackedIssueState::Open),
+            tracked(9, "Homeboy findings", &body, TrackedIssueState::Open),
         ];
 
         let plan = reconcile_measured(
-            &[],
-            &existing,
-            &cfg(),
-            "audit",
+            &[group("test", "test_failure", 1)],
+            &issues,
+            &config(),
+            "test",
             "sample-plugin",
-            false, // narrowed run: profile=pr
+            true,
         );
-
-        assert!(
-            plan.actions.is_empty(),
-            "a narrowed run must not retire categories it never measured, got {:?}",
-            plan.actions
-        );
-    }
-
-    #[test]
-    fn narrowed_measurement_still_files_and_updates_what_it_did_measure() {
-        // Coverage gating is about closing, not about going silent: a narrowed
-        // run must still report the findings it actually produced.
-        let existing = vec![issue(
-            11298,
-            "core boundary leak",
-            TrackedIssueState::Open,
-            409,
-        )];
-        let groups = vec![group("structural", 3)];
-
-        let plan = reconcile_measured(&groups, &existing, &cfg(), "audit", "sample-plugin", false);
-
-        assert_eq!(plan.actions.len(), 1);
-        assert!(
-            matches!(&plan.actions[0], ReconcileAction::FileNew { title, .. }
-                if title == "audit: structural in sample-plugin (3)"),
-            "got {:?}",
-            plan.actions[0]
-        );
-    }
-
-    #[test]
-    fn complete_measurement_still_closes_absent_categories() {
-        // The full-tree sweep keeps its authority to retire resolved debt.
-        let existing = vec![issue(11300, "dead code", TrackedIssueState::Open, 147)];
-
-        let plan = reconcile_measured(&[], &existing, &cfg(), "audit", "sample-plugin", true);
-
-        assert_eq!(plan.actions.len(), 1);
         assert!(matches!(
-            &plan.actions[0],
-            ReconcileAction::Close { number: 11300, .. }
+            plan.actions[0],
+            ReconcileAction::Update { number: 9, .. }
         ));
-    }
-
-    #[test]
-    fn scoped_absent_issue_honors_component_scope() {
-        let mut other_component = issue(10, "dead guard", TrackedIssueState::Open, 4);
-        other_component.title = "audit: dead guard in other-component (4)".into();
-        let existing = vec![
-            other_component,
-            issue(20, "god file", TrackedIssueState::Open, 9),
-            issue(30, "unreferenced export", TrackedIssueState::Open, 2),
-        ];
-        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "sample-plugin");
-
-        assert_eq!(plan.actions.len(), 2);
         assert!(matches!(
-            &plan.actions[0],
-            ReconcileAction::Close {
-                number: 20,
-                category,
+            plan.actions[1],
+            ReconcileAction::CloseDuplicate {
+                number: 12,
+                keep: 9,
                 ..
-            } if category == "god_file"
-        ));
-        assert!(matches!(
-            &plan.actions[1],
-            ReconcileAction::Close {
-                number: 30,
-                category,
-                ..
-            } if category == "unreferenced_export"
+            }
         ));
     }
 
     #[test]
-    fn label_falls_back_to_category_with_underscores_replaced() {
-        let groups = vec![IssueGroup {
-            command: "audit".into(),
-            component_id: "x".into(),
-            category: "snake_case_thing".into(),
-            count: 1,
-            label: String::new(),
-            body: String::new(),
-            confidence: None,
-        }];
-        let plan = reconcile(&groups, &[], &cfg());
-        match &plan.actions[0] {
-            ReconcileAction::FileNew { title, .. } => {
-                assert!(title.contains("snake case thing"));
-            }
-            _ => panic!("expected FileNew"),
-        }
-    }
-
-    #[test]
-    fn explicit_label_used_in_title_when_provided() {
-        let groups = vec![IssueGroup {
-            command: "lint".into(),
-            component_id: "x".into(),
-            category: "i18n".into(),
-            count: 3,
-            label: "i18n / l10n".into(),
-            body: String::new(),
-            confidence: None,
-        }];
-        let plan = reconcile(&groups, &[], &cfg());
-        match &plan.actions[0] {
-            ReconcileAction::FileNew { title, .. } => {
-                assert_eq!(title, "lint: i18n / l10n in x (3)");
-            }
-            _ => panic!("expected FileNew"),
-        }
-    }
-
-    #[test]
-    fn plan_counts_aggregate_correctly() {
-        let plan = ReconcilePlan::new(
-            "c",
-            vec![
-                ReconcileAction::FileNew {
-                    command: "a".into(),
-                    component_id: "c".into(),
-                    category: "k".into(),
-                    title: "t".into(),
-                    body: "b".into(),
-                    labels: vec![],
-                    count: 1,
-                },
-                ReconcileAction::Update {
-                    number: 1,
-                    title: "t".into(),
-                    body: "b".into(),
-                    category: "k".into(),
-                    count: 1,
-                },
-                ReconcileAction::Update {
-                    number: 2,
-                    title: "t".into(),
-                    body: "b".into(),
-                    category: "k".into(),
-                    count: 1,
-                },
-                ReconcileAction::Skip {
-                    category: "k".into(),
-                    component_id: "c".into(),
-                    reason: ReconcileSkipReason::NoFindingsNoIssue,
-                },
-            ],
+    fn closed_completed_issue_does_not_revive_stale_sections() {
+        let old_body = render_body(
+            "sample-plugin",
+            &BTreeMap::from([("audit:structural".into(), "resolved audit".into())]),
         );
-        let c = plan.counts();
-        assert_eq!(c.file_new, 1);
-        assert_eq!(c.update, 2);
-        assert_eq!(c.skip, 1);
-        assert!(!plan.is_noop());
+        let closed = tracked(
+            8,
+            "Homeboy findings in sample-plugin",
+            &old_body,
+            TrackedIssueState::ClosedCompleted,
+        );
+
+        let plan = reconcile_measured(
+            &[group("lint", "formatting", 1)],
+            &[closed],
+            &config(),
+            "lint",
+            "sample-plugin",
+            true,
+        );
+
+        let body = match &plan.actions[0] {
+            ReconcileAction::FileNew { body, .. } => body,
+            action => panic!("expected file_new, got {action:?}"),
+        };
+        assert!(!body.contains("resolved audit"));
+        assert!(body.contains("findings-section=lint:formatting:start"));
     }
 }

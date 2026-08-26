@@ -1098,6 +1098,7 @@ pub(crate) fn record_replacement_gate_proof(
         &args.run_id,
         replacement,
         args.authorize_external_proof,
+        args.accept_inherited_failures,
     )?;
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
