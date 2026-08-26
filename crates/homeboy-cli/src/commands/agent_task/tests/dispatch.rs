@@ -715,14 +715,42 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
     with_isolated_home(|_| {
         let checkout = tempfile::tempdir().expect("repository checkout");
         init_runtime_component_checkout(checkout.path());
+        std::fs::create_dir(checkout.path().join("php-transformer"))
+            .expect("nested component directory");
+        std::fs::write(
+            checkout.path().join("php-transformer/plugin.php"),
+            "<?php\n",
+        )
+        .expect("nested component marker");
+        assert!(Command::new("git")
+            .args(["add", "php-transformer/plugin.php"])
+            .current_dir(checkout.path())
+            .status()
+            .expect("stage nested component")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "add nested component"])
+            .current_dir(checkout.path())
+            .status()
+            .expect("commit nested component")
+            .success());
         let remote = "https://github.com/example/blocks-engine.git";
         add_remote(checkout.path(), "origin", remote);
         register_component_with_aliases(
             "php-transformer",
             &["blocks-engine"],
-            checkout.path(),
+            &checkout.path().join("php-transformer"),
             remote,
         );
+        let destination_root = tempfile::tempdir().expect("destination root");
+        let destination = destination_root.path().join("blocks-engine@fix-12844");
+        assert!(Command::new("git")
+            .args(["worktree", "add", "-b", "fix-12844"])
+            .arg(&destination)
+            .current_dir(checkout.path())
+            .status()
+            .expect("create linked destination")
+            .success());
 
         let issue = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
             "homeboy".to_string(),
@@ -761,7 +789,7 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
             "--repo".to_string(),
             "blocks-engine".to_string(),
             "--to-worktree".to_string(),
-            checkout.path().display().to_string(),
+            destination.display().to_string(),
             "--backend".to_string(),
             "fixture".to_string(),
             "--no-finalize".to_string(),
@@ -769,7 +797,8 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
         .expect("normalize worktree repository alias");
 
         for args in [&issue, &cwd, &worktree] {
-            assert_eq!(args.dispatch.repo.as_deref(), Some("php-transformer"));
+            assert_eq!(args.dispatch.repo.as_deref(), Some("blocks-engine"));
+            assert_eq!(args.component.as_deref(), Some("php-transformer"));
             let identity = args
                 .repository_identity
                 .as_ref()
@@ -779,19 +808,49 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
         }
         assert_eq!(
             issue.to_worktree.as_deref(),
-            Some("php-transformer@fix-issue-12844-blocks-engine")
+            Some("blocks-engine@fix-issue-12844-blocks-engine")
         );
         assert_eq!(issue.base.as_deref(), Some("trunk"));
+        let replay = super::super::run::cook_replay_argv(&issue);
+        assert!(replay
+            .windows(2)
+            .any(|args| args == ["--repo", "blocks-engine"]));
+        assert!(replay
+            .windows(2)
+            .any(|args| args == ["--component", "php-transformer"]));
 
-        let plan =
-            super::super::run::compile_cook_plan(&worktree, json!({ "action": "lookup_pending" }))
-                .expect("compile normalized durable plan");
+        let plan = super::super::run::compile_cook_plan(
+            &worktree,
+            json!({ "action": "existing", "path": destination }),
+        )
+        .expect("compile normalized durable plan");
         assert_eq!(
             plan.metadata["cook_repository_identity"]["repository_name"],
             "blocks-engine"
         );
         assert_eq!(
             plan.metadata["cook_repository_identity"]["component_id"],
+            "php-transformer"
+        );
+        assert_eq!(plan.group_key.as_deref(), Some("blocks-engine"));
+        assert_eq!(plan.tasks[0].group_key.as_deref(), Some("blocks-engine"));
+        assert_eq!(
+            plan.tasks[0].workspace.slug.as_deref(),
+            Some("blocks-engine")
+        );
+        assert_eq!(plan.metadata["component"], "php-transformer");
+        assert_eq!(plan.tasks[0].metadata["component"], "php-transformer");
+        assert_eq!(plan.tasks[0].executor.config["repo"], "blocks-engine");
+        assert_eq!(
+            plan.tasks[0].executor.config["component_id"],
+            "php-transformer"
+        );
+        assert_eq!(
+            plan.tasks[0].executor.config["component_cwd"],
+            "php-transformer"
+        );
+        assert_eq!(
+            plan.metadata["gate_workspace"]["component_cwd"],
             "php-transformer"
         );
 
@@ -823,7 +882,7 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
         assert_eq!(provision["provision_intent"]["repo"], "blocks-engine");
         assert_eq!(
             provider_args.dispatch.repo.as_deref(),
-            Some("php-transformer")
+            Some("blocks-engine")
         );
 
         let component_id = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
@@ -844,6 +903,72 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
             .expect("component-id identity evidence");
         assert_eq!(identity["repository_name"], "blocks-engine");
         assert_eq!(identity["component_id"], "php-transformer");
+    });
+}
+
+#[test]
+fn cook_replay_preserves_exact_component_when_repository_has_multiple_components() {
+    with_isolated_home(|_| {
+        let root = tempfile::tempdir().expect("repository root");
+        homeboy::core::test_support::run_git_fixture_command(root.path(), &["init", "-q"]);
+        let first = root.path().join("component-a");
+        let second = root.path().join("component-b");
+        std::fs::create_dir_all(&first).expect("first component");
+        std::fs::create_dir_all(&second).expect("second component");
+        let remote = "https://github.com/example/shared-repository.git";
+        register_component("component-a", &first, remote);
+        register_component("component-b", &second, remote);
+
+        for component in ["component-a", "component-b"] {
+            let resolved = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                component.to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/shared-repository/issues/12844".to_string(),
+                "--base".to_string(),
+                "main".to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect("resolve exact component");
+            assert_eq!(resolved.dispatch.repo.as_deref(), Some("shared-repository"));
+            assert_eq!(resolved.component.as_deref(), Some(component));
+
+            let replay = super::super::run::cook_replay_argv(&resolved);
+            assert!(replay
+                .windows(2)
+                .any(|args| args == ["--repo", "shared-repository"]));
+            assert!(replay
+                .windows(2)
+                .any(|args| args == ["--component", component]));
+            let replayed = super::super::run::resolve_cook_destination(cook_args_from_cli(replay))
+                .expect("replay exact component");
+            assert_eq!(replayed.dispatch.repo, resolved.dispatch.repo);
+            assert_eq!(replayed.component, resolved.component);
+        }
+
+        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "shared-repository".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/example/shared-repository/issues/12844".to_string(),
+            "--base".to_string(),
+            "main".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("canonical repository remains ambiguous without a component");
+        assert!(error
+            .message
+            .contains("multiple configured component identities"));
     });
 }
 
@@ -1171,6 +1296,8 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback
                 "--prompt",
                 "resolve metadata",
                 "--repo",
+                "fixture",
+                "--component",
                 "fixture",
                 "--to-worktree",
                 "fixture@missing",

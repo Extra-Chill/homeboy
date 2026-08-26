@@ -1861,6 +1861,20 @@ fn compile_batch_cooks(
                 invocation.dispatch,
                 &mut readiness_cache,
             )?;
+            if !cook.repository_identity.is_null() {
+                options.initial_plan.metadata["cook_repository_identity"] =
+                    cook.repository_identity.clone();
+            }
+            if let (Some(workspace), Some(component_id)) = (
+                options.source_worktree_path.as_deref(),
+                cook.component_id.as_deref(),
+            ) {
+                super::run::bind_cook_component_workspace(
+                    &mut options.initial_plan,
+                    workspace,
+                    component_id,
+                )?;
+            }
             if let Some(executor) = options
                 .initial_plan
                 .tasks
@@ -2444,12 +2458,12 @@ fn normalize_static_cook_batch_repo_with_placement(
     placement: Placement,
 ) -> Result<()> {
     if !std::path::Path::new(&args.repo).is_absolute() {
-        return Ok(());
+        return normalize_named_cook_batch_repo(args);
     }
     match homeboy::core::component::resolve_registered_primary_path(&args.repo)? {
         homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
             args.repo = id;
-            Ok(())
+            normalize_named_cook_batch_repo(args)
         }
         homeboy::core::component::RegisteredPrimaryPathResolution::Related(candidates) => {
             Err(invalid_cook_batch_repo(args, candidates, placement))
@@ -2491,7 +2505,7 @@ fn normalize_cook_batch_repo_with_placement(
         || std::path::Path::new(&args.repo).exists();
     let handle_like = args.repo.contains('@');
     if !path_like && !handle_like {
-        return Ok(());
+        return normalize_named_cook_batch_repo(args);
     }
 
     if handle_like && !path_like {
@@ -2515,7 +2529,7 @@ fn normalize_cook_batch_repo_with_placement(
     match homeboy::core::component::resolve_registered_primary_path(&args.repo)? {
         homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
             args.repo = id;
-            Ok(())
+            normalize_named_cook_batch_repo(args)
         }
         homeboy::core::component::RegisteredPrimaryPathResolution::Related(candidates) => {
             Err(invalid_cook_batch_repo(args, candidates, placement))
@@ -2526,10 +2540,19 @@ fn normalize_cook_batch_repo_with_placement(
     }
 }
 
+fn normalize_named_cook_batch_repo(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
+    let (repository, component, _) =
+        super::run::cook_repository_identity_for_selection(&args.repo, args.component.as_deref())?;
+    args.repo = repository;
+    args.component = Some(component);
+    Ok(())
+}
+
 fn resolve_cook_batch_default_branch(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
-    let component = homeboy::core::component::registered_by_id(&args.repo)?
-        .ok_or_else(|| invalid_cook_batch_repo(args, Vec::new(), Placement::Auto))?;
-    let component_path = PathBuf::from(component.local_path);
+    let component_path = super::run::cook_component_path_for_repository_name(
+        args.component.as_deref().unwrap_or(&args.repo),
+    )?
+    .ok_or_else(|| invalid_cook_batch_repo(args, Vec::new(), Placement::Auto))?;
     let resolution = resolve_default_branch(DefaultBranchRequest {
         explicit_base: args.base.as_deref(),
         explicit_from: args.from.as_deref(),
@@ -2641,6 +2664,9 @@ fn cook_batch_argv_with_placement(
         "--isolate-gate-xdg".to_string(),
         args.gates.isolate_gate_xdg.to_string(),
     ];
+    if let Some(component) = &args.component {
+        command.extend(["--component".to_string(), component.clone()]);
+    }
     if let Some(from) = &args.from {
         command.extend(["--from".to_string(), from.clone()]);
     }
@@ -3660,6 +3686,7 @@ impl BatchCookFanoutPlan {
         }
         for cook in &mut plan.cooks {
             cook.apply_defaults(args)?;
+            validate_batch_cook_repository_component(cook)?;
         }
         plan.resolve_dependencies()?;
         Ok(plan)
@@ -3787,6 +3814,43 @@ impl BatchCookFanoutPlan {
     }
 }
 
+fn validate_batch_cook_repository_component(cook: &mut BatchCookSpec) -> Result<()> {
+    let identity_present = !cook.repository_identity.is_null();
+    let (repo, component) = match (cook.repo.as_deref(), cook.component_id.as_deref()) {
+        (Some(repo), Some(component)) if identity_present => (repo, component),
+        (Some(_), None) if !identity_present => return Ok(()),
+        (None, None) if !identity_present => return Ok(()),
+        _ => {
+            return Err(invalid_fanout(&format!(
+                "cook `{}` has an incomplete repository/component identity",
+                cook.cook_id
+            )))
+        }
+    };
+    let (repository, component_id, identity) =
+        super::run::cook_repository_identity_for_selection(repo, Some(component))?;
+    if repository != repo || component_id != component {
+        return Err(invalid_fanout(&format!(
+            "cook `{}` component `{component}` does not belong to repository `{repo}`",
+            cook.cook_id
+        )));
+    }
+    for field in [
+        "repository_name",
+        "component_id",
+        "component_cwd",
+        "remote_identity",
+    ] {
+        if cook.repository_identity.get(field) != identity.get(field) {
+            return Err(invalid_fanout(&format!(
+                "cook `{}` repository identity does not match component `{component}`",
+                cook.cook_id
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct BatchCookSpec {
     cook_id: String,
@@ -3804,6 +3868,10 @@ struct BatchCookSpec {
     workspace_materialization: Vec<BatchCookWorkspaceMaterialization>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    component_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    repository_identity: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     task_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3981,6 +4049,7 @@ impl BatchCookSpec {
                 .clone()
                 .or_else(|| self.cwd.is_none().then(|| self.to_worktree.clone())),
             repo: self.repo.clone(),
+            component: self.component_id.clone(),
             task_url: self.task_url.clone(),
             backend: self.backend.clone(),
             selector: self.selector.clone(),
@@ -4200,6 +4269,8 @@ fn build_cook_batch_plan_with_profiles(
     args: &AgentTaskFanoutCookBatchArgs,
     profiles: VerificationProfiles,
 ) -> Result<BatchCookFanoutPlan> {
+    let (repository, component_id, repository_identity) =
+        super::run::cook_repository_identity_for_selection(&args.repo, args.component.as_deref())?;
     let bindings = parse_explicit_worktree_bindings(&args.worktrees)?;
     if !bindings.is_empty()
         && bindings
@@ -4225,12 +4296,12 @@ fn build_cook_batch_plan_with_profiles(
             issue.number,
             slugify(&issue.repo)
         );
-        let worktree = format!("{}@{}", args.repo, slugify(&branch));
+        let worktree = format!("{}@{}", repository, slugify(&branch));
         let explicit_worktree = bindings.get(issue_url).cloned();
         let prompt = render_prompt(
             args.prompt_template.as_deref(),
             &issue,
-            &args.repo,
+            &repository,
             &branch,
             &worktree,
         );
@@ -4252,7 +4323,9 @@ fn build_cook_batch_plan_with_profiles(
             cwd: None,
             workspace: None,
             workspace_materialization: Vec::new(),
-            repo: Some(args.repo.clone()),
+            repo: Some(repository.clone()),
+            component_id: Some(component_id.clone()),
+            repository_identity: repository_identity.clone(),
             task_url: Some(issue_url.clone()),
             backend: args.backend.clone(),
             selector: args.selector.clone(),
@@ -4316,7 +4389,7 @@ fn build_cook_batch_plan_with_profiles(
         let digest = content_hash::sha256_hex(&encoded);
         format!(
             "cook-batch-{}-{}-{}-{}",
-            args.repo,
+            repository,
             first,
             cooks.len(),
             &digest[..12]
@@ -4336,7 +4409,9 @@ fn build_cook_batch_plan_with_profiles(
         metadata: serde_json::json!({
             "source": "agent-task fanout cook-batch",
             "issue_count": args.issues.len(),
-            "repo": args.repo,
+            "repo": repository,
+            "component": component_id,
+            "repository_identity": repository_identity,
             "base": args.base,
             "from": args.from,
             "default_branch_resolution": args.base_resolution,
@@ -4564,11 +4639,10 @@ fn validate_batch_cook_gates(
 }
 
 fn batch_gate_workspace(args: &AgentTaskFanoutCookBatchArgs) -> Result<Option<std::path::PathBuf>> {
-    let component = homeboy::core::component::registered_by_id(&args.repo)?;
-    let Some(component) = component else {
+    let selector = args.component.as_deref().unwrap_or(&args.repo);
+    let Some(path) = super::run::cook_component_path_for_repository_name(selector)? else {
         return Ok(None);
     };
-    let path = std::path::PathBuf::from(component.local_path);
     Ok(path.is_dir().then_some(path))
 }
 
@@ -4582,11 +4656,19 @@ fn batch_plan_gate_workspace(plan: &BatchCookFanoutPlan) -> Result<Option<std::p
         return Ok(None);
     }
     let repository = repositories.into_iter().next().expect("one repository");
-    let component = homeboy::core::component::registered_by_id(repository)?;
-    let Some(component) = component else {
+    let component_id = plan
+        .cooks
+        .iter()
+        .filter_map(|cook| cook.component_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    let component_id = match component_id.len() {
+        0 => repository,
+        1 => component_id.into_iter().next().expect("one component"),
+        _ => return Ok(None),
+    };
+    let Some(path) = super::run::cook_component_path_for_repository_name(component_id)? else {
         return Ok(None);
     };
-    let path = std::path::PathBuf::from(component.local_path);
     Ok(path.is_dir().then_some(path))
 }
 
@@ -4638,11 +4720,9 @@ fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
 /// Resolve the effective execution backend for the batch and fail early when it
 /// has no installed provider (#7717).
 ///
-/// When `--backend` is omitted the effective backend comes from the configured
-/// `agent_task.default_backend`. We pin it onto `args.backend` so it is visible
-/// in the preflight and carried identically to every child cook, then confirm a
-/// provider can serve it — turning a late, provider-shaped child failure into an
-/// early configuration error listing the backends that are actually installed.
+/// When `--backend` is omitted the effective backend comes from component-scoped
+/// policy and then the configured global fallback. We pin it onto `args.backend`
+/// so it is visible in preflight and carried identically to every child cook.
 fn resolve_and_validate_effective_backend(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
     let catalog = AgentTaskProviderCatalog::discover();
     resolve_and_validate_effective_backend_with_providers(args, catalog.providers())
@@ -4652,9 +4732,21 @@ fn resolve_and_validate_effective_backend_with_providers(
     args: &mut AgentTaskFanoutCookBatchArgs,
     providers: &[provider::AgentTaskExecutorProvider],
 ) -> Result<()> {
+    resolve_and_validate_effective_backend_with_providers_and_default(
+        args,
+        providers,
+        provider::default_backend_for_component,
+    )
+}
+
+fn resolve_and_validate_effective_backend_with_providers_and_default(
+    args: &mut AgentTaskFanoutCookBatchArgs,
+    providers: &[provider::AgentTaskExecutorProvider],
+    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
+) -> Result<()> {
     let effective = match args.backend.as_deref() {
         Some(backend) if !backend.trim().is_empty() => backend.trim().to_string(),
-        _ => match provider::default_backend().map_err(|error| {
+        _ => match default_backend(args.component.as_deref()).map_err(|error| {
             invalid_fanout(&format!("could not resolve default backend: {error}"))
         })? {
             Some(backend) => backend,
@@ -4702,7 +4794,7 @@ fn resolve_and_validate_effective_backend_with_providers(
                 let source = if args.backend.is_some() {
                     "requested via --backend"
                 } else {
-                    "resolved from agent_task.default_backend"
+                    "resolved from component/default backend policy"
                 };
                 return Err(invalid_fanout(&format!(
                 "agent-task fanout backend '{effective}' ({source}) has no installed provider. \
@@ -6723,6 +6815,7 @@ fi
                 "https://github.com/Extra-Chill/homeboy/issues/6454".to_string(),
             ],
             repo: "homeboy".to_string(),
+            component: None,
             from: Some("origin/main".to_string()),
             base: Some("main".to_string()),
             base_resolution: None,
@@ -6770,6 +6863,108 @@ fi
             dry_run_planner_timeout_seconds: None,
             run_plan: false,
         }
+    }
+
+    #[test]
+    fn cook_batch_preserves_canonical_repository_and_nested_component_identity() {
+        with_isolated_home(|home| {
+            let repository = home.path().join("blocks-engine");
+            std::fs::create_dir_all(&repository).expect("repository");
+            homeboy::core::test_support::run_git_fixture_command(&repository, &["init", "-q"]);
+            let component = repository.join("php-transformer");
+            std::fs::create_dir_all(&component).expect("nested component");
+            let registrations = home.path().join(".config/homeboy/components");
+            std::fs::create_dir_all(&registrations).expect("component registrations");
+            std::fs::write(
+                registrations.join("php-transformer.json"),
+                serde_json::json!({
+                    "local_path": component,
+                    "remote_url": "https://github.com/Automattic/blocks-engine.git",
+                    "aliases": ["blocks-engine"]
+                })
+                .to_string(),
+            )
+            .expect("component registration");
+            let second_component = repository.join("block-parser");
+            std::fs::create_dir_all(&second_component).expect("second nested component");
+            std::fs::write(
+                registrations.join("block-parser.json"),
+                serde_json::json!({
+                    "local_path": second_component,
+                    "remote_url": "https://github.com/Automattic/blocks-engine.git"
+                })
+                .to_string(),
+            )
+            .expect("second component registration");
+
+            let mut batch_args = cook_batch_args();
+            batch_args.repo = "php-transformer".to_string();
+            normalize_cook_batch_repo(&mut batch_args).expect("normalize component to owning repo");
+            assert_eq!(batch_args.repo, "blocks-engine");
+            assert_eq!(batch_args.component.as_deref(), Some("php-transformer"));
+            assert_eq!(
+                super::super::run::cook_component_path_for_repository_name(
+                    batch_args.component.as_deref().expect("component")
+                )
+                .expect("resolve component path"),
+                Some(component)
+            );
+            assert_eq!(
+                batch_gate_workspace(&batch_args).expect("gate workspace"),
+                Some(repository.join("php-transformer"))
+            );
+
+            let plan = build_cook_batch_plan(&batch_args).expect("build typed fanout plan");
+            assert_eq!(plan.metadata["repo"], "blocks-engine");
+            assert_eq!(plan.metadata["component"], "php-transformer");
+            assert!(plan
+                .cooks
+                .iter()
+                .all(|cook| cook.repo.as_deref() == Some("blocks-engine")));
+            assert!(plan
+                .cooks
+                .iter()
+                .all(|cook| cook.component_id.as_deref() == Some("php-transformer")));
+            assert!(plan
+                .cooks
+                .iter()
+                .all(|cook| cook.to_worktree.starts_with("blocks-engine@")));
+
+            let replayed = BatchCookFanoutPlan::from_value(
+                serde_json::to_value(&plan).expect("serialize fanout plan"),
+                &args(),
+            )
+            .expect("replay fanout plan");
+            let invocation = replayed.cooks[0]
+                .to_cook_invocation(&replayed)
+                .expect("compile replay invocation");
+            assert_eq!(invocation.dispatch.repo.as_deref(), Some("blocks-engine"));
+            assert_eq!(
+                invocation.dispatch.component.as_deref(),
+                Some("php-transformer")
+            );
+            let replay = cook_batch_argv(&batch_args);
+            assert!(replay
+                .windows(2)
+                .any(|args| args == ["--repo", "blocks-engine"]));
+            assert!(replay
+                .windows(2)
+                .any(|args| args == ["--component", "php-transformer"]));
+
+            let mut tampered = serde_json::to_value(&plan).expect("serialize tampered plan");
+            tampered["cooks"][0]["component_id"] = Value::String("block-parser".to_string());
+            let error = BatchCookFanoutPlan::from_value(tampered, &args())
+                .expect_err("mismatched repository identity must fail closed");
+            assert!(error.message.contains("repository identity does not match"));
+
+            let mut partial = serde_json::to_value(&plan).expect("serialize partial plan");
+            partial["cooks"][0]["repository_identity"] = Value::Null;
+            let error = BatchCookFanoutPlan::from_value(partial, &args())
+                .expect_err("partial component identity must fail closed");
+            assert!(error
+                .message
+                .contains("incomplete repository/component identity"));
+        });
     }
 
     #[test]
@@ -8324,6 +8519,28 @@ fi
         resolve_and_validate_effective_backend(&mut args)
             .expect("dry-run planning must not require an installed provider");
         assert_eq!(args.backend.as_deref(), Some("sandbox"));
+    }
+
+    #[test]
+    fn fanout_resolves_implicit_backend_from_exact_component_policy() {
+        let mut args = cook_batch_args();
+        args.repo = "blocks-engine".to_string();
+        args.component = Some("php-transformer".to_string());
+        args.backend = None;
+        args.dry_run = true;
+        args.run_plan = false;
+
+        resolve_and_validate_effective_backend_with_providers_and_default(
+            &mut args,
+            &[],
+            |component| {
+                assert_eq!(component, Some("php-transformer"));
+                Ok(Some("component-policy".to_string()))
+            },
+        )
+        .expect("resolve component-scoped backend");
+
+        assert_eq!(args.backend.as_deref(), Some("component-policy"));
     }
 
     #[test]

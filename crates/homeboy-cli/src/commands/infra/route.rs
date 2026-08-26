@@ -995,6 +995,11 @@ fn admit_unmaterialized_cook(
     };
     let resolved = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
+    let mut replay_args = normalized_args.to_vec();
+    crate::commands::agent_task::run::rewrite_cook_identity_replay_argv(
+        &mut replay_args,
+        &resolved,
+    );
     let cook_id = resolved
         .dispatch
         .run_id
@@ -1016,7 +1021,7 @@ fn admit_unmaterialized_cook(
         |value: serde_json::Value| admission_digest(serde_json::to_vec(&value).unwrap_or_default());
     let current_notification = homeboy::core::notification_route::current();
     let request_ref = digest_json(serde_json::json!({
-        "argv": normalized_args,
+        "argv": &replay_args,
         "notification": current_notification,
     }));
     let existing =
@@ -1029,7 +1034,7 @@ fn admit_unmaterialized_cook(
     });
     let mut staged_intent = if existing.is_none() {
         Some(stage_unmaterialized_cook_replay_intent(
-            normalized_args,
+            &replay_args,
             &cook_id,
             current_notification.as_ref(),
         )?)

@@ -48,12 +48,15 @@ pub enum AgentTaskFanoutCommand {
 pub struct AgentTaskFanoutCookBatchArgs {
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,
-    /// Registered repository slug or exact registered primary checkout path.
+    /// Registered repository/component slug or exact registered primary checkout path.
     ///
-    /// A primary path resolves to its slug before child planning. Use a repo
-    /// slug for worktree handles and other workspace paths.
+    /// Component identities and aliases resolve to their canonical owning
+    /// repository before child planning and worktree handoff.
     #[arg(long = "repo", value_name = "REPO_SLUG_OR_PRIMARY_PATH")]
     pub repo: String,
+    /// Controller-resolved component selector retained across replay.
+    #[arg(long = "component", value_name = "COMPONENT_ID", hide = true)]
+    pub component: Option<String>,
     /// Source ref used to create every child worktree. When omitted, this is
     /// inferred from the repository default branch. An explicit value wins and
     /// must resolve to the same commit as --base.

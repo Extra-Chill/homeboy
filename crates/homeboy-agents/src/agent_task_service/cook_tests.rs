@@ -60,6 +60,91 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
     AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
 }
 
+#[test]
+fn deferred_materialization_binds_nested_component_without_replacing_repository_root() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let repository = tempfile::tempdir().expect("materialized repository");
+        homeboy_core::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
+        let component_path = repository.path().join("packages/php-transformer");
+        std::fs::create_dir_all(&component_path).expect("nested component");
+        let registrations = home.path().join(".config/homeboy/components");
+        std::fs::create_dir_all(&registrations).expect("component registrations");
+        std::fs::write(
+            registrations.join("php-transformer.json"),
+            serde_json::json!({
+                "local_path": component_path,
+                "remote_url": "https://github.com/example/blocks-engine.git"
+            })
+            .to_string(),
+        )
+        .expect("register nested component");
+
+        let mut plan = AgentTaskPlan::new(
+            "deferred-component",
+            vec![AgentTaskRequest {
+                schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "task-a".to_string(),
+                group_key: Some("blocks-engine".to_string()),
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "fixture".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: "run".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
+                metadata: Value::Null,
+            }],
+        );
+        plan.group_key = Some("blocks-engine".to_string());
+        plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "blocks-engine",
+            "component_id": "php-transformer",
+            "component_cwd": "packages/php-transformer"
+        });
+
+        bind_materialized_cook_component_workspace(&mut plan, repository.path())
+            .expect("bind deferred component workspace");
+
+        assert!(plan.tasks[0].workspace.root.is_none());
+        assert_eq!(
+            plan.tasks[0].executor.config["component_cwd"],
+            "packages/php-transformer"
+        );
+        assert_eq!(
+            plan.metadata["gate_workspace"]["component_cwd"],
+            "packages/php-transformer"
+        );
+        assert_eq!(
+            plan.metadata["gate_workspace"]["requested_cwd"],
+            repository.path().display().to_string()
+        );
+
+        let mut stale = plan.clone();
+        stale.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "blocks-engine",
+            "component_id": "removed-transformer",
+            "provenance": "--repo:configured-component"
+        });
+        let error = bind_materialized_cook_component_workspace(&mut stale, repository.path())
+            .expect_err("stale component registration must fail closed");
+        assert!(error.message.contains("no longer registered"));
+    });
+}
+
 const DURABLE_COOK_FIXTURE_SCHEMA: &str = "homeboy/durable-cook-fixture/v1";
 static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 

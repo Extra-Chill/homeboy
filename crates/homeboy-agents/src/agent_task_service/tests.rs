@@ -1413,7 +1413,11 @@ fn quarantine_and_rearm_reject_sanitized_aliases_without_mutating_the_literal_re
 #[test]
 fn discovery_lists_durable_runs_with_operator_commands() {
     with_isolated_home(|_| {
-        let plan = discovery_plan();
+        let mut plan = discovery_plan();
+        plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "homeboy",
+            "component_id": "homeboy-cli"
+        });
         agent_task_lifecycle::submit_plan(&plan, Some("run-discovery-list")).expect("submitted");
 
         let report = discover_runs(AgentTaskDiscoveryFilter::All).expect("listed");
@@ -1435,6 +1439,7 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         assert_eq!(run.run_id, "run-discovery-list");
         assert_eq!(run.state, AgentTaskRunState::Queued);
         assert_eq!(run.repo.as_deref(), Some("homeboy"));
+        assert_eq!(run.component.as_deref(), Some("homeboy-cli"));
         assert_eq!(run.workspace.as_deref(), Some("/tmp/homeboy"));
         assert_eq!(
             run.task_url.as_deref(),

@@ -4968,18 +4968,17 @@ fn run_cook_spine(
         &options.ai_tool,
     );
     if options.gates.has_npm_run_declaration() {
-        let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "workspace",
-                "Cook requires a workspace before gate declaration preflight",
-                Some(options.to_worktree.clone()),
-                None,
-            )
-        })?;
-        if let Err(error) = options
-            .gates
-            .preflight_declarations(std::path::Path::new(gate_workspace))
-        {
+        let gate_workspace = super::cook_promotion::component_workspace_path(&options)?
+            .or_else(|| options.source_worktree_path.clone())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "Cook requires a workspace before gate declaration preflight",
+                    Some(options.to_worktree.clone()),
+                    None,
+                )
+            })?;
+        if let Err(error) = options.gates.preflight_declarations(&gate_workspace) {
             let error = with_pre_execution_phase(error, "gate_declaration_preflight");
             record_pre_execution_failure(
                 lifecycle_store,
@@ -5012,16 +5011,18 @@ fn run_cook_spine(
     {
         Ok(())
     } else {
-        let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "workspace",
-                "Cook requires a workspace before gate toolchain preflight",
-                Some(options.to_worktree.clone()),
-                None,
-            )
-        })?;
+        let gate_workspace = super::cook_promotion::component_workspace_path(&options)?
+            .or_else(|| options.source_worktree_path.clone())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "Cook requires a workspace before gate toolchain preflight",
+                    Some(options.to_worktree.clone()),
+                    None,
+                )
+            })?;
         crate::agent_task_gate::preflight_gate_toolchains(
-            gate_workspace,
+            &gate_workspace,
             &options.gates.gate_environment,
             &required_toolchains,
             &options.gates.gate_package_artifacts,
@@ -7955,6 +7956,7 @@ fn materialize_pending_cook_workspace(
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
     validate_pending_cook_repository_identity(&options.initial_plan, &target)?;
+    bind_materialized_cook_component_workspace(&mut options.initial_plan, &target)?;
     // Deferred provider materialization has no checkout at initial recipe
     // persistence. Capture and persist this immutable boundary before Cook can
     // admit or dispatch the materialized destination.
@@ -7987,6 +7989,88 @@ fn materialize_pending_cook_workspace(
         &options.initial_run_id,
         &options.initial_plan,
     )
+}
+
+fn bind_materialized_cook_component_workspace(
+    plan: &mut AgentTaskPlan,
+    repository_root: &Path,
+) -> Result<()> {
+    let Some(component_id) = plan
+        .metadata
+        .pointer("/cook_repository_identity/component_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok(());
+    };
+    let requested_repository = plan
+        .metadata
+        .pointer("/cook_repository_identity/provenance")
+        .and_then(Value::as_str)
+        == Some("--repo:requested-repository");
+    if requested_repository {
+        return Ok(());
+    }
+    let Some(component) = homeboy_core::component::registered_by_id(&component_id)? else {
+        return Err(Error::validation_invalid_argument(
+            "component workspace",
+            format!("configured component `{component_id}` is no longer registered"),
+            Some(component_id),
+            None,
+        ));
+    };
+    let effective = match plan
+        .metadata
+        .pointer("/cook_repository_identity/component_cwd")
+        .and_then(Value::as_str)
+    {
+        Some(component_cwd) => homeboy_core::resolve_contained_local_path(
+            repository_root,
+            component_cwd,
+            "component_cwd",
+        )?,
+        None => homeboy_core::component::resolution::rebase_component_path_to_checkout(
+            &component,
+            repository_root,
+        ),
+    };
+    if !effective.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "component workspace",
+            format!(
+                "resolved component `{component_id}` is not present in materialized Cook workspace"
+            ),
+            Some(effective.display().to_string()),
+            None,
+        ));
+    }
+    let effective = effective.canonicalize().map_err(|error| {
+        Error::internal_io(error.to_string(), Some(effective.display().to_string()))
+    })?;
+    let component_cwd = effective.strip_prefix(repository_root).map_err(|_| {
+        Error::validation_invalid_argument(
+            "component workspace",
+            "resolved component workspace escapes the materialized repository root",
+            Some(effective.display().to_string()),
+            None,
+        )
+    })?;
+    if component_cwd.as_os_str().is_empty() {
+        return Ok(());
+    }
+    plan.metadata["gate_workspace"] = serde_json::json!({
+        "requested_cwd": repository_root,
+        "effective_cwd": effective,
+        "component_cwd": component_cwd,
+        "component_id": component_id,
+    });
+    for task in &mut plan.tasks {
+        if !task.executor.config.is_object() {
+            task.executor.config = serde_json::json!({});
+        }
+        task.executor.config["component_cwd"] = Value::String(component_cwd.display().to_string());
+    }
+    Ok(())
 }
 
 /// Retry only supervised, read-only resolve timeouts. Not-found, malformed, and

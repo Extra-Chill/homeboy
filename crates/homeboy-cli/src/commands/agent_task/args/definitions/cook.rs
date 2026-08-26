@@ -1000,6 +1000,10 @@ pub struct AgentTaskCookArgs {
     pub help_full: Option<bool>,
     #[command(flatten)]
     pub dispatch: DispatchArgs,
+    /// Controller-resolved component selector retained across replay while
+    /// --repo carries the canonical owning repository.
+    #[arg(long = "component", value_name = "COMPONENT_ID", hide = true)]
+    pub component: Option<String>,
     /// Completion rule for isolated candidates: wait for all results (default)
     /// or promote the first successful candidate.
     #[arg(long, default_value_t = AgentTaskCandidateCompletionPolicy::WaitAll, value_name = "POLICY")]
