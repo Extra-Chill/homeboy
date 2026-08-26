@@ -834,6 +834,69 @@ mod tests {
         });
     }
 
+    #[test]
+    fn resume_supervises_then_replays_a_completed_checkpoint_idempotently() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-controller-resume-harness";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            let request = request_of(cook_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CookJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+            let supervising = driver.prepare(request).expect("prepare cook job");
+
+            let observed = driver
+                .resume(supervising.clone(), harness.handle())
+                .expect("resume supervision of dead child");
+
+            assert_eq!(observed["phase"], "completed");
+            assert_eq!(observed["terminal_state"], "failed");
+            let mut completed = supervising;
+            completed["phase"] = json!("completed");
+            completed["terminal_state"] = json!("failed");
+            let first = driver
+                .resume(completed.clone(), harness.handle())
+                .expect("first completed replay");
+            let second = driver
+                .resume(completed, harness.handle())
+                .expect("second completed replay");
+            assert_eq!(first, second);
+            assert_eq!(first, observed);
+        });
+    }
+
+    #[test]
+    fn cancellation_requested_through_the_harness_stops_supervision() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-controller-cancel-harness";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            let request = request_of(cook_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CookJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+            harness
+                .request_cancellation("test cancellation")
+                .expect("request cancellation");
+            let handle = harness.handle();
+            assert!(handle.is_cancelled());
+
+            let result = driver
+                .execute(driver.prepare(request).expect("prepare cook job"), handle)
+                .expect("stop supervision after cancellation");
+
+            assert_eq!(result["phase"], "completed");
+            assert_eq!(result["terminal_state"], "failed");
+        });
+    }
+
     /// A child that ended without ever publishing durable identity is not a
     /// success. Reporting it as one would reproduce the dishonesty detachment
     /// exists to remove.
