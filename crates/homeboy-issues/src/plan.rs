@@ -13,11 +13,8 @@ use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanVa
 const ACTION_INPUT_KEY: &str = "action";
 
 /// One row of incoming findings: "command produced N findings of category X
-/// for component Y." This is the input grain reconcile reasons over.
-///
-/// `command` is `"audit" | "lint" | "test"` etc. — used for label-scoping
-/// the tracker query (e.g. only consider open issues labeled `audit`) and
-/// for the issue title prefix.
+/// for component Y." Each row owns one section in the component's rolling
+/// findings issue.
 ///
 /// `category` is the kind/key (e.g. `unreferenced_export`, `god_file`,
 /// `missing_test_method`). Empty findings counts (`count = 0`) for a category

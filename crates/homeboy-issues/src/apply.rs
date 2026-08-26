@@ -202,7 +202,7 @@ mod tests {
     }
 
     impl Tracker for MockTracker {
-        fn list_issues(&self, _label: &str, _limit: usize) -> Result<Vec<crate::TrackedIssue>> {
+        fn list_issues(&self, _limit: usize) -> Result<Vec<crate::TrackedIssue>> {
             unimplemented!("apply_plan does not call list_issues")
         }
         fn create_issue(&self, title: &str, _body: &str, _labels: &[String]) -> Result<u64> {

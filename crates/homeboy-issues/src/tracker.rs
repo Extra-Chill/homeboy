@@ -22,15 +22,10 @@ use super::plan::{TrackedIssue, TrackedIssueState};
 /// at construction time, NOT per call. This matches the existing
 /// `core/git/github.rs` shape.
 pub trait Tracker {
-    /// Return every issue in the tracker matching the given label. Includes
-    /// open AND closed issues — reconcile needs `state_reason` on closed
-    /// issues to distinguish completed from not_planned.
-    ///
-    /// `command_label` is the reconciler's category-class label
-    /// (e.g. `"audit"`, `"lint"`, `"test"`). Implementations should restrict
-    /// the result set by this label so we don't paginate the entire tracker
-    /// for every reconcile run.
-    fn list_issues(&self, command_label: &str, limit: usize) -> Result<Vec<TrackedIssue>>;
+    /// Return tracker issues for component-scoped reconciliation. Includes
+    /// open and closed issues so state reasons and legacy finding issues can be
+    /// reconciled. Discovery must not depend on optional labels.
+    fn list_issues(&self, limit: usize) -> Result<Vec<TrackedIssue>>;
 
     /// File a new issue with the given title, body, and labels. Returns the
     /// new issue number on success.
@@ -87,12 +82,12 @@ impl GithubTracker {
 }
 
 impl Tracker for GithubTracker {
-    fn list_issues(&self, command_label: &str, limit: usize) -> Result<Vec<TrackedIssue>> {
+    fn list_issues(&self, limit: usize) -> Result<Vec<TrackedIssue>> {
         let out = issue_find(
             Some(&self.component_id),
             IssueFindOptions {
                 title: None,
-                labels: vec![command_label.to_string()],
+                labels: Vec::new(),
                 state: IssueState::All,
                 limit,
                 path: self.path.clone(),
