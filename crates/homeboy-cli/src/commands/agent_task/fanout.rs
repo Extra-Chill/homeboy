@@ -5021,6 +5021,7 @@ fn resolve_and_validate_effective_backend_with_catalog_and_default(
 ) -> Result<()> {
     let command = fanout_provider_dispatch_command(
         Some(args.repo.clone()),
+        args.component.clone(),
         args.backend.clone(),
         args.selector.clone(),
         args.model.clone(),
@@ -5053,6 +5054,7 @@ fn with_provider_admission_remediation(error: Error) -> Error {
 
 fn fanout_provider_dispatch_command(
     repo: Option<String>,
+    component: Option<String>,
     backend: Option<String>,
     selector: Option<String>,
     model: Option<String>,
@@ -5063,6 +5065,7 @@ fn fanout_provider_dispatch_command(
         prompt: Some("Validate fanout provider admission declarations.".to_string()),
         prompt_is_literal: true,
         repo,
+        component,
         backend,
         selector,
         model,
@@ -5157,6 +5160,7 @@ fn admit_batch_provider_routes_with_catalog(
     for cook in &mut plan.cooks {
         let command = fanout_provider_dispatch_command(
             cook.repo.clone(),
+            cook.component_id.clone(),
             cook.backend.clone(),
             cook.selector.clone(),
             cook.model.clone(),
@@ -9456,6 +9460,8 @@ fi
         args.repo = "blocks-engine".to_string();
         args.component = Some("php-transformer".to_string());
         args.backend = None;
+        args.selector = None;
+        args.secret_env.clear();
         args.dry_run = true;
         args.run_plan = false;
 
