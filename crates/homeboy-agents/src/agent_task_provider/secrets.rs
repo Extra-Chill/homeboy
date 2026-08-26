@@ -49,6 +49,16 @@ fn provider_secret_env(
     request: Option<&AgentTaskRequest>,
 ) -> Vec<String> {
     let mut names = Vec::new();
+    names.extend(
+        provider
+            .invocation
+            .env
+            .iter()
+            .filter(|env| {
+                env.source.as_deref() == Some("secret_env") || env.redacted.unwrap_or(false)
+            })
+            .map(|env| env.name.clone()),
+    );
     for readiness in &provider.runner_readiness {
         names.extend(readiness.secret_env.iter().cloned());
     }

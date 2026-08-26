@@ -30,6 +30,26 @@ fn git(path: &Path, args: &[&str]) {
     );
 }
 
+fn init_task_worktree(source: &Path, worktree: &Path, branch: &str) {
+    std::fs::create_dir_all(source).expect("source dir");
+    git(source, &["init", "-b", "main"]);
+    git(source, &["config", "user.email", "homeboy@example.test"]);
+    git(source, &["config", "user.name", "Homeboy Test"]);
+    std::fs::write(source.join("README"), "fixture\n").expect("source fixture");
+    git(source, &["add", "."]);
+    git(source, &["commit", "-m", "fixture"]);
+    git(
+        source,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            worktree.to_str().expect("utf-8 worktree path"),
+        ],
+    );
+}
+
 #[test]
 fn extracts_all_local_path_sources_including_runtime_overlays() {
     let value = serde_json::json!({
@@ -607,18 +627,20 @@ fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() 
             .expect("homeboy data")
             .join("task-worktrees");
         std::fs::create_dir_all(&store).expect("worktree store");
-        let source = home.path().join("primary");
+        let source = home.path().join("repo");
         let worktree = home.path().join("repo@cook");
+        init_task_worktree(&source, &worktree, "cook");
         let nested = worktree.join("fixtures/input.json");
-        std::fs::create_dir_all(&source).expect("source dir");
         std::fs::create_dir_all(nested.parent().unwrap()).expect("nested dir");
         std::fs::write(&nested, "{}\n").expect("nested file");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "nested fixture"]);
         std::fs::write(
             store.join("repo_cook.json"),
             serde_json::json!({
                 "id": "repo@cook",
                 "component_id": "repo",
-                "source_checkout": home.path().join("repo").display().to_string(),
+                "source_checkout": source.display().to_string(),
                 "worktree_path": worktree.display().to_string(),
                 "branch": "cook",
                 "base_ref": "HEAD",
@@ -667,15 +689,20 @@ fn path_setting_workspace_ref_resolves_inside_setting_json() {
             .expect("homeboy data")
             .join("task-worktrees");
         std::fs::create_dir_all(&store).expect("worktree store");
+        let source = home.path().join("repo");
         let worktree = home.path().join("repo@cook");
+        init_task_worktree(&source, &worktree, "cook");
         let nested = worktree.join("data/corpus");
         std::fs::create_dir_all(&nested).expect("nested dir");
+        std::fs::write(nested.join(".keep"), "fixture\n").expect("nested fixture");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "nested fixture"]);
         std::fs::write(
             store.join("repo_cook.json"),
             serde_json::json!({
                 "id": "repo@cook",
                 "component_id": "repo",
-                "source_checkout": home.path().join("repo").display().to_string(),
+                "source_checkout": source.display().to_string(),
                 "worktree_path": worktree.display().to_string(),
                 "branch": "cook",
                 "base_ref": "HEAD",
@@ -770,6 +797,98 @@ fn path_setting_workspace_ref_resolves_adopted_workspace() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn path_setting_workspace_ref_resolves_configured_provider_workspace() {
+    use homeboy_core::defaults::{
+        save_config, HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig,
+        WorktreeProviderKind, WorktreeProviderListResultMapping,
+    };
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let workspace = home.path().join("configured-workspace");
+        std::fs::create_dir(&workspace).expect("configured workspace");
+        let fixture = workspace.join("fixtures");
+        std::fs::create_dir(&fixture).expect("fixture directory");
+        std::fs::write(fixture.join("input.json"), "{}\n").expect("fixture file");
+        for args in [
+            &["init", "-b", "cook"][..],
+            &["config", "user.email", "homeboy@example.test"][..],
+            &["config", "user.name", "Homeboy Test"][..],
+            &["add", "."][..],
+            &["commit", "-m", "fixture"][..],
+        ] {
+            git(&workspace, args);
+        }
+        let script = home.path().join("provider");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"configured@cook\",\"path\":\"{}\",\"branch\":\"cook\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                workspace.display()
+            ),
+        )
+        .expect("provider script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("executable provider");
+        let mut providers = HashMap::new();
+        providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                commands: WorktreeProviderCommands {
+                    list: Some(vec![script.display().to_string()]),
+                    ..Default::default()
+                },
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                list_result_mapping: Some(WorktreeProviderListResultMapping {
+                    items: "$.worktrees".to_string(),
+                    handle: "$.handle".to_string(),
+                    path: "$.path".to_string(),
+                    branch: "$.branch".to_string(),
+                    dirty: "$.safety.dirty".to_string(),
+                    unpushed: "$.safety.unpushed".to_string(),
+                    primary: "$.safety.primary".to_string(),
+                    task_url: None,
+                }),
+            },
+        );
+        save_config(&HomeboyConfig {
+            worktree_providers: providers,
+            ..HomeboyConfig::default()
+        })
+        .expect("provider config");
+        let ownership =
+            homeboy_core::worktree_provider::resolve_worktree_ownership("configured@cook")
+                .expect("configured ownership");
+        assert_eq!(ownership.path, workspace.display().to_string());
+
+        let args = vec![
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--setting=fixture=@workspace:configured@cook/fixtures/input.json".to_string(),
+        ];
+        let (rewritten, resolutions) =
+            resolve_path_setting_workspace_refs_in_args(&args).expect("configured workspace ref");
+
+        assert_eq!(
+            rewritten[2],
+            format!("--setting=fixture={}", fixture.join("input.json").display())
+        );
+        assert_eq!(resolutions[0].source_kind, "configured_worktree");
+        assert!(resolutions[0].source_provenance.is_none());
+    });
+}
+
 #[test]
 fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
     homeboy_core::test_support::with_isolated_home(|home| {
@@ -793,9 +912,7 @@ fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
             .expect_err("missing adopted workspace path should fail");
 
         assert_eq!(err.details["field"], "workspace_ref");
-        assert!(err
-            .message
-            .contains("resolved to a missing controller path"));
+        assert!(err.message.contains("points at a missing directory"));
     });
 }
 
@@ -819,7 +936,7 @@ fn path_setting_workspace_ref_missing_handle_fails_locally() {
 }
 
 #[test]
-fn path_setting_workspace_ref_removed_record_fails_as_stale() {
+fn path_setting_workspace_ref_removed_record_is_not_resolvable() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let store = homeboy_core::paths::homeboy_data()
             .expect("homeboy data")
@@ -854,7 +971,9 @@ fn path_setting_workspace_ref_removed_record_fails_as_stale() {
             .expect_err("removed workspace ref should fail");
 
         assert_eq!(err.details["field"], "workspace_ref");
-        assert!(err.message.contains("stale task_worktree"));
+        assert!(err
+            .message
+            .contains("does not match a known workspace handle"));
     });
 }
 

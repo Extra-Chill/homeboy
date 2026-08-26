@@ -2830,10 +2830,14 @@ fn cancel_run_signals_live_running_record() {
         .expect("read descendant pid");
     let descendant_pid: u32 = descendant_pid.trim().parse().expect("descendant pid");
     let owner_pid = child.id();
+    let owner_identity = homeboy_core::process::process_start_identity(owner_pid)
+        .expect("probe owner process identity")
+        .expect("live owner exposes a process identity");
     let mut running = lifecycle_store
         .read_record("run-cancel-live")
         .expect("running record");
     running.metadata["runner_pid"] = json!(owner_pid);
+    running.metadata["runner_process_start_identity"] = json!(owner_identity);
     lifecycle_store
         .write_record(&running)
         .expect("persist owned process identity");

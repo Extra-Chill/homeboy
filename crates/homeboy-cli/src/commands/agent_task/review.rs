@@ -1023,6 +1023,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         evidence,
         ai_used_for: args.ai_used_for,
         review_dossier,
+        composed_ai_model_disclosure: false,
         review_profile,
         manual_finalization: args.manual_finalization,
         expected_candidate_sha: None,
@@ -1098,6 +1099,7 @@ pub(crate) fn record_replacement_gate_proof(
         &args.run_id,
         replacement,
         args.authorize_external_proof,
+        args.accept_inherited_failures,
     )?;
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }

@@ -636,10 +636,9 @@ pub(crate) fn promote_or_load_attempt_in_store(
             let target_path = promotion.target.path.as_deref().or_else(|| {
                 promotion.provenance.get("worktree_path").and_then(Value::as_str)
             }).map(PathBuf::from).or_else(|| {
-                homeboy_core::worktree::resolve_if_present(&promotion.to_worktree)
+                homeboy_core::worktree_provider::observe_worktree_provider_workspace(&promotion.to_worktree)
                     .ok()
-                    .flatten()
-                    .map(|record| PathBuf::from(record.worktree_path))
+                    .map(|workspace| PathBuf::from(workspace.ownership.path))
             }).ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "promotion.target.path",
@@ -774,6 +773,7 @@ pub fn record_replacement_gate_proof(
     run_id: &str,
     mut replacement: AgentTaskPromotionReport,
     external_authorization: Option<String>,
+    accept_inherited_failures: bool,
 ) -> Result<AgentTaskPromotionReport> {
     let original = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -783,18 +783,25 @@ pub fn record_replacement_gate_proof(
             None,
         )
     })?;
-    if original.status == AgentTaskPromotionStatus::Applied
-        && original.provenance.get("replacement_gate_proof").is_some()
-        && replacement.source == original.source
-        && replacement.target == original.target
-        && replacement.to_worktree == original.to_worktree
-        && replacement.patch_artifact == original.patch_artifact
-        && replacement.changed_files == original.changed_files
-        && replacement.verified_base == original.verified_base
-        && replacement.deterministic_gates == original.deterministic_gates
-        && replacement.command_evidence == original.command_evidence
-    {
-        return Ok(original);
+    if original.provenance.get("replacement_gate_proof").is_some() {
+        if original.finalization_eligible(accept_inherited_failures)
+            && replacement.source == original.source
+            && replacement.target == original.target
+            && replacement.to_worktree == original.to_worktree
+            && replacement.patch_artifact == original.patch_artifact
+            && replacement.changed_files == original.changed_files
+            && replacement.verified_base == original.verified_base
+            && replacement.deterministic_gates == original.deterministic_gates
+            && replacement.command_evidence == original.command_evidence
+        {
+            return Ok(original);
+        }
+        return Err(Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            "replacement proof is already recorded; replay its exact evidence and inherited-failure policy",
+            Some(run_id.to_string()),
+            None,
+        ));
     }
     if original.status != AgentTaskPromotionStatus::GateFailed || !original.status.patch_promoted()
     {
@@ -817,7 +824,11 @@ pub fn record_replacement_gate_proof(
         ));
     }
     replacement.normalize_gate_outcome();
-    validate_replacement_proof_finalization_eligibility(run_id, &replacement)?;
+    validate_replacement_proof_finalization_eligibility(
+        run_id,
+        &replacement,
+        accept_inherited_failures,
+    )?;
     validate_legacy_replacement_candidate_checkout(run_id, &original, &replacement)?;
     let expected_candidate = original.provenance.get("candidate");
     let observed_candidate = replacement.provenance.get("candidate");
@@ -894,6 +905,7 @@ pub fn record_replacement_gate_proof(
         "reason": "infrastructure_invalid_original_gates",
         "operator_authorization": external_authorization,
         "externally_produced": true,
+        "accept_inherited_failures": accept_inherited_failures,
         // `Inherit` serializes as the default in gate reports; recording the
         // resolved policy here keeps that valid standard policy explicit.
         "environment_policy": replacement.deterministic_gates.iter().map(|gate| serde_json::json!({
@@ -1018,6 +1030,7 @@ fn validate_legacy_replacement_candidate_checkout(
 fn validate_replacement_proof_finalization_eligibility(
     run_id: &str,
     replacement: &AgentTaskPromotionReport,
+    accept_inherited_failures: bool,
 ) -> Result<()> {
     let failed = |predicate: &'static str, gate_id: Option<&str>| {
         let mut error = Error::validation_invalid_argument(
@@ -1033,8 +1046,8 @@ fn validate_replacement_proof_finalization_eligibility(
         error
     };
 
-    if replacement.status != AgentTaskPromotionStatus::Applied {
-        return Err(failed("applied_status", None));
+    if !replacement.status.patch_promoted() {
+        return Err(failed("promoted_status", None));
     }
     if replacement.deterministic_gates.is_empty() {
         return Err(failed("non_empty_deterministic_gates", None));
@@ -1042,7 +1055,7 @@ fn validate_replacement_proof_finalization_eligibility(
     if replacement.verified_base.is_none() {
         return Err(failed("verified_base", None));
     }
-    if !replacement.finalization_eligible(false) {
+    if !replacement.finalization_eligible(accept_inherited_failures) {
         return Err(failed("green_gate_status", None));
     }
     let candidate_checkout = replacement.provenance.get("candidate_checkout");
@@ -1050,11 +1063,18 @@ fn validate_replacement_proof_finalization_eligibility(
         if gate.command.is_empty() {
             return Err(failed("command", Some(&gate.id)));
         }
-        if !replacement
-            .command_evidence
-            .iter()
-            .any(|evidence| evidence.exit_code == 0 && evidence.command == gate.command)
-        {
+        if !replacement.command_evidence.iter().any(|evidence| {
+            evidence.command == gate.command
+                && match gate.status {
+                    crate::agent_task_gate::AgentTaskGateStatus::Succeeded => {
+                        evidence.exit_code == 0
+                    }
+                    crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure => {
+                        accept_inherited_failures && evidence.exit_code == gate.exit_code
+                    }
+                    _ => false,
+                }
+        }) {
             return Err(failed("matching_command_evidence", Some(&gate.id)));
         }
         if candidate_checkout.is_none()
@@ -1087,7 +1107,13 @@ fn validate_replacement_proof_finalization_eligibility(
     let candidate_bound_gates = shell_gates
         .iter()
         .copied()
-        .filter(|gate| replacement.has_visible_passed_gate_for_command(&gate.command[2]))
+        .filter(|gate| match gate.status {
+            crate::agent_task_gate::AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
+            crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure => {
+                accept_inherited_failures
+            }
+            _ => false,
+        })
         .collect::<Vec<_>>();
     if candidate_bound_gates.is_empty() {
         return Err(failed("candidate_checkout", None));
@@ -1123,12 +1149,22 @@ pub fn verify_replacement_gates(
         REPLACEMENT_GATE_PROOF_CLAIM_LEASE,
     )? {
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
-            serde_json::from_value(result).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("deserialize completed replacement gate proof".to_string()),
-                )
-            })
+            let report: AgentTaskPromotionReport =
+                serde_json::from_value(result).map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("deserialize completed replacement gate proof".to_string()),
+                    )
+                })?;
+            if !report.finalization_eligible(gates.accept_inherited_failures) {
+                return Err(Error::validation_invalid_argument(
+                    "accept_inherited_failures",
+                    "completed replacement proof contains accepted inherited failures; reauthorize them explicitly",
+                    Some(run_id),
+                    None,
+                ));
+            }
+            Ok(report)
         }
         agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
             let claim = lifecycle_store.operation_claim(&run_id, &operation_key)?;
@@ -1180,6 +1216,8 @@ fn verify_replacement_gates_owned(
     gates: crate::agent_task_gate::VerifyGateOptions,
     external_authorization: String,
 ) -> Result<AgentTaskPromotionReport> {
+    let accept_inherited_failures = gates.accept_inherited_failures;
+    let gate_timeout = gates.gate_timeout();
     let original = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "latest_promotion",
@@ -1191,10 +1229,16 @@ fn verify_replacement_gates_owned(
     // A process can die after `record_replacement_gate_proof()` commits and
     // before its operation claim is completed. Recover that durable success
     // without repeating the gate execution that produced the proof.
-    if original.status == AgentTaskPromotionStatus::Applied
-        && original.provenance.get("replacement_gate_proof").is_some()
-    {
-        return Ok(original);
+    if original.provenance.get("replacement_gate_proof").is_some() {
+        if original.finalization_eligible(accept_inherited_failures) {
+            return Ok(original);
+        }
+        return Err(Error::validation_invalid_argument(
+            "accept_inherited_failures",
+            "completed replacement proof contains accepted inherited failures; reauthorize them explicitly",
+            Some(run_id.to_string()),
+            None,
+        ));
     }
     if replacement_gate_execution_started(lifecycle_store, run_id)? {
         return Err(interrupted_replacement_gate_execution_error(run_id));
@@ -1226,10 +1270,9 @@ fn verify_replacement_gates_owned(
     let target_path = original.target.path.as_deref().or_else(|| {
         original.provenance.get("worktree_path").and_then(Value::as_str)
     }).map(PathBuf::from).or_else(|| {
-        homeboy_core::worktree::resolve_if_present(&original.to_worktree)
+        homeboy_core::worktree_provider::observe_worktree_provider_workspace(&original.to_worktree)
             .ok()
-            .flatten()
-            .map(|record| PathBuf::from(record.worktree_path))
+            .map(|workspace| PathBuf::from(workspace.ownership.path))
     }).ok_or_else(|| Error::validation_invalid_argument(
         "promotion.target.path",
         "replacement gates require the failed promotion's durable candidate worktree path or registered worktree handle",
@@ -1288,14 +1331,29 @@ fn verify_replacement_gates_owned(
             mark_replacement_gate_execution_started(lifecycle_store, run_id)
         },
     )?;
-    // #11290's import boundary requires command evidence for each green gate.
+    super::cook_baseline::compare_gate_failures_to_verified_base(
+        &mut replacement,
+        &target_path,
+        replacement_gate_workspace
+            .as_deref()
+            .unwrap_or(&target_path),
+        &verified_base.sha,
+        gate_timeout,
+        |_, _| Ok(()),
+    )?;
+    // #11290's import boundary requires command evidence for each accepted gate.
     // The shared gate runner retains that evidence in detailed gate reports, so
     // project it into the typed promotion command-evidence view before recording.
     replacement.command_evidence.extend(
         replacement
             .deterministic_gates
             .iter()
-            .filter(|gate| gate.exit_code == 0)
+            .filter(|gate| {
+                gate.exit_code == 0
+                    || (accept_inherited_failures
+                        && gate.status
+                            == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure)
+            })
             .map(
                 |gate| crate::agent_task_promotion::AgentTaskPromotionCommandReport {
                     command: gate.command.clone(),
@@ -1306,7 +1364,12 @@ fn verify_replacement_gates_owned(
                 },
             ),
     );
-    record_replacement_gate_proof(&run_id, replacement, Some(external_authorization))
+    record_replacement_gate_proof(
+        &run_id,
+        replacement,
+        Some(external_authorization),
+        accept_inherited_failures,
+    )
 }
 
 fn bind_persisted_promotion_artifact(
@@ -2543,18 +2606,24 @@ pub(crate) fn cook_finalization_options_with_stores(
                 None,
             )
         })?;
-    let mut review_dossier = cook_review_dossier_with_stores(
-        store,
-        lifecycle_store,
-        options,
-        promotion,
-        successful_run_id,
-    )?;
+    let (mut review_dossier, composed_ai_model_disclosure, preserve_used_for_disclosure) =
+        cook_review_dossier_with_stores(
+            store,
+            lifecycle_store,
+            options,
+            promotion,
+            successful_run_id,
+        )?;
     review_dossier.overrides = overrides;
     // A non-empty option is an explicit operator disclosure. Otherwise retain
     // the validated review form's process statement as durable PR provenance.
     let ai_used_for = if options.ai_used_for.trim().is_empty() {
         review_dossier.ai_assistance.used_for.clone()
+    } else if preserve_used_for_disclosure {
+        format!(
+            "{} {}",
+            review_dossier.ai_assistance.used_for, options.ai_used_for
+        )
     } else {
         options.ai_used_for.clone()
     };
@@ -2617,6 +2686,7 @@ pub(crate) fn cook_finalization_options_with_stores(
         },
         ai_used_for,
         review_dossier,
+        composed_ai_model_disclosure,
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: false,
         expected_candidate_sha: None,
@@ -3815,6 +3885,7 @@ fn manual_finalization_options(
         evidence: report.evidence,
         ai_used_for: report.review_dossier.ai_assistance.used_for.clone(),
         review_dossier: report.review_dossier,
+        composed_ai_model_disclosure: false,
         review_profile: resolve_review_profile(&path)?,
         manual_finalization: true,
         expected_candidate_sha,
@@ -3909,7 +3980,7 @@ fn cook_review_dossier_with_stores(
     options: &AgentTaskCookServiceOptions,
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
-) -> Result<AgentTaskReviewDossier> {
+) -> Result<(AgentTaskReviewDossier, bool, bool)> {
     // A form-only run owns reviewer metadata but carries forward the durable
     // gate proof while its authenticated source owns candidate scope.
     let terminal_promotion = promotion;
@@ -4059,30 +4130,34 @@ fn cook_review_dossier_with_stores(
             },
         ]);
     }
-    Ok(AgentTaskReviewDossier {
-        schema: "homeboy/agent-task-review-dossier/v1".to_string(),
-        summary: lineage.summary,
-        what_changed: lineage.what_changed,
-        how_to_test,
-        compatibility: lineage.compatibility,
-        // Deterministic evidence: orchestrator-owned. The task objective, scope,
-        // gate count, and adoption provenance are factual records, not prose the
-        // AI restates.
-        evidence,
-        verified_commands,
-        changed_public_contracts: Vec::new(),
-        public_contract_evidence: None,
-        ai_assistance: AgentTaskReviewAiAssistance {
-            // Deterministic: the orchestrator knows whether/what tool+model ran,
-            // and attributes Homeboy as the harness that drove the change.
-            used: true,
-            tool: lineage.tool,
-            model: lineage.model,
-            used_for: lineage.used_for,
+    Ok((
+        AgentTaskReviewDossier {
+            schema: "homeboy/agent-task-review-dossier/v1".to_string(),
+            summary: lineage.summary,
+            what_changed: lineage.what_changed,
+            how_to_test,
+            compatibility: lineage.compatibility,
+            // Deterministic evidence: orchestrator-owned. The task objective, scope,
+            // gate count, and adoption provenance are factual records, not prose the
+            // AI restates.
+            evidence,
+            verified_commands,
+            changed_public_contracts: Vec::new(),
+            public_contract_evidence: None,
+            ai_assistance: AgentTaskReviewAiAssistance {
+                // Deterministic: the orchestrator knows whether/what tool+model ran,
+                // and attributes Homeboy as the harness that drove the change.
+                used: true,
+                tool: lineage.tool,
+                model: lineage.model,
+                used_for: lineage.used_for,
+            },
+            source_relationships: Vec::new(),
+            overrides: Vec::new(),
         },
-        source_relationships: Vec::new(),
-        overrides: Vec::new(),
-    })
+        lineage.composed_model_disclosure,
+        lineage.preserve_used_for_disclosure,
+    ))
 }
 
 struct CookAiLineage {
@@ -4092,6 +4167,8 @@ struct CookAiLineage {
     tool: String,
     model: String,
     used_for: String,
+    composed_model_disclosure: bool,
+    preserve_used_for_disclosure: bool,
 }
 
 struct CookAttemptExecution {
@@ -4100,6 +4177,17 @@ struct CookAttemptExecution {
     tool: String,
     model: Option<String>,
     review_form_only: bool,
+}
+
+struct CookContribution {
+    run_id: String,
+    execution: CookAttemptExecution,
+}
+
+struct CookContributionSource {
+    run_id: String,
+    task_id: String,
+    patch_sha256: String,
 }
 
 fn concrete_provider_model(value: Option<&str>) -> Option<String> {
@@ -4308,6 +4396,225 @@ fn cook_attempt_execution_in_store(
     })
 }
 
+fn cook_contribution_source(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<CookContributionSource>> {
+    let plan = lifecycle_store.read_controller_plan(run_id)?;
+    let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
+    let task = plan
+        .tasks
+        .iter()
+        .find(|task| task.task_id == outcome.task_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "Cook lineage outcome does not match a task in its durable execution plan",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let provenance = &task.inputs["cook_loop"]["artifact_provenance"];
+    if provenance.is_null() {
+        return Ok(None);
+    }
+    let source = CookContributionSource {
+        run_id: provenance["source_run_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        task_id: provenance["source_task_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        patch_sha256: provenance["source_patch_artifact_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    };
+    if source.run_id.is_empty() || source.task_id.is_empty() || source.patch_sha256.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "cook_loop.artifact_provenance",
+            "Cook contribution source binding is incomplete",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(source))
+}
+
+fn exact_promotion_for_contribution(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskPromotionReport> {
+    let record = lifecycle_store.read_record(run_id)?;
+    let value = record.metadata.get("latest_promotion").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion",
+            "Cook contribution source has no persisted promotion",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let promotion: AgentTaskPromotionReport =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "latest_promotion",
+                format!("persisted Cook contribution promotion is invalid: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if promotion.source.run_id.as_deref() != Some(run_id) {
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.source.run_id",
+            "persisted Cook contribution promotion belongs to another attempt",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(promotion)
+}
+
+fn substantive_contribution_chain(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    attempts: &[super::AgentTaskCookRecipeAttempt],
+    terminal_run_id: &str,
+) -> Result<Vec<CookContribution>> {
+    let positions = attempts
+        .iter()
+        .enumerate()
+        .map(|(index, attempt)| (attempt.run_id.as_str(), index))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut contributions = Vec::new();
+    let mut current_run_id = terminal_run_id.to_string();
+    let mut visited = std::collections::BTreeSet::new();
+    loop {
+        if !visited.insert(current_run_id.clone()) {
+            return Err(Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance",
+                "Cook contribution lineage contains a cycle",
+                Some(current_run_id),
+                None,
+            ));
+        }
+        let current_position =
+            positions
+                .get(current_run_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "cook_recipe.attempts",
+                        "Cook contribution is absent from the persisted recipe",
+                        Some(current_run_id.clone()),
+                        None,
+                    )
+                })?;
+        let execution = cook_attempt_execution_in_store(lifecycle_store, &current_run_id)?;
+        if execution.review_form_only {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "metadata-only review-form attempts cannot contribute implementation patches",
+                Some(current_run_id),
+                None,
+            ));
+        }
+        let source = cook_contribution_source(lifecycle_store, &current_run_id)?;
+        contributions.push(CookContribution {
+            run_id: current_run_id.clone(),
+            execution,
+        });
+        let Some(source) = source else {
+            break;
+        };
+        let source_position = positions
+            .get(source.run_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_loop.artifact_provenance.source_run_id",
+                    "Cook contribution source is absent from the persisted recipe",
+                    Some(source.run_id.clone()),
+                    None,
+                )
+            })?;
+        if source_position >= current_position {
+            return Err(Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance.source_run_id",
+                "Cook contribution source must precede its consumer",
+                Some(source.run_id),
+                None,
+            ));
+        }
+        let source_promotion = exact_promotion_for_contribution(lifecycle_store, &source.run_id)?;
+        if !source_promotion.status.patch_promoted()
+            || source_promotion.source.task_id.as_str() != source.task_id.as_str()
+            || source_promotion.patch_artifact.sha256.as_deref()
+                != Some(source.patch_sha256.as_str())
+        {
+            return Err(Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance",
+                "Cook contribution source binding does not match its persisted promotion",
+                Some(source.run_id),
+                None,
+            ));
+        }
+        current_run_id = source.run_id;
+    }
+    contributions.reverse();
+    Ok(contributions)
+}
+
+fn substantive_lineage(
+    contributions: Vec<CookContribution>,
+    terminal_form: &crate::agent_task_review_dossier::AiFilledReviewForm,
+) -> Result<CookAiLineage> {
+    let Some(terminal) = contributions.last() else {
+        return Err(Error::internal_unexpected(
+            "substantive Cook lineage has no authenticated contribution",
+        ));
+    };
+    if contributions.len() == 1 {
+        let model = required_execution_model(&terminal.execution, &terminal.run_id)?;
+        return Ok(CookAiLineage {
+            summary: terminal_form.summary.clone(),
+            what_changed: terminal_form.what_changed.clone(),
+            compatibility: terminal_form.compatibility.clone(),
+            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(
+                &terminal.execution.tool,
+            ),
+            model,
+            used_for: terminal_form.used_for.clone(),
+            composed_model_disclosure: false,
+            preserve_used_for_disclosure: false,
+        });
+    }
+    let mut tools = Vec::new();
+    let mut models = Vec::new();
+    let mut roles = Vec::new();
+    for (index, contribution) in contributions.iter().enumerate() {
+        let role = format!("Implementation {}", index + 1);
+        let tool =
+            crate::agent_task_review_dossier::homeboy_tool_disclosure(&contribution.execution.tool);
+        let model = required_execution_model(&contribution.execution, &contribution.run_id)?;
+        tools.push(format!("{role}: {tool}"));
+        models.push(format!("{role}: {model}"));
+        roles.push(format!(
+            "{role}: {tool} authored an authenticated contribution retained in the delivered candidate."
+        ));
+    }
+    Ok(CookAiLineage {
+        summary: terminal_form.summary.clone(),
+        what_changed: terminal_form.what_changed.clone(),
+        compatibility: terminal_form.compatibility.clone(),
+        tool: tools.join("; "),
+        model: models.join("; "),
+        used_for: roles.join(" "),
+        composed_model_disclosure: true,
+        preserve_used_for_disclosure: true,
+    })
+}
+
 fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> Result<String> {
     execution.model.clone().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -4354,30 +4661,14 @@ fn cook_ai_lineage_with_stores(
         ));
     };
     attempts.truncate(terminal_index + 1);
-    // Preserve the byte-for-byte single-attempt output. Multi-attempt form-only
-    // recovery instead makes each authenticated role visible to reviewers.
-    if terminal_index == 0 {
-        let execution = cook_attempt_execution_in_store(lifecycle_store, successful_run_id)?;
-        let model = required_execution_model(&execution, successful_run_id)?;
-        return Ok(CookAiLineage {
-            summary: terminal_form.summary.clone(),
-            what_changed: terminal_form.what_changed.clone(),
-            compatibility: terminal_form.compatibility.clone(),
-            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(&execution.tool),
-            model,
-            used_for: terminal_form.used_for.clone(),
-        });
-    }
     let terminal = cook_attempt_execution_in_store(lifecycle_store, successful_run_id)?;
-    let terminal_model = required_execution_model(&terminal, successful_run_id)?;
     if !terminal.review_form_only {
-        return Err(Error::validation_invalid_argument(
-            "cook_recipe.attempts",
-            "multi-attempt Cook finalization only composes role disclosures for a metadata-only review-form follow-up",
-            Some(successful_run_id.to_string()),
-            None,
-        ));
+        return substantive_lineage(
+            substantive_contribution_chain(lifecycle_store, &attempts, successful_run_id)?,
+            terminal_form,
+        );
     }
+    let terminal_model = required_execution_model(&terminal, successful_run_id)?;
     let source_run_id = promotion
         .provenance
         .pointer("/cook_follow_up/source_run_id")
@@ -4463,6 +4754,8 @@ fn cook_ai_lineage_with_stores(
         tool,
         model,
         used_for,
+        composed_model_disclosure: true,
+        preserve_used_for_disclosure: false,
     })
 }
 
@@ -4758,7 +5051,7 @@ pub fn cook_failure_context(
     let pre_execution_diagnostic = record.as_ref().and_then(|record| {
         let failure = record.metadata.get("pre_execution_failure")?;
         let details = failure.get("details")?;
-        homeboy_core::worktree_providers::compact_provider_failure_details(details).map(
+        homeboy_core::worktree_provider::compact_worktree_provider_failure_details(details).map(
             |evidence| {
                 serde_json::json!({
                     "code": failure.get("error_code"),
@@ -5244,7 +5537,7 @@ mod recovery_action_tests {
             "checkpoint-mismatch-attempt-1",
             true,
             false,
-            false,
+            true,
             true,
             Vec::new(),
             None,

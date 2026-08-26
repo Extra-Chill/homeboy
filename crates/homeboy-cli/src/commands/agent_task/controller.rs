@@ -2,7 +2,9 @@
 //! lifecycle, spec defaults, and the CLI dispatch bridge.
 
 use serde_json::Value;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use homeboy::agents::agent_task_controller_service::{
     build_run_failure_summary, controller_spec_fingerprint_for_status,
@@ -40,6 +42,11 @@ use super::args::{
     AgentTaskLoopStatusArgs,
 };
 use super::command_json_value;
+
+const LOOP_COORDINATOR_ENV: &str = "HOMEBOY_AGENT_TASK_LOOP_COORDINATOR";
+const LOOP_COORDINATOR_READY_ENV: &str = "HOMEBOY_AGENT_TASK_LOOP_COORDINATOR_READY";
+const LOOP_COORDINATOR_POLL: Duration = Duration::from_millis(500);
+const LOOP_COORDINATOR_READY_BUDGET: Duration = Duration::from_secs(30);
 
 pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
     match args.command {
@@ -112,6 +119,12 @@ fn controller_status_report_value(
         homeboy::agents::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
     let mut value = serde_json::to_value(report)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    if let Some(record) = value.get("controller") {
+        let work = loop_work_projection(record);
+        if let Some(object) = value.as_object_mut() {
+            object.insert("work".to_string(), work);
+        }
+    }
     if args.spec.is_some()
         || args.dispatch.dispatch_backend.is_some()
         || args.dispatch.dispatch_selector.is_some()
@@ -262,12 +275,8 @@ fn loop_define(args: AgentTaskLoopDefineArgs) -> CmdResult<Value> {
     }
 
     let defaults = ControllerDispatchDefaults::from_loop_define_args(&args);
-    let (resume_report, exit_code) = loop_resume_with_executor(
-        report.loop_id.clone(),
-        args.revolution_limit,
-        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        defaults,
-    )?;
+    let (resume_report, exit_code) =
+        submit_loop_resume(report.loop_id.clone(), args.revolution_limit, defaults)?;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-define-result/v1",
@@ -285,10 +294,13 @@ fn loop_define(args: AgentTaskLoopDefineArgs) -> CmdResult<Value> {
 fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
     let report =
         homeboy::agents::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
+    let controller = serde_json::to_value(&report.controller)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     Ok((
         command_json_value(serde_json::json!({
             "schema": "homeboy/agent-task-loop-status-result/v1",
             "runtime": loop_runtime_metadata(&report.controller.metadata),
+            "work": loop_work_projection(&controller),
             "status": report,
         }))?,
         0,
@@ -297,18 +309,12 @@ fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
 
 fn loop_resume(args: AgentTaskLoopResumeArgs) -> CmdResult<Value> {
     let defaults = ControllerDispatchDefaults::from_loop_resume_args(&args);
-    loop_resume_with_executor(
-        args.loop_id,
-        args.revolution_limit,
-        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        defaults,
-    )
+    submit_loop_resume(args.loop_id, args.revolution_limit, defaults)
 }
 
-fn loop_resume_with_executor(
+fn submit_loop_resume(
     loop_id: String,
     revolution_limit: Option<u32>,
-    executor: SharedAgentTaskExecutor,
     defaults: ControllerDispatchDefaults,
 ) -> CmdResult<Value> {
     let mut record = homeboy::agents::agent_tasks::loop_controller::load_controller(&loop_id)?;
@@ -344,8 +350,7 @@ fn loop_resume_with_executor(
     stamp_record_loop_runtime_metadata(&mut record, true, limit, true)?;
     homeboy::agents::agent_tasks::loop_controller::write_controller(&record)?;
     let resumed_loop_id = loop_id.clone();
-    let (value, exit_code) =
-        controller_resume_with_executor_and_defaults(loop_id, executor, defaults)?;
+    let (value, exit_code) = detach_loop_coordinator(loop_id, defaults)?;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-resume-result/v1",
@@ -364,16 +369,62 @@ fn loop_stop(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
         .map(|value| value as u32);
     stamp_record_loop_runtime_metadata(&mut record, false, limit, false)?;
     homeboy::agents::agent_tasks::loop_controller::write_controller(&record)?;
+    let work = cancel_loop_work(&record, "agent-task loop stop requested")?;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-stop-result/v1",
             "loop_id": record.loop_id,
             "on": false,
             "runtime": loop_runtime_metadata(&record.metadata),
+            "work": work,
             "controller": record,
         }),
         0,
     ))
+}
+
+fn loop_work_projection(controller: &Value) -> Value {
+    let Some(job_id) = controller
+        .pointer("/metadata/work_job/job_id")
+        .and_then(Value::as_str)
+    else {
+        return Value::Null;
+    };
+    match homeboy::core::daemon::LocalControllerJobClient::connect()
+        .and_then(|client| client.status(job_id))
+    {
+        Ok(job) => serde_json::json!({
+            "job_id": job_id,
+            "status": job.status,
+            "event_count": job.event_count,
+            "updated_at_ms": job.updated_at_ms,
+        }),
+        Err(error) => serde_json::json!({
+            "job_id": job_id,
+            "status": "unavailable",
+            "error": {
+                "code": format!("{:?}", error.code),
+            },
+        }),
+    }
+}
+
+fn cancel_loop_work(
+    record: &homeboy::agents::agent_task_loop_controller::AgentTaskLoopControllerRecord,
+    reason: &str,
+) -> homeboy::core::Result<Value> {
+    let Some(job_id) = record
+        .metadata
+        .pointer("/work_job/job_id")
+        .and_then(Value::as_str)
+    else {
+        return Ok(Value::Null);
+    };
+    let job = homeboy::core::daemon::LocalControllerJobClient::connect()?.cancel(job_id, reason)?;
+    Ok(serde_json::json!({
+        "job_id": job_id,
+        "status": job.status,
+    }))
 }
 
 /// One-command end-to-end controller proof (#6222).
@@ -1395,11 +1446,10 @@ fn controller_run_action(args: AgentTaskControllerRunArgs) -> CmdResult<Value> {
 
 fn controller_resume(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value> {
     let defaults = ControllerDispatchDefaults::from_run_next_args(&args);
-    controller_resume_with_executor_and_defaults(
-        args.loop_id,
-        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        defaults,
-    )
+    if std::env::var(LOOP_COORDINATOR_ENV).ok().as_deref() == Some(args.loop_id.as_str()) {
+        return run_loop_coordinator(args.loop_id, defaults);
+    }
+    detach_loop_coordinator(args.loop_id, defaults)
 }
 
 #[cfg(test)]
@@ -1456,22 +1506,223 @@ fn controller_run_action_with_executor_and_defaults(
     Ok((command_json_value(result.value)?, result.exit_code))
 }
 
-fn controller_resume_with_executor_and_defaults(
+fn run_loop_coordinator(loop_id: String, defaults: ControllerDispatchDefaults) -> CmdResult<Value> {
+    wait_for_loop_coordinator_release()?;
+    let executor: SharedAgentTaskExecutor =
+        Arc::new(ExtensionProviderAgentTaskExecutor::discover());
+    loop {
+        let dispatch = CliDispatchHook {
+            executor: executor.clone(),
+            defaults: defaults.clone(),
+        };
+        let result = agent_task_controller_service::resume(&loop_id, executor.clone(), &dispatch)?;
+        let state = result.value.controller.state;
+        if result.exit_code != 0
+            || matches!(
+                state,
+                homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::HumanReady
+                    | homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Completed
+                    | homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Abandoned
+                    | homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Escalated
+                    | homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Failed
+            )
+        {
+            return Ok((command_json_value(result.value)?, result.exit_code));
+        }
+        if result.value.stopped_reason == "idle"
+            && state
+                != homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Waiting
+        {
+            return Ok((command_json_value(result.value)?, result.exit_code));
+        }
+        std::thread::sleep(LOOP_COORDINATOR_POLL);
+    }
+}
+
+fn detach_loop_coordinator(
     loop_id: String,
-    executor: SharedAgentTaskExecutor,
     defaults: ControllerDispatchDefaults,
 ) -> CmdResult<Value> {
-    let dispatch = CliDispatchHook {
-        executor: executor.clone(),
-        defaults,
+    let controller_path =
+        homeboy::agents::agent_task_loop_controller::controller_record_path(&loop_id)?;
+    let loop_root = controller_path.parent().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected("loop controller record has no parent directory")
+    })?;
+    std::fs::create_dir_all(loop_root).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(loop_root.display().to_string()))
+    })?;
+    let log_path = loop_root.join("coordinator.log");
+    let ready_path = loop_root.join("coordinator.ready");
+    if let Err(error) = std::fs::remove_file(&ready_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(ready_path.display().to_string()),
+            ));
+        }
+    }
+    let log = std::fs::File::create(&log_path).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
+    })?;
+    let log_err = log.try_clone().map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
+    })?;
+    let executable = std::env::current_exe().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("resolve current executable for loop coordinator".to_string()),
+        )
+    })?;
+    let mut command = Command::new(executable);
+    command
+        .args(loop_coordinator_args(&loop_id, &defaults))
+        .env(LOOP_COORDINATOR_ENV, &loop_id)
+        .env(LOOP_COORDINATOR_READY_ENV, &ready_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    homeboy::core::process::detach_from_caller_session(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("spawn detached loop coordinator".to_string()),
+        )
+    })?;
+    let start_identity = match homeboy::core::process::process_start_identity(child.id()) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            let _ = homeboy::core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            return Err(homeboy::core::Error::internal_unexpected(
+                "detached loop coordinator has no verifiable process identity",
+            ));
+        }
+        Err(error) => {
+            let _ = homeboy::core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            return Err(homeboy::core::Error::internal_io(
+                error,
+                Some("inspect detached loop coordinator identity".to_string()),
+            ));
+        }
     };
-    let result = agent_task_controller_service::resume(&loop_id, executor, &dispatch)?;
-    Ok((command_json_value(result.value)?, result.exit_code))
+    let submission = homeboy::agents::agent_task_service::loop_work_job_submission(
+        &loop_id,
+        child.id(),
+        &start_identity,
+    )?;
+    let client = homeboy::core::daemon::LocalControllerJobClient::connect_current_build()?;
+    let job = match client.submit(submission) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = homeboy::core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let job_id = job.id.to_string();
+    if let Err(error) = persist_loop_work_identity(&loop_id, &job_id) {
+        let _ = client.cancel(&job_id, "loop work identity could not be persisted");
+        let _ = homeboy::core::process::terminate_process_tree(child.id());
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Err(error) = client.start(&job_id) {
+        let _ = client.cancel(&job_id, "loop coordinator could not start supervision");
+        let _ = homeboy::core::process::terminate_process_tree(child.id());
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Err(error) = std::fs::write(&ready_path, format!("{job_id}\n")) {
+        let _ = client.cancel(
+            &job_id,
+            "loop coordinator launch gate could not be released",
+        );
+        let _ = homeboy::core::process::terminate_process_tree(child.id());
+        let _ = child.wait();
+        return Err(homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some(ready_path.display().to_string()),
+        ));
+    }
+    Ok((
+        command_json_value(serde_json::json!({
+            "schema": "homeboy/agent-task-loop-work-submission/v1",
+            "loop_id": loop_id,
+            "job_id": job_id,
+            "state": "submitted",
+            "log_path": log_path,
+            "commands": {
+                "status": format!("homeboy agent-task controller status {loop_id}"),
+                "cancel": format!("homeboy agent-task loop stop {loop_id}"),
+            },
+        }))?,
+        0,
+    ))
+}
+
+fn wait_for_loop_coordinator_release() -> homeboy::core::Result<()> {
+    let Some(path) = std::env::var_os(LOOP_COORDINATOR_READY_ENV) else {
+        return Ok(());
+    };
+    let path = std::path::PathBuf::from(path);
+    let started = std::time::Instant::now();
+    while started.elapsed() < LOOP_COORDINATOR_READY_BUDGET {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(homeboy::core::Error::internal_unexpected(
+        "loop coordinator was not released by its durable Work owner",
+    ))
+}
+
+fn persist_loop_work_identity(loop_id: &str, job_id: &str) -> homeboy::core::Result<()> {
+    let mut record = homeboy::agents::agent_task_loop_controller::load_controller(loop_id)?;
+    if !record.metadata.is_object() {
+        record.metadata = serde_json::json!({});
+    }
+    record.metadata["work_job"] = serde_json::json!({
+        "schema": "homeboy/agent-task-loop-work-ref/v1",
+        "job_id": job_id,
+        "state": "submitted",
+    });
+    homeboy::agents::agent_task_loop_controller::write_controller(&record)
+}
+
+fn loop_coordinator_args(loop_id: &str, defaults: &ControllerDispatchDefaults) -> Vec<String> {
+    let mut args = vec![
+        "agent-task".to_string(),
+        "controller".to_string(),
+        "resume".to_string(),
+        loop_id.to_string(),
+    ];
+    for (flag, value) in [
+        ("--dispatch-backend", defaults.backend.as_deref()),
+        ("--dispatch-selector", defaults.selector.as_deref()),
+        ("--dispatch-model", defaults.model.as_deref()),
+        (
+            "--dispatch-provider-config",
+            defaults.provider_config.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+    }
+    args
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::agents::agent_task_loop_controller::{
+        self, AgentTaskLoopControllerState, AgentTaskLoopWait, AgentTaskLoopWaitStatus,
+    };
+    use homeboy::core::test_support::with_isolated_home;
 
     #[test]
     fn controller_doctor_checks_never_compare_the_backend_name_by_string() {
@@ -1496,6 +1747,70 @@ mod tests {
         // binary.
         assert!(is_fixture_backend(TEST_DOUBLE));
         assert!(!is_fixture_backend("opencode"));
+    }
+
+    #[test]
+    fn loop_coordinator_wakes_an_expired_wait_without_manual_resume() {
+        with_isolated_home(|_| {
+            let mut record =
+                agent_task_loop_controller::create_controller("loop-timeout", "repair", "v1")
+                    .expect("create controller");
+            record.state = AgentTaskLoopControllerState::Waiting;
+            record.waits.push(AgentTaskLoopWait {
+                wait_key: "deadline".to_string(),
+                event_type: "operator.deadline".to_string(),
+                entity_id: None,
+                external_ref: None,
+                timeout_at: Some("2000-01-01T00:00:00+00:00".to_string()),
+                escalation_policy: None,
+                status: AgentTaskLoopWaitStatus::Open,
+                satisfied_by_event_id: None,
+            });
+            agent_task_loop_controller::write_controller(&record).expect("persist wait");
+
+            let (_, exit_code) = run_loop_coordinator(
+                "loop-timeout".to_string(),
+                ControllerDispatchDefaults::default(),
+            )
+            .expect("coordinator reconciles deadline");
+
+            assert_eq!(exit_code, 0);
+            let record = agent_task_loop_controller::load_controller("loop-timeout")
+                .expect("read reconciled controller");
+            assert_eq!(record.state, AgentTaskLoopControllerState::Running);
+            assert_eq!(record.waits[0].status, AgentTaskLoopWaitStatus::TimedOut);
+        });
+    }
+
+    #[test]
+    fn loop_coordinator_child_carries_dispatch_defaults() {
+        let args = loop_coordinator_args(
+            "loop-dispatch",
+            &ControllerDispatchDefaults {
+                backend: Some("backend".to_string()),
+                selector: Some("selector".to_string()),
+                model: Some("model".to_string()),
+                provider_config: Some(r#"{"runtime":"pinned"}"#.to_string()),
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "agent-task",
+                "controller",
+                "resume",
+                "loop-dispatch",
+                "--dispatch-backend",
+                "backend",
+                "--dispatch-selector",
+                "selector",
+                "--dispatch-model",
+                "model",
+                "--dispatch-provider-config",
+                r#"{"runtime":"pinned"}"#,
+            ]
+        );
     }
 
     #[test]

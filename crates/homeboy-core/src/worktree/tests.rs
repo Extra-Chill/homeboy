@@ -84,6 +84,7 @@ fn fixture_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
         task_url: Some("https://example.com/task".to_string()),
         run_id: None,
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+        terminal_disposition: None,
         branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         state: TaskWorktreeState::Active,

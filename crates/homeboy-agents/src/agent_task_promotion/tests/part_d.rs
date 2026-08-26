@@ -189,7 +189,7 @@ fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
         },
     );
 
-    homeboy_core::worktree_providers::resolve_worktree_provider_from_config(
+    homeboy_core::worktree_provider::resolve_worktree_ownership_from_config(
         "fixture@cook-target",
         &config,
     )
