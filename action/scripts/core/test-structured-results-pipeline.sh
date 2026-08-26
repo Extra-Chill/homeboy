@@ -16,8 +16,8 @@ case "$*" in
   *"runs report failure-digest"*)
     printf '%s\n' '## Failure Digest'
     ;;
-  *"runs findings reconcile"*)
-    printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"runs","operation":"findings reconcile","success":true,"exit_code":0,"status":"succeeded","data":{"variant":"findings_reconcile","payload":{"plan_lines":["file lint finding"],"result":{"executions":[{"outcome":{"outcome":"filed"}}]}}}}'
+  *"runs findings reconcile-run"*)
+    printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"runs","operation":"findings reconcile-run","success":true,"exit_code":0,"status":"succeeded","data":{"variant":"findings_reconcile_run","payload":{"commands":[{"command":"lint","component_id":"example","source":"'"${HOMEBOY_CI_RESULTS_DIR}"'/review-lint.json","status":"processed","warnings":[],"issues_created":1,"issues_updated":0,"issues_closed":0,"failures":0,"reconcile":{"plan_lines":["file lint finding"],"result":{"executions":[{"outcome":{"outcome":"filed"}}]}}}],"totals":{"commands_processed":1,"issues_created":1,"issues_updated":0,"issues_closed":0,"failures":0}}}}'
     ;;
   *"review lint"*)
     while [ "$#" -gt 0 ]; do
