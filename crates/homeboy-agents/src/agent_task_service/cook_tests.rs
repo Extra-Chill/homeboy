@@ -6603,7 +6603,6 @@ fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation()
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
         // This fixture has no remote; base capture is outside ensure reconciliation.
-        options.task_base_sha = Some("fixture-base".to_string());
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
