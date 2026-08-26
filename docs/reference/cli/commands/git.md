@@ -27,6 +27,7 @@ Git operations for components
 | `homeboy git push` | Push local commits to remote |
 | `homeboy git rebase` | Rebase the current branch onto another ref |
 | `homeboy git cherry-pick` | Cherry-pick one or more commits onto the current branch |
+| `homeboy git patch` | Preserve or restore an operation-owned worktree patch without refs/stash |
 | `homeboy git pull` | Pull remote changes |
 | `homeboy git tag` | Create a git tag |
 | `homeboy git issue` | Manage GitHub issues for a component |
@@ -141,6 +142,51 @@ On conflict, returns a failed result. Resolve manually, then re-run with `--cont
 | `--continue` | flag | Continue an in-progress cherry-pick after manual conflict resolution. Mutually exclusive with `--abort` |
 | `--abort` | flag | Abort an in-progress cherry-pick |
 | `--path` | `<PATH>` | Workspace path to operate on directly |
+
+## `homeboy git patch`
+
+```sh
+homeboy git patch <COMMAND>
+```
+
+Preserve or restore an operation-owned worktree patch without refs/stash
+
+| Subcommand | Summary |
+| --- | --- |
+| `homeboy git patch preserve` | Capture staged, unstaged, and untracked changes, then leave the worktree clean |
+| `homeboy git patch restore` | Restore a previously captured patch by its operation identity |
+
+## `homeboy git patch preserve`
+
+```sh
+homeboy git patch preserve [OPTIONS] <OPERATION_ID>
+```
+
+Capture staged, unstaged, and untracked changes, then leave the worktree clean
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<OPERATION_ID>` | yes | _no help text_ |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--path` | `<PATH>` | _no help text_ |
+
+## `homeboy git patch restore`
+
+```sh
+homeboy git patch restore [OPTIONS] <OPERATION_ID>
+```
+
+Restore a previously captured patch by its operation identity
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<OPERATION_ID>` | yes | _no help text_ |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--path` | `<PATH>` | _no help text_ |
 
 ## `homeboy git pull`
 

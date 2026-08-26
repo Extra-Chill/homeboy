@@ -46,9 +46,9 @@ impl WorktreeArgs {
 
 #[derive(Subcommand)]
 enum WorktreeCommand {
-    /// Create a task worktree from a registered component checkout
+    /// Create a task worktree through the configured or built-in provider
     Create {
-        /// Component ID to use as the source checkout
+        /// Component or repository handle for provider creation
         component_id: String,
         /// Branch to create in the task worktree
         #[arg(long)]
@@ -102,7 +102,7 @@ enum WorktreeCommand {
         #[arg(long, default_value_t = 60)]
         retry_after_seconds: u64,
     },
-    /// List persisted task worktrees
+    /// List worktrees owned by configured and built-in providers
     List,
     /// Report bounded local task-worktree inventory and reconcile only leased terminal snapshots
     Inventory {
@@ -119,7 +119,7 @@ enum WorktreeCommand {
         #[arg(long)]
         apply: bool,
     },
-    /// Inspect one task worktree and its safety gates
+    /// Inspect a provider-owned worktree and its safety state
     Status {
         /// Task worktree ID, e.g. component@branch-slug
         id: String,
@@ -138,7 +138,7 @@ enum WorktreeCommand {
         #[arg(long, requires = "cleanup_branch")]
         allow_unmerged_branch: bool,
     },
-    /// Remove cleanup-eligible task worktrees after safety checks
+    /// Clean up eligible configured and built-in provider worktrees
     Cleanup {
         // Remove planned worktrees and artifacts after safety checks.
         // Without --apply, only reports the plan; --dry-run names that
