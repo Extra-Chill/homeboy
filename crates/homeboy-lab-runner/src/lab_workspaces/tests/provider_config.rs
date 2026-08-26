@@ -30,6 +30,26 @@ fn git(path: &Path, args: &[&str]) {
     );
 }
 
+fn init_task_worktree(source: &Path, worktree: &Path, branch: &str) {
+    std::fs::create_dir_all(source).expect("source dir");
+    git(source, &["init", "-b", "main"]);
+    git(source, &["config", "user.email", "homeboy@example.test"]);
+    git(source, &["config", "user.name", "Homeboy Test"]);
+    std::fs::write(source.join("README"), "fixture\n").expect("source fixture");
+    git(source, &["add", "."]);
+    git(source, &["commit", "-m", "fixture"]);
+    git(
+        source,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            worktree.to_str().expect("utf-8 worktree path"),
+        ],
+    );
+}
+
 #[test]
 fn extracts_all_local_path_sources_including_runtime_overlays() {
     let value = serde_json::json!({
@@ -607,18 +627,20 @@ fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() 
             .expect("homeboy data")
             .join("task-worktrees");
         std::fs::create_dir_all(&store).expect("worktree store");
-        let source = home.path().join("primary");
+        let source = home.path().join("repo");
         let worktree = home.path().join("repo@cook");
+        init_task_worktree(&source, &worktree, "cook");
         let nested = worktree.join("fixtures/input.json");
-        std::fs::create_dir_all(&source).expect("source dir");
         std::fs::create_dir_all(nested.parent().unwrap()).expect("nested dir");
         std::fs::write(&nested, "{}\n").expect("nested file");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "nested fixture"]);
         std::fs::write(
             store.join("repo_cook.json"),
             serde_json::json!({
                 "id": "repo@cook",
                 "component_id": "repo",
-                "source_checkout": home.path().join("repo").display().to_string(),
+                "source_checkout": source.display().to_string(),
                 "worktree_path": worktree.display().to_string(),
                 "branch": "cook",
                 "base_ref": "HEAD",
@@ -667,15 +689,20 @@ fn path_setting_workspace_ref_resolves_inside_setting_json() {
             .expect("homeboy data")
             .join("task-worktrees");
         std::fs::create_dir_all(&store).expect("worktree store");
+        let source = home.path().join("repo");
         let worktree = home.path().join("repo@cook");
+        init_task_worktree(&source, &worktree, "cook");
         let nested = worktree.join("data/corpus");
         std::fs::create_dir_all(&nested).expect("nested dir");
+        std::fs::write(nested.join(".keep"), "fixture\n").expect("nested fixture");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "nested fixture"]);
         std::fs::write(
             store.join("repo_cook.json"),
             serde_json::json!({
                 "id": "repo@cook",
                 "component_id": "repo",
-                "source_checkout": home.path().join("repo").display().to_string(),
+                "source_checkout": source.display().to_string(),
                 "worktree_path": worktree.display().to_string(),
                 "branch": "cook",
                 "base_ref": "HEAD",
@@ -885,9 +912,7 @@ fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
             .expect_err("missing adopted workspace path should fail");
 
         assert_eq!(err.details["field"], "workspace_ref");
-        assert!(err
-            .message
-            .contains("resolved to a missing controller path"));
+        assert!(err.message.contains("points at a missing directory"));
     });
 }
 
@@ -911,7 +936,7 @@ fn path_setting_workspace_ref_missing_handle_fails_locally() {
 }
 
 #[test]
-fn path_setting_workspace_ref_removed_record_fails_as_stale() {
+fn path_setting_workspace_ref_removed_record_is_not_resolvable() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let store = homeboy_core::paths::homeboy_data()
             .expect("homeboy data")
@@ -946,7 +971,9 @@ fn path_setting_workspace_ref_removed_record_fails_as_stale() {
             .expect_err("removed workspace ref should fail");
 
         assert_eq!(err.details["field"], "workspace_ref");
-        assert!(err.message.contains("stale task_worktree"));
+        assert!(err
+            .message
+            .contains("does not match a known workspace handle"));
     });
 }
 

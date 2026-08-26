@@ -1258,19 +1258,21 @@ impl<'a> WorktreeProviderRegistry<'a> {
     }
 
     pub fn resolve(&self, handle: &str) -> Result<WorktreeOwnership> {
+        self.resolve_if_present(handle)?.ok_or_else(|| {
+            worktree_providers::worktree_provider_not_found_error(handle, self.config, false)
+        })
+    }
+
+    pub fn resolve_if_present(&self, handle: &str) -> Result<Option<WorktreeOwnership>> {
         if let WorktreeProviderLookup::Found(ownership) = NativeWorktreeProvider.resolve(handle)? {
-            return Ok(ownership);
+            return Ok(Some(ownership));
         }
         if let WorktreeProviderLookup::Found(ownership) =
             CommandWorktreeProvider::new(self.config).resolve(handle)?
         {
-            return Ok(ownership);
+            return Ok(Some(ownership));
         }
-        Err(worktree_providers::worktree_provider_not_found_error(
-            handle,
-            self.config,
-            false,
-        ))
+        Ok(None)
     }
 
     pub fn list(&self) -> Result<Vec<WorktreeProviderWorkspace>> {
@@ -1531,6 +1533,10 @@ impl<'a> WorktreeProviderRegistry<'a> {
 /// Resolve through the single ordered provider boundary used by consumers.
 pub fn resolve_worktree_ownership(handle: &str) -> Result<WorktreeOwnership> {
     resolve_worktree_ownership_from_config(handle, &defaults::load_config())
+}
+
+pub fn resolve_worktree_ownership_if_present(handle: &str) -> Result<Option<WorktreeOwnership>> {
+    WorktreeProviderRegistry::new(&defaults::load_config()).resolve_if_present(handle)
 }
 
 pub fn resolve_worktree_ownership_from_config(

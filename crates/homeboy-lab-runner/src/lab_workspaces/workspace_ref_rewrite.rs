@@ -163,16 +163,27 @@ pub(super) fn maybe_resolve_workspace_ref(
     let Some((handle, subpath)) = parse_workspace_ref(value) else {
         return Ok(None);
     };
-    let ownership = worktree_provider::resolve_worktree_ownership(&handle).map_err(|_| {
-        Error::validation_invalid_argument(
-            "workspace_ref",
-            format!("Lab offload workspace ref `{value}` does not match a known workspace handle"),
-            Some(value.to_string()),
-            Some(vec![
-                "Create a Homeboy task worktree or adopt an existing path with `homeboy worktree adopt <handle> <path>`.".to_string(),
-            ]),
-        )
-    })?;
+    let ownership = worktree_provider::resolve_worktree_ownership_if_present(&handle)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "workspace_ref",
+                format!("Lab offload workspace ref `{value}` could not be resolved: {error}"),
+                Some(value.to_string()),
+                None,
+            )
+        })?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace_ref",
+                format!(
+                    "Lab offload workspace ref `{value}` does not match a known workspace handle"
+                ),
+                Some(value.to_string()),
+                Some(vec![
+                    "Create a Homeboy task worktree or adopt an existing path with `homeboy worktree adopt <handle> <path>`.".to_string(),
+                ]),
+            )
+        })?;
     let workspace_path = PathBuf::from(&ownership.path);
     let mut resolved = workspace_path.clone();
     if let Some(subpath) = subpath.as_deref() {
