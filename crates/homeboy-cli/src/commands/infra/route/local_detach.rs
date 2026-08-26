@@ -516,7 +516,12 @@ fn consume_local_cook_launch_token() -> bool {
     ) else {
         return false;
     };
-    consume_local_cook_launch_token_at(&token, &PathBuf::from(path))
+    let consumed = consume_local_cook_launch_token_at(&token, &PathBuf::from(path));
+    if consumed {
+        std::env::remove_var(LOCAL_COOK_LAUNCH_TOKEN_ENV);
+        std::env::remove_var(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV);
+    }
+    consumed
 }
 
 fn local_cook_launch_token_is_present() -> bool {
@@ -1677,6 +1682,22 @@ mod tests {
         let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
         assert!(consume_local_cook_launch_token_at(token.as_ref(), &path));
         assert!(!consume_local_cook_launch_token_at(token.as_ref(), &path));
+    }
+
+    #[test]
+    fn consumed_launch_token_is_not_inherited_by_nested_cook() {
+        let directory = tempfile::tempdir().expect("temporary token directory");
+        let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
+        let _env = super::super::tests::EnvGuard::set_many(&[
+            (LOCAL_COOK_LAUNCH_TOKEN_ENV, Some(token.as_str())),
+            (
+                LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV,
+                Some(path.to_str().expect("UTF-8 token path")),
+            ),
+        ]);
+
+        assert!(consume_local_cook_launch_token());
+        assert!(!local_cook_launch_token_is_present());
     }
 
     #[test]
