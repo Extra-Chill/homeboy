@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.15] - 2026-08-25
+
+### Changed
+- run differential baselines only when needed
+
 ## [2.15.14] - 2026-08-26
 
 ### Fixed
