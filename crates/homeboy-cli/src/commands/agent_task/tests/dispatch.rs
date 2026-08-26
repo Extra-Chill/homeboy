@@ -104,6 +104,28 @@ fn explicit_repo_identity_resolution_does_not_hydrate_unrelated_components() {
     });
 }
 
+#[test]
+fn explicit_unregistered_repo_is_proven_by_the_workspace_remote() {
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("checkout");
+        init_runtime_component_checkout(checkout.path());
+        add_remote(
+            checkout.path(),
+            "origin",
+            "https://github.com/example/fixture.git",
+        );
+
+        let identities = super::super::run::cook_repository_identities_for_workspace(
+            "--cwd",
+            checkout.path().to_str().expect("UTF-8 checkout path"),
+            Some("fixture"),
+        )
+        .expect("resolve explicit repository identity from its remote");
+
+        assert_eq!(identities.len(), 1);
+    });
+}
+
 fn write_component_without_collision_validation(component: homeboy::core::component::Component) {
     let directory = homeboy::core::paths::components().expect("component config directory");
     std::fs::create_dir_all(&directory).expect("create component config directory");
@@ -516,10 +538,21 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
 
         let bin = tempfile::tempdir().expect("fake git bin");
         let git = bin.path().join("git");
-        std::fs::write(&git, "#!/bin/sh\nsleep 30\n").expect("write fake git");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
+        )
+        .expect("write fake git");
         let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+        let _stale_checkout = homeboy::core::test_support::EnvVarGuard::set(
+            "HOMEBOY_STALE_CHECKOUT",
+            std::fs::canonicalize(stale.path())
+                .expect("canonical stale checkout")
+                .display()
+                .to_string(),
+        );
         let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
             format!(
