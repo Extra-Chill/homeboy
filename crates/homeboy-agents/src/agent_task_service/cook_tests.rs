@@ -21,8 +21,8 @@ use super::super::cook_promotion::{
     persisted_promotion_for_attempt_in_store, prepare_manual_finalization_identity,
     record_replacement_gate_proof, recover_cook_pr_with_backend,
     recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
-    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
-    MovingBaseCookRecovery,
+    replacement_gate_execution_started, selected_candidate_task_id_in_store,
+    verify_replacement_gates, CookReportInput, MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
     persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
@@ -14975,6 +14975,7 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         .expect("serialize failed promotion");
         failed["source"]["task_id"] =
             serde_json::json!(options.initial_plan.tasks[0].task_id.clone());
+        failed["patch_artifact"]["id"] = serde_json::json!("committed-changes");
         failed["target"]["dirty"] = serde_json::json!(true);
         agent_task_lifecycle::record_promotion("run-verify-replacement", failed)
             .expect("align source task evidence");
@@ -14999,6 +15000,23 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             gate_log.display()
         );
         let reviewer_gate = "test \"$(cat \"$(git rev-parse --show-toplevel)/figma-transformer/tracked.txt\")\" = promoted".to_string();
+        let unavailable_patch = patch_path.with_extension("unavailable");
+        std::fs::rename(&patch_path, &unavailable_patch).expect("hide promotion artifact");
+        verify_replacement_gates(
+            "cook-verify-replacement",
+            VerifyGateOptions {
+                verify: vec![reviewer_gate.clone()],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+        )
+        .expect_err("artifact preflight fails before shell execution");
+        assert!(!replacement_gate_execution_started(
+            &test_lifecycle_store(),
+            "run-verify-replacement"
+        )
+        .expect("read replacement gate fence"));
+        std::fs::rename(&unavailable_patch, &patch_path).expect("restore promotion artifact");
         let replacement = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
@@ -15011,6 +15029,7 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         .expect("replacement gates complete");
 
         assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(replacement.patch_artifact.id, "committed-changes");
         assert_eq!(
             replacement.provenance["candidate"]["fingerprint"]["target_path"],
             serde_json::json!(std::fs::canonicalize(&target)

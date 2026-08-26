@@ -290,8 +290,18 @@ jobs:
     # baseline only after a non-passing candidate, and uses composite-safe
     # cancellation detection (#11751 W1-3/W1-10).
     #
-    # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, #13437, and
-    # #13536.
+    # v2.15.16 additionally carries the two halves of the phantom-red-gate
+    # diagnosis: 73ffaa1/#445 attributes a failed or timed-out setup to its
+    # owning step instead of fabricating command failures, and #451 stops a
+    # cancelled run from being reported as a failed gate at all. Together with
+    # #13510 (a realistic from-source build budget) those are the reasons
+    # `Audit` has been red on this repository with no findings and no digest.
+    # Also picks up #450 (differential tests compared against the live base).
+    # v2.15.17 runs a non-passing candidate's baseline at full scope so its
+    # failed-test identities remain comparable when candidate scope is changed.
+    #
+    # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, #13437,
+    # #13536, #445, #450, and #451.
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@a55a1dde4d52d00656ac9b01ad06d1be2e5b4378
     with:
       commands: review test
