@@ -791,12 +791,7 @@ pub(super) fn intercept_local_detached_cook(
             &mut child,
             handoff_timeout(),
         )?;
-        if handoff.state != DetachedHandoffState::Accepted {
-            let reason = if handoff.state == DetachedHandoffState::ExitedBeforeHandoff {
-                "detached Cook exited before materializing an executable plan"
-            } else {
-                "detached Cook did not materialize an executable plan before the bounded handoff deadline"
-            };
+        if let Some(reason) = detached_handoff_rejection_reason(handoff.state) {
             let _ = controller_client.cancel(controller_job.job_id(), reason);
             terminate_and_reap_detached_child(&mut child);
             return Err(empty_detached_plan_error(
@@ -804,13 +799,12 @@ pub(super) fn intercept_local_detached_cook(
                 reason,
             ));
         }
-        crate::commands::agent_task::run::announce_durable_cook_identity(
-            Some(&cook_id),
-            handoff
-                .run_id
-                .as_deref()
-                .expect("accepted handoff has run id"),
-        );
+        if let Some(run_id) = handoff.run_id.as_deref() {
+            crate::commands::agent_task::run::announce_durable_cook_identity(
+                Some(&cook_id),
+                run_id,
+            );
+        }
         let envelope = handoff_envelope(
             &cook_id,
             pid,
@@ -1284,6 +1278,11 @@ impl DetachedHandoffState {
             Self::ExitedBeforeHandoff => "exited_before_handoff",
         }
     }
+}
+
+fn detached_handoff_rejection_reason(state: DetachedHandoffState) -> Option<&'static str> {
+    (state == DetachedHandoffState::ExitedBeforeHandoff)
+        .then_some("detached Cook exited before materializing an executable plan")
 }
 
 fn handoff_timeout() -> Duration {
@@ -2545,6 +2544,7 @@ mod tests {
                 .expect("observe bounded pending handoff");
 
             assert_eq!(handoff.state, DetachedHandoffState::Pending);
+            assert_eq!(detached_handoff_rejection_reason(handoff.state), None);
             assert_eq!(
                 agent_task_lifecycle::status(cook_id)
                     .expect("pending status command resolves")
@@ -2866,6 +2866,10 @@ mod tests {
                     .expect("observe exited handoff");
 
             assert_eq!(handoff.state, DetachedHandoffState::ExitedBeforeHandoff);
+            assert_eq!(
+                detached_handoff_rejection_reason(handoff.state),
+                Some("detached Cook exited before materializing an executable plan")
+            );
             assert_eq!(handoff.run_id, None);
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("the observer terminalizes the exited handoff parent");

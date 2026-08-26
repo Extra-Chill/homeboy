@@ -452,6 +452,119 @@ fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination
 }
 
 #[test]
+fn committed_candidate_pre_apply_resolution_trusts_only_its_exact_unpushed_destination() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (temp, repo, base, candidate) = adopted_commit_repo();
+        let provider = temp.path().join("configured-provider.sh");
+        let response = serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-apply-response/v1",
+            "workspace_path": repo,
+            "command_evidence": []
+        });
+        let invocation = CommandInvocation {
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("cat >/dev/null; printf '%s' '{response}'"),
+            ],
+            ..Default::default()
+        };
+        let configure_provider = |script: &str| {
+            std::fs::write(&provider, script).expect("write configured provider");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&provider)
+                    .expect("provider metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+            }
+            let mut config = HomeboyConfig::default();
+            config.worktree_providers.insert(
+                "fixture".to_string(),
+                WorktreeProviderConfig {
+                    enabled: true,
+                    kind: WorktreeProviderKind::Command,
+                    apply_enabled: true,
+                    lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: WorktreeProviderCommands {
+                        resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                        ..Default::default()
+                    },
+                    list_result_mapping: Some(WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    }),
+                },
+            );
+            homeboy_core::defaults::save_config(&config).expect("save provider config");
+        };
+        let inventory = |before_output: &str| {
+            format!(
+                "#!/bin/sh\n{before_output}printf '%s\\n' '{}'\n",
+                serde_json::json!({
+                    "worktrees": [{
+                        "handle": "fixture@candidate",
+                        "path": repo,
+                        "branch": "main",
+                        "safety": { "dirty": false, "unpushed": true, "primary": false }
+                    }]
+                })
+            )
+        };
+        configure_provider(&inventory(""));
+        let mut options = adopted_commit_options(
+            &temp,
+            &repo,
+            base.clone(),
+            candidate.clone(),
+            VerifyGateOptions::default(),
+        );
+        options.to_worktree = "fixture@candidate".to_string();
+        options.provider_invocation = Some(invocation.clone());
+        promote(options.clone()).expect("exact clean unpushed candidate is admitted before apply");
+
+        let alternate = temp.path().join("alternate");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                alternate.to_str().expect("alternate path"),
+                &candidate,
+            ],
+        );
+        let mut mismatched_path = options.clone();
+        mismatched_path.source_worktree_path = Some(alternate);
+        let error = promote(mismatched_path).expect_err("different source path is rejected");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.untrusted_unpushed"
+        );
+
+        configure_provider(&inventory(&format!(
+            "git -C {} commit --allow-empty -m advanced >/dev/null\n",
+            repo.display()
+        )));
+        let error = promote(options).expect_err("advanced destination HEAD is rejected");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.untrusted_unpushed"
+        );
+    });
+}
+
+#[test]
 fn validate_patch_extracts_safe_changed_files() {
     let patch = normalize_promotion_patch(VALID_PATCH, "repo@promoted-task").expect("valid patch");
 
