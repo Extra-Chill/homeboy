@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.18] - 2026-08-26
+
+### Fixed
+- read finding totals from command payload
+
 ## [2.15.17] - 2026-08-26
 
 ### Fixed
