@@ -6521,6 +6521,21 @@ fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation()
                 "-m",
                 "base",
             ],
+            vec![
+                "-C",
+                source.to_str().expect("source path"),
+                "remote",
+                "add",
+                "origin",
+                source.to_str().expect("source path"),
+            ],
+            vec![
+                "-C",
+                source.to_str().expect("source path"),
+                "fetch",
+                "origin",
+                "main:refs/remotes/origin/main",
+            ],
         ] {
             assert!(Command::new("git")
                 .args(args)
@@ -6602,8 +6617,6 @@ fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation()
         let run_id = "durable-ensure-run";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
-        // This fixture has no remote; base capture is outside ensure reconciliation.
-        options.task_base_sha = Some("fixture-base".to_string());
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
@@ -6669,6 +6682,122 @@ fn timed_out_ensure_reconciles_its_created_workspace_without_a_second_mutation()
         assert!(!ambient_lifecycle_store
             .record_exists(run_id)
             .expect("ambient lifecycle state remains untouched"));
+    });
+}
+
+#[test]
+fn pending_cook_ensures_native_destination_after_durable_admission_idempotently() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
+        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
+        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
+        let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
+        let source = home.path().join("Developer/fixture");
+        std::fs::create_dir_all(&source).expect("source directory");
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .status()
+                .expect("git runs")
+                .success());
+        }
+        std::fs::write(source.join("homeboy.json"), r#"{"id":"fixture"}"#)
+            .expect("component manifest");
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&source)
+            .status()
+            .expect("git add")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "base"])
+            .current_dir(&source)
+            .status()
+            .expect("git commit")
+            .success());
+        let components = home.path().join(".config/homeboy/components");
+        std::fs::create_dir_all(&components).expect("component registry");
+        std::fs::write(
+            components.join("fixture.json"),
+            serde_json::json!({
+                "local_path": source,
+                "remote_path": "wp-content/plugins/fixture"
+            })
+            .to_string(),
+        )
+        .expect("component registration");
+
+        let cook_id = "native-provision";
+        let run_id = "native-provision-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        options.to_worktree = "fixture@native-provision".to_string();
+        options.task_base_sha = Some("fixture-base".to_string());
+        options.initial_plan.metadata["cook_provision"] = serde_json::json!({
+            "action": "lookup_pending",
+            "kind": "provider",
+            "handle": options.to_worktree,
+            "provision_intent": {
+                "repo": "fixture",
+                "base": "main",
+                "head": "native-provision",
+                "task_url": "https://example.test/issues/8017",
+            },
+            "lifecycle_intent": {
+                "purpose": "agent_task_cook",
+                "cleanup_policy": "remove_on_success",
+            },
+        });
+
+        recipe_store
+            .persist_initial_recipe(&options)
+            .expect("persist durable recipe");
+        materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, &options)
+            .expect("materialize durable run");
+        assert!(
+            homeboy_core::worktree::resolve_if_present(&options.to_worktree)
+                .expect("native lookup")
+                .is_none()
+        );
+
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
+            .expect("ensure native Cook destination");
+        let first_path = options
+            .source_worktree_path
+            .clone()
+            .expect("bound native destination");
+        materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
+            .expect("re-admit native Cook destination");
+
+        let record = homeboy_core::worktree::resolve_if_present(&options.to_worktree)
+            .expect("native lookup")
+            .expect("native record");
+        assert_eq!(record.run_id.as_deref(), Some(run_id));
+        assert_eq!(
+            record.cleanup_policy,
+            homeboy_core::worktree::CleanupPolicy::RemoveWhenSafe
+        );
+        assert_eq!(record.worktree_path, first_path.display().to_string());
+        let plan = lifecycle_store
+            .read_controller_plan(run_id)
+            .expect("persisted controller plan");
+        assert_eq!(plan.metadata["cook_provision"]["action"], "existing");
+        assert_eq!(
+            plan.metadata["cook_provision"]["provider_identity"],
+            "native"
+        );
+        assert!(plan.metadata["cook_provision"]
+            .get("workspace_identity")
+            .is_none());
+        assert_eq!(
+            plan.tasks[0].workspace.root.as_deref(),
+            Some(first_path.to_str().expect("UTF-8 native path"))
+        );
     });
 }
 
@@ -7712,10 +7841,26 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
             provider_config(&switched_provider),
         );
         homeboy_core::defaults::save_config(&config).expect("save changed provider config");
+        let base_sha = String::from_utf8(
+            Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("primary path"),
+                    "rev-parse",
+                    "HEAD",
+                ])
+                .output()
+                .expect("resolve fixture base")
+                .stdout,
+        )
+        .expect("UTF-8 fixture base")
+        .trim()
+        .to_string();
         let mut options = batch_cook_options(
             "provider-bound",
             Arc::new(AcceptedDetachedAttemptDispatcher),
         );
+        options.task_base_sha = Some(base_sha.clone());
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending", "kind": "provider", "handle": options.to_worktree,
             "worktree_provider_id": "z-original",
@@ -7755,6 +7900,7 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
             }),
         );
         dispatch_options.to_worktree = "fixture@provider-bound".to_string();
+        dispatch_options.task_base_sha = Some(base_sha);
         dispatch_options.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending", "kind": "provider",
             "handle": dispatch_options.to_worktree,
@@ -7763,7 +7909,11 @@ fn pending_cook_workspace_lookup_remains_bound_to_timed_out_provider() {
 
         let report = run_cook(CookContext::new(dispatch_options, Arc::new(UnusedExecutor)))
             .expect("Cook dispatches the materialized provider workspace");
-        assert_eq!(report.value.status, "in_flight");
+        assert_eq!(
+            report.value.status, "in_flight",
+            "unexpected Cook report: {:#?}",
+            report.value
+        );
         let dispatched = captured
             .lock()
             .expect("captured dispatch plan")
@@ -15453,9 +15603,9 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         // persisted when their child was admitted; they do not retain a CWD.
         options.source_worktree_path = None;
         options.initial_plan.metadata["cook_provision"] = serde_json::json!({
-            "workspace_identity": homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_identity_by_id_from_config(
+            "workspace_identity": homeboy_core::worktree_provider::resolve_configured_worktree_exact_identity_from_config(
                 &options.to_worktree,
-                "fixture",
+                Some("fixture"),
                 &config,
             )
             .expect("persisted provider identity")

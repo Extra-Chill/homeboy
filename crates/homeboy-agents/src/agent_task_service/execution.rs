@@ -26,7 +26,7 @@ use crate::agent_task_scheduler::{
 };
 use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
-use homeboy_core::{config, worktree, Error, Result};
+use homeboy_core::{config, worktree, worktree_provider, Error, Result};
 
 pub const AGENT_TASK_PLAN_VALIDATION_SCHEMA: &str = "homeboy/agent-task-plan-validation/v1";
 
@@ -2488,44 +2488,73 @@ fn prepare_component_worktree_workspace(
         )
     })?;
     let cleanup_policy = cleanup_policy_for_workspace(request.workspace.cleanup.as_deref());
-    let created = worktree::create(worktree::WorktreeCreateOptions {
+    let task_url = request.workspace.task_url.clone().or_else(|| {
+        request
+            .source_refs
+            .iter()
+            .find(|source| source.kind == "task")
+            .or_else(|| request.source_refs.first())
+            .map(source_uri)
+    });
+    let created = worktree_provider::create_worktree(worktree::WorktreeCreateOptions {
         component_id: component_id.clone(),
         branch,
         from: request.workspace.base_ref.clone(),
-        task_url: request.workspace.task_url.clone().or_else(|| {
-            request
-                .source_refs
-                .iter()
-                .find(|source| source.kind == "task")
-                .or_else(|| request.source_refs.first())
-                .map(source_uri)
-        }),
+        task_url,
         run_id: run_id.map(str::to_string),
-        cleanup_policy,
+        cleanup_policy: cleanup_policy.clone(),
     })?;
-    let record = created.record;
-    let cleanup = cleanup_lifecycle_policy(&record.cleanup_policy);
+    let (root, cleanup, materialization) = match created {
+        worktree_provider::WorktreeProviderCreateOutput::Native(created) => {
+            let record = created.record;
+            let cleanup = cleanup_lifecycle_policy(&record.cleanup_policy).to_string();
+            let root = record.worktree_path.clone();
+            let materialization = serde_json::json!({
+                "kind": "homeboy-worktree",
+                "id": record.id,
+                "component_id": record.component_id,
+                "branch": record.branch,
+                "base_ref": record.base_ref,
+                "root": record.worktree_path,
+                "source_checkout": record.source_checkout,
+                "task_url": record.task_url,
+                "run_id": record.run_id,
+                "cleanup_policy": cleanup.clone(),
+            });
+            (root, cleanup, materialization)
+        }
+        worktree_provider::WorktreeProviderCreateOutput::Configured(provision) => {
+            let cleanup_policy =
+                cleanup_policy.unwrap_or(worktree::CleanupPolicy::PreserveOnFailure);
+            let cleanup = cleanup_lifecycle_policy(&cleanup_policy).to_string();
+            let evidence = worktree_provider::ConfiguredWorktreeCreateEvidence::from(provision);
+            let root = evidence.path.clone();
+            let materialization = serde_json::json!({
+                "kind": "worktree-provider",
+                "provider": evidence.provider,
+                "id": evidence.handle,
+                "component_id": component_id.clone(),
+                "branch": evidence.branch,
+                "root": evidence.path,
+                "task_url": evidence.task_url,
+                "run_id": run_id,
+                "cleanup_policy": cleanup.clone(),
+                "provision_action": evidence.provision_action,
+                "idempotency_key": evidence.idempotency_key,
+            });
+            (root, cleanup, materialization)
+        }
+    };
     request.workspace.kind = None;
     request.workspace.mode = AgentTaskWorkspaceMode::Existing;
-    request.workspace.root = Some(record.worktree_path.clone());
+    request.workspace.root = Some(root);
     request.workspace.slug = Some(component_id);
     request.workspace.component_id = None;
     request.workspace.branch = None;
     request.workspace.base_ref = None;
     request.workspace.task_url = None;
-    request.workspace.cleanup = Some(cleanup.to_string());
-    request.workspace.materialization = serde_json::json!({
-        "kind": "homeboy-worktree",
-        "id": record.id,
-        "component_id": record.component_id,
-        "branch": record.branch,
-        "base_ref": record.base_ref,
-        "root": record.worktree_path,
-        "source_checkout": record.source_checkout,
-        "task_url": record.task_url,
-        "run_id": record.run_id,
-        "cleanup_policy": cleanup,
-    });
+    request.workspace.cleanup = Some(cleanup);
+    request.workspace.materialization = materialization;
 
     Ok(())
 }

@@ -921,9 +921,8 @@ fn promote_with_provider_and_checkpoint_internal(
     let pre_apply_verified_base = if !options.dry_run {
         match resolve_promotion_target_path(&options.to_worktree)? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
-            // No pre-apply Homeboy-managed target path resolves (e.g. a
-            // provider-owned destination); fall back to validating against the
-            // applied worktree below, preserving prior behavior for that path.
+            // No provider-owned pre-apply target path resolves; fall back to
+            // validating against the applied worktree below.
             None => None,
         }
     } else {
@@ -992,8 +991,8 @@ fn promote_with_provider_and_checkpoint_internal(
         None
     };
     let verified_base = if let Some(worktree_path) = applied_worktree_path.as_deref() {
-        // Reuse the base verified before apply; only re-capture when a
-        // provider-owned destination had no resolvable pre-apply target path.
+        // Reuse the base verified before apply; only re-capture when the
+        // destination had no resolvable provider-owned pre-apply path.
         let verified_base = if base_verified_before_apply {
             pre_apply_verified_base
         } else {
@@ -2369,21 +2368,22 @@ fn promotion_source(
     }
 }
 
-/// Resolve the Homeboy-managed target worktree path before the patch is
-/// applied, so the declared base can be validated against it without mutating
-/// the working tree (#9400). Returns `None` for a non-Homeboy destination
-/// (provider-owned), where the pre-apply path is not known and validation falls
-/// back to the applied worktree.
+/// Resolve a provider-owned target before the patch is applied, so the declared
+/// base can be validated against it without mutating the working tree (#9400).
+/// Genuinely unmanaged destinations retain the post-apply validation fallback.
 fn resolve_promotion_target_path(to_worktree: &str) -> Result<Option<PathBuf>> {
-    let Some(record) = homeboy_core::worktree::resolve_workspace_ref_if_present(to_worktree)?
-    else {
-        return Ok(None);
-    };
-    if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+    if Path::new(to_worktree).is_dir() {
         return Ok(None);
     }
-    let path = PathBuf::from(record.path());
-    Ok(path.is_dir().then_some(path))
+    match homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
+        to_worktree,
+        &homeboy_core::defaults::load_config(),
+        homeboy_core::worktree_provider::WorktreeMutationContext::default(),
+    ) {
+        Ok(target) => Ok(target.path.is_dir().then_some(target.path)),
+        Err(error) if error.details["worktree_provider_lookup"] == "not_found" => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn capture_declared_base(
@@ -2769,8 +2769,8 @@ fn post_apply_report(
         })),
         _ => None,
     };
-    // Managed targets pass their pre-apply snapshot. Provider-owned targets do
-    // not expose a path until apply, so retain the established best-effort read.
+    // Managed targets pass their pre-apply snapshot. Unmanaged targets may not
+    // expose a path until apply, so retain the established best-effort read.
     let verified_base = verified_base.or_else(|| {
         capture_declared_base(worktree_path, options.base_ref.as_deref())
             .ok()

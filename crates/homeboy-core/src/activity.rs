@@ -36,6 +36,7 @@ mod model;
 mod daemon_jobs;
 mod observation;
 mod runner_sessions;
+mod worktrees;
 
 pub use model::*;
 
@@ -132,6 +133,7 @@ pub fn activity_report_filtered(
     for item in agent_task_items {
         collector.insert(item);
     }
+    worktrees::collect(&mut collector, filter)?;
     // Match authoritative agent-task identities first. Other sources often
     // carry only durable run/job references; inserting them unfiltered lets the
     // collector join those projections before the canonical selector runs.

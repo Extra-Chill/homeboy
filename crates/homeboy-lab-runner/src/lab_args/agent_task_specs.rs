@@ -494,9 +494,12 @@ fn rewrite_fanout_cook_workspaces(
             else {
                 continue;
             };
-            let resolved_controller_path = homeboy_core::worktree::resolve(&controller_value)
+            let resolved_controller_path =
+                homeboy_core::worktree_provider::observe_worktree_provider_workspace(
+                    &controller_value,
+                )
                 .ok()
-                .map(|record| record.worktree_path)
+                .map(|workspace| workspace.ownership.path)
                 .unwrap_or_else(|| controller_value.clone());
             let Some(runner_path) = rewrite_path_with_mappings(&resolved_controller_path, mappings)
             else {
