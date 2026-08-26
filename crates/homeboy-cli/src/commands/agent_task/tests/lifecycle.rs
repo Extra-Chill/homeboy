@@ -4762,6 +4762,7 @@ fn replacement_gate_proof_command_requires_typed_proof_and_operator_authorizatio
         "@replacement.json",
         "--authorize-external-proof",
         "Chris approved durable evidence",
+        "--accept-inherited-failures",
     ])
     .expect("replacement proof command parses");
     let Commands::AgentTask(args) = cli.command else {
@@ -4776,6 +4777,7 @@ fn replacement_gate_proof_command_requires_typed_proof_and_operator_authorizatio
         args.authorize_external_proof.as_deref(),
         Some("Chris approved durable evidence")
     );
+    assert!(args.accept_inherited_failures);
 }
 
 #[test]
