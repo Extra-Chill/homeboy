@@ -76,7 +76,7 @@ fn item_from_workspace(workspace: WorktreeProviderWorkspace) -> ActivityItem {
 mod tests {
     use super::*;
     use crate::worktree_provider::{
-        WorktreeOwnership, WorktreeProviderSafety, WorktreeProviderWorkspace,
+        WorktreeOwnership, WorktreeProviderSafety, WorktreeProviderWorkspace, WorktreeWorkspaceKind,
     };
 
     #[test]
@@ -86,8 +86,10 @@ mod tests {
                 provider: WorktreeProviderIdentity::Configured("fixture".to_string()),
                 handle: "repo@branch".to_string(),
                 path: "/workspace".to_string(),
-                branch: "branch".to_string(),
+                kind: WorktreeWorkspaceKind::Configured,
+                branch: Some("branch".to_string()),
                 task_url: Some("https://example.test/issues/8017".to_string()),
+                provenance: None,
             },
             repository: Some("repo".to_string()),
             owner_run_ref: Some("run-8017".to_string()),

@@ -623,7 +623,7 @@ pub struct WorktreeQueueCreateRequest {
     pub task_url: Option<String>,
     pub task_ref: Option<String>,
     pub run_id: Option<String>,
-    pub provider_lifecycle: Option<crate::worktree_providers::WorktreeProviderLifecycleIntent>,
+    pub provider_lifecycle: Option<crate::worktree_provider::WorktreeProvisionLifecycle>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

@@ -582,34 +582,6 @@ fn resolve_dispatch_workspace(
         return Ok(Some(DispatchWorkspaceTarget::path(path, "workspace-path")));
     }
 
-    if let Some(record) = worktree::resolve_workspace_ref_if_present(workspace)? {
-        if record.state() != &worktree::TaskWorktreeState::Active {
-            return Err(Error::validation_invalid_argument(
-                "workspace",
-                format!(
-                    "Homeboy workspace '{}' is no longer active",
-                    record.handle()
-                ),
-                Some(workspace.clone()),
-                None,
-            ));
-        }
-        let root = std::path::PathBuf::from(record.path());
-        if !root.is_dir() {
-            return Err(Error::validation_invalid_argument(
-                "workspace",
-                format!(
-                    "Homeboy workspace '{}' points at a missing directory {}; recreate or remove the stale record",
-                    record.handle(),
-                    root.display()
-                ),
-                Some(workspace.clone()),
-                None,
-            ));
-        }
-        return DispatchWorkspaceTarget::workspace_ref(record).map(Some);
-    }
-
     let target = homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
         workspace,
         &homeboy_core::defaults::load_config(),
@@ -639,6 +611,14 @@ fn resolve_dispatch_workspace(
             ]),
         )
     })?;
+    if target.provider == homeboy_core::worktree_provider::WorktreeProviderIdentity::Native {
+        let record = worktree::resolve_workspace_ref_if_present(workspace)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "native provider selected workspace `{workspace}` without a registry record"
+            ))
+        })?;
+        return DispatchWorkspaceTarget::workspace_ref(record).map(Some);
+    }
     let root = target.path.clone();
     if !root.is_dir() {
         let provider = match &target.provider {

@@ -6,11 +6,12 @@ use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::worktree_provider::{
-    self, WorktreeFinalizationLookup, WorktreeProviderIdentity, WorktreeProvisionDestination,
-};
-use homeboy_core::worktree_providers::{
-    worktree_provider_idempotency_key, WorktreeProviderCleanupPolicy, WorktreeProviderCreateIntent,
-    WorktreeProviderLifecycleIntent, WorktreeProviderTerminalDisposition,
+    self, worktree_provision_idempotency_key as worktree_provider_idempotency_key,
+    WorktreeCleanupPolicy as WorktreeProviderCleanupPolicy, WorktreeFinalizationLookup,
+    WorktreeProviderIdentity, WorktreeProvisionDestination,
+    WorktreeProvisionIntent as WorktreeProviderCreateIntent,
+    WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent,
+    WorktreeTerminalDisposition as WorktreeProviderTerminalDisposition,
 };
 use uuid::Uuid;
 
@@ -51,20 +52,6 @@ impl ReleaseWorkspace {
         }
 
         let config = defaults::load_config();
-        // Provider staging is an explicit capability. Without a configured
-        // lifecycle provider, preserve legacy release preflight diagnostics.
-        let lifecycle_provider_configured =
-            worktree_provider::configured_lifecycle_provisioning_available(&config)?;
-        if !lifecycle_provider_configured {
-            return Ok(Self {
-                component: component.clone(),
-                output: ReleaseWorkspaceOutput::in_place(&component.local_path),
-                owned: None,
-                record_owner: None,
-                store,
-            });
-        }
-
         let source_sha = verified_remote_default_sha(component)?;
         let default_branch = git::default_branch_name(Path::new(&component.local_path))
             .unwrap_or_else(|| "main".to_string());
@@ -75,18 +62,23 @@ impl ReleaseWorkspace {
             cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
         };
         let handle = format!("release-{}-{}", component.id, &source_sha[..12]);
-        let intent = WorktreeProviderCreateIntent {
+        let mut intent = WorktreeProviderCreateIntent {
             handle,
-            repo: component
-                .remote_url
-                .clone()
-                .unwrap_or_else(|| component.local_path.clone()),
+            repo: component.id.clone(),
             base: default_branch,
             head: source_sha.clone(),
             task_url: owner_run_ref,
         };
-        let selected_provider =
-            worktree_provider::select_worktree_provision_provider_from_config(&intent, &config)?;
+        let planned =
+            worktree_provider::plan_worktree_provision_from_config(&intent, &lifecycle, &config)?;
+        let destination = match planned {
+            homeboy_core::worktree_provider::WorktreeProvisionPlan::Admitted(destination)
+            | homeboy_core::worktree_provider::WorktreeProvisionPlan::Planned(destination) => {
+                destination
+            }
+        };
+        intent.handle = destination.ownership.handle;
+        let selected_provider = destination.ownership.provider;
         let selected_provider_id = provider_evidence_id(&selected_provider);
         // Publish ownership before invoking the provider. A crash during ensure
         // is therefore recoverable through the same idempotency owner reference.
@@ -565,7 +557,7 @@ fn verify_staging_workspace(
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_record, in_place_eligible, reconcile_pending};
+    use super::{finalize_record, in_place_eligible, reconcile_pending, ReleaseWorkspace};
     use crate::release::operation_record::{OperationRecord, OperationRecordStore};
 
     /// The isolated home each test below installs, named as roots.
@@ -588,13 +580,14 @@ mod tests {
         save_config, HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig,
         WorktreeProviderKind,
     };
+    use homeboy_core::git;
     use homeboy_core::worktree_provider::{
-        WorktreeOwnership, WorktreeProviderIdentity, WorktreeProvisionDestination,
+        WorktreeCleanupPolicy as WorktreeProviderCleanupPolicy, WorktreeOwnership,
+        WorktreeProviderIdentity, WorktreeProvisionDestination,
+        WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent,
+        WorktreeTerminalDisposition as WorktreeProviderTerminalDisposition, WorktreeWorkspaceKind,
     };
-    use homeboy_core::worktree_providers::{
-        WorktreeProviderCleanupPolicy, WorktreeProviderLifecycleIntent,
-        WorktreeProviderTerminalDisposition,
-    };
+    use std::path::Path;
     use std::process::Command;
 
     #[test]
@@ -633,6 +626,86 @@ mod tests {
         assert!(in_place_eligible(&component));
         std::fs::write(path.join("README.md"), "dirty\n").expect("dirty");
         assert!(!in_place_eligible(&component));
+    }
+
+    #[test]
+    fn dirty_default_checkout_stages_through_the_builtin_provider() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let remote = home.path().join("origin.git");
+            let source = home.path().join("source");
+            std::fs::create_dir(&source).expect("source checkout");
+            assert!(Command::new("git")
+                .args(["init", "--bare", remote.to_str().expect("remote path")])
+                .status()
+                .expect("bare remote")
+                .success());
+            for args in [
+                vec!["init", "--quiet", "--initial-branch", "main"],
+                vec!["config", "user.email", "test@example.invalid"],
+                vec!["config", "user.name", "Homeboy Test"],
+                vec![
+                    "remote",
+                    "add",
+                    "origin",
+                    remote.to_str().expect("remote path"),
+                ],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git")
+                    .success());
+            }
+            std::fs::write(source.join("README.md"), "fixture\n").expect("source file");
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "initial"],
+                vec!["push", "-u", "origin", "main"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git")
+                    .success());
+            }
+            std::fs::write(source.join("README.md"), "dirty\n").expect("dirty source");
+            let components = home.path().join(".config/homeboy/components");
+            std::fs::create_dir_all(&components).expect("component registry");
+            std::fs::write(
+                components.join("fixture.json"),
+                serde_json::json!({
+                    "id": "fixture",
+                    "local_path": source,
+                    "remote_path": "fixture"
+                })
+                .to_string(),
+            )
+            .expect("component registration");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: source.display().to_string(),
+                remote_path: "fixture".to_string(),
+                remote_url: Some(remote.display().to_string()),
+                ..Default::default()
+            };
+
+            let workspace = ReleaseWorkspace::select(&test_roots(), &component)
+                .expect("built-in provider staging");
+
+            assert_eq!(workspace.output.kind, "provider_owned");
+            assert_eq!(workspace.output.provider_id.as_deref(), Some("native"));
+            assert_ne!(workspace.component.local_path, component.local_path);
+            assert_eq!(
+                git::head_sha(Path::new(&workspace.component.local_path)),
+                git::head_sha(&source)
+            );
+            assert_eq!(
+                git::status_porcelain(Path::new(&workspace.component.local_path)).as_deref(),
+                Some("")
+            );
+        });
     }
 
     #[test]
@@ -702,8 +775,10 @@ mod tests {
                     provider: WorktreeProviderIdentity::Configured("fixture".to_string()),
                     handle: "release-fixture".to_string(),
                     path: "/workspace".to_string(),
-                    branch: "main".to_string(),
+                    kind: WorktreeWorkspaceKind::Configured,
+                    branch: Some("main".to_string()),
                     task_url: None,
+                    provenance: None,
                 },
                 exact_identity: None,
             };

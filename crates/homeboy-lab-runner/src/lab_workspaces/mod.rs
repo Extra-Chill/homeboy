@@ -6,7 +6,6 @@ use serde::Serialize;
 
 use homeboy_agents::agent_task_provider;
 use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
-use homeboy_core::worktree::TaskWorktreeState;
 use homeboy_core::{component, Error, Result};
 
 use super::lab_workspaces_deps::{

@@ -25,9 +25,10 @@ use homeboy::core::observation::runs_service::{
 };
 use homeboy::core::output::OutputBudget;
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
-use homeboy::core::worktree::{WorktreeCleanupOptions, WorktreeCleanupOutput};
-use homeboy::core::worktree_provider::cleanup_native_worktree_provider;
-use homeboy::core::worktree_providers::WorktreeProviderCleanupOptions;
+use homeboy::core::worktree::WorktreeCleanupOutput;
+use homeboy::core::worktree_provider::{
+    cleanup_worktrees_from_config, WorktreeCleanupRequest, WorktreeCleanupScope,
+};
 use homeboy::runner::runners::{
     self as runner, RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
@@ -215,11 +216,12 @@ pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> Cmd
                 ResourceCleanupOptions {
                     intent: cleanup_intent(args.apply),
                     artifacts: None,
-                    worktree_providers: Some(WorktreeProviderCleanupOptions {
-                        provider: args.provider,
-                        all_providers: args.all_providers,
+                    worktree_providers: Some(WorktreeCleanupRequest {
+                        providers: args.provider,
+                        all_configured_providers: args.all_providers,
                         apply: args.apply,
                         timeout: None,
+                        ..WorktreeCleanupRequest::default()
                     }),
                 },
                 defaults::load_config(),
@@ -1961,12 +1963,21 @@ fn cleanup_inventory_with_deadline(
             deadline,
             CleanupCategoryCommandOverrides::default(),
             || {
-                let output = cleanup_native_worktree_provider(WorktreeCleanupOptions {
-                    force: false,
-                    dry_run: !apply,
-                    cleanup_branches: apply,
-                    allow_unmerged_branches: false,
-                })?;
+                let output = cleanup_worktrees_from_config(
+                    &WorktreeCleanupRequest {
+                        scope: WorktreeCleanupScope::Native,
+                        providers: Vec::new(),
+                        all_configured_providers: false,
+                        apply,
+                        force: false,
+                        cleanup_branches: apply,
+                        allow_unmerged_branches: false,
+                        timeout: None,
+                    },
+                    &homeboy::core::defaults::load_config(),
+                )?
+                .native
+                .expect("native cleanup scope includes the built-in provider");
                 task_worktrees_category(output, apply).map(|category| vec![category])
             },
         );
@@ -1985,15 +1996,16 @@ fn cleanup_inventory_with_deadline(
                     ResourceCleanupOptions {
                         intent: cleanup_intent(apply),
                         artifacts: None,
-                        worktree_providers: Some(WorktreeProviderCleanupOptions {
-                            provider: Vec::new(),
-                            all_providers: true,
+                        worktree_providers: Some(WorktreeCleanupRequest {
+                            providers: Vec::new(),
+                            all_configured_providers: true,
                             apply,
                             timeout: deadline.map(|deadline| {
                                 deadline
                                     .duration_since(SystemTime::now())
                                     .unwrap_or(Duration::ZERO)
                             }),
+                            ..WorktreeCleanupRequest::default()
                         }),
                     },
                     config.clone(),

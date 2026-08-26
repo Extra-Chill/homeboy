@@ -7407,7 +7407,7 @@ fn trusted_initial_cook_workspace(
         return Err(error);
     }
     homeboy_core::worktree_provider::validate_worktree_root(&source, &options.to_worktree)?;
-    let trust = homeboy_core::worktree_providers::TrustedUnpushedWorktree {
+    let trust = homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
         path: source.clone(),
         head,
     };
@@ -7881,7 +7881,7 @@ fn materialize_pending_cook_workspace(
                 identity, &config,
             )?;
         destination.ownership.path = identity.path.clone();
-        destination.ownership.branch = identity.branch.clone();
+        destination.ownership.branch = Some(identity.branch.clone());
         destination.exact_identity = Some(identity);
     }
     if destination.ownership.handle != options.to_worktree {
@@ -8404,7 +8404,7 @@ fn provision_pending_cook_workspace(
             )])
         })
     };
-    let create_intent = homeboy_core::worktree_providers::WorktreeProviderCreateIntent {
+    let create_intent = homeboy_core::worktree_provider::WorktreeProvisionIntent {
         handle: options.to_worktree.clone(),
         repo: required("repo")?.to_string(),
         base: required("base")?.to_string(),
@@ -8432,10 +8432,10 @@ fn provision_pending_cook_workspace(
         .to_string();
     let cleanup_policy = match lifecycle.get("cleanup_policy").and_then(Value::as_str) {
         None | Some("remove_on_success") => {
-            homeboy_core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess
+            homeboy_core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess
         }
         Some("preserve_on_failure") => {
-            homeboy_core::worktree_providers::WorktreeProviderCleanupPolicy::PreserveOnFailure
+            homeboy_core::worktree_provider::WorktreeCleanupPolicy::PreserveOnFailure
         }
         Some(value) => {
             return Err(Error::validation_invalid_argument(
@@ -8463,7 +8463,7 @@ fn provision_pending_cook_workspace(
         .map(homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured);
     homeboy_core::worktree_provider::ensure_worktree_provision_from_config(
         &create_intent,
-        &homeboy_core::worktree_providers::WorktreeProviderLifecycleIntent {
+        &homeboy_core::worktree_provider::WorktreeProvisionLifecycle {
             purpose,
             owner_run_ref: options.initial_run_id.clone(),
             cleanup_policy,
@@ -8627,7 +8627,7 @@ struct TrackedPromotionContinuation {
 /// not add unrelated work.
 fn cook_owned_unpushed_destination(
     continuation: &TrackedPromotionContinuation,
-) -> Result<Option<homeboy_core::worktree_providers::TrustedUnpushedWorktree>> {
+) -> Result<Option<homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination>> {
     let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
         &continuation.candidate
     else {
@@ -8706,7 +8706,7 @@ fn cook_owned_unpushed_destination(
         return Err(error);
     }
     Ok(Some(
-        homeboy_core::worktree_providers::TrustedUnpushedWorktree {
+        homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
             path: path.clone(),
             head,
         },
