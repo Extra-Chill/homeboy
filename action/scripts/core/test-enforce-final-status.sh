@@ -125,3 +125,19 @@ case "${output}" in
 esac
 
 printf 'All final status enforcement checks passed.\n'
+
+# A cancelled run has no verdict to enforce; exiting non-zero would report the
+# cancellation itself as a gate failure.
+assert_exit 0 "a cancelled run is not enforced as a failure" \
+  env RESULTS='{"review test":"fail"}' COMMANDS='review test' HOMEBOY_RUN_CANCELLED=true PR_ACTIVE=true \
+  bash "${ENFORCE_STATUS}"
+output="$(env RESULTS='{"review test":"fail"}' COMMANDS='review test' HOMEBOY_RUN_CANCELLED=true PR_ACTIVE=true bash "${ENFORCE_STATUS}" 2>&1 || true)"
+grep -Fq 'Run was cancelled before commands completed' <<< "${output}" || { printf 'FAIL: cancellation exit did not say why\n'; exit 1; }
+printf 'PASS: cancellation exit explains itself\n'
+
+# An uncancelled run with the same results must still fail, so the guard cannot
+# quietly disable enforcement.
+assert_exit 1 "an uncancelled failure still fails" \
+  env RESULTS='{"review test":"fail"}' COMMANDS='review test' HOMEBOY_RUN_CANCELLED=false PR_ACTIVE=true \
+  bash "${ENFORCE_STATUS}"
+

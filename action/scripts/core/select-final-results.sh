@@ -30,7 +30,19 @@ results_are_complete() {
   ' >/dev/null 2>&1
 }
 
-if ! results_are_complete; then
+# A cancelled run never reached a verdict. `setup_failed` covers a build that
+# failed or timed out, but a run superseded by a newer push writes no setup
+# result at all, so it would fall through to the fabricate-all-fail branch
+# below and surface as a red gate that names no rule and produces no findings --
+# indistinguishable from a real failure.
+if [ "${HOMEBOY_RUN_CANCELLED:-false}" = "true" ] && ! results_are_complete && ! setup_failed; then
+  echo "::notice::Run was cancelled before commands completed; not reporting cancellation as command failure"
+  RESULTS="$(printf '%s\n' "${COMMANDS}" | jq -Rc '
+    split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0))
+    | map({key: ., value: "not_run"})
+    | from_entries
+  ')"
+elif ! results_are_complete; then
   if setup_failed; then
     RESULTS="$(printf '%s\n' "${COMMANDS}" | jq -Rc '
       split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0))

@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.14] - 2026-08-26
+
+### Fixed
+- report a cancelled run as not-run rather than failed
+
 ## [2.15.13] - 2026-08-25
 
 ### Fixed

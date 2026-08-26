@@ -26,6 +26,14 @@ validate_results_json() {
   fi
 }
 
+# Same reasoning as the stale-PR case below: a cancelled run never reached a
+# verdict, so there is nothing to enforce. Exiting non-zero here reports the
+# cancellation itself as a gate failure.
+if [ "${HOMEBOY_RUN_CANCELLED:-false}" = "true" ]; then
+  echo "Run was cancelled before commands completed — nothing to enforce"
+  exit 0
+fi
+
 if [ "${PR_ACTIVE:-}" = "false" ]; then
   echo "PR was merged or closed before final enforcement — ignoring stale command results"
   exit 0
