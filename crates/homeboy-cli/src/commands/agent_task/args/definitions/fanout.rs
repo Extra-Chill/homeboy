@@ -5,6 +5,15 @@ use super::cook::{
     PROVIDER_EVIDENCE_DECLARATION,
 };
 
+pub const VERIFICATION_PROFILES_EXAMPLE: &str = r#"{"profiles":{"rust":{"verify":["cargo test"],"private_verify":["./private-check"],"mode":"append"},"node":{"verify":["npm test"],"mode":"replace"}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"rust"},{"selector":"owner/repo#124","profile":"node"}]}"#;
+
+const VERIFICATION_PROFILES_HELP: &str = r#"JSON verification profile declaration, inline or @file.json.
+
+Profiles contain visible `verify` and/or `private_verify` command arrays. `mode` is `append` (the default, combining profile and shared gates) or `replace` (discarding shared gates for that child). Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector.
+
+Complete example:
+  {"profiles":{"rust":{"verify":["cargo test"],"private_verify":["./private-check"],"mode":"append"},"node":{"verify":["npm test"],"mode":"replace"}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"rust"},{"selector":"owner/repo#124","profile":"node"}]}"#;
+
 #[derive(Args, Debug)]
 pub struct AgentTaskFanoutArgs {
     #[command(subcommand)]
@@ -106,9 +115,11 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub ai_tool: Option<String>,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
-    /// JSON verification profile declaration, inline or @file.json. Profiles
-    /// append to or replace shared --verify/--private-verify gates per issue.
-    #[arg(long = "verification-profiles", value_name = "JSON")]
+    #[arg(
+        long = "verification-profiles",
+        value_name = "JSON",
+        help = VERIFICATION_PROFILES_HELP
+    )]
     pub verification_profiles: Option<String>,
     /// Maximum number of child cooks to run at once.
     ///

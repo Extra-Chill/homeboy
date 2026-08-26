@@ -52,7 +52,7 @@ use super::super::CmdResult;
 use super::args::{
     AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
     AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs, AgentTaskFanoutRunPlanArgs,
-    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
+    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs, VERIFICATION_PROFILES_EXAMPLE,
 };
 use super::command_json_value;
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
@@ -4249,14 +4249,7 @@ fn build_static_cook_batch_plan(
         args.prompt_template.as_deref(),
     )?;
     let profiles = match args.verification_profiles.as_deref() {
-        Some(spec) => serde_json::from_str(spec).map_err(|error| {
-            Error::validation_invalid_argument(
-                "verification-profiles",
-                format!("invalid inline JSON verification profile declaration: {error}"),
-                None,
-                None,
-            )
-        })?,
+        Some(spec) => parse_verification_profiles(spec)?,
         None => VerificationProfiles {
             profiles: BTreeMap::new(),
             assignments: Vec::new(),
@@ -4448,6 +4441,7 @@ fn parse_explicit_worktree_bindings(values: &[String]) -> Result<BTreeMap<String
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VerificationProfiles {
     #[serde(default)]
     profiles: BTreeMap<String, VerificationProfile>,
@@ -4456,6 +4450,7 @@ struct VerificationProfiles {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VerificationProfile {
     #[serde(default)]
     verify: Vec<String>,
@@ -4474,6 +4469,7 @@ enum VerificationProfileMode {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VerificationProfileAssignment {
     selector: String,
     profile: String,
@@ -4496,7 +4492,12 @@ impl VerificationProfiles {
                     "verification-profiles.assignments.selector",
                     "selector_unmatched: verification profile selector did not match any batch child",
                     Some(assignment.selector.clone()),
-                    Some(cooks.iter().map(|cook| cook.cook_id.clone()).collect()),
+                    Some(
+                        cooks
+                            .iter()
+                            .flat_map(verification_profile_selectors)
+                            .collect(),
+                    ),
                 ));
             }
         }
@@ -4601,14 +4602,50 @@ fn load_verification_profiles(spec: Option<&str>) -> Result<VerificationProfiles
         });
     };
     let raw = config::read_json_spec_to_string(spec)?;
-    let profiles: VerificationProfiles = serde_json::from_str(&raw).map_err(|error| {
+    parse_verification_profiles(&raw)
+}
+
+fn parse_verification_profiles(raw: &str) -> Result<VerificationProfiles> {
+    let value: Value = serde_json::from_str(raw).map_err(|error| {
         Error::validation_invalid_argument(
             "verification-profiles",
-            format!("invalid JSON verification profile declaration: {error}"),
+            format!("schema_invalid at $: invalid JSON verification profile declaration: {error}"),
             None,
-            None,
+            Some(vec![format!(
+                "Use this shape: {VERIFICATION_PROFILES_EXAMPLE}"
+            )]),
         )
     })?;
+    let profiles: VerificationProfiles =
+        serde_path_to_error::deserialize(value).map_err(|error| {
+            let message = error.inner().to_string();
+            let mut path = error.path().to_string();
+            if path == "." {
+                path.clear();
+            }
+            if let Some(field) = message
+                .strip_prefix("unknown field `")
+                .and_then(|rest| rest.split_once('`').map(|(field, _)| field))
+            {
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(field);
+            }
+            let path = if path.is_empty() {
+                "$".to_string()
+            } else {
+                format!("$.{path}")
+            };
+            Error::validation_invalid_argument(
+                "verification-profiles",
+                format!("schema_invalid at {path}: {message}"),
+                None,
+                Some(vec![format!(
+                    "Use this shape: {VERIFICATION_PROFILES_EXAMPLE}"
+                )]),
+            )
+        })?;
     for assignment in &profiles.assignments {
         if assignment.selector.trim().is_empty() {
             return Err(Error::invalid_argument(
@@ -4630,7 +4667,7 @@ fn validate_batch_cook_gates(
                 "verification-profiles",
                 "gate_missing: every cook-batch child requires verify or private_verify before worktree creation",
                 Some(cook.cook_id.clone()),
-                Some(vec!["Pass shared --verify/--private-verify gates, or assign a non-empty profile to this child.".to_string()]),
+                Some(verification_profile_selectors(cook)),
             ));
         }
     }
@@ -4679,6 +4716,7 @@ fn effective_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Vec<Value> {
             serde_json::json!({
                 "cook_id": cook.cook_id,
                 "task_url": cook.task_url,
+                "selectors": verification_profile_selectors(cook),
                 "profile": cook.verification_profile,
                 "verify": cook.verify,
                 "private_verify": cook.private_verify.iter().map(|_| "[private]").collect::<Vec<_>>(),
@@ -4686,6 +4724,20 @@ fn effective_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn verification_profile_selectors(cook: &BatchCookSpec) -> Vec<String> {
+    let Some(issue_url) = cook.task_url.as_deref() else {
+        return vec![cook.cook_id.clone()];
+    };
+    let Ok(issue) = IssueRef::parse(issue_url) else {
+        return vec![issue_url.to_string(), cook.cook_id.clone()];
+    };
+    vec![
+        issue_url.to_string(),
+        issue.key,
+        format!("issue-{}", issue.number),
+    ]
 }
 
 /// Batch plans are durable controller state and retain private commands for the
@@ -5490,9 +5542,71 @@ mod tests {
     use crate::cli_surface::{Cli, Commands, Placement};
     use crate::commands::agent_task::{AgentTaskCommand, AgentTaskFanoutCommand};
     use crate::test_support::{env_lock, with_isolated_home};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use serde_json::json;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn cook_batch_help_documents_the_complete_verification_profile_contract() {
+        let mut command = Cli::command()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("fanout")
+            .expect("fanout command")
+            .find_subcommand("cook-batch")
+            .expect("cook-batch command")
+            .clone();
+        let help = command.render_long_help().to_string();
+
+        for expected in [
+            "--verification-profiles <JSON>",
+            "Complete example:",
+            "https://github.com/owner/repo/issues/123",
+            "owner/repo#124",
+            "issue-number",
+            "append",
+            "replace",
+            "private_verify",
+        ] {
+            assert!(help.contains(expected), "missing {expected}:\n{help}");
+        }
+    }
+
+    #[test]
+    fn verification_profile_parser_rejects_unknown_fields_with_paths_and_example() {
+        for (declaration, expected_path) in [
+            (
+                r#"{"profiles":{},"assignments":[],"per_issue":{}}"#,
+                "$.per_issue",
+            ),
+            (
+                r#"{"profiles":{"rust":{"verify":["cargo test"],"command":["cargo fmt"]}},"assignments":[]}"#,
+                "$.profiles.rust.command",
+            ),
+            (
+                r#"{"profiles":{"rust":{"verify":["cargo test"]}},"assignments":[{"selector":"issue-1","profile":"rust","append":true}]}"#,
+                "$.assignments[0].append",
+            ),
+        ] {
+            let error = parse_verification_profiles(declaration)
+                .expect_err("unknown verification profile field");
+            assert_eq!(error.details["field"], "verification-profiles");
+            assert!(
+                error.details["problem"]
+                    .as_str()
+                    .expect("typed problem")
+                    .contains(expected_path),
+                "{error}"
+            );
+            assert!(
+                error.details["tried"][0]
+                    .as_str()
+                    .expect("corrected example")
+                    .contains(VERIFICATION_PROFILES_EXAMPLE),
+                "{error}"
+            );
+        }
+    }
 
     fn source(
         command: &str,
@@ -8008,6 +8122,18 @@ fi
         let plan = build_cook_batch_plan(&args).expect("plan before worktree creation");
         let error = validate_batch_cook_gates(&plan, None).expect_err("every child needs a gate");
         assert_eq!(error.details["problem"], "gate_missing: every cook-batch child requires verify or private_verify before worktree creation");
+        assert!(error.details["id"]
+            .as_str()
+            .expect("uncovered child id")
+            .ends_with("issue-6454"));
+        assert_eq!(
+            error.details["tried"],
+            json!([
+                "https://github.com/Extra-Chill/homeboy/issues/6454",
+                "Extra-Chill/homeboy#6454",
+                "issue-6454"
+            ])
+        );
     }
 
     #[test]
@@ -8713,6 +8839,20 @@ fi
             let mut args = cook_batch_args();
             args.repo = "fanout-dry-run-fixture".to_string();
             args.from = Some("HEAD".to_string());
+            args.gates.verify = vec!["shared-check".to_string()];
+            args.verification_profiles = Some(
+                serde_json::json!({
+                    "profiles": {
+                        "append": { "verify": ["profile-check"], "mode": "append" },
+                        "replace": { "private_verify": ["private-check"], "mode": "replace" }
+                    },
+                    "assignments": [
+                        { "selector": "Extra-Chill/homeboy#6453", "profile": "append" },
+                        { "selector": "https://github.com/Extra-Chill/homeboy/issues/6454", "profile": "replace" }
+                    ]
+                })
+                .to_string(),
+            );
             let (value, exit_code) = cook_batch(args).expect("dry-run plan");
 
             assert_eq!(exit_code, 0);
@@ -8734,6 +8874,23 @@ fi
                 .expect("cooks")
                 .iter()
                 .all(|cook| cook["workspace"].is_null()));
+            let gates = value["preflight"]["deterministic_gates"]
+                .as_array()
+                .expect("resolved gate preview");
+            assert_eq!(gates[0]["profile"], "append");
+            assert_eq!(gates[0]["verify"], json!(["shared-check", "profile-check"]));
+            assert_eq!(
+                gates[0]["selectors"],
+                json!([
+                    "https://github.com/Extra-Chill/homeboy/issues/6453",
+                    "Extra-Chill/homeboy#6453",
+                    "issue-6453"
+                ])
+            );
+            assert_eq!(gates[1]["profile"], "replace");
+            assert_eq!(gates[1]["verify"], json!([]));
+            assert_eq!(gates[1]["private_verify"], json!(["[private]"]));
+            assert!(!value.to_string().contains("private-check"));
             assert!(!home
                 .path()
                 .join(".local/share/homeboy/agent-task-recipes")
