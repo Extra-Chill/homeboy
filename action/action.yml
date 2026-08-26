@@ -679,7 +679,7 @@ runs:
         FIRST_RESULTS: ${{ steps.run-commands.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
-        HOMEBOY_RUN_CANCELLED: ${{ cancelled() }}
+        HOMEBOY_RUN_CANCELLED: ${{ steps.source-build.outcome == 'cancelled' || steps.run-commands.outcome == 'cancelled' }}
       run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh run finding_reconciliation -- bash ${{ github.action_path }}/scripts/core/select-final-results.sh
 
     - name: Generate failure digest
@@ -777,7 +777,7 @@ runs:
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         OPERATIONS_RESULTS: ${{ steps.run-operations.outputs.results }}
         PR_ACTIVE: ${{ steps.final-pr-state.outputs.active || steps.check-pr-state.outputs.active }}
-        HOMEBOY_RUN_CANCELLED: ${{ cancelled() }}
+        HOMEBOY_RUN_CANCELLED: ${{ steps.source-build.outcome == 'cancelled' || steps.run-commands.outcome == 'cancelled' }}
       run: bash ${{ github.action_path }}/scripts/core/enforce-final-status.sh
 
     - name: Evaluate PR policy
