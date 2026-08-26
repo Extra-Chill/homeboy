@@ -15,7 +15,9 @@ use crate::agent_task_executor_evidence::link_latest_executor_evidence;
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment,
 };
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -1003,6 +1005,8 @@ fn run_materialized_provider_command_once_contained(
     // Progress and the wall timeout must share a monotonic clock. A system-clock
     // adjustment must never turn a stale provider into a live one.
     let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let mut runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
+    let mut runtime_progress_events = 0_u64;
 
     let (stdout_runtime_capture, stderr_runtime_capture) =
         runtime_output_captures(request, run_id, attempt);
@@ -1058,6 +1062,13 @@ fn run_materialized_provider_command_once_contained(
             Ok(Some(status)) => break (Some(status), false, false),
             Ok(None) => {
                 let elapsed = started.elapsed();
+                let current_runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
+                if runtime_progress_advanced(&runtime_progress, &current_runtime_progress) {
+                    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                    last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+                    runtime_progress_events = runtime_progress_events.saturating_add(1);
+                }
+                runtime_progress = current_runtime_progress;
                 if elapsed >= process_timeout {
                     break (None, false, true);
                 }
@@ -1137,6 +1148,7 @@ fn run_materialized_provider_command_once_contained(
                 "liveness_timeout_ms": liveness_timeout_ms,
                 "stdout_bytes": stdout_capture.total_bytes,
                 "stderr_bytes": stderr_capture.total_bytes,
+                "runtime_progress_events": runtime_progress_events,
             }),
         );
     }
@@ -1686,6 +1698,33 @@ where
     })
 }
 
+fn runtime_progress_snapshot(root: &Path) -> BTreeMap<PathBuf, u64> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return BTreeMap::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if !name.contains("progress") {
+                return None;
+            }
+            let path = entry.path();
+            let metadata = path.metadata().ok()?;
+            metadata.is_file().then_some((path, metadata.len()))
+        })
+        .collect()
+}
+
+fn runtime_progress_advanced(
+    previous: &BTreeMap<PathBuf, u64>,
+    current: &BTreeMap<PathBuf, u64>,
+) -> bool {
+    current
+        .iter()
+        .any(|(path, size)| *size > previous.get(path).copied().unwrap_or_default())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn provider_timeout_diagnostic_data(
     request: &AgentTaskExecutorRequest,
@@ -1797,7 +1836,7 @@ fn classify_stall_or_rate_limit(
         AgentTaskOutcomeStatus::ProviderError,
         AgentTaskFailureClassification::Stalled,
         format!(
-            "provider '{provider_id}' produced no stdout/stderr progress before liveness_timeout_ms={liveness_timeout_ms}"
+            "provider '{provider_id}' produced no process output or structured runtime progress before liveness_timeout_ms={liveness_timeout_ms}"
         ),
     )
 }

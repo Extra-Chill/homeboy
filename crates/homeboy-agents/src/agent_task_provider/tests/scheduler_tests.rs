@@ -932,6 +932,25 @@ fn parent_visible_progress_keeps_provider_alive_until_wall_deadline() {
 }
 
 #[test]
+fn structured_runtime_progress_keeps_provider_alive_until_completion() {
+    let command = format!(
+        "node {}",
+        script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let progress=path.join(req.artifacts_path,'provider-progress.jsonl'); let timer=setInterval(()=>fs.appendFileSync(progress,'{}\\n'),10); setTimeout(()=>{clearInterval(timer); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed with structured progress'}));},900);")
+    );
+    let (mut request, provider) = request("task-liveness-runtime-progress", command);
+    request.limits.timeout_ms = Some(1_500);
+    request.limits.liveness_timeout_ms = Some(500);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(
+        outcome.summary.as_deref(),
+        Some("completed with structured progress")
+    );
+}
+
+#[test]
 fn stalled_provider_retains_declared_attempt_workspace_artifact() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = linked_cook_source(&temp);
