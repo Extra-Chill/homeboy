@@ -47,6 +47,10 @@ use homeboy_core::process::{
 };
 use homeboy_core::Result;
 
+use super::work_job::{
+    register_work_job_handler, work_job_submission, WorkJobHandle, WorkJobHandler,
+    WorkJobInvocation,
+};
 use crate::agent_task_lifecycle;
 
 pub const AGENT_TASK_COOK_JOB_TYPE: &str = "agent-task-cook";
@@ -233,8 +237,10 @@ fn invalid_cook_job(message: &str) -> homeboy_core::Error {
 
 pub struct CookJobDriver;
 
-impl ControllerJobDriver for CookJobDriver {
-    fn job_type(&self) -> &'static str {
+struct CookWorkHandler;
+
+impl WorkJobHandler for CookWorkHandler {
+    fn work_type(&self) -> &'static str {
         AGENT_TASK_COOK_JOB_TYPE
     }
 
@@ -247,8 +253,6 @@ impl ControllerJobDriver for CookJobDriver {
     }
 
     fn public_progress(&self, progress: &Value) -> Result<Value> {
-        // Progress is projected field by field rather than passed through, so a
-        // future private progress field cannot reach the public log by default.
         Ok(json!({
             "phase": progress.get("phase").cloned().unwrap_or(Value::Null),
             "cook_id": progress.get("cook_id").cloned().unwrap_or(Value::Null),
@@ -266,8 +270,6 @@ impl ControllerJobDriver for CookJobDriver {
     }
 
     fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
-        // A cook's error text can quote provider output, which can quote the
-        // prompt. Only the typed code crosses into public job state.
         ControllerJobPublicError {
             message: "controller-owned cook supervision failed".to_string(),
             data: json!({ "code": format!("{:?}", error.code) }),
@@ -275,9 +277,6 @@ impl ControllerJobDriver for CookJobDriver {
     }
 
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
-        // `deny_unknown_fields` on both the job and its request makes any inline
-        // secret — a prompt, an env block, a provider invocation, a token — a
-        // parse failure rather than an accepted field.
         AgentTaskCookJob::parse(request.clone()).map(|_| ())
     }
 
@@ -292,9 +291,75 @@ impl ControllerJobDriver for CookJobDriver {
         job.to_checkpoint()
     }
 
-    fn execute(&self, prepared: Value, handle: ControllerJobHandle) -> Result<Value> {
-        let mut job = AgentTaskCookJob::parse(prepared)?;
+    fn advance(
+        &self,
+        checkpoint: Value,
+        handle: WorkJobHandle,
+        invocation: WorkJobInvocation,
+    ) -> Result<Value> {
+        let mut job = AgentTaskCookJob::parse(checkpoint)?;
+        if invocation == WorkJobInvocation::Resume
+            && job.resume_disposition() == CookJobResumeDisposition::AlreadyComplete
+        {
+            return job.completed_result();
+        }
         self.supervise(&mut job, handle)
+    }
+
+    fn cancel(&self, checkpoint: &Value) -> Result<()> {
+        let job = AgentTaskCookJob::parse(checkpoint.clone())?;
+        if job.phase == AgentTaskCookJobPhase::Completed {
+            return Ok(());
+        }
+        let run_id = job
+            .request
+            .pinned_retry_run_id
+            .as_deref()
+            .unwrap_or(&job.request.cook_id);
+        agent_task_lifecycle::cancel_run(run_id, Some("controller job cancelled")).map(|_| ())
+    }
+}
+
+/// Recovery-only adapter for persisted `agent-task-cook` v1 controller jobs.
+impl ControllerJobDriver for CookJobDriver {
+    fn job_type(&self) -> &'static str {
+        AGENT_TASK_COOK_JOB_TYPE
+    }
+
+    fn version(&self) -> u32 {
+        AGENT_TASK_COOK_JOB_VERSION
+    }
+
+    fn public_request(&self, request: &Value) -> Result<Value> {
+        CookWorkHandler.public_request(request)
+    }
+
+    fn public_progress(&self, progress: &Value) -> Result<Value> {
+        CookWorkHandler.public_progress(progress)
+    }
+
+    fn public_result(&self, result: &Value) -> Result<Value> {
+        CookWorkHandler.public_result(result)
+    }
+
+    fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
+        CookWorkHandler.public_error(error)
+    }
+
+    fn validate_secret_references(&self, request: &Value) -> Result<()> {
+        CookWorkHandler.validate_secret_references(request)
+    }
+
+    fn prepare(&self, request: Value) -> Result<Value> {
+        CookWorkHandler.prepare(request)
+    }
+
+    fn execute(&self, prepared: Value, handle: ControllerJobHandle) -> Result<Value> {
+        CookWorkHandler.advance(
+            prepared,
+            WorkJobHandle::legacy(handle, &CookWorkHandler),
+            WorkJobInvocation::Execute,
+        )
     }
 
     /// Re-adopt supervision after a daemon restart.
@@ -304,18 +369,11 @@ impl ControllerJobDriver for CookJobDriver {
     /// unfinished one either re-attaches to a child still provably alive, or
     /// observes the durable outcome of one that is not.
     fn resume(&self, checkpoint: Value, handle: ControllerJobHandle) -> Result<Value> {
-        let mut job = AgentTaskCookJob::parse(checkpoint)?;
-        match job.resume_disposition() {
-            // Replaying a finished job reports its durable result and touches
-            // nothing. This is what makes repeated recovery safe.
-            CookJobResumeDisposition::AlreadyComplete => job.completed_result(),
-            // Neither branch spawns anything: supervision either re-attaches to
-            // a child that is still provably ours, or observes on its first
-            // iteration that the child is gone and terminalizes from durable
-            // state.
-            CookJobResumeDisposition::ReadoptLiveChild
-            | CookJobResumeDisposition::ObserveTerminalOutcome => self.supervise(&mut job, handle),
-        }
+        CookWorkHandler.advance(
+            checkpoint,
+            WorkJobHandle::legacy(handle, &CookWorkHandler),
+            WorkJobInvocation::Resume,
+        )
     }
 
     /// Stop the cook through the one established cancellation path.
@@ -329,29 +387,18 @@ impl ControllerJobDriver for CookJobDriver {
     /// `terminate_process_tree(std::process::id())` — the in-flight stop path.
     /// No second mechanism is introduced here.
     fn cancel(&self, prepared: &Value) -> Result<()> {
-        let job = AgentTaskCookJob::parse(prepared.clone())?;
-        if job.phase == AgentTaskCookJobPhase::Completed {
-            return Ok(());
-        }
-        // A retry supervisor owns one immutable attempt. Resolving its Cook
-        // alias here could instead cancel a later retry that became latest.
-        let run_id = job
-            .request
-            .pinned_retry_run_id
-            .as_deref()
-            .unwrap_or(&job.request.cook_id);
-        agent_task_lifecycle::cancel_run(run_id, Some("controller job cancelled")).map(|_| ())
+        CookWorkHandler.cancel(prepared)
     }
 }
 
-impl CookJobDriver {
+impl CookWorkHandler {
     /// Watch a detached child to its durable terminal state.
     ///
     /// Liveness is judged by PID *and* kernel start identity. An
     /// `IdentityMismatch` or `Unverifiable` reading is treated as "no longer our
     /// child" rather than as death, so supervision can never attribute a
     /// stranger's process to this cook.
-    fn supervise(&self, job: &mut AgentTaskCookJob, handle: ControllerJobHandle) -> Result<Value> {
+    fn supervise(&self, job: &mut AgentTaskCookJob, handle: WorkJobHandle) -> Result<Value> {
         job.phase = AgentTaskCookJobPhase::Supervising;
         handle.checkpoint(job.to_checkpoint()?)?;
         handle.progress(job.progress_projection())?;
@@ -525,6 +572,8 @@ fn child_is_live(request: &AgentTaskCookJobRequest) -> bool {
 pub fn register_cook_job_driver() {
     static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     REGISTERED.get_or_init(|| {
+        register_work_job_handler(std::sync::Arc::new(CookWorkHandler))
+            .expect("register cook work job handler");
         controller_job_driver::register_controller_job_driver(std::sync::Arc::new(CookJobDriver))
             .expect("register cook controller job driver");
     });
@@ -547,12 +596,11 @@ pub fn cook_job_submission(
         supervisor_id: None,
         pinned_retry_run_id: None,
     })?;
-    Ok(json!({
-        "type": AGENT_TASK_COOK_JOB_TYPE,
-        "version": AGENT_TASK_COOK_JOB_VERSION,
-        "idempotency_key": job.idempotency_key,
-        "request": job.to_checkpoint()?,
-    }))
+    work_job_submission(
+        &CookWorkHandler,
+        job.idempotency_key.clone(),
+        job.to_checkpoint()?,
+    )
 }
 
 /// Build a retry-specific supervisor submission. The Cook alias remains the
@@ -571,12 +619,11 @@ pub fn cook_retry_job_submission(
         supervisor_id: Some(run_id.to_string()),
         pinned_retry_run_id: Some(run_id.to_string()),
     })?;
-    Ok(json!({
-        "type": AGENT_TASK_COOK_JOB_TYPE,
-        "version": AGENT_TASK_COOK_JOB_VERSION,
-        "idempotency_key": job.idempotency_key,
-        "request": job.to_checkpoint()?,
-    }))
+    work_job_submission(
+        &CookWorkHandler,
+        job.idempotency_key.clone(),
+        job.to_checkpoint()?,
+    )
 }
 
 #[cfg(test)]
@@ -589,6 +636,10 @@ mod tests {
             .expect("lifecycle store")
     }
     use super::*;
+    use crate::agent_task_service::work_job::{
+        WorkJobDriver, WORK_JOB_CHECKPOINT_SCHEMA, WORK_JOB_PROGRESS_SCHEMA,
+        WORK_JOB_RESULT_SCHEMA, WORK_JOB_TYPE, WORK_JOB_VERSION,
+    };
     use homeboy_core::api_jobs::JobEventKind;
     use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness};
     use std::sync::Arc;
@@ -598,6 +649,7 @@ mod tests {
     };
 
     fn submission(cook_id: &str, pid: u32) -> Value {
+        register_cook_job_driver();
         cook_job_submission(cook_id, pid, &IDENTITY).expect("build cook job submission")
     }
 
@@ -617,9 +669,10 @@ mod tests {
         );
         assert_eq!(first["idempotency_key"], replay["idempotency_key"]);
         assert_ne!(first["idempotency_key"], successor["idempotency_key"]);
-        let first_job = AgentTaskCookJob::parse(first["request"].clone()).expect("first job");
-        let successor_job =
-            AgentTaskCookJob::parse(successor["request"].clone()).expect("successor job");
+        let first_job =
+            AgentTaskCookJob::parse(first["request"]["request"].clone()).expect("first job");
+        let successor_job = AgentTaskCookJob::parse(successor["request"]["request"].clone())
+            .expect("successor job");
         assert_eq!(first_job.run_id.as_deref(), Some("cook-retry-attempt-2"));
         assert_eq!(
             successor_job.run_id.as_deref(),
@@ -635,8 +688,16 @@ mod tests {
     fn request_of(cook_id: &str, pid: u32) -> Value {
         submission(cook_id, pid)
             .get("request")
+            .and_then(|request| request.get("request"))
             .cloned()
             .expect("submission carries a request")
+    }
+
+    fn work_request_of(cook_id: &str, pid: u32) -> Value {
+        submission(cook_id, pid)
+            .get("request")
+            .cloned()
+            .expect("submission carries a work request")
     }
 
     /// The wire payload the launcher sends must be exactly what the driver
@@ -645,14 +706,20 @@ mod tests {
     fn the_submission_round_trips_through_the_driver() {
         let submission = submission("cook-round-trip", 4242);
 
-        assert_eq!(submission["type"], AGENT_TASK_COOK_JOB_TYPE);
-        assert_eq!(submission["version"], AGENT_TASK_COOK_JOB_VERSION);
+        assert_eq!(submission["type"], WORK_JOB_TYPE);
+        assert_eq!(submission["version"], WORK_JOB_VERSION);
         assert_eq!(
             submission["idempotency_key"],
             "agent-task-cook:cook-round-trip"
         );
+        assert_eq!(submission["request"]["work_type"], AGENT_TASK_COOK_JOB_TYPE);
+        assert_eq!(
+            submission["request"]["work_version"],
+            AGENT_TASK_COOK_JOB_VERSION
+        );
 
-        let job = AgentTaskCookJob::parse(submission["request"].clone()).expect("parse request");
+        let job = AgentTaskCookJob::parse(submission["request"]["request"].clone())
+            .expect("parse request");
         assert_eq!(job.request.cook_id, "cook-round-trip");
         assert_eq!(job.request.child_pid, 4242);
         assert_eq!(job.request.child_start_identity, IDENTITY);
@@ -660,7 +727,7 @@ mod tests {
         assert_eq!(job.run_id, None);
         assert_eq!(job.terminal_state, None);
 
-        let driver = CookJobDriver;
+        let driver = WorkJobDriver;
         driver
             .validate_secret_references(&submission["request"])
             .expect("a reference-only request validates");
@@ -688,7 +755,7 @@ mod tests {
     /// `deny_unknown_fields` is what enforces that, so prove it rejects.
     #[test]
     fn inline_secrets_are_refused_rather_than_carried() {
-        let driver = CookJobDriver;
+        let driver = WorkJobDriver;
         for smuggled in [
             json!({ "prompt": "the private task text" }),
             json!({ "env": { "ANTHROPIC_API_KEY": "sk-live-secret" } }),
@@ -696,8 +763,12 @@ mod tests {
             json!({ "notification_route": "opaque-destination" }),
             json!({ "launcher_log": "/home/operator/.homeboy/cook.log" }),
         ] {
-            let mut request = request_of("cook-secrets", 4242);
+            let mut request = work_request_of("cook-secrets", 4242);
             let object = request.as_object_mut().expect("request is an object");
+            let object = object
+                .get_mut("request")
+                .and_then(Value::as_object_mut)
+                .expect("domain request is an object");
             for (key, value) in smuggled.as_object().expect("smuggled object") {
                 object.insert(key.clone(), value.clone());
             }
@@ -713,13 +784,14 @@ mod tests {
     /// locate the operator's filesystem or the child's kernel identity.
     #[test]
     fn public_projections_withhold_paths_and_process_identity() {
-        let driver = CookJobDriver;
+        let driver = WorkJobDriver;
         let mut job =
             AgentTaskCookJob::parse(request_of("cook-public", 4242)).expect("parse request");
         job.phase = AgentTaskCookJobPhase::Completed;
         job.run_id = Some("cook-public-attempt-1".to_string());
         job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
-        let value = job.to_checkpoint().expect("serialize job");
+        let mut value = work_request_of("cook-public", 4242);
+        value["request"] = job.to_checkpoint().expect("serialize job");
 
         let public = driver.public_request(&value).expect("public request");
         let public_text = public.to_string();
@@ -738,9 +810,23 @@ mod tests {
             "run_id": "cook-public-attempt-1",
             "prompt": "the private task text",
         });
-        let progress = driver.public_progress(&private).expect("public progress");
+        let progress = driver
+            .public_progress(&json!({
+                "schema": WORK_JOB_PROGRESS_SCHEMA,
+                "work_type": AGENT_TASK_COOK_JOB_TYPE,
+                "work_version": AGENT_TASK_COOK_JOB_VERSION,
+                "progress": private.clone(),
+            }))
+            .expect("public progress");
         assert!(!progress.to_string().contains("private task text"));
-        let result = driver.public_result(&private).expect("public result");
+        let result = driver
+            .public_result(&json!({
+                "schema": WORK_JOB_RESULT_SCHEMA,
+                "work_type": AGENT_TASK_COOK_JOB_TYPE,
+                "work_version": AGENT_TASK_COOK_JOB_VERSION,
+                "result": private,
+            }))
+            .expect("public result");
         assert!(!result.to_string().contains("private task text"));
     }
 
@@ -803,9 +889,8 @@ mod tests {
                 cook_id,
             )
             .expect("persist handoff parent");
-            let mut request = request_of(cook_id, u32::MAX);
-            request["phase"] = json!("queued");
-            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CookJobDriver);
+            let request = work_request_of(cook_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct controller job harness");
             let prepared = driver.prepare(request).expect("prepare cook job");
@@ -814,13 +899,15 @@ mod tests {
                 .execute(prepared, harness.handle())
                 .expect("supervise dead child to durable outcome");
 
-            assert_eq!(result["terminal_state"], "failed");
-            assert_eq!(result["phase"], "completed");
+            assert_eq!(result["result"]["terminal_state"], "failed");
+            assert_eq!(result["result"]["phase"], "completed");
             let checkpoint = harness
                 .checkpoint()
                 .expect("read checkpoint")
                 .expect("supervision checkpoint");
-            assert_eq!(checkpoint["phase"], "supervising");
+            assert_eq!(checkpoint["schema"], WORK_JOB_CHECKPOINT_SCHEMA);
+            assert_eq!(checkpoint["work_type"], AGENT_TASK_COOK_JOB_TYPE);
+            assert_eq!(checkpoint["checkpoint"]["phase"], "supervising");
             let progress = harness
                 .events()
                 .expect("read controller events")
@@ -843,8 +930,8 @@ mod tests {
                 cook_id,
             )
             .expect("persist handoff parent");
-            let request = request_of(cook_id, u32::MAX);
-            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CookJobDriver);
+            let request = work_request_of(cook_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct controller job harness");
             let supervising = driver.prepare(request).expect("prepare cook job");
@@ -853,11 +940,11 @@ mod tests {
                 .resume(supervising.clone(), harness.handle())
                 .expect("resume supervision of dead child");
 
-            assert_eq!(observed["phase"], "completed");
-            assert_eq!(observed["terminal_state"], "failed");
+            assert_eq!(observed["result"]["phase"], "completed");
+            assert_eq!(observed["result"]["terminal_state"], "failed");
             let mut completed = supervising;
-            completed["phase"] = json!("completed");
-            completed["terminal_state"] = json!("failed");
+            completed["checkpoint"]["phase"] = json!("completed");
+            completed["checkpoint"]["terminal_state"] = json!("failed");
             let first = driver
                 .resume(completed.clone(), harness.handle())
                 .expect("first completed replay");
@@ -878,8 +965,8 @@ mod tests {
                 cook_id,
             )
             .expect("persist handoff parent");
-            let request = request_of(cook_id, u32::MAX);
-            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CookJobDriver);
+            let request = work_request_of(cook_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct controller job harness");
             harness
@@ -892,8 +979,8 @@ mod tests {
                 .execute(driver.prepare(request).expect("prepare cook job"), handle)
                 .expect("stop supervision after cancellation");
 
-            assert_eq!(result["phase"], "completed");
-            assert_eq!(result["terminal_state"], "failed");
+            assert_eq!(result["result"]["phase"], "completed");
+            assert_eq!(result["result"]["terminal_state"], "failed");
         });
     }
 
@@ -976,7 +1063,7 @@ mod tests {
                 .expect("build submission");
 
             CookJobDriver
-                .cancel(&submission["request"])
+                .cancel(&submission["request"]["request"])
                 .expect("driver cancellation reaches the lifecycle stop path");
 
             assert!(
@@ -1018,7 +1105,7 @@ mod tests {
                 cook_retry_job_submission(cook_id, "cook-retry-cancel-attempt-2", 4242, &IDENTITY)
                     .expect("build retry supervisor submission");
             CookJobDriver
-                .cancel(&submission["request"])
+                .cancel(&submission["request"]["request"])
                 .expect("cancel pinned retry supervisor");
 
             assert_eq!(
