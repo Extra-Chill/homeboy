@@ -32,14 +32,15 @@ for name, job in jobs.items():
     ]
     if not refs:
         continue
+    expected = "${{ steps.action-sha.outputs.sha }}" if name == "plan" else pinned
     for r in refs:
-        if r != pinned:
+        if r != expected:
             problems.append(f"{name}: checks out .homeboy-action at {r!r}, not the resolved SHA")
     needs = job.get("needs")
     needs = [needs] if isinstance(needs, str) else (needs or [])
     # needs only exposes DIRECT dependencies, so a transitive path to plan is
     # not enough to read needs.plan.outputs.
-    if "plan" not in needs:
+    if name != "plan" and "plan" not in needs:
         problems.append(f"{name}: consumes needs.plan.outputs but does not list plan in needs")
 
 if jobs.get("plan", {}).get("outputs", {}).get("action-sha") is None:

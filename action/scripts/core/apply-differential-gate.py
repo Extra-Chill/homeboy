@@ -352,14 +352,6 @@ def main() -> int:
                 continue
             candidate_only_inventory = current_inventory - base_inventory
             baseline_only_inventory = base_inventory - current_inventory
-            if candidate_only_inventory:
-                adjusted[command] = "no_comparable_evidence"
-                print(
-                    f"::error::Differential gate rejected {command}: type=no_comparable_evidence; "
-                    f"{len(candidate_only_inventory)} candidate-only inventory identity(s) prevent attribution.",
-                    file=sys.stderr,
-                )
-                continue
             introduced = current_failed - base_failed
             if introduced:
                 print(
@@ -368,6 +360,12 @@ def main() -> int:
                 )
                 continue
             adjusted[command] = "baseline_red"
+            if candidate_only_inventory:
+                print(
+                    f"::notice::Differential gate admitted {len(candidate_only_inventory)} "
+                    f"passing candidate-only test identity(s) for {command}.",
+                    file=sys.stderr,
+                )
             if baseline_only_inventory:
                 print(
                     f"::warning::Differential gate marked {command} baseline_red: "

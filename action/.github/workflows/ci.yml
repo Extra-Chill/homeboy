@@ -312,6 +312,7 @@ jobs:
       test-shards-enabled: ${{ steps.plan.outputs.test-shards-enabled }}
       test-command: ${{ steps.plan.outputs.test-command }}
       action-sha: ${{ steps.action-sha.outputs.sha }}
+      base-sha: ${{ steps.base-sha.outputs.sha }}
     steps:
       # Resolve the action ref to one immutable revision for every phase and shard.
       - name: Resolve action revision
@@ -336,6 +337,24 @@ jobs:
           fi
           echo "Resolved ${ACTION_REF} -> ${sha}"
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out resolved Homeboy Action
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ steps.action-sha.outputs.sha }}
+          path: .homeboy-action
+
+      - name: Resolve live base revision
+        id: base-sha
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: bash .homeboy-action/scripts/core/resolve-live-base-sha.sh
 
       - name: Plan quality checks
         id: plan
@@ -552,7 +571,7 @@ jobs:
           PHASE_OUTPUT_DIR: differential-phase/candidate
           REPOSITORY: ${{ github.repository }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
           CHECKOUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           COMMAND: ${{ matrix.command }}
           COMPONENT: ${{ steps.phase.outputs.component }}
@@ -595,7 +614,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ needs.plan.outputs.base-sha }}
           fetch-depth: 0
 
       - uses: actions/checkout@v6
@@ -649,8 +668,8 @@ jobs:
           PHASE_OUTPUT_DIR: differential-phase/baseline
           REPOSITORY: ${{ github.repository }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          CHECKOUT_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
+          CHECKOUT_SHA: ${{ needs.plan.outputs.base-sha }}
           COMMAND: ${{ matrix.command }}
           COMPONENT: ${{ steps.phase.outputs.component }}
           CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
@@ -1120,7 +1139,7 @@ jobs:
           PHASE_ARTIFACT_ROOT: differential-artifacts
           REPOSITORY: ${{ github.repository }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
           COMMAND: ${{ matrix.command }}
           ARTIFACT_KEY: ${{ matrix.artifact_key }}
           ACTION_REVISION: ${{ steps.action-revision.outputs.value }}
