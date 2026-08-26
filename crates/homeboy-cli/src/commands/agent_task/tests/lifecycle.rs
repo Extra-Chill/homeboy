@@ -1405,11 +1405,13 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
             .expect("read persisted failure");
         let loaded_recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
             .expect("load historical recipe");
-        assert!(super::super::run::pre_execution_local_runtime_recovery(
-            &loaded_recipe,
-            &persisted_record,
-            false,
-        ));
+        assert!(
+            homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+                &loaded_recipe,
+                &persisted_record,
+                false,
+            )
+        );
 
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),

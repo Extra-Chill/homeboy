@@ -2463,16 +2463,6 @@ fn apply_local_continuation_decision(
     Ok(())
 }
 
-pub(crate) fn pre_execution_local_runtime_recovery(
-    recipe: &homeboy::agents::agent_task_service::AgentTaskCookRecipe,
-    record: &homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord,
-    explicit_local_override: bool,
-) -> bool {
-    !agent_task_service::cook_continuation_requires_model_provenance(record)
-        && (explicit_local_override
-            || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local"))
-}
-
 /// `retry --run` owns a fresh queued replacement attempt. It may dispatch that
 /// attempt through the immutable Cook recipe; ordinary `cook-continue` remains
 /// observation-only until the attempt becomes terminal.
@@ -2625,7 +2615,11 @@ where
             .plan,
     )?;
     let pre_execution_runtime_recovery =
-        pre_execution_local_runtime_recovery(&recipe, &record, local_override.is_some());
+        agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+            &recipe,
+            &record,
+            local_override.is_some(),
+        );
     let dispatcher = if pre_execution_runtime_recovery || local_override.is_some() {
         None
     } else {
@@ -2919,7 +2913,11 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         }
     };
     let pre_execution_runtime_recovery =
-        pre_execution_local_runtime_recovery(&recipe, &record, local_override.is_some());
+        agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+            &recipe,
+            &record,
+            local_override.is_some(),
+        );
     let dispatcher = match if pre_execution_runtime_recovery || local_override.is_some() {
         Ok(None)
     } else {

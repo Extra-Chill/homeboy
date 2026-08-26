@@ -1843,6 +1843,18 @@ pub fn reconstruct_options_for_pre_execution_recovery(
     reconstruct_recipe_options(recipe, None, false, false)
 }
 
+/// Whether an attempt that never reached provider execution may be rebuilt by
+/// the current controller without replaying a historical external transport.
+pub fn local_pre_execution_runtime_recovery_is_eligible(
+    recipe: &AgentTaskCookRecipe,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    explicit_local_override: bool,
+) -> bool {
+    super::cook_pre_execution::retryable_pre_execution_failure(record)
+        && (explicit_local_override
+            || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local"))
+}
+
 /// Reconstruct the policy used to adopt an already-prepared candidate. Adoption
 /// never replays provider work, so it may use a validated historical recipe
 /// after a controller runtime upgrade.

@@ -4081,6 +4081,24 @@ fn reserve_cook_materialization_capacity(
     )
 }
 
+fn reconstruct_existing_cook_options(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+    adoption_or_historical_continuation: bool,
+    pre_execution_runtime_recovery: bool,
+    local_placement_override: bool,
+) -> Result<AgentTaskCookServiceOptions> {
+    if adoption_or_historical_continuation {
+        super::reconstruct_adoption_options_with_dispatcher(recipe, attempt_dispatcher)
+    } else if pre_execution_runtime_recovery {
+        super::reconstruct_options_for_pre_execution_recovery(recipe)
+    } else if local_placement_override {
+        super::cook_recipe::reconstruct_options_with_local_placement_override(recipe)
+    } else {
+        super::reconstruct_options_with_dispatcher(recipe, attempt_dispatcher)
+    }
+}
+
 /// Everything one Cook run needs. Replaces the 15-variant `run_cook*` family:
 /// each variant was this struct with a different subset of fields defaulted,
 /// spelled out as a name because Rust has no default arguments.
@@ -4664,22 +4682,26 @@ fn run_cook_spine(
     // Resume from the validated durable inputs so ambient transport state cannot
     // turn replay into a conflicting new cook.
     let requested_run_id = options.initial_run_id.clone();
+    let requested_record = lifecycle_store.read_record(&requested_run_id).ok();
     let local_placement_override = options.attempt_dispatcher.is_none()
-        && lifecycle_store
-            .read_record(&requested_run_id)
-            .ok()
-            .is_some_and(|record| transport_admission_reset_available(Some(&record)));
+        && requested_record
+            .as_ref()
+            .is_some_and(|record| transport_admission_reset_available(Some(record)));
+    let pre_execution_runtime_recovery = requested_record.as_ref().is_some_and(|record| {
+        super::local_pre_execution_runtime_recovery_is_eligible(
+            &recipe,
+            record,
+            local_placement_override,
+        )
+    });
     let mut options = if existing_recipe {
-        let mut reconstructed = if adopted_model.is_some() || allow_historical_terminal {
-            super::reconstruct_adoption_options_with_dispatcher(
-                &recipe,
-                options.attempt_dispatcher,
-            )?
-        } else if local_placement_override {
-            super::cook_recipe::reconstruct_options_with_local_placement_override(&recipe)?
-        } else {
-            super::reconstruct_options_with_dispatcher(&recipe, options.attempt_dispatcher)?
-        };
+        let mut reconstructed = reconstruct_existing_cook_options(
+            &recipe,
+            options.attempt_dispatcher,
+            adopted_model.is_some() || allow_historical_terminal,
+            pre_execution_runtime_recovery,
+            local_placement_override,
+        )?;
         if let Some(attempt) = recipe
             .attempts
             .iter()
