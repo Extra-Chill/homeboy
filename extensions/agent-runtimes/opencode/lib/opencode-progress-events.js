@@ -65,10 +65,10 @@ function consumeLine(line, stream, emit, options, workspace, state) {
 }
 
 function translateOpenCodeEvent(frame = {}, context = {}) {
-	const parts = Array.isArray(frame.parts) ? frame.parts : [frame];
+	const parts = Array.isArray(frame.parts) ? frame.parts : frame.part && typeof frame.part === 'object' ? [frame.part] : [frame];
 	for (const part of parts) {
 		const tool = stringValue(part.tool || part.name || frame.tool || frame.name);
-		const input = objectValue(part.input || part.args || frame.input || frame.args);
+		const input = objectValue(part.state?.input || part.input || part.args || frame.input || frame.args);
 		if (!tool) continue;
 		const status = stringValue(part.state?.status || part.status || frame.status).toLowerCase();
 		const failed = Boolean(part.state?.error || part.error || frame.error) || ['error', 'failed'].includes(status);
@@ -149,7 +149,10 @@ function summary(state) {
 	return { emitted: state.emitted.length, coalesced_or_dropped: state.dropped, last_type: state.emitted.at(-1)?.type || '' };
 }
 
-function validTimestamp(value) { return typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? value : ''; }
+function validTimestamp(value) {
+	if (typeof value === 'number' && Number.isFinite(value)) return new Date(value).toISOString();
+	return typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? value : '';
+}
 function timestamp(value) { return typeof value === 'function' ? value() : typeof value === 'string' ? value : new Date().toISOString(); }
 function bounded(value, max) { return String(value || '').slice(0, max); }
 function stringValue(value) { return typeof value === 'string' && value.trim() ? value.trim() : ''; }

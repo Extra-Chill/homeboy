@@ -51,7 +51,7 @@ function requestFor(commandArgs, artifactsPath) {
 	try {
 		const streamingCli = path.join(root, 'streaming-opencode.cjs');
 		fs.writeFileSync(streamingCli, `#!/usr/bin/env node
-process.stdout.write(JSON.stringify({ sessionID: 'ses_fixture_123', timestamp: '2026-08-07T12:00:00.000Z', parts: [{ tool: 'bash', input: { command: 'TOKEN=super-secret-token run --snapshot=' + 'x'.repeat(10000) }, state: { status: 'completed' } }] }) + '\\n');
+process.stdout.write(JSON.stringify({ type: 'tool_use', sessionID: 'ses_fixture_123', timestamp: 1787763877191, part: { type: 'tool', tool: 'bash', state: { status: 'completed', input: { command: 'TOKEN=super-secret-token run --snapshot=' + 'x'.repeat(10000) } } } }) + '\\n');
 setTimeout(() => process.exit(0), 250);
 `);
 		const streamed = run(requestFor([streamingCli], path.join(root, 'stream-artifacts')));
@@ -64,7 +64,7 @@ setTimeout(() => process.exit(0), 250);
 		const relayed = streamedResult.stderr.trim().split('\n').map((line) => JSON.parse(line));
 		assert.deepEqual(relayed, [{
 			schema: 'homeboy/agent-task-runtime-progress/v1', provider: 'opencode', session_id: 'ses_fixture_123',
-			category: 'command.completed', latest_activity_at: '2026-08-07T12:00:00.000Z',
+			category: 'command.completed', latest_activity_at: '2026-08-26T17:04:37.191Z',
 		}]);
 		assert.ok(Buffer.byteLength(streamedResult.stderr) < 300);
 		const runtimeLog = fs.readFileSync(path.join(root, 'stream-artifacts', 'relay-fixture-opencode-runtime-stdout.log'), 'utf8');
