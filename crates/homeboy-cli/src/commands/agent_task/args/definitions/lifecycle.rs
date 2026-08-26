@@ -680,6 +680,9 @@ pub struct RecordReplacementGateProofArgs {
     /// Explicit operator authorization for externally produced proof.
     #[arg(long, value_name = "TEXT")]
     pub authorize_external_proof: Option<String>,
+    /// Accept candidate failures proven identical against the immutable base.
+    #[arg(long)]
+    pub accept_inherited_failures: bool,
 }
 #[derive(Args, Debug)]
 pub struct VerifyReplacementArgs {

@@ -14947,6 +14947,7 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         options.initial_run_id = "run-verify-replacement".to_string();
         options.to_worktree = "fixture@cook-candidate".to_string();
         options.source_worktree_path = Some(target.clone());
+        options.gates.accept_inherited_failures = true;
         persist_initial_recipe(&options).expect("persist recipe");
         record_tracked_promotion_continuation(&options, &target);
         agent_task_lifecycle::record_cook_attempt_in_store(
@@ -14976,6 +14977,10 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         failed["source"]["task_id"] =
             serde_json::json!(options.initial_plan.tasks[0].task_id.clone());
         failed["patch_artifact"]["id"] = serde_json::json!("committed-changes");
+        failed["verified_base"]["sha"] =
+            serde_json::json!(
+                git_output(&source, &["rev-parse", "HEAD"]).expect("resolve fixture base")
+            );
         failed["target"]["dirty"] = serde_json::json!(true);
         agent_task_lifecycle::record_promotion("run-verify-replacement", failed)
             .expect("align source task evidence");
@@ -14996,7 +15001,7 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
 
         let gate_log = temp.path().join("replacement-gate-runs");
         let gate = format!(
-            "test \"$(cat ../figma-transformer/tracked.txt)\" = promoted; printf ran >> {}",
+            "printf ran >> {}; printf inherited >&2; exit 1",
             gate_log.display()
         );
         let reviewer_gate = "test \"$(cat \"$(git rev-parse --show-toplevel)/figma-transformer/tracked.txt\")\" = promoted".to_string();
@@ -15006,6 +15011,7 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             "cook-verify-replacement",
             VerifyGateOptions {
                 verify: vec![reviewer_gate.clone()],
+                accept_inherited_failures: true,
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
@@ -15022,13 +15028,15 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             VerifyGateOptions {
                 verify: vec![reviewer_gate.clone()],
                 private_verify: vec![gate.clone()],
+                execution_policy: crate::agent_task_gate::AgentTaskGateExecutionPolicy::ContinueAll,
+                accept_inherited_failures: true,
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
         )
         .expect("replacement gates complete");
 
-        assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(replacement.status, AgentTaskPromotionStatus::GateFailed);
         assert_eq!(replacement.patch_artifact.id, "committed-changes");
         assert_eq!(
             replacement.provenance["candidate"]["fingerprint"]["target_path"],
@@ -15063,10 +15071,25 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             homeboy_core::gate::HomeboyGateVisibility::Private,
             "a private required gate remains durable runtime evidence"
         );
+        assert_eq!(
+            replacement.deterministic_gates[1].status,
+            crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        let error = verify_replacement_gates(
+            "cook-verify-replacement",
+            VerifyGateOptions {
+                verify: vec![replacement.deterministic_gates[0].command[2].clone()],
+                ..Default::default()
+            },
+            "Chris approved corrected gate evidence".to_string(),
+        )
+        .expect_err("completed inherited failure needs renewed authorization");
+        assert_eq!(error.details["field"], "accept_inherited_failures");
         let replay = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
                 verify: vec![replacement.deterministic_gates[0].command[2].clone()],
+                accept_inherited_failures: true,
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
@@ -15076,7 +15099,7 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
         assert_eq!(replay.command_evidence, replacement.command_evidence);
         assert_eq!(
             std::fs::read_to_string(gate_log).expect("read gate log"),
-            "ran"
+            "ranran"
         );
         let record = agent_task_lifecycle::status("run-verify-replacement").expect("read record");
         assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 3);
@@ -15094,6 +15117,11 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
                 ["original_history"]["status"],
             "gate_failed"
+        );
+        assert_eq!(
+            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
+                ["accept_inherited_failures"],
+            true
         );
     });
 }
@@ -18212,7 +18240,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
                 capture: Default::default(),
             },
         ];
-        let error = record_replacement_gate_proof(run_id, replacement.clone(), None)
+        let error = record_replacement_gate_proof(run_id, replacement.clone(), None, false)
             .expect_err("external proof requires operator authorization");
         assert!(error.message.contains("explicit operator authorization"));
 
@@ -18222,6 +18250,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             drifted,
             Some("Chris approved external proof".to_string()),
+            false,
         )
         .expect_err("base drift is refused");
         assert!(error.message.contains("drifted"));
@@ -18236,6 +18265,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             mismatched_evidence,
             Some("Chris approved external proof".to_string()),
+            false,
         )
         .expect_err("each gate needs matching command evidence");
         assert!(error.message.contains("matching_command_evidence"));
@@ -18251,6 +18281,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             private_gate,
             Some("Chris approved external proof".to_string()),
+            false,
         )
         .expect_err("private gates cannot hydrate reviewer test instructions");
         assert_eq!(error.details["failed_eligibility_predicate"], "visibility");
@@ -18270,6 +18301,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             unrelated_legacy_checkout,
             Some("Chris approved external proof".to_string()),
+            false,
         )
         .expect_err("legacy replacement checkout must match the original immutable fingerprint");
         assert_eq!(
@@ -18305,6 +18337,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             mixed_gates,
             Some("Chris approved external proof".to_string()),
+            false,
         )
         .expect_err("an unbound private gate cannot be persisted beside a valid visible gate");
         assert_eq!(
@@ -18319,12 +18352,14 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             replacement,
             Some("Chris approved external proof".to_string()),
+            false,
         )
         .expect("record bound green replacement proof");
         let replay = record_replacement_gate_proof(
             run_id,
             replacement_for_replay,
             Some("Chris approved external proof".to_string()),
+            false,
         )
         .expect("identical proof replay is idempotent");
         assert_eq!(
