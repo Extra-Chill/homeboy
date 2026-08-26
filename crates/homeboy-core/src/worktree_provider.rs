@@ -84,6 +84,9 @@ pub struct WorktreeMutationTarget {
     pub provider: WorktreeProviderIdentity,
     pub handle: String,
     pub path: PathBuf,
+    pub branch: Option<String>,
+    pub task_url: Option<String>,
+    pub safety: Option<WorktreeProviderSafety>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,6 +389,15 @@ impl WorktreeMutationProvider for NativeWorktreeProvider {
             provider: WorktreeProviderIdentity::Native,
             handle: record.handle().to_string(),
             path,
+            branch: match &record {
+                worktree::WorkspaceRefRecord::Task(record) => Some(record.branch.clone()),
+                worktree::WorkspaceRefRecord::Adopted(_) => None,
+            },
+            task_url: match &record {
+                worktree::WorkspaceRefRecord::Task(record) => record.task_url.clone(),
+                worktree::WorkspaceRefRecord::Adopted(_) => None,
+            },
+            safety: None,
         }))
     }
 }
@@ -642,6 +654,14 @@ impl WorktreeMutationProvider for CommandWorktreeProvider<'_> {
                 provider: WorktreeProviderIdentity::Configured(resolution.provider_id),
                 handle: resolution.worktree.handle,
                 path: PathBuf::from(resolution.worktree.path),
+                branch: Some(resolution.worktree.branch),
+                task_url: resolution.worktree.task_url,
+                safety: Some(WorktreeProviderSafety {
+                    dirty: resolution.worktree.safety.dirty,
+                    unpushed: resolution.worktree.safety.unpushed,
+                    primary: resolution.worktree.safety.primary,
+                    missing: false,
+                }),
             }),
             None => WorktreeMutationLookup::NotFound,
         })
@@ -914,6 +934,22 @@ pub fn resolve_worktree_mutation_target_from_config(
     Err(worktree_providers::worktree_provider_not_found_error(
         reference, config, true,
     ))
+}
+
+/// Resolve a mutation target through configured command-provider authority
+/// only. This is used when durable task evidence already selected configured
+/// ownership and native fallback would violate that binding.
+pub fn resolve_configured_worktree_mutation_target_from_config(
+    reference: &str,
+    config: &HomeboyConfig,
+    context: WorktreeMutationContext<'_>,
+) -> Result<WorktreeMutationTarget> {
+    match CommandWorktreeProvider::new(config).resolve_for_mutation(reference, context)? {
+        WorktreeMutationLookup::Found(target) => Ok(target),
+        WorktreeMutationLookup::NotFound => Err(
+            worktree_providers::worktree_provider_not_found_error(reference, config, true),
+        ),
+    }
 }
 
 /// Admit an existing destination through native ownership first, then through
@@ -1449,6 +1485,7 @@ mod tests {
                             "handle": "fixture@command",
                             "path": workspace.path(),
                             "branch": "command-branch",
+                            "task_url": "https://example.test/issues/8017",
                             "safety": { "dirty": false, "unpushed": false, "primary": false }
                         }, {
                             "handle": "fixture@unsafe",
@@ -1492,7 +1529,7 @@ mod tests {
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
-                        task_url: None,
+                        task_url: Some("$.task_url".to_string()),
                     }),
                 },
             );
@@ -1512,6 +1549,26 @@ mod tests {
                 "fixture@command",
                 WorktreeProviderIdentity::Configured("command-fixture".to_string()),
                 workspace.path(),
+            );
+            let mutation = resolve_configured_worktree_mutation_target_from_config(
+                "fixture@command",
+                &config,
+                WorktreeMutationContext::default(),
+            )
+            .expect("configured mutation facade");
+            assert_eq!(mutation.branch.as_deref(), Some("command-branch"));
+            assert_eq!(
+                mutation.task_url.as_deref(),
+                Some("https://example.test/issues/8017")
+            );
+            assert_eq!(
+                mutation.safety,
+                Some(WorktreeProviderSafety {
+                    dirty: false,
+                    unpushed: false,
+                    primary: false,
+                    missing: false,
+                })
             );
             assert_provision_admission_conformance(
                 &CommandWorktreeProvider::new(&config),

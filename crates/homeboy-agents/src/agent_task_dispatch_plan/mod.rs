@@ -19,7 +19,7 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
 };
 use crate::agent_task_secrets::validate_secret_env;
-use homeboy_core::{defaults, worktree, worktree_providers, Error, Result};
+use homeboy_core::{defaults, worktree, Error, Result};
 
 use super::agent_task_dispatch_service::{
     initial_provider_route_from_policy, AgentTaskDispatchRequest, AgentTaskModelSelection,
@@ -610,7 +610,12 @@ fn resolve_dispatch_workspace(
         return DispatchWorkspaceTarget::workspace_ref(record).map(Some);
     }
 
-    let resolution = worktree_providers::resolve_worktree_provider(workspace).map_err(|error| {
+    let target = homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
+        workspace,
+        &homeboy_core::defaults::load_config(),
+        homeboy_core::worktree_provider::WorktreeMutationContext::default(),
+    )
+    .map_err(|error| {
         if error
             .details
             .pointer("/workspace/classification")
@@ -634,14 +639,20 @@ fn resolve_dispatch_workspace(
             ]),
         )
     })?;
-    let root = std::path::PathBuf::from(&resolution.worktree.path);
+    let root = target.path.clone();
     if !root.is_dir() {
+        let provider = match &target.provider {
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => "native",
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
+                provider
+            }
+        };
         return Err(Error::validation_invalid_argument(
             "workspace",
             format!(
                 "managed worktree '{}' resolved by provider '{}' points at a missing directory {}",
                 workspace,
-                resolution.provider_id,
+                provider,
                 root.display()
             ),
             Some(workspace.clone()),
@@ -649,7 +660,7 @@ fn resolve_dispatch_workspace(
         ));
     }
 
-    Ok(Some(DispatchWorkspaceTarget::provider(resolution)))
+    Ok(Some(DispatchWorkspaceTarget::provider(target)))
 }
 
 #[derive(Debug, Clone)]
@@ -741,26 +752,43 @@ impl DispatchWorkspaceTarget {
         })
     }
 
-    fn provider(resolution: worktree_providers::WorktreeProviderResolution) -> Self {
-        let root = std::path::PathBuf::from(&resolution.worktree.path);
+    fn provider(target: homeboy_core::worktree_provider::WorktreeMutationTarget) -> Self {
+        let root = target.path;
+        let provider_id = match target.provider {
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => {
+                "native".to_string()
+            }
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
+                provider
+            }
+        };
+        let safety =
+            target
+                .safety
+                .unwrap_or(homeboy_core::worktree_provider::WorktreeProviderSafety {
+                    dirty: false,
+                    unpushed: false,
+                    primary: false,
+                    missing: false,
+                });
         Self {
             root: root.clone(),
-            slug: Some(resolution.worktree.handle.clone()),
+            slug: Some(target.handle.clone()),
             kind: Some("worktree-provider".to_string()),
             component_id: None,
-            branch: Some(resolution.worktree.branch.clone()),
+            branch: target.branch.clone(),
             base_ref: None,
             workspace_identity: None,
             metadata: serde_json::json!({
                 "kind": "worktree-provider",
-                "provider_id": resolution.provider_id,
-                "handle": resolution.worktree.handle,
+                "provider_id": provider_id,
+                "handle": target.handle,
                 "root": root.display().to_string(),
-                "branch": resolution.worktree.branch,
+                "branch": target.branch,
                 "safety": {
-                    "dirty": resolution.worktree.safety.dirty,
-                    "unpushed": resolution.worktree.safety.unpushed,
-                    "primary": resolution.worktree.safety.primary,
+                    "dirty": safety.dirty,
+                    "unpushed": safety.unpushed,
+                    "primary": safety.primary,
                 },
             }),
         }

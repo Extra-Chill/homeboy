@@ -3851,13 +3851,12 @@ fn resolve_cook_preview_destination(
                 }),
             ));
         }
-        let resolution = match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+        let target = match homeboy::core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
             &handle,
             &config,
-            None,
-            None,
+            homeboy::core::worktree_provider::WorktreeMutationContext::default(),
         ) {
-            Ok(resolution) => resolution,
+            Ok(target) => target,
             Err(error)
                 if issue_derived && error.details["worktree_provider_lookup"] == "not_found" =>
             {
@@ -3909,8 +3908,12 @@ fn resolve_cook_preview_destination(
             }
             Err(error) => return Err(error),
         };
+        let provider_id = match &target.provider {
+            homeboy::core::worktree_provider::WorktreeProviderIdentity::Native => "native",
+            homeboy::core::worktree_provider::WorktreeProviderIdentity::Configured(id) => id,
+        };
         if homeboy::core::worktree_providers::worktree_provider_path_requires_materialization(
-            &resolution.worktree.path,
+            &target.path.display().to_string(),
         ) {
             resolve_cook_base(&mut args)?;
             return Ok((
@@ -3919,8 +3922,8 @@ fn resolve_cook_preview_destination(
                     "action": "materialization_required",
                     "kind": "provider",
                     "handle": handle,
-                    "provider_id": resolution.provider_id,
-                    "remote_path": resolution.worktree.path,
+                    "provider_id": provider_id,
+                    "remote_path": target.path,
                     "reason": "the configured provider resolved a registered remote workspace that requires materialization before filesystem planning",
                     "apply": "rerun Cook without --preview to converge the destination through its configured provider",
                     "provider_calls": {
@@ -3930,7 +3933,7 @@ fn resolve_cook_preview_destination(
                 }),
             ));
         }
-        let path = PathBuf::from(&resolution.worktree.path);
+        let path = target.path;
         homeboy::core::worktree_providers::validate_task_worktree_root(&path, &handle)?;
         validate_cook_destination_identity(&args, &path)?;
         return Ok((
@@ -3938,10 +3941,10 @@ fn resolve_cook_preview_destination(
             serde_json::json!({
                 "action": "planned_reuse",
                 "kind": "provider",
-                "handle": resolution.worktree.handle,
-                "path": resolution.worktree.path,
-                "branch": resolution.worktree.branch,
-                "provider_id": resolution.provider_id,
+                "handle": target.handle,
+                "path": path,
+                "branch": target.branch,
+                "provider_id": provider_id,
                 "provider_calls": {
                     "resolve_and_admission": "executed",
                     "ensure": "deferred",

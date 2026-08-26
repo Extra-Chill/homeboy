@@ -6814,15 +6814,17 @@ fn validate_cook_workspace(
             .map(|continuation| cook_owned_unpushed_destination(continuation))
             .transpose()?
             .flatten();
-        homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+        homeboy_core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
             &options.to_worktree,
             &homeboy_core::defaults::load_config(),
-            continuation.as_ref().map(|continuation| &continuation.baseline),
-            trusted_unpushed.as_ref(),
+            homeboy_core::worktree_provider::WorktreeMutationContext {
+                safety_baseline: continuation
+                    .as_ref()
+                    .map(|continuation| &continuation.baseline),
+                trusted_unpushed_destination: trusted_unpushed.as_ref(),
+            },
         )?
-        .worktree
         .path
-        .into()
     };
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
     let target = std::fs::canonicalize(&target).map_err(|error| {
@@ -7310,13 +7312,12 @@ fn trusted_initial_cook_workspace(
         homeboy_core::git::is_ancestor(&source.display().to_string(), task_base_sha, &head)
             .unwrap_or(false);
     let config = homeboy_core::defaults::load_config();
-    match homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+    match homeboy_core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
         &options.to_worktree,
         &config,
-        None,
-        None,
+        homeboy_core::worktree_provider::WorktreeMutationContext::default(),
     ) {
-        Ok(resolution) => return Ok(Some(PathBuf::from(resolution.worktree.path))),
+        Ok(target) => return Ok(Some(target.path)),
         Err(error)
             if error.details.pointer("/workspace/classification")
                 != Some(&Value::String("workspace.untrusted_unpushed".to_string())) =>
@@ -7350,13 +7351,16 @@ fn trusted_initial_cook_workspace(
         path: source.clone(),
         head,
     };
-    let resolution = homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
-        &options.to_worktree,
-        &config,
-        None,
-        Some(&trust),
-    )?;
-    if resolution.worktree.task_url.as_deref() != task_url {
+    let target =
+        homeboy_core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
+            &options.to_worktree,
+            &config,
+            homeboy_core::worktree_provider::WorktreeMutationContext {
+                safety_baseline: None,
+                trusted_unpushed_destination: Some(&trust),
+            },
+        )?;
+    if target.task_url.as_deref() != task_url {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             "explicitly targeted provider worktree is not owned by this Cook task",
@@ -7367,7 +7371,7 @@ fn trusted_initial_cook_workspace(
             )]),
         ));
     }
-    let resolved = std::fs::canonicalize(&resolution.worktree.path).map_err(|error| {
+    let resolved = std::fs::canonicalize(&target.path).map_err(|error| {
         Error::validation_invalid_argument(
             "to_worktree",
             format!("provider returned an unresolved targeted Cook checkout: {error}"),
@@ -8504,13 +8508,16 @@ fn authenticated_historical_review_form_workspace_with_trace(
         }
     };
     trace.pass("continuation_evidence");
-    let resolution =
-        match homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+    let target =
+        match homeboy_core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
             &options.to_worktree,
             &homeboy_core::defaults::load_config(),
-            Some(&continuation.baseline),
+            homeboy_core::worktree_provider::WorktreeMutationContext {
+                safety_baseline: Some(&continuation.baseline),
+                trusted_unpushed_destination: None,
+            },
         ) {
-            Ok(resolution) => resolution,
+            Ok(target) => target,
             Err(error) => {
                 let predicate = if error.details.pointer("/workspace/classification")
                     == Some(&Value::String("workspace.resolved_but_dirty".to_string()))
@@ -8526,9 +8533,9 @@ fn authenticated_historical_review_form_workspace_with_trace(
         };
     trace.pass("provider_resolution");
     trace.pass("provider_baseline_verification");
-    if resolution.worktree.handle != options.to_worktree
+    if target.handle != options.to_worktree
         || homeboy_core::worktree_providers::validate_task_worktree_root(
-            std::path::Path::new(&resolution.worktree.path),
+            &target.path,
             &options.to_worktree,
         )
         .is_err()
@@ -8538,7 +8545,7 @@ fn authenticated_historical_review_form_workspace_with_trace(
         return Ok(false);
     }
     trace.pass("worktree_root");
-    let Ok(target) = std::fs::canonicalize(&resolution.worktree.path) else {
+    let Ok(target) = std::fs::canonicalize(&target.path) else {
         trace.deny("candidate_fingerprint", "unavailable");
         record_trace(&trace)?;
         return Ok(false);

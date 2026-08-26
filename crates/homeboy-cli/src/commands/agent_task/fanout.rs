@@ -2925,14 +2925,12 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
             continue;
         }
         if cook.adopted_worktree {
-            let resolution = homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+            let workspace = homeboy::core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
                 &cook.to_worktree,
                 &homeboy::core::defaults::load_config(),
-                None,
-                None,
+                homeboy::core::worktree_provider::WorktreeMutationContext::default(),
             )?;
-            let workspace = &resolution.worktree;
-            if workspace.branch != *branch {
+            if workspace.branch.as_deref() != Some(branch) {
                 return Err(Error::validation_invalid_argument(
                     "worktree",
                     "explicit worktree branch does not match its Cook child",
@@ -2960,7 +2958,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                     None,
                 ));
             }
-            let path = PathBuf::from(&workspace.path);
+            let path = workspace.path.clone();
             homeboy::core::worktree_providers::validate_task_worktree_root(
                 &path,
                 &cook.to_worktree,
@@ -3000,7 +2998,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                 command: vec!["adopted".to_string(), cook.to_worktree.clone()],
                 retry_after_seconds: None,
                 active_lock_holder: None,
-                path: Some(workspace.path.clone()),
+                path: Some(workspace.path.display().to_string()),
                 error: None,
                 failure: None,
             });
@@ -3011,13 +3009,13 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
             continue;
         }
         if let Some(config) = &provider_config {
-            match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            match homeboy::core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
                     &cook.to_worktree,
                     config,
-                    None,
+                    homeboy::core::worktree_provider::WorktreeMutationContext::default(),
                 ) {
-                Ok(resolution) => {
-                    if resolution.worktree.branch != *branch {
+                Ok(workspace) => {
+                    if workspace.branch.as_deref() != Some(branch) {
                         return Err(Error::validation_invalid_argument(
                             "worktree",
                             "resolved provider worktree branch does not match its Cook child",
@@ -3025,7 +3023,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                             None,
                         ));
                     }
-                    if resolution.worktree.task_url.as_deref().is_some_and(|task_url| {
+                    if workspace.task_url.as_deref().is_some_and(|task_url| {
                         cook.task_url.as_deref().is_none_or(|expected| {
                             homeboy::core::worktree_providers::normalize_task_url(task_url)
                                 != homeboy::core::worktree_providers::normalize_task_url(expected)
@@ -3045,7 +3043,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                         command: Vec::new(),
                         retry_after_seconds: None,
                         active_lock_holder: None,
-                        path: Some(resolution.worktree.path),
+                        path: Some(workspace.path.display().to_string()),
                         error: None,
                         failure: None,
                     });
