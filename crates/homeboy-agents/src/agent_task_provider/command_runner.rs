@@ -103,8 +103,7 @@ impl ProviderOutputCapture {
 pub(super) fn run_materialized_provider_command(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
-    run_id: Option<&str>,
-    execution_attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
     let mut retry_attempt = 1;
     // This state belongs to one invocation's retry sequence. It cannot couple
@@ -112,8 +111,7 @@ pub(super) fn run_materialized_provider_command(
     let mut prior_immediate_failure = None;
     loop {
         let started = Instant::now();
-        let mut outcome =
-            run_materialized_provider_command_once(request, provider, run_id, execution_attempt);
+        let mut outcome = run_materialized_provider_command_once(request, provider, execution);
         classify_provider_policy_denial(request, &mut outcome);
         classify_transient_provider_outcome(&mut outcome);
 
@@ -142,7 +140,7 @@ pub(super) fn run_materialized_provider_command(
                     }),
                 });
                 attach_runtime_tool_provenance(request, &mut outcome);
-                link_latest_executor_evidence(request, &mut outcome, run_id);
+                link_latest_executor_evidence(request, &mut outcome, execution.run_id.as_deref());
                 return outcome;
             }
             prior_immediate_failure = Some(failure.signature);
@@ -160,7 +158,7 @@ pub(super) fn run_materialized_provider_command(
             attach_runtime_tool_provenance(request, &mut outcome);
             // Preserve and link the latest raw executor input/result as
             // first-class run evidence before returning the final outcome.
-            link_latest_executor_evidence(request, &mut outcome, run_id);
+            link_latest_executor_evidence(request, &mut outcome, execution.run_id.as_deref());
             return outcome;
         }
 
@@ -611,16 +609,14 @@ impl ProviderContainmentReport {
 pub(super) fn run_materialized_provider_command_once(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
-    run_id: Option<&str>,
-    attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
     let mut containment_report = ProviderContainmentReport::default();
     let mut outcome = run_materialized_provider_command_once_contained(
         request,
         provider,
         &mut containment_report,
-        run_id,
-        attempt,
+        execution,
     );
     containment_report.annotate(&mut outcome);
     if let Err(error) = retain_failed_workspace_artifacts(&mut outcome, request) {
@@ -639,9 +635,10 @@ fn run_materialized_provider_command_once_contained(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
     containment_report: &mut ProviderContainmentReport,
-    run_id: Option<&str>,
-    attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
+    let run_id = execution.run_id.as_deref();
+    let attempt = execution.attempt;
     let command = render_provider_command_display(provider);
     let deadline_remaining_ms = crate::agent_task_timeout::remaining_execution_deadline_ms(
         request.limits.execution_deadline_unix_ms,
@@ -811,7 +808,54 @@ fn run_materialized_provider_command_once_contained(
         ));
     }
 
+    let launch_context = match AgentTaskProviderLaunchContext::materialize(
+        &request.request,
+        provider,
+        execution,
+        cwd.as_deref(),
+        &env,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.provider_launch_context_invalid",
+                error.to_string(),
+                json!({ "provider": provider.id }),
+            )
+        }
+    };
+    if let (Some(store), Some(run_id)) = (execution.lifecycle_store(), run_id) {
+        if let Err(error) = store.record_provider_launch_context(
+            run_id,
+            &request.request.task_id,
+            attempt,
+            &launch_context,
+        ) {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::Provider,
+                "agent_task.provider_launch_context_persistence_failed",
+                error.to_string(),
+                json!({ "provider": provider.id, "run_id": run_id }),
+            );
+        }
+    }
+
     let mut command_builder = Command::new(&program);
+    if let Err(error) = launch_context.apply_declared_environment(&mut command_builder) {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::ProviderError,
+            AgentTaskFailureClassification::InvalidInput,
+            "agent_task.provider_launch_environment_invalid",
+            error.to_string(),
+            json!({ "provider": provider.id }),
+        );
+    }
     command_builder.args(&args).envs(
         env.iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
@@ -916,12 +960,22 @@ fn run_materialized_provider_command_once_contained(
     if let Some(run_id) = run_id {
         // Failure to record this diagnostic identity must not interrupt provider
         // execution. The reservation remains the execution authority.
-        let _ = crate::agent_task_lifecycle::record_provider_execution_process(
-            run_id,
-            &request.request.task_id,
-            attempt,
-            child.id(),
-        );
+        if let Some(store) = execution.lifecycle_store() {
+            let _ = crate::agent_task_lifecycle::record_provider_execution_process_in_store(
+                store,
+                run_id,
+                &request.request.task_id,
+                attempt,
+                child.id(),
+            );
+        } else {
+            let _ = crate::agent_task_lifecycle::record_provider_execution_process(
+                run_id,
+                &request.request.task_id,
+                attempt,
+                child.id(),
+            );
+        }
     }
 
     if let Err(error) = containment.attach(&child) {
@@ -1503,7 +1557,8 @@ pub(super) fn run_provider_command(
     run_id: Option<&str>,
 ) -> AgentTaskOutcome {
     let materialized = test_executor_request(request);
-    run_materialized_provider_command(&materialized, provider, run_id, 1)
+    let context = test_execution_context(run_id);
+    run_materialized_provider_command(&materialized, provider, &context)
 }
 
 #[cfg(test)]
@@ -1512,7 +1567,19 @@ pub(super) fn run_provider_command_once(
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let materialized = test_executor_request(request);
-    run_materialized_provider_command_once(&materialized, provider, None, 1)
+    let context = test_execution_context(None);
+    run_materialized_provider_command_once(&materialized, provider, &context)
+}
+
+#[cfg(test)]
+fn test_execution_context(run_id: Option<&str>) -> AgentTaskExecutionContext {
+    AgentTaskExecutionContext {
+        plan_id: "provider-unit-test".to_string(),
+        run_id: run_id.map(str::to_string),
+        attempt: 1,
+        cancellation: crate::agent_task_scheduler::AgentTaskCancellationToken::default(),
+        lifecycle_store: None,
+    }
 }
 
 #[cfg(test)]
@@ -2673,7 +2740,7 @@ pub(super) fn provider_command_env(
     env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
     env.extend(
         resolve_secret_env_with_fallbacks(
-            &request.executor.secret_env,
+            &secret_env_plan.secret_env_names(),
             &provider_secret_sources(provider, Some(request)),
         )
         .map_err(ProviderCommandEnvError::Secret)?,

@@ -3420,6 +3420,62 @@ pub fn reserve_provider_execution_in_store(
     Ok(reservation)
 }
 
+/// Attach the complete, redacted launch contract to the reservation before the
+/// provider subprocess exists. Recovery can then distinguish a portable launch
+/// from one still bound to ambient controller credentials.
+pub fn record_provider_launch_context_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    context: &crate::agent_task_provider::AgentTaskProviderLaunchContext,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let key = format!("{task_id}:{attempt}");
+    if context.run_id.as_deref() != Some(run_id.as_str())
+        || context.task_id != task_id
+        || context.attempt != attempt
+    {
+        return Err(Error::validation_invalid_argument(
+            "provider_launch_context",
+            "provider launch context identity does not match its reservation",
+            Some(key),
+            None,
+        ));
+    }
+    let value = serde_json::to_value(context).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize provider launch context".to_string()),
+        )
+    })?;
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
+        let Some(execution) = record.metadata["provider_executions"]
+            .as_array_mut()
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == key)
+            })
+        else {
+            return false;
+        };
+        if execution.get("launch_context").is_some() {
+            return execution["launch_context"] == value;
+        }
+        execution["launch_context"] = value.clone();
+        true
+    })?;
+    record.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_execution",
+            "cannot attach launch context to an unreserved or conflicting provider execution",
+            Some(key),
+            None,
+        )
+    })
+}
+
 /// Bind a reserved provider execution to the subprocess that actually runs it.
 ///
 /// Fanout workers are threads and therefore share the coordinator PID. The
