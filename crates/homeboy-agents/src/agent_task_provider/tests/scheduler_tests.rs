@@ -1053,6 +1053,35 @@ fn provider_command_receives_declared_secret_env() {
 }
 
 #[test]
+fn provider_command_receives_only_the_declared_launch_environment() {
+    let secret_name = format!("HOMEBOY_TEST_DECLARED_LAUNCH_SECRET_{}", std::process::id());
+    let ambient_name = format!("HOMEBOY_TEST_UNDECLARED_LAUNCH_ENV_{}", std::process::id());
+    std::env::set_var(&secret_name, "declared-secret");
+    std::env::set_var(&ambient_name, "must-not-leak");
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let launch=JSON.parse(process.env.{});let secretOk=process.env.{secret_name}==='declared-secret';let ambientAbsent=process.env.{ambient_name}===undefined;let redacted=!JSON.stringify(launch).includes('declared-secret');let identity=launch.task_id===req.task_id&&launch.schema==='homeboy/agent-task-provider-launch-context/v1';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:secretOk&&ambientAbsent&&redacted&&identity?'succeeded':'failed',summary:'launch context checked'}}));",
+            crate::agent_task_provider::AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON_ENV
+        ))
+    );
+    let (mut request, provider) = request("task-declared-launch-env", command);
+    request.executor.secret_env = vec![secret_name.clone()];
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
+
+    let aggregate = scheduler.run(AgentTaskPlan::new(
+        "plan-declared-launch-env",
+        vec![request],
+    ));
+
+    assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
+    std::env::remove_var(secret_name);
+    std::env::remove_var(ambient_name);
+}
+
+#[test]
 fn provider_command_receives_canonical_secret_env_plan_without_values() {
     let secret_name = format!("HOMEBOY_TEST_AGENT_TASK_PLAN_SECRET_{}", std::process::id());
     std::env::set_var(&secret_name, "hydrated-secret");

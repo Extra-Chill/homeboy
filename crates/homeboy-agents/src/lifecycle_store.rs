@@ -310,6 +310,18 @@ impl AgentTaskLifecycleStore {
         super::lifecycle_ops::reserve_provider_execution_in_store(self, run_id, task, attempt)
     }
 
+    pub(crate) fn record_provider_launch_context(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt: u32,
+        context: &crate::agent_task_provider::AgentTaskProviderLaunchContext,
+    ) -> Result<AgentTaskRunRecord> {
+        super::lifecycle_ops::record_provider_launch_context_in_store(
+            self, run_id, task_id, attempt, context,
+        )
+    }
+
     pub(crate) fn record_provider_execution_terminal(
         &self,
         run_id: &str,
