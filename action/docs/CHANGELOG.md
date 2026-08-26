@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.13] - 2026-08-25
+
+### Fixed
+- compare differential tests against live base
+- neutralize gates when PR closes before execution
+
 ## [2.15.12] - 2026-08-25
 
 ### Changed
