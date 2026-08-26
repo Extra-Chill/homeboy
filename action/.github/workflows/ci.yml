@@ -668,7 +668,10 @@ jobs:
           expected-commands: ${{ inputs.expected-commands || inputs.commands }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
-          scope: ${{ inputs.scope }}
+          # The base checkout cannot derive the candidate's changed scope by
+          # comparing the base SHA to itself. Run a real baseline so its
+          # evidence can be compared with the candidate's selected inventory.
+          scope: full
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}

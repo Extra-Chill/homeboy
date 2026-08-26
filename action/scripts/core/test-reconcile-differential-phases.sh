@@ -166,8 +166,21 @@ run_case 0 'reconciliation reuses the newest independently retried phase artifac
 grep -F 'name: ${{ matrix.title }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: reconciliation did not preserve required check names\n'; exit 1; }
 # shellcheck disable=SC2016
 grep -F 'differential-gating: ${{ inputs.differential-gating }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate lost differential scope semantics\n'; exit 1; }
-# shellcheck disable=SC2016
-grep -F 'scope: ${{ inputs.scope }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: baseline lost caller scope semantics\n'; exit 1; }
+python3 - "${WORKFLOW}" <<'PY'
+import sys
+import yaml
+
+workflow = yaml.safe_load(open(sys.argv[1]))
+
+def phase_scope(job, name):
+    step = next(step for step in workflow["jobs"][job]["steps"] if step.get("name") == name)
+    return step["with"]["scope"]
+
+if phase_scope("candidate", "Run candidate ${{ matrix.title }}") != "${{ inputs.scope }}":
+    raise SystemExit("FAIL: candidate lost caller scope semantics")
+if phase_scope("baseline", "Run baseline ${{ matrix.title }}") != "full":
+    raise SystemExit("FAIL: baseline can compare its checkout to itself instead of producing real evidence")
+PY
 grep -F 'Evaluate PR policy after reconciled quality gates' "${WORKFLOW}" >/dev/null || { printf 'FAIL: reconciled workflow dropped PR policy evaluation\n'; exit 1; }
 # shellcheck disable=SC2016
 grep -F 'homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate artifacts are not command- and attempt-scoped\n'; exit 1; }
