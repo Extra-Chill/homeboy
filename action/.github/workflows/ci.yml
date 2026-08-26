@@ -605,7 +605,7 @@ jobs:
 
   baseline:
     name: Baseline ${{ matrix.title }}
-    needs: [binary, plan]
+    needs: [binary, plan, candidate]
     if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -623,15 +623,35 @@ jobs:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+      - name: Download candidate phase evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          path: candidate-phase
+      - name: Select baseline execution
+        id: baseline-policy
+        env:
+          BASELINE_SELECTED: ${{ matrix.baseline }}
+          CANDIDATE_MANIFEST: candidate-phase/candidate/manifest.json
+          COMMAND: ${{ matrix.command }}
+        run: |
+          run=false
+          if [ "${BASELINE_SELECTED}" = true ]; then
+            status="$(jq -r --arg command "${COMMAND}" '.results[$command] // "unknown"' "${CANDIDATE_MANIFEST}" 2>/dev/null || printf unknown)"
+            [ "${status}" = pass ] || run=true
+          fi
+          echo "run=${run}" >> "${GITHUB_OUTPUT}"
+          echo "Candidate status for ${COMMAND}: ${status:-not selected}; run baseline: ${run}"
       - name: Download candidate Homeboy binary
         id: candidate-binary
+        if: steps.baseline-policy.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
         run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
       - name: Run baseline ${{ matrix.title }}
         id: phase
-        if: matrix.baseline == 'true'
+        if: steps.baseline-policy.outputs.run == 'true'
         continue-on-error: true
         env:
           HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
@@ -661,7 +681,7 @@ jobs:
           auto-issue: 'false'
       - name: Write baseline phase provenance
         id: provenance
-        if: always() && matrix.baseline == 'true'
+        if: always() && steps.baseline-policy.outputs.run == 'true'
         shell: bash
         env:
           PHASE: baseline
@@ -684,7 +704,7 @@ jobs:
           bash .homeboy-action/scripts/core/write-differential-phase-manifest.sh
           cp -R homeboy-ci-results differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
       - name: Upload baseline phase evidence
-        if: always() && matrix.baseline == 'true' && steps.provenance.outcome == 'success'
+        if: always() && steps.baseline-policy.outputs.run == 'true' && steps.provenance.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: homeboy-differential-baseline-${{ matrix.artifact_key }}-${{ github.run_attempt }}
@@ -1146,7 +1166,7 @@ jobs:
           ARTIFACT_KEY: ${{ matrix.artifact_key }}
           ACTION_REVISION: ${{ steps.action-revision.outputs.value }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-          REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' }}
+          REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' && 'candidate-failure' || 'false' }}
           PR_ACTIVE: ${{ steps.final-pr-state.outputs.active }}
         run: bash .homeboy-action/scripts/core/reconcile-differential-phases.sh
 

@@ -64,7 +64,7 @@ assert_count 'actions/checkout@v6' '16' "${CI_WORKFLOW}" "reusable CI workflow u
 assert_count 'actions/cache@v5' '1' "${CI_WORKFLOW}" "reusable CI workflow owns one candidate build cache"
 assert_count 'actions/cache@v5' '3' "${ROOT_DIR}/action.yml" "composite action owns release, source-build, and extension caches"
 assert_count 'actions/upload-artifact@v7' '8' "${CI_WORKFLOW}" "reusable CI workflow uses artifact upload v7"
-assert_count 'actions/download-artifact@v7' '7' "${CI_WORKFLOW}" "reusable CI workflow uses artifact download v7"
+assert_count 'actions/download-artifact@v7' '8' "${CI_WORKFLOW}" "reusable CI workflow uses artifact download v7"
 assert_count 'actions/create-github-app-token@v3' '3' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v3"
 assert_not_contains 'actions/checkout@v4' "${CI_WORKFLOW}" "reusable CI workflow has no checkout v4 references"
 assert_not_contains 'actions/cache@v4' "${CI_WORKFLOW}" "reusable CI workflow has no cache v4 references"

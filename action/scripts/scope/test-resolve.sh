@@ -76,9 +76,10 @@ assert_flags lint true '--changed-since origin/main' 'lint stays scoped under di
 assert_flags refactor true '--changed-since origin/main' 'refactor stays scoped'
 assert_flags review true '--changed-since origin/main' 'review stays scoped'
 
-# `test` keeps the exemption: its scope travels in the extension's
-# HOMEBOY_TEST_SCOPE_* contract, so a CLI flag would double-scope it.
-assert_flags test true '' 'test remains exempt under differential gating'
+# Homeboy turns this one changed ref into the extension's exact changed-test
+# selection. Without the CLI flag, no selection contract is produced and every
+# differential Test silently expands to the full suite (homeboy#11751 W1-3).
+assert_flags test true '--changed-since origin/main' 'test is scoped under differential gating'
 assert_flags test false '--changed-since origin/main' 'test is scoped without differential gating'
 
 # Never-scoped commands must stay unscoped regardless of gating.
