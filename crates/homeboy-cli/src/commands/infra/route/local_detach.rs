@@ -302,12 +302,21 @@ pub(super) fn intercept_local_cook_retry(
             (pid, start_identity, launch_token)
         }
     };
+    let child_session_ref = launch_token
+        .1
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| {
+            Error::internal_unexpected("detached retry session reference is unavailable")
+        })?;
     let controller_job = match submit_cook_retry_controller_job(
         &controller_client,
         cook_id,
         &run_id,
         pid,
         &start_identity,
+        child_session_ref,
     ) {
         Ok(job) => job,
         Err(error) => {
@@ -913,12 +922,14 @@ fn submit_cook_retry_controller_job(
     run_id: &str,
     pid: u32,
     start_identity: &homeboy::core::process::ProcessStartIdentity,
+    child_session_ref: &str,
 ) -> homeboy::core::Result<ControllerJobHandoff> {
     let submission = homeboy::agents::agent_task_service::cook_retry_job_submission(
         cook_id,
         run_id,
         pid,
         start_identity,
+        child_session_ref,
     )?;
     let job = client.submit(submission)?;
     Ok(ControllerJobHandoff::Owned {
