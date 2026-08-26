@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
-# Tests for scripts/issues/auto-file-categorized-issues.sh empty-input handling.
+# Tests for scripts/issues/auto-file-categorized-issues.sh.
 #
 # Covers issue #214: the categorizer must distinguish "nothing to categorize"
 # (success) from "a command failed before producing output" (failure).
 #
-# These tests do not exercise the reconcile path against a real `homeboy`
-# binary — they target the decision logic at the tail of the script that
-# determines the final exit code when zero commands produced structured output.
+# A fake Homeboy binary returns command-result/v3 aggregate fixtures so this
+# exercises the one-call orchestration contract without tracker mutations.
 
 set -euo pipefail
 
@@ -21,6 +20,23 @@ fi
 
 TMP_ROOT=$(mktemp -d)
 trap 'rm -rf "${TMP_ROOT}"' EXIT
+
+mkdir -p "${TMP_ROOT}/bin"
+cat > "${TMP_ROOT}/bin/homeboy" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -n "${MOCK_HOMEBOY_ARGS_FILE:-}" ]; then
+  printf '%s\n' "$*" >> "${MOCK_HOMEBOY_ARGS_FILE}"
+fi
+
+if [ "${MOCK_HOMEBOY_MODE:-empty}" = "mutations" ]; then
+  printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"runs","operation":"findings reconcile-run","success":true,"exit_code":0,"status":"succeeded","data":{"variant":"findings_reconcile_run","payload":{"commands":[{"command":"audit","component_id":"example","source":"/tmp/review-audit.json","status":"processed","warnings":[],"issues_created":1,"issues_updated":2,"issues_closed":3,"failures":0,"reconcile":{"plan_lines":["file findings"],"result":{"executions":[]}}}],"totals":{"commands_processed":1,"issues_created":1,"issues_updated":2,"issues_closed":3,"failures":0}}}}'
+else
+  printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"runs","operation":"findings reconcile-run","success":true,"exit_code":0,"status":"succeeded","data":{"variant":"findings_reconcile_run","payload":{"commands":[],"totals":{"commands_processed":0,"issues_created":0,"issues_updated":0,"issues_closed":0,"failures":0}}}}'
+fi
+SH
+chmod +x "${TMP_ROOT}/bin/homeboy"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -48,7 +64,7 @@ run_categorizer() {
   local output status
   set +e
   output=$(env -i \
-    PATH="${PATH}" \
+    PATH="${TMP_ROOT}/bin:${PATH}" \
     HOME="${HOME}" \
     GITHUB_REPOSITORY="example-org/example-repo" \
     GITHUB_SERVER_URL="https://github.com" \
@@ -127,10 +143,27 @@ run_categorizer \
 run_categorizer \
   "failed command in RESULTS propagates exit 1" \
   1 \
-  "No structured result exists for review audit; attempted" \
+  "Commands failed without producing structured output for categorization: review audit" \
   RESULTS='{"review audit":"fail"}' \
   COMMANDS='review audit' \
   EXPECTED_COMMANDS='review audit,review lint,review test'
+
+# The action delegates command normalization, durable filename resolution,
+# mutation accounting, and plan rendering to one aggregate Homeboy call.
+ARGS_FILE="${TMP_ROOT}/homeboy-args"
+run_categorizer \
+  "aggregate reconcile delegates once" \
+  0 \
+  "Issues created: 1" \
+  RESULTS='{"review audit":"fail"}' \
+  COMMANDS='review audit' \
+  EXPECTED_COMMANDS='review audit,review lint,review test' \
+  MOCK_HOMEBOY_MODE='mutations' \
+  MOCK_HOMEBOY_ARGS_FILE="${ARGS_FILE}"
+
+[ "$(wc -l < "${ARGS_FILE}")" -eq 1 ] || { printf 'FAIL: expected one Homeboy invocation\n'; exit 1; }
+grep -F 'runs findings reconcile-run example' "${ARGS_FILE}" >/dev/null
+grep -F -- '--commands review audit' "${ARGS_FILE}" >/dev/null
 
 # Case 4 — RESULTS marks all commands as passing but no JSON files exist.
 # This is the "clean codebase" path: nothing to categorize, exit 0.
