@@ -1069,6 +1069,52 @@ mod tests {
         });
     }
 
+    #[test]
+    fn execute_and_resume_supervise_through_the_controller_job_handle() {
+        with_isolated_home(|_| {
+            let batch_id = "fanout-controller-harness";
+            persist_batch(batch_id, &["unstarted"]);
+            let request = request_of(batch_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CookBatchJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+            let prepared = driver.prepare(request).expect("prepare batch job");
+
+            let result = driver
+                .execute(prepared, harness.handle())
+                .expect("supervise dead coordinator");
+
+            assert_eq!(result["phase"], "completed");
+            assert_eq!(result["terminal_state"], "partial_failure");
+            let checkpoint = harness
+                .checkpoint()
+                .expect("read checkpoint")
+                .expect("supervision checkpoint");
+            assert_eq!(checkpoint["phase"], "supervising");
+            let progress = harness
+                .events()
+                .expect("read controller events")
+                .into_iter()
+                .find(|event| event.kind == JobEventKind::Progress)
+                .and_then(|event| event.data)
+                .expect("projected supervision progress");
+            assert_eq!(progress["batch_id"], batch_id);
+            assert!(progress.get("child_pid").is_none());
+
+            let mut completed = checkpoint;
+            completed["phase"] = json!("completed");
+            completed["terminal_state"] = json!("partial_failure");
+            let first = driver
+                .resume(completed.clone(), harness.handle())
+                .expect("first completed replay");
+            let second = driver
+                .resume(completed, harness.handle())
+                .expect("second completed replay");
+            assert_eq!(first, second);
+            assert_eq!(first, result);
+        });
+    }
+
     /// A coordinator that died before writing its batch record is not a
     /// vacuously successful empty wave.
     #[test]

@@ -4292,6 +4292,8 @@ mod count_unit_tests {
 
 #[cfg(test)]
 mod tests {
+    use homeboy::core::api_jobs::JobEventKind;
+    use homeboy::core::test_support::{with_isolated_home, ControllerJobHarness};
     use homeboy::core::worktree;
     use homeboy::runner::runners::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
     use serde_json::json;
@@ -4299,6 +4301,70 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn controller_cleanup_request() -> Value {
+        serde_json::to_value(CleanupArgs {
+            apply: true,
+            include: vec![CleanupCategoryArg::ControllerScratch],
+            exclude: Vec::new(),
+            include_untagged: false,
+            older_than_days: None,
+            runtime_tmp_managed_older_than_days: None,
+            limit: None,
+            full: false,
+            cursor: None,
+            command: None,
+        })
+        .expect("serialize cleanup request")
+    }
+
+    #[test]
+    fn execute_and_resume_use_the_controller_job_handle_boundary() {
+        with_isolated_home(|_| {
+            let request = controller_cleanup_request();
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CleanupJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+
+            let result = driver
+                .execute(request.clone(), harness.handle())
+                .expect("execute isolated cleanup");
+            assert_eq!(result["phase"], "completed");
+            let checkpoint = harness
+                .checkpoint()
+                .expect("read checkpoint")
+                .expect("completed cleanup checkpoint");
+            assert_eq!(checkpoint["completed"]["phase"], "completed");
+            assert!(harness
+                .events()
+                .expect("read controller events")
+                .into_iter()
+                .any(|event| event.kind == JobEventKind::Progress
+                    && event.data.as_ref().and_then(|data| data.get("phase"))
+                        == Some(&json!("running"))));
+
+            let first = driver
+                .resume(checkpoint.clone(), harness.handle())
+                .expect("first completed replay");
+            let second = driver
+                .resume(checkpoint, harness.handle())
+                .expect("second completed replay");
+            assert_eq!(first, second);
+            assert_eq!(first, result);
+
+            let cancelled = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct cancelled controller job harness");
+            cancelled
+                .request_cancellation("test cancellation")
+                .expect("request cancellation");
+            assert_eq!(
+                driver
+                    .execute(request, cancelled.handle())
+                    .expect("cancel before cleanup starts"),
+                json!({ "phase": "cancelled" })
+            );
+        });
+    }
 
     #[test]
     fn runtime_temp_retained_records_expose_producer_run_and_unknown_boundaries() {

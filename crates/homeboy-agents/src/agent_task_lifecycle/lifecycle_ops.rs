@@ -3675,7 +3675,7 @@ pub fn record_cook_progress_with_activity_in_store(
             metadata.insert("cook_progress".to_string(), progress);
         }
         if !record.state.is_terminal()
-            && (!record.is_runner_backed() || record.has_fresh_controller_pre_provider_heartbeat())
+            && (!record.is_runner_backed() || record.is_controller_pre_provider_phase())
         {
             record.updated_at = Some(now_timestamp());
             update_lifecycle_heartbeat(record);
