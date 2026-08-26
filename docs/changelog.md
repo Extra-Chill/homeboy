@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.15] - 2026-08-26
+
+### Fixed
+- preserve head recovery source
+- preserve live pending handoff
+- trust immutable unpushed target
+
 ## [0.361.14] - 2026-08-26
 
 ### Changed
