@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.7] - 2026-08-26
+
+### Changed
+- persist explicit provider launch context
+
+### Fixed
+- admit non-repository build roots
+- stop reporting a fully-read empty process scope as a possible escape
+- accept inherited replacement proof
+- derive the required-gates fixtures from the manifest so the terminal-verdict tests measure again
+- maintain one rolling findings issue
+- rebind pre-execution runtime
+
 ## [0.361.6] - 2026-08-26
 
 ### Changed
