@@ -20,6 +20,7 @@ use homeboy::issues::{
 
 use super::parse_key_val;
 use super::utils::args::MutationArgs;
+use super::utils::output::command_output_stem;
 use super::CmdResult;
 
 #[derive(Args, Clone)]
@@ -84,8 +85,8 @@ pub(crate) enum IssuesCommand {
         #[arg(long)]
         no_refresh_closed: bool,
 
-        /// Cap the number of issues fetched from the tracker for migration and
-        /// dedup analysis.
+        /// Cap each marker-targeted tracker query used for migration and dedup
+        /// analysis.
         #[arg(long, default_value_t = 1000)]
         list_limit: usize,
 
@@ -120,6 +121,12 @@ pub(crate) enum IssuesCommand {
         #[arg(long, value_delimiter = ',', default_value = "audit,lint,test")]
         commands: Vec<String>,
 
+        /// Explicit native command output mapping. Repeatable as
+        /// `--from-output audit=/tmp/review-audit.json`. When present, these
+        /// mappings replace command-derived filenames.
+        #[arg(long = "from-output", value_name = "COMMAND=PATH", value_parser = parse_key_val)]
+        from_output: Vec<(String, String)>,
+
         /// Optional run URL appended to generated issue bodies.
         #[arg(long, value_name = "URL")]
         run_url: Option<String>,
@@ -129,8 +136,8 @@ pub(crate) enum IssuesCommand {
         #[arg(long)]
         no_refresh_closed: bool,
 
-        /// Cap the number of issues fetched from the tracker for migration and
-        /// dedup analysis per command.
+        /// Cap each marker-targeted tracker query used for migration and dedup
+        /// analysis per command.
         #[arg(long, default_value_t = 1000)]
         list_limit: usize,
 
@@ -283,6 +290,7 @@ pub fn run(args: IssuesArgs) -> CmdResult<IssuesCommandOutput> {
             component_id,
             output_dir,
             commands,
+            from_output,
             run_url,
             no_refresh_closed,
             list_limit,
@@ -293,6 +301,7 @@ pub fn run(args: IssuesArgs) -> CmdResult<IssuesCommandOutput> {
                 component_id,
                 output_dir,
                 commands,
+                from_output,
                 run_url,
                 no_refresh_closed,
                 list_limit,
@@ -387,6 +396,7 @@ fn run_reconcile_run(
     component_id: String,
     output_dir: Option<String>,
     commands: Vec<String>,
+    from_output: Vec<(String, String)>,
     run_url: Option<String>,
     no_refresh_closed: bool,
     list_limit: usize,
@@ -394,12 +404,13 @@ fn run_reconcile_run(
     path: Option<String>,
 ) -> homeboy::core::Result<ReconcileRunOutput> {
     let output_dir = discover_output_dir(output_dir)?;
-    let commands = normalize_reconcile_run_commands(commands);
+    let sources = reconcile_run_sources(&output_dir, commands, from_output);
     let mut command_outputs = Vec::new();
     let mut totals = ReconcileRunTotals::default();
 
-    for command in commands {
-        let source = output_dir.join(format!("{command}.json"));
+    for source in sources {
+        let command = source.command;
+        let source = source.path;
         let source_display = source.display().to_string();
 
         match inspect_reconcile_run_output(&source) {
@@ -523,12 +534,66 @@ fn normalize_reconcile_run_commands(commands: Vec<String>) -> Vec<String> {
         .flat_map(|raw| {
             raw.split(',')
                 .map(str::trim)
-                .filter(|part| !part.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         })
-        .filter(|command| matches!(command.as_str(), "audit" | "lint" | "test"))
+        .filter(|command| !command.is_empty())
         .collect()
+}
+
+struct ReconcileRunSource {
+    command: String,
+    path: PathBuf,
+}
+
+fn reconcile_run_sources(
+    output_dir: &Path,
+    commands: Vec<String>,
+    from_output: Vec<(String, String)>,
+) -> Vec<ReconcileRunSource> {
+    if !from_output.is_empty() {
+        let mut mapped = BTreeMap::new();
+        for (raw, path) in from_output {
+            if let Some(command) = quality_base_command(&raw) {
+                mapped.insert(
+                    command.to_string(),
+                    ReconcileRunSource {
+                        command: command.to_string(),
+                        path: PathBuf::from(path),
+                    },
+                );
+            }
+        }
+        return mapped.into_values().collect();
+    }
+
+    let mut sources = BTreeMap::new();
+    for raw in normalize_reconcile_run_commands(commands) {
+        if let Some(command) = quality_base_command(&raw) {
+            sources.insert(
+                command.to_string(),
+                output_dir.join(format!("{}.json", command_output_stem(&raw))),
+            );
+        }
+    }
+
+    sources
+        .into_iter()
+        .map(|(command, path)| ReconcileRunSource { command, path })
+        .collect()
+}
+
+fn quality_base_command(command: &str) -> Option<&'static str> {
+    let command = command
+        .trim()
+        .strip_prefix("review ")
+        .unwrap_or(command.trim());
+    match command.split_whitespace().next()? {
+        "audit" => Some("audit"),
+        "lint" => Some("lint"),
+        "test" => Some("test"),
+        _ => None,
+    }
 }
 
 fn inspect_reconcile_run_output(path: &Path) -> OutputInspection {
@@ -869,46 +934,24 @@ fn render_plan_lines(plan: &ReconcilePlan) -> Vec<String> {
     plan.actions
         .iter()
         .map(|a| match a {
-            homeboy::issues::ReconcileAction::FileNew {
-                command,
-                component_id,
-                category,
-                count,
-                ..
-            } => format!(
-                "file_new      {}: {} in {} ({})",
-                command, category, component_id, count
-            ),
-            homeboy::issues::ReconcileAction::Update {
-                number,
-                category,
-                count,
-                ..
-            } => format!("update        {} ({}) → #{}", category, count, number),
-            homeboy::issues::ReconcileAction::UpdateClosed {
-                number,
-                category,
-                count,
-                ..
-            } => format!(
-                "update_closed {} ({}) → #{} (stays closed)",
-                category, count, number
-            ),
-            homeboy::issues::ReconcileAction::Close {
-                number, category, ..
-            } => format!("close         {} → #{}", category, number),
-            homeboy::issues::ReconcileAction::CloseDuplicate {
-                number,
-                keep,
-                category,
-                ..
-            } => format!(
-                "dedupe        {} → keep #{}, close #{}",
-                category, keep, number
-            ),
-            homeboy::issues::ReconcileAction::Skip {
-                category, reason, ..
-            } => format!("skip          {} ({:?})", category, reason),
+            homeboy::issues::ReconcileAction::FileNew { component_id, .. } => {
+                format!("file_new      findings in {component_id}")
+            }
+            homeboy::issues::ReconcileAction::Update { number, .. } => {
+                format!("update        findings → #{number}")
+            }
+            homeboy::issues::ReconcileAction::UpdateClosed { number, .. } => {
+                format!("update_closed findings → #{number} (stays closed)")
+            }
+            homeboy::issues::ReconcileAction::Close { number, .. } => {
+                format!("close         findings → #{number}")
+            }
+            homeboy::issues::ReconcileAction::CloseDuplicate { number, keep, .. } => {
+                format!("dedupe        findings → keep #{keep}, close #{number}")
+            }
+            homeboy::issues::ReconcileAction::Skip { reason, .. } => {
+                format!("skip          findings ({reason:?})")
+            }
         })
         .collect()
 }
@@ -977,6 +1020,47 @@ mod tests {
             Some(value) => std::env::set_var("HOMEBOY_OUTPUT_DIR", value),
             None => std::env::remove_var("HOMEBOY_OUTPUT_DIR"),
         }
+    }
+
+    #[test]
+    fn reconcile_run_resolves_action_command_stems() {
+        let sources = reconcile_run_sources(
+            Path::new("/tmp/results"),
+            vec![
+                "review audit --profile=pr".to_string(),
+                "review lint".to_string(),
+                "release".to_string(),
+            ],
+            Vec::new(),
+        );
+
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].command, "audit");
+        assert_eq!(
+            sources[0].path,
+            PathBuf::from("/tmp/results/review-audit---profile-pr.json")
+        );
+        assert_eq!(sources[1].command, "lint");
+        assert_eq!(
+            sources[1].path,
+            PathBuf::from("/tmp/results/review-lint.json")
+        );
+    }
+
+    #[test]
+    fn reconcile_run_explicit_outputs_replace_derived_sources() {
+        let sources = reconcile_run_sources(
+            Path::new("/tmp/results"),
+            vec!["audit".to_string()],
+            vec![(
+                "review test".to_string(),
+                "/durable/review-test.json".to_string(),
+            )],
+        );
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].command, "test");
+        assert_eq!(sources[0].path, PathBuf::from("/durable/review-test.json"));
     }
 
     #[test]

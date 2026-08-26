@@ -260,6 +260,10 @@ pub fn issue_find(
         "--json".into(),
         "number,title,body,url,state,stateReason,closedAt,labels".into(),
     ];
+    if let Some(search) = &options.search {
+        args.push("--search".into());
+        args.push(search.clone());
+    }
     // Pass labels through gh to narrow the server-side result set; we still
     // enforce the exact label-set conjunction locally in case gh changes the
     // semantics of --label (currently: all-of).

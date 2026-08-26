@@ -582,7 +582,7 @@ Defaults to dry-run; pass `--apply` to actually call the tracker.
 | `--from-output` | `<COMMAND=PATH>` | Native Homeboy command output to normalize before reconcile. Repeatable as `--from-output audit=/tmp/audit.json` |
 | `--run-url` | `<URL>` | Optional run URL appended to generated issue bodies when using `--from-output` |
 | `--no-refresh-closed` | flag | Don't refresh the body of closed-not_planned issues with the latest finding count. Default is to refresh (so the closed issue stays useful as a "current state" reference) |
-| `--list-limit` | `<LIST_LIMIT>` | Cap the number of issues fetched from the tracker for migration and dedup analysis |
+| `--list-limit` | `<LIST_LIMIT>` | Cap each marker-targeted tracker query used for migration and dedup analysis |
 | `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
 | `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json (CI runners, ad-hoc clones) |
@@ -605,9 +605,10 @@ Discovers `<command>.json` files in an output directory, runs the existing per-c
 | --- | --- | --- |
 | `--output-dir` | `<DIR>` | Directory containing structured command outputs such as `audit.json`, `lint.json`, and `test.json`. Defaults to HOMEBOY_OUTPUT_DIR when omitted |
 | `--commands` | `<COMMANDS>` | Comma-separated command list to inspect in the output directory |
+| `--from-output` | `<COMMAND=PATH>` | Explicit native command output mapping. Repeatable as `--from-output audit=/tmp/review-audit.json`. When present, these mappings replace command-derived filenames |
 | `--run-url` | `<URL>` | Optional run URL appended to generated issue bodies |
 | `--no-refresh-closed` | flag | Don't refresh the body of closed-not_planned issues with the latest finding count |
-| `--list-limit` | `<LIST_LIMIT>` | Cap the number of issues fetched from the tracker for migration and dedup analysis per command |
+| `--list-limit` | `<LIST_LIMIT>` | Cap each marker-targeted tracker query used for migration and dedup analysis per command |
 | `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
 | `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
 | `--path` | `<PATH>` | Workspace path to discover the component from a portable homeboy.json (CI runners, ad-hoc clones) |

@@ -94,46 +94,18 @@ fn execute_action(action: &ReconcileAction, tracker: &dyn Tracker) -> ReconcileE
 
 fn summary_for(action: &ReconcileAction) -> String {
     match action {
-        ReconcileAction::FileNew {
-            command,
-            component_id,
-            category,
-            count,
-            ..
-        } => format!(
-            "file_new      {}: {} in {} ({})",
-            command, category, component_id, count
-        ),
-        ReconcileAction::Update {
-            number,
-            category,
-            count,
-            ..
-        } => format!("update        {} ({} → #{})", category, count, number),
-        ReconcileAction::UpdateClosed {
-            number,
-            category,
-            count,
-            ..
-        } => format!(
-            "update_closed {} ({} → #{}) [stays closed]",
-            category, count, number
-        ),
-        ReconcileAction::Close {
-            number, category, ..
-        } => format!("close         {} → #{}", category, number),
-        ReconcileAction::CloseDuplicate {
-            number,
-            keep,
-            category,
-            ..
-        } => format!(
-            "dedupe        {} → keep #{} close #{}",
-            category, keep, number
-        ),
-        ReconcileAction::Skip {
-            category, reason, ..
-        } => format!("skip          {} ({:?})", category, reason),
+        ReconcileAction::FileNew { component_id, .. } => {
+            format!("file_new      findings in {component_id}")
+        }
+        ReconcileAction::Update { number, .. } => format!("update        findings → #{number}"),
+        ReconcileAction::UpdateClosed { number, .. } => {
+            format!("update_closed findings → #{number} [stays closed]")
+        }
+        ReconcileAction::Close { number, .. } => format!("close         findings → #{number}"),
+        ReconcileAction::CloseDuplicate { number, keep, .. } => {
+            format!("dedupe        findings → keep #{keep} close #{number}")
+        }
+        ReconcileAction::Skip { reason, .. } => format!("skip          findings ({reason:?})"),
     }
 }
 
@@ -243,13 +215,10 @@ mod tests {
 
     fn file_new(category: &str) -> ReconcileAction {
         ReconcileAction::FileNew {
-            command: "audit".into(),
             component_id: "c".into(),
-            category: category.into(),
             title: format!("audit: {} in c (5)", category),
             body: "body".into(),
             labels: vec!["audit".into()],
-            count: 5,
         }
     }
 
@@ -277,18 +246,14 @@ mod tests {
                     number: 100,
                     title: "audit: x in c (3)".into(),
                     body: "b".into(),
-                    category: "x".into(),
-                    count: 3,
                 },
                 ReconcileAction::Close {
                     number: 200,
-                    category: "y".into(),
                     comment: "resolved".into(),
                 },
                 ReconcileAction::CloseDuplicate {
                     number: 300,
                     keep: 100,
-                    category: "x".into(),
                     comment: "dupe of #100".into(),
                 },
             ],
@@ -325,12 +290,10 @@ mod tests {
             "c",
             vec![
                 ReconcileAction::Skip {
-                    category: "x".into(),
                     component_id: "c".into(),
                     reason: ReconcileSkipReason::NoFindingsNoIssue,
                 },
                 ReconcileAction::Skip {
-                    category: "y".into(),
                     component_id: "c".into(),
                     reason: ReconcileSkipReason::ClosedNotPlannedNoRefresh,
                 },
@@ -359,7 +322,6 @@ mod tests {
                 file_new("a"),
                 ReconcileAction::Close {
                     number: 1,
-                    category: "b".into(),
                     comment: "c".into(),
                 },
                 file_new("c"),
@@ -396,8 +358,6 @@ mod tests {
             vec![ReconcileAction::UpdateClosed {
                 number: 50,
                 body: "fresh".into(),
-                category: "x".into(),
-                count: 99,
             }],
         );
         let tracker = MockTracker::new();
