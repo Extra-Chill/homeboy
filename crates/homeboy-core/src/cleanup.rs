@@ -189,7 +189,19 @@ pub fn admit_reconstructable_artifact_work_in_root(
 
     // A busy owner is not treated as success: every caller still measures below
     // and deterministically admits or refuses from the current filesystem facts.
-    let _ = try_run_automatic_artifact_retention_with_config(data_root, &roots, &retention)?;
+    let repository_roots = existing_unique_roots(
+        roots
+            .iter()
+            .filter_map(|root| git_root(root).ok())
+            .collect(),
+    );
+    if !repository_roots.is_empty() {
+        let _ = try_run_automatic_artifact_retention_with_config(
+            data_root,
+            &repository_roots,
+            &retention,
+        )?;
+    }
 
     for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
@@ -3163,6 +3175,27 @@ mod tests {
             assert!(error.is_storage_exhausted());
             assert_eq!(error.details["reserve_bytes"], u64::MAX);
             assert!(repo.path().join("target/debug/app").exists());
+        });
+    }
+
+    #[test]
+    fn pressure_admission_remeasures_non_repository_paths_without_worktree_retention() {
+        crate::test_support::with_isolated_home(|_| {
+            let build_root = tempfile::tempdir().expect("non-repository build root");
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: crate::defaults::RetentionConfig {
+                    reconstructable_artifact_reserve_bytes: u64::MAX,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("save retention");
+
+            let error = admit_reconstructable_artifact_work(vec![build_root.path().to_path_buf()])
+                .expect_err("a measured reserve breach must still refuse non-repository work");
+
+            assert!(error.is_storage_exhausted());
+            assert_eq!(error.details["reserve_bytes"], u64::MAX);
         });
     }
 

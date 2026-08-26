@@ -488,6 +488,60 @@ fn a_duplicate_declared_context_is_refused_by_the_generator() {
     );
 }
 
+/// Criterion: a declaration that gates nothing is refused at declaration time.
+///
+/// Every derived artifact is a projection of `.gates`, so a manifest that
+/// declares no gates — or that has lost the terminal aggregate proving the
+/// others executed — derives a ruleset requiring nothing, and `--check` would
+/// then report that vacuum as *current*. This is #12833 reached through
+/// generation rather than through live drift: the enforceable difference
+/// between "the policy is satisfied" and "there is no policy" has to be made
+/// here, because downstream every artifact is faithful to whatever it was
+/// given.
+#[test]
+fn a_declaration_that_gates_nothing_is_refused_by_the_generator() {
+    for (label, mutate) in [
+        (
+            "no-gates",
+            (|manifest: &mut serde_json::Value| {
+                manifest["gates"] = serde_json::json!([]);
+            }) as fn(&mut serde_json::Value),
+        ),
+        ("no-terminal-gate", |manifest: &mut serde_json::Value| {
+            for gate in manifest["gates"].as_array_mut().expect("manifest gates") {
+                if let Some(object) = gate.as_object_mut() {
+                    object.remove("terminal");
+                }
+            }
+        }),
+    ] {
+        let scratch = Scratch::new(label);
+        let mut mutated = manifest().clone();
+        mutate(&mut mutated);
+        let path = scratch.write(
+            "manifest.json",
+            &serde_json::to_string_pretty(&mutated).expect("mutated manifest"),
+        );
+
+        let output = Command::new("bash")
+            .args([".github/generate-required-gates-artifacts.sh", "--check"])
+            .env("REQUIRED_GATES_MANIFEST", &path)
+            .env(
+                "REQUIRED_GATES_RULESET_OUTPUT",
+                scratch.missing("ruleset.json"),
+            )
+            .env("REQUIRED_GATES_DOCS_OUTPUT", "")
+            .output()
+            .expect("required-gates generator should run");
+
+        assert!(
+            !output.status.success(),
+            "the `{label}` manifest declares no enforceable gate policy and must be refused \
+             before any artifact is derived from it"
+        );
+    }
+}
+
 #[test]
 fn shipped_validator_accepts_the_versioned_policy() {
     let output = run_validator(
