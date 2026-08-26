@@ -48,7 +48,7 @@ impl From<RawTestFailure> for TestFailure {
             message: raw
                 .message
                 .unwrap_or_else(|| "test failure (no message provided)".to_string()),
-            source_file: raw.source_file.or(raw.source).unwrap_or_default(),
+            source_file: raw.source.or(raw.source_file).unwrap_or_default(),
             source_line: raw.line.or(raw.source_line).unwrap_or_default(),
         }
     }
@@ -879,34 +879,32 @@ mod tests {
     }
 
     #[test]
-    fn failures_file_parser_accepts_normalized_runtime_helper_aliases() {
+    fn failures_file_parser_accepts_normalized_records_with_compatibility_aliases() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let failures_file = temp_dir.path().join("test-failures.json");
         std::fs::write(
             &failures_file,
             r#"[{
                 "test_id": "suite::case",
-                "test_name": "suite::case",
+                "test_name": "suite::legacy-case",
                 "file": "tests/suite.rs",
-                "test_file": "tests/suite.rs",
+                "test_file": "tests/legacy.rs",
                 "line": 42,
-                "source_line": 42,
+                "source_line": 24,
                 "failure_type": "assertion",
-                "error_type": "assertion",
-                "message": "failed assertion",
-                "source_file": "tests/suite.rs"
+                "error_type": "legacy_assertion",
+                "message": "failed assertion"
             }]"#,
         )
         .expect("write normalized test failures");
 
         let parsed = parse_failures_file(&failures_file)
-            .expect("normalized runtime-helper failures should parse")
+            .expect("normalized test failures should parse")
             .expect("test failures payload should be present");
 
         assert_eq!(parsed.failures.len(), 1);
         assert_eq!(parsed.failures[0].test_name, "suite::case");
         assert_eq!(parsed.failures[0].test_file, "tests/suite.rs");
-        assert_eq!(parsed.failures[0].source_file, "tests/suite.rs");
         assert_eq!(parsed.failures[0].source_line, 42);
         assert_eq!(parsed.failures[0].error_type, "assertion");
     }
