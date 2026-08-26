@@ -577,6 +577,7 @@ jobs:
           COMPONENT: ${{ steps.phase.outputs.component }}
           CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
           RESULTS: ${{ steps.phase.outputs.results }}
+          EXECUTION_STATE: ${{ steps.phase.outputs.pr-state-reason == 'pr_closed' && 'pr_closed' || 'completed' }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
         run: |
@@ -674,6 +675,7 @@ jobs:
           COMPONENT: ${{ steps.phase.outputs.component }}
           CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
           RESULTS: ${{ steps.phase.outputs.results }}
+          EXECUTION_STATE: ${{ steps.phase.outputs.pr-state-reason == 'pr_closed' && 'pr_closed' || 'completed' }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
         run: |
@@ -1145,6 +1147,7 @@ jobs:
           ACTION_REVISION: ${{ steps.action-revision.outputs.value }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' }}
+          PR_ACTIVE: ${{ steps.final-pr-state.outputs.active }}
         run: bash .homeboy-action/scripts/core/reconcile-differential-phases.sh
 
       - name: Generate GitHub App token

@@ -113,12 +113,23 @@ validate_manifest() {
   _check_predicate "${phase}" "${artifact_name}" "${manifest}" binary_sha256 \
     'must be a 64-character hex digest' \
     '(.binary_sha256 | type == "string" and test("^[0-9a-f]{64}$"))'
+  _check_predicate "${phase}" "${artifact_name}" "${manifest}" execution_state \
+    "must be 'completed' or 'pr_closed'" \
+    '((.execution_state // "completed") == "completed" or .execution_state == "pr_closed")'
   _check_predicate "${phase}" "${artifact_name}" "${manifest}" results \
-    "must be an object recording '${command}' as pass, fail, or timeout" \
-    "(.results | type == \"object\" and (.[\"${command}\"] == \"pass\" or .[\"${command}\"] == \"fail\" or .[\"${command}\"] == \"timeout\"))"
+    "must record '${command}' as pass, fail, or timeout after execution, or be empty for pr_closed" \
+    "(.results | type == \"object\") and (if .execution_state == \"pr_closed\" then (.results | length == 0) else (.[\"results\"][\"${command}\"] == \"pass\" or .[\"results\"][\"${command}\"] == \"fail\" or .[\"results\"][\"${command}\"] == \"timeout\") end)"
 }
 
 validate_manifest candidate "${candidate_artifact_name}" "${candidate_manifest}" "${CANDIDATE_SHA}"
+candidate_execution_state="$(jq -r '.execution_state // "completed"' "${candidate_manifest}")"
+if [ "${candidate_execution_state}" = pr_closed ]; then
+  [ "${PR_ACTIVE:-}" = false ] || fail_closed "Candidate command execution was skipped as pr_closed, but the final PR state is active."
+  printf 'results={}\ncomponent=%s\noutput-dir=%s\nlifecycle-state=pr_closed\n' \
+    "$(jq -r '.component' "${candidate_manifest}")" "${candidate_dir}/homeboy-ci-results" >> "${GITHUB_OUTPUT}"
+  echo "PR closed before candidate command execution; recording a neutral pr_closed lifecycle verdict."
+  exit 0
+fi
 candidate_results="$(jq -c '.results' "${candidate_manifest}")"
 candidate_output="${candidate_dir}/homeboy-ci-results"
 [ -d "${candidate_output}" ] || fail_closed "Candidate result payload is missing."
@@ -129,6 +140,14 @@ if [ "${REQUIRE_BASELINE:-false}" = "true" ]; then
   baseline_artifact_name="${RESOLVED_ARTIFACT_NAME}"
   baseline_dir="$(dirname "${baseline_manifest}")"
   validate_manifest baseline "${baseline_artifact_name}" "${baseline_manifest}" "${BASE_SHA}"
+  baseline_execution_state="$(jq -r '.execution_state // "completed"' "${baseline_manifest}")"
+  if [ "${baseline_execution_state}" = pr_closed ]; then
+    [ "${PR_ACTIVE:-}" = false ] || fail_closed "Baseline command execution was skipped as pr_closed, but the final PR state is active."
+    printf 'results={}\ncomponent=%s\noutput-dir=%s\nlifecycle-state=pr_closed\n' \
+      "$(jq -r '.component' "${candidate_manifest}")" "${candidate_output}" >> "${GITHUB_OUTPUT}"
+    echo "PR closed before baseline command execution; recording a neutral pr_closed lifecycle verdict."
+    exit 0
+  fi
   candidate_component="$(jq -r '.component' "${candidate_manifest}")"
   baseline_component="$(jq -r '.component' "${baseline_manifest}")"
   candidate_cli="$(jq -r '.cli_revision' "${candidate_manifest}")"

@@ -30,6 +30,12 @@ write_phase() {
   jq -cn --arg phase "${phase}" --arg repository example/repo --arg candidate_sha candidate --arg base_sha base --arg checkout_sha "${checkout_sha}" --arg command 'review test' --arg component "${component}" --arg action_revision action-sha --arg cli_revision "${cli}" --arg binary_sha256 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' --argjson run_attempt 2 --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > "${dir}/manifest.json"
 }
 
+mark_pr_closed() {
+  local phase="$1"
+  jq '.execution_state = "pr_closed" | .results = {}' "${tmp}/artifacts/${phase}/manifest.json" > "${tmp}/manifest.json"
+  mv "${tmp}/manifest.json" "${tmp}/artifacts/${phase}/manifest.json"
+}
+
 run_case() {
   local expected="$1" label="$2"
   shift 2
@@ -63,6 +69,23 @@ run_case 1 'candidate timeout remains blocking'
 
 rm -rf "${tmp}/artifacts"; mkdir -p "${tmp}/artifacts"; write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
 run_case 1 'missing candidate artifact fails closed'
+
+rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; mark_pr_closed candidate
+run_case 0 'closed PR before candidate execution produces a neutral lifecycle verdict'
+grep -F 'lifecycle-state=pr_closed' "${tmp}/output" >/dev/null || { printf 'FAIL: candidate closure omitted typed lifecycle output\n'; exit 1; }
+
+rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; mark_pr_closed candidate
+rm -f "${tmp}/output"
+set +e
+PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ARTIFACT_KEY=fixture-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=true GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null 2>&1
+active_closed_status=$?
+set -e
+[ "${active_closed_status}" -eq 1 ] || { printf 'FAIL: active PR accepted pr_closed candidate evidence\n'; exit 1; }
+printf 'PASS: active PR fails closed for pr_closed candidate evidence\n'
+
+rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; write_phase baseline base component cli '{"review test":"fail"}' "${payload_one}"; mark_pr_closed baseline
+run_case 0 'closed PR before baseline execution produces a neutral lifecycle verdict'
+grep -F 'lifecycle-state=pr_closed' "${tmp}/output" >/dev/null || { printf 'FAIL: baseline closure omitted typed lifecycle output\n'; exit 1; }
 
 rm -rf "${tmp}/artifacts"; write_phase candidate candidate component-a cli '{"review test":"pass"}' "${payload_pass}"; write_phase baseline base component-b cli '{"review test":"pass"}' "${payload_pass}"
 run_case 1 'component provenance mismatch fails closed'

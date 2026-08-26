@@ -22,8 +22,9 @@ run_writer() {
   ACTION_REVISION=action-sha \
   CLI_REVISION="${CLI_REVISION-}" \
   BINARY_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  EXECUTION_STATE="${EXECUTION_STATE:-completed}" \
   RUN_ATTEMPT=2 \
-  RESULTS='{"review test":"pass"}' \
+  RESULTS="${RESULTS:-{\"review test\":\"pass\"}}" \
     bash "${WRITER}"
 }
 
@@ -31,6 +32,26 @@ CLI_REVISION='homeboy 9.9.9+candidate' run_writer >/dev/null
 jq -e '.cli_revision == "homeboy 9.9.9+candidate" and .results["review test"] == "pass"' \
   "${tmp}/candidate/manifest.json" >/dev/null
 printf 'PASS: producer atomically publishes a manifest with selected CLI identity\n'
+
+rm -rf "${tmp}/candidate"
+CLI_REVISION='homeboy 9.9.9+candidate' EXECUTION_STATE=pr_closed RESULTS='{"review test":"fail"}' run_writer >/dev/null
+jq -e '.execution_state == "pr_closed" and .results == {}' "${tmp}/candidate/manifest.json" >/dev/null
+printf 'PASS: producer records pr_closed without synthetic quality results\n'
+
+rm -rf "${tmp}/candidate"
+set +e
+output="$(CLI_REVISION='homeboy 9.9.9+candidate' EXECUTION_STATE=unknown run_writer 2>&1)"
+status=$?
+set -e
+if [ "${status}" -eq 0 ] || [ -e "${tmp}/candidate/manifest.json" ]; then
+  printf 'FAIL: unknown execution state was published\n%s\n' "${output}"
+  exit 1
+fi
+case "${output}" in
+  *"field 'execution_state' must be 'completed' or 'pr_closed'"*) ;;
+  *) printf 'FAIL: unknown execution state omitted its contract error\n%s\n' "${output}"; exit 1 ;;
+esac
+printf 'PASS: producer rejects unknown execution states\n'
 
 rm -rf "${tmp}/candidate"
 set +e
