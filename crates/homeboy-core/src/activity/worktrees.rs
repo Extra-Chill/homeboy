@@ -1,6 +1,7 @@
 use super::{
     ActivityCollector, ActivityContext, ActivityCrossRefs, ActivityEvidenceRef, ActivityFilter,
     ActivityItem, ActivityRunnerRefs, ActivityState, ActivityTaskIdentity,
+    WORKTREE_RESOURCE_SOURCE_STORE,
 };
 use crate::worktree_provider::{self, WorktreeProviderIdentity, WorktreeProviderWorkspace};
 use crate::Result;
@@ -36,7 +37,9 @@ fn item_from_workspace(workspace: WorktreeProviderWorkspace) -> ActivityItem {
     ActivityItem {
         id: format!("worktree:{provider_id}:{handle}"),
         kind: "worktree".to_string(),
-        source_store: "worktree.provider".to_string(),
+        // Marks every item from this source as open-resource inventory for
+        // the work classification in `model` (#13620).
+        source_store: WORKTREE_RESOURCE_SOURCE_STORE.to_string(),
         state,
         created_at: workspace
             .created_at
@@ -75,6 +78,7 @@ fn item_from_workspace(workspace: WorktreeProviderWorkspace) -> ActivityItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::ActivityWorkClass;
     use crate::worktree_provider::{
         WorktreeOwnership, WorktreeProviderSafety, WorktreeProviderWorkspace, WorktreeWorkspaceKind,
     };
@@ -107,5 +111,45 @@ mod tests {
         assert_eq!(item.refs.run_id.as_deref(), Some("run-8017"));
         assert_eq!(item.context.worktree.as_deref(), Some("repo@branch"));
         assert_eq!(item.evidence[0].id, "fixture");
+    }
+
+    /// #13620: an open worktree stays visible with its held state, but the
+    /// item itself classifies as open-resource inventory so report counts can
+    /// separate it from executing work.
+    #[test]
+    fn open_worktree_classifies_as_resource_not_executing_work() {
+        let workspace = |handle: &str, disposition: Option<&str>| WorktreeProviderWorkspace {
+            ownership: WorktreeOwnership {
+                provider: WorktreeProviderIdentity::Native,
+                handle: handle.to_string(),
+                path: format!("/workspace/{handle}"),
+                kind: WorktreeWorkspaceKind::AdoptedWorkspace,
+                branch: None,
+                task_url: None,
+                provenance: None,
+            },
+            repository: None,
+            owner_run_ref: None,
+            created_at: None,
+            terminal_disposition: disposition.map(str::to_string),
+            safety: WorktreeProviderSafety {
+                dirty: false,
+                unpushed: false,
+                primary: false,
+                missing: false,
+            },
+        };
+
+        let open = item_from_workspace(workspace("repo@fix-13620", None));
+        assert_eq!(open.state, ActivityState::Running);
+        assert_eq!(open.work_class(), ActivityWorkClass::OpenResource);
+        assert!(open.is_open_resource());
+        assert!(!open.is_executing_work());
+
+        // A terminally disposed workspace is closed history, not held
+        // inventory, and still classifies as a resource record.
+        let disposed = item_from_workspace(workspace("repo@merged", Some("succeeded")));
+        assert_eq!(disposed.state, ActivityState::Succeeded);
+        assert!(disposed.is_open_resource());
     }
 }

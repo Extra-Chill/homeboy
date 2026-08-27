@@ -135,12 +135,20 @@ pub(crate) fn render_activity_summary(payload: &serde_json::Value) -> Option<Str
     let counts = report.get("counts")?;
     let items = report.get("items")?.as_array()?;
     let mut lines = Vec::new();
+    // Both work dimensions on one line: executing liveness (jobs, controllers,
+    // agent tasks, providers) and held resource inventory (worktrees). Open
+    // worktrees must not inflate the execution answer an operator relies on
+    // before daemon maintenance (#13620).
     lines.push(format!(
-        "activity: total={} active={} running={} queued={} failed={} stale={}",
+        "activity: total={} executing={} (running={} queued={}) open_resources={} failed={} stale={}",
         counts.get("total")?.as_u64()?,
         counts.get("active")?.as_u64()?,
         counts.get("running")?.as_u64()?,
         counts.get("queued")?.as_u64()?,
+        counts
+            .get("open_resources")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
         counts.get("failed")?.as_u64()?,
         counts.get("stale")?.as_u64()?,
     ));
@@ -726,6 +734,50 @@ mod tests {
         }))
         .expect("summary");
         assert!(rendered.contains("No active or recent Homeboy activity."));
+    }
+
+    /// #13620: the compact summary must answer both dimensions at a glance —
+    /// how much work is executing, and how much resource inventory is open —
+    /// without item-by-item interpretation.
+    #[test]
+    fn summary_presents_executing_and_open_resource_dimensions() {
+        let rendered = render_activity_summary(&json!({
+            "counts": {
+                "total": 4,
+                "active": 1,
+                "running": 1,
+                "queued": 0,
+                "failed": 0,
+                "stale": 0,
+                "open_resources": 3
+            },
+            "items": []
+        }))
+        .expect("summary");
+        assert!(
+            rendered
+                .contains("activity: total=4 executing=1 (running=1 queued=0) open_resources=3"),
+            "summary line: {rendered}"
+        );
+
+        let zero_executing = render_activity_summary(&json!({
+            "counts": {
+                "total": 3,
+                "active": 0,
+                "running": 0,
+                "queued": 0,
+                "failed": 0,
+                "stale": 0,
+                "open_resources": 3
+            },
+            "items": []
+        }))
+        .expect("summary");
+        assert!(
+            zero_executing
+                .contains("activity: total=3 executing=0 (running=0 queued=0) open_resources=3"),
+            "summary line: {zero_executing}"
+        );
     }
 
     #[test]
