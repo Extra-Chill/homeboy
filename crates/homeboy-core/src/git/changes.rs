@@ -309,19 +309,76 @@ pub fn get_diff(path: &str) -> Result<String> {
 }
 
 /// Get diff between baseline ref and HEAD (commit range diff).
+///
+/// Diffs against the merge-base of `baseline_ref` and `HEAD`, not the
+/// literal tip of `baseline_ref`. `baseline_ref` is frequently a branch
+/// (e.g. `origin/main`) rather than an immutable tag, and long-running
+/// work can easily outlive it: if the branch has advanced since the
+/// current work diverged, a literal `baseline_ref..HEAD` diff would
+/// include every commit that landed on `baseline_ref` afterward,
+/// misrepresenting unrelated upstream changes as part of this diff. See
+/// [`base_advance_warning`] for surfacing how far the base has moved.
 pub fn get_range_diff(path: &str, baseline_ref: &str) -> Result<String> {
-    let output = execute_git(
-        path,
-        &["diff", &format!("{}..HEAD", baseline_ref), "--", "."],
-    )
-    .map_err(|e| Error::git_command_failed(e.to_string()))?;
+    let merge_base = resolve_merge_base(path, baseline_ref)?;
+    let output = execute_git(path, &["diff", &format!("{}..HEAD", merge_base), "--", "."])
+        .map_err(|e| Error::git_command_failed(e.to_string()))?;
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Report how far `baseline_ref` has advanced beyond its merge-base with
+/// `HEAD`, i.e. how many commits landed on the base branch after the
+/// current work diverged from it.
+///
+/// Returns `None` when the ref can't be resolved, a merge-base can't be
+/// found, or the ref hasn't moved past the merge-base (it's still an
+/// ancestor of `HEAD`, e.g. an immutable release tag). Returns `Some`
+/// with an operator-facing message when it has, so a reviewer knows a
+/// rebase may be needed before merging — diffs and commit lists computed
+/// against the merge-base reflect only the state at divergence, not
+/// whatever landed on the base branch since.
+pub fn base_advance_warning(path: &str, baseline_ref: &str) -> Option<String> {
+    let merge_base = resolve_merge_base(path, baseline_ref).ok()?;
+    let tip_output = execute_git(
+        path,
+        &["rev-parse", "--verify", &format!("{baseline_ref}^{{commit}}")],
+    )
+    .ok()?;
+    if !tip_output.status.success() {
+        return None;
+    }
+    let tip = String::from_utf8_lossy(&tip_output.stdout).trim().to_string();
+    if tip == merge_base {
+        return None;
+    }
+
+    let count_output = execute_git(
+        path,
+        &["rev-list", "--count", &format!("{merge_base}..{tip}")],
+    )
+    .ok()?;
+    if !count_output.status.success() {
+        return None;
+    }
+    let count: u64 = String::from_utf8_lossy(&count_output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+    if count == 0 {
+        return None;
+    }
+
+    Some(format!(
+        "'{baseline_ref}' has advanced {count} commit{} beyond the merge-base with HEAD; the commits and diff above reflect only the merge-base, not the moving tip. A rebase may be needed before merging.",
+        if count == 1 { "" } else { "s" }
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
 
     /// Regression: get_uncommitted_changes runs `git update-index --refresh`
     /// before reading status so stale stat info from upstream tooling
@@ -452,6 +509,138 @@ mod tests {
             .contains(&"untracked name.txt".to_string()));
         assert!(changes.untracked.contains(&"worktree name.txt".to_string()));
         assert!(changes.staged.iter().all(|path| !path.contains(" -> ")));
+    }
+
+    fn init_repo_with_initial_commit(path: &str) {
+        for args in [
+            ["init", "-q", "-b", "main"].as_slice(),
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Test"].as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(Path::new(path).join("shared.txt"), "shared\n").unwrap();
+        for args in [
+            ["add", "."].as_slice(),
+            ["commit", "-q", "-m", "initial"].as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+
+    fn git(path: &str, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?} failed"
+        );
+    }
+
+    /// Regression for the "moving base branch" bug: a long-running worktree
+    /// diverges from `main`, then `main` advances with unrelated commits
+    /// while the candidate branch keeps working. Diffing the candidate
+    /// against `main`'s literal tip would (incorrectly) include those
+    /// unrelated upstream commits, making the candidate look like it
+    /// deleted/changed things it never touched. Diffing against the
+    /// merge-base must show only the candidate's own change.
+    #[test]
+    fn get_range_diff_ignores_commits_added_to_base_after_divergence() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap().to_string();
+        init_repo_with_initial_commit(&path);
+
+        // Branch the candidate off main before main advances.
+        git(&path, &["checkout", "-q", "-b", "candidate"]);
+
+        // main advances with unrelated commits after the candidate diverged
+        // (simulating other work landing on origin/main during a long cook).
+        git(&path, &["checkout", "-q", "main"]);
+        fs::write(dir.path().join("unrelated.txt"), "unrelated\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-q", "-m", "unrelated upstream change"]);
+        fs::remove_file(dir.path().join("shared.txt")).unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-q", "-m", "unrelated upstream deletion"]);
+
+        // The candidate makes its own, unrelated, intended change.
+        git(&path, &["checkout", "-q", "candidate"]);
+        fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-q", "-m", "candidate feature"]);
+
+        let diff = get_range_diff(&path, "main").expect("range diff");
+
+        assert!(
+            diff.contains("feature.txt"),
+            "diff must include the candidate's own change: {diff}"
+        );
+        assert!(
+            !diff.contains("unrelated.txt"),
+            "diff must not include files only added to the moving base after divergence: {diff}"
+        );
+        assert!(
+            !diff.contains("shared.txt"),
+            "diff must not include files only deleted on the moving base after divergence: {diff}"
+        );
+    }
+
+    #[test]
+    fn base_advance_warning_reports_how_far_a_moved_base_has_advanced() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap().to_string();
+        init_repo_with_initial_commit(&path);
+
+        git(&path, &["checkout", "-q", "-b", "candidate"]);
+
+        git(&path, &["checkout", "-q", "main"]);
+        fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-q", "-m", "advance 1"]);
+        fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-q", "-m", "advance 2"]);
+
+        git(&path, &["checkout", "-q", "candidate"]);
+
+        let warning =
+            base_advance_warning(&path, "main").expect("warning when base has advanced");
+        assert!(
+            warning.contains("2 commits"),
+            "expected the warning to report the exact advance count: {warning}"
+        );
+        assert!(
+            warning.contains("rebase"),
+            "expected the warning to hint that a rebase may be needed: {warning}"
+        );
+    }
+
+    #[test]
+    fn base_advance_warning_is_none_when_base_has_not_moved() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap().to_string();
+        init_repo_with_initial_commit(&path);
+
+        git(&path, &["checkout", "-q", "-b", "candidate"]);
+        fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-q", "-m", "candidate feature"]);
+
+        // main never moved past the point candidate branched from.
+        assert_eq!(base_advance_warning(&path, "main"), None);
     }
 
     #[test]

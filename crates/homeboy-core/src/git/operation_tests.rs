@@ -312,6 +312,81 @@ fn push_token_requires_github_remote_url() {
     assert!(!err.to_string().contains("secret-token"));
 }
 
+/// Regression: `homeboy release changes --since <branch> --git-diffs`
+/// diffs against the merge-base of the branch and HEAD, not the branch's
+/// literal (possibly-advanced) tip, and warns explicitly when the branch
+/// has moved past the merge-base since the current work diverged from it.
+#[test]
+fn changes_at_since_moving_branch_diffs_against_merge_base_and_warns() {
+    use std::fs;
+    let (dir, path) = init_repo_with_initial_commit();
+
+    Command::new("git")
+        .args(["checkout", "-q", "-b", "candidate"])
+        .current_dir(&path)
+        .status()
+        .unwrap();
+
+    // main advances with an unrelated commit after candidate diverged.
+    Command::new("git")
+        .args(["checkout", "-q", "main"])
+        .current_dir(&path)
+        .status()
+        .unwrap();
+    fs::write(dir.path().join("unrelated.txt"), "unrelated\n").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&path)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-q", "-m", "unrelated upstream change"])
+        .current_dir(&path)
+        .status()
+        .unwrap();
+
+    Command::new("git")
+        .args(["checkout", "-q", "candidate"])
+        .current_dir(&path)
+        .status()
+        .unwrap();
+    fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&path)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-q", "-m", "candidate feature"])
+        .current_dir(&path)
+        .status()
+        .unwrap();
+
+    let out = changes_at(None, Some("main"), true, Some(&path)).expect("changes_at with --since");
+
+    let diff = out.diff.expect("diff requested via include_diff");
+    assert!(
+        diff.contains("feature.txt"),
+        "diff must include the candidate's own change: {diff}"
+    );
+    assert!(
+        !diff.contains("unrelated.txt"),
+        "diff must not include upstream-only changes from the moving base: {diff}"
+    );
+
+    let warning = out
+        .warning
+        .expect("warning expected when the base has advanced past the merge-base");
+    assert!(
+        warning.contains("advanced"),
+        "expected an explicit moved-base warning: {warning}"
+    );
+    assert!(
+        warning.contains("rebase"),
+        "expected the warning to hint a rebase may be needed: {warning}"
+    );
+}
+
 #[test]
 fn test_short_head_revision_at() {
     let (_dir, path) = init_repo_with_initial_commit();
