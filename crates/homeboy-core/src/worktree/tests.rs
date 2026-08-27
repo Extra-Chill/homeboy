@@ -396,6 +396,75 @@ fn create_returns_existing_matching_task_worktree_idempotently() {
     });
 }
 
+/// #13647: worktree provisioning inherited whatever ambient global Git
+/// identity happened to be configured in the surrounding environment,
+/// instead of the identity the target remote's host actually requires. A
+/// commit made in a freshly created task worktree therefore carried the
+/// wrong author. Creation must pin the repository-local identity declared
+/// for the remote's host up front, so agent-authored commits carry the
+/// right author without anyone remembering to check.
+#[test]
+fn create_pins_worktree_identity_to_the_target_remotes_host_policy() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "identity-fixture");
+        run_git(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github-extrachill.example.test:extra-chill/homeboy.git",
+            ],
+        );
+
+        let mut config = crate::defaults::HomeboyConfig::default();
+        config.git_hosts.insert(
+            "github-extrachill.example.test".to_string(),
+            crate::defaults::GitHostConfig {
+                name: "Extra Chill Author".to_string(),
+                email: "author@extrachill.example.test".to_string(),
+            },
+        );
+        crate::defaults::save_config(&config).expect("save git host identity policy");
+
+        // Simulate the ambient identity a shared provisioning environment can
+        // inherit from an unrelated organization's global gitconfig (#13647).
+        run_git(home.path(), &["config", "--global", "user.name", "Chris Huber"]);
+        run_git(
+            home.path(),
+            &["config", "--global", "user.email", "chris.huber@automattic.com"],
+        );
+
+        let created = create(options).expect("create task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+
+        assert_eq!(
+            git::run_git(&path, &["config", "user.name"], "git config user.name")
+                .unwrap()
+                .trim(),
+            "Extra Chill Author"
+        );
+        assert_eq!(
+            git::run_git(&path, &["config", "user.email"], "git config user.email")
+                .unwrap()
+                .trim(),
+            "author@extrachill.example.test"
+        );
+
+        // The reported defect is the *committed* author, not just config
+        // plumbing: make a commit in the new worktree and check it end to end.
+        fs::write(path.join("task.txt"), "task\n").unwrap();
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-q", "-m", "task work"]);
+        let author = git::run_git(&path, &["log", "-1", "--format=%an <%ae>"], "git log author")
+            .unwrap();
+        assert_eq!(
+            author.trim(),
+            "Extra Chill Author <author@extrachill.example.test>"
+        );
+    });
+}
+
 #[test]
 fn create_reuses_existing_worktree_with_a_relative_gitdir_pointer() {
     crate::test_support::with_isolated_home(|home| {
