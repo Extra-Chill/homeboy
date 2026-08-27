@@ -49,7 +49,7 @@ pub struct ConfigOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    defaults: Option<Defaults>,
+    defaults: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,10 +84,12 @@ fn show(builtin: bool, pointer: Option<&str>) -> CmdResult<ConfigOutput> {
     }
 
     if builtin {
+        let mut defaults = defaults_value(&defaults::builtin_defaults())?;
+        elide_large_install_scripts(&mut defaults, "/install_methods", " --builtin");
         Ok((
             ConfigOutput {
                 command: "config.show".to_string(),
-                defaults: Some(defaults::builtin_defaults()),
+                defaults: Some(defaults),
                 config: None,
                 path: None,
                 exists: None,
@@ -100,7 +102,8 @@ fn show(builtin: bool, pointer: Option<&str>) -> CmdResult<ConfigOutput> {
         ))
     } else {
         let config = defaults::load_config();
-        let config = redacted_config_value(&config)?;
+        let mut config = redacted_config_value(&config)?;
+        elide_large_install_scripts(&mut config, "/defaults/install_methods", "");
         Ok((
             ConfigOutput {
                 command: "config.show".to_string(),
@@ -116,6 +119,61 @@ fn show(builtin: bool, pointer: Option<&str>) -> CmdResult<ConfigOutput> {
             0,
         ))
     }
+}
+
+/// Threshold, in characters, above which an `upgrade_command` install script
+/// is considered too large to usefully appear inline in an unscoped `config
+/// show`. Short one-liners (e.g. `brew update && brew upgrade homeboy`) stay
+/// inline; the multi-line source/binary bootstrap scripts do not.
+const INSTALL_SCRIPT_ELISION_THRESHOLD: usize = 200;
+
+/// Replace long, embedded install/upgrade shell scripts with a short summary
+/// in an unscoped `config show` dump.
+///
+/// `config show` (no pointer) is the natural first command an operator runs
+/// to inspect state, but `defaults.install_methods` carries multi-line
+/// binary-upgrade and source-build scripts that otherwise dominate the
+/// output and bury the settings people actually came to read (#13635). A
+/// pointer read of a specific `upgrade_command` still returns the full
+/// script verbatim — nothing here changes what data exists, only what an
+/// unscoped dump shows by default.
+fn elide_large_install_scripts(
+    root: &mut Value,
+    install_methods_pointer: &str,
+    builtin_flag: &str,
+) {
+    let Some(methods) = root
+        .pointer_mut(install_methods_pointer)
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    for (key, method) in methods.iter_mut() {
+        let Some(method) = method.as_object_mut() else {
+            continue;
+        };
+        let Some(command) = method.get("upgrade_command").and_then(Value::as_str) else {
+            continue;
+        };
+        if command.chars().count() <= INSTALL_SCRIPT_ELISION_THRESHOLD && !command.contains('\n') {
+            continue;
+        }
+
+        let chars = command.chars().count();
+        let elided = format!(
+            "[{chars} chars omitted; run `homeboy config show{builtin_flag} /defaults/install_methods/{key}/upgrade_command` to view the full script]"
+        );
+        method.insert("upgrade_command".to_string(), Value::String(elided));
+    }
+}
+
+fn defaults_value(defaults: &Defaults) -> homeboy::core::Result<Value> {
+    serde_json::to_value(defaults).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "Failed to serialize built-in defaults: {error}"
+        ))
+    })
 }
 
 fn show_pointer(builtin: bool, pointer: &str) -> CmdResult<ConfigOutput> {
@@ -391,7 +449,7 @@ fn reset() -> CmdResult<ConfigOutput> {
         ConfigOutput {
             command: "config.reset".to_string(),
             config: None,
-            defaults: Some(defaults::builtin_defaults()),
+            defaults: Some(defaults_value(&defaults::builtin_defaults())?),
             path: Some(defaults::config_path()?),
             exists: None,
             pointer: None,
@@ -554,6 +612,97 @@ mod tests {
                 show_pointer(true, "/defaults/deploy/scp_flags").expect("builtin pointer read");
             assert_eq!(builtin_only.source.as_deref(), Some("builtin"));
             assert_eq!(builtin_only.path, None);
+        });
+    }
+
+    /// Reproduces #13635: an unscoped `config show` used to dump the entire
+    /// multi-line binary-upgrade and source-build scripts inline, burying
+    /// settings like `agent_task`/`notifications`/`release_gate` in ~15KB of
+    /// install-method shell programs. The actual settings must be readable
+    /// without the embedded scripts drowning them out.
+    #[test]
+    fn unscoped_show_elides_large_install_scripts_but_keeps_real_settings_readable() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let (output, _) = show(false, None).expect("unscoped config show");
+            let config = output.config.expect("merged config value");
+
+            // Real settings the user actually came to read remain intact.
+            assert!(
+                config.get("agent_task").is_some(),
+                "agent_task settings must still be present: {config}"
+            );
+            assert!(
+                config.get("notifications").is_some(),
+                "notifications settings must still be present: {config}"
+            );
+            assert!(
+                config.get("release_gate").is_some(),
+                "release_gate settings must still be present: {config}"
+            );
+
+            // The large embedded install/upgrade shell scripts (source build,
+            // binary upgrade) no longer dominate the output.
+            let source_script = config
+                .pointer("/defaults/install_methods/source/upgrade_command")
+                .and_then(Value::as_str)
+                .expect("source upgrade_command present");
+            let binary_script = config
+                .pointer("/defaults/install_methods/binary/upgrade_command")
+                .and_then(Value::as_str)
+                .expect("binary upgrade_command present");
+            assert!(
+                source_script.len() < INSTALL_SCRIPT_ELISION_THRESHOLD + 200,
+                "source upgrade_command should be elided in an unscoped dump: {source_script}"
+            );
+            assert!(
+                binary_script.len() < INSTALL_SCRIPT_ELISION_THRESHOLD + 200,
+                "binary upgrade_command should be elided in an unscoped dump: {binary_script}"
+            );
+            assert!(!source_script.contains('\n'));
+            assert!(!binary_script.contains('\n'));
+
+            // The elision must not silently discard data: it names the exact
+            // pointer that returns the real script.
+            assert!(source_script.contains("/defaults/install_methods/source/upgrade_command"));
+            assert!(binary_script.contains("/defaults/install_methods/binary/upgrade_command"));
+
+            // A short, unmodified one-liner install command stays inline.
+            let homebrew_script = config
+                .pointer("/defaults/install_methods/homebrew/upgrade_command")
+                .and_then(Value::as_str)
+                .expect("homebrew upgrade_command present");
+            assert_eq!(homebrew_script, "brew update && brew upgrade homeboy");
+
+            // Overall output shrinks dramatically now that the scripts are elided.
+            let serialized = serde_json::to_string(&config).expect("serialize config");
+            assert!(
+                serialized.len() < 4000,
+                "unscoped config show should be readable, got {} bytes",
+                serialized.len()
+            );
+        });
+    }
+
+    /// A pointer read explicitly requesting the script still returns it in
+    /// full — eliding only changes what an *unscoped* dump shows by default.
+    #[test]
+    fn pointer_read_still_returns_the_full_install_script() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let (output, _) =
+                show_pointer(false, "/defaults/install_methods/source/upgrade_command")
+                    .expect("explicit pointer read of the install script");
+            let value = output
+                .value
+                .expect("script value")
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            assert!(value.contains('\n'), "full script must remain multi-line");
+            assert!(
+                value.len() > INSTALL_SCRIPT_ELISION_THRESHOLD,
+                "an explicit pointer read must not be elided"
+            );
         });
     }
 
