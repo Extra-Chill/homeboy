@@ -24,6 +24,17 @@ use std::time::Instant;
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
+/// Floor and ceiling for how often the liveness watchdog re-samples the
+/// provider's execution workspace for file activity. A CLI agent that edits
+/// files without ever writing to stdout/stderr until its final JSON result is
+/// still doing verifiable work, and only the workspace on disk can prove that
+/// (#13626). Each sample forks `git`, so the interval is derived from the
+/// configured liveness deadline (a quarter of it) rather than fixed: a short
+/// deadline still gets several samples inside its own window, and a long one
+/// never turns into its own load source by sampling a large repository every
+/// tick of the poll loop.
+const WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS: u64 = 200;
+const WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS: u64 = 5_000;
 pub const PROVIDER_READINESS_RESULT_SCHEMA: &str =
     "homeboy/agent-task-provider-readiness-result/v1";
 const PROVIDER_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -418,6 +429,7 @@ fn classify_provider_policy_denial(
 fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
     if outcome_text_is_rate_limited(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
+        annotate_usage_cap(outcome);
         return;
     }
     let already_transient =
@@ -440,6 +452,38 @@ fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
     if outcome_text_is_transient(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::Transient);
     }
+}
+
+/// Attach a [`super::usage_cap::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS`]
+/// diagnostic naming the reset time when the outcome text carries a usage-cap
+/// signature the scheduler's rotation-skip logic can act on (#13644). A
+/// generic rate-limit failure without a recognizable usage-cap reset stays a
+/// plain `RateLimited` classification, unchanged.
+fn annotate_usage_cap(outcome: &mut AgentTaskOutcome) {
+    let now = chrono::Utc::now();
+    let reset_at = outcome
+        .summary
+        .as_deref()
+        .and_then(|text| super::usage_cap::detect_usage_cap(text, now))
+        .or_else(|| {
+            outcome.diagnostics.iter().find_map(|diagnostic| {
+                super::usage_cap::detect_usage_cap(&diagnostic.message, now).or_else(|| {
+                    super::usage_cap::detect_usage_cap(&diagnostic.data.to_string(), now)
+                })
+            })
+        });
+    let Some(reset_at) = reset_at else {
+        return;
+    };
+    push_unique_diagnostic(
+        &mut outcome.diagnostics,
+        super::usage_cap::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS.to_string(),
+        format!(
+            "provider usage cap reached; resets at {}",
+            reset_at.to_rfc3339()
+        ),
+        json!({ "reset_at": reset_at.to_rfc3339() }),
+    );
 }
 
 fn outcome_text_is_rate_limited(outcome: &AgentTaskOutcome) -> bool {
@@ -519,6 +563,8 @@ pub(super) fn is_rate_limited_provider_error(text: &str) -> bool {
         "provider quota",
         "quota exceeded",
         "exceeded your quota",
+        "usage limit",
+        "usage cap",
     ]
     .iter()
     .any(|pattern| lowered.contains(pattern))
@@ -1007,6 +1053,15 @@ fn run_materialized_provider_command_once_contained(
     let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let mut runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
     let mut runtime_progress_events = 0_u64;
+    // Only sampled when the workspace root is known; a provider running
+    // without a declared workspace (e.g. a preflight or repo-less task) keeps
+    // relying on process output and artifacts-path progress alone.
+    let mut workspace_progress = attestation_root
+        .as_deref()
+        .map(workspace_progress_snapshot)
+        .unwrap_or_default();
+    let mut workspace_progress_events = 0_u64;
+    let mut next_workspace_progress_check_ms = 0_u64;
 
     let (stdout_runtime_capture, stderr_runtime_capture) =
         runtime_output_captures(request, run_id, attempt);
@@ -1057,18 +1112,48 @@ fn run_materialized_provider_command_once_contained(
     // grace first and misclassify the attempt as stalled.
     let liveness_timeout = (liveness_timeout_ms < requested_timeout_ms)
         .then_some(Duration::from_millis(liveness_timeout_ms));
+    // A quarter of the liveness deadline guarantees several workspace samples
+    // land inside any single liveness window, however short, while the floor
+    // and ceiling keep a very short test deadline or a very long production
+    // one from turning into an excessive or pointless `git` fork cadence.
+    let workspace_progress_check_interval_ms = (liveness_timeout_ms / 4).clamp(
+        WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS,
+        WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS,
+    );
     let (status, killed_for_liveness, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (Some(status), false, false),
             Ok(None) => {
                 let elapsed = started.elapsed();
+                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                let mut progressed = false;
                 let current_runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
                 if runtime_progress_advanced(&runtime_progress, &current_runtime_progress) {
-                    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-                    last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+                    progressed = true;
                     runtime_progress_events = runtime_progress_events.saturating_add(1);
                 }
                 runtime_progress = current_runtime_progress;
+                // Liveness is the only consumer of the workspace signal, so it
+                // is only worth the `git` fork when a liveness deadline is
+                // actually in force and due for a fresh sample.
+                if liveness_timeout.is_some() && elapsed_ms >= next_workspace_progress_check_ms {
+                    next_workspace_progress_check_ms =
+                        elapsed_ms.saturating_add(workspace_progress_check_interval_ms);
+                    if let Some(root) = attestation_root.as_deref() {
+                        let current_workspace_progress = workspace_progress_snapshot(root);
+                        if workspace_progress_advanced(
+                            &workspace_progress,
+                            &current_workspace_progress,
+                        ) {
+                            progressed = true;
+                            workspace_progress_events = workspace_progress_events.saturating_add(1);
+                        }
+                        workspace_progress = current_workspace_progress;
+                    }
+                }
+                if progressed {
+                    last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+                }
                 if elapsed >= process_timeout {
                     break (None, false, true);
                 }
@@ -1149,6 +1234,7 @@ fn run_materialized_provider_command_once_contained(
                 "stdout_bytes": stdout_capture.total_bytes,
                 "stderr_bytes": stderr_capture.total_bytes,
                 "runtime_progress_events": runtime_progress_events,
+                "workspace_progress_events": workspace_progress_events,
             }),
         );
     }
@@ -1698,6 +1784,18 @@ where
     })
 }
 
+/// Size every file the provider owns under its artifacts directory.
+///
+/// `artifacts_path` is handed to the provider as its private output directory,
+/// so a file growing there is the provider doing work — whatever it is named.
+///
+/// This deliberately does not filter on the file name. It used to require the
+/// name to contain `progress`, which made liveness depend on a runtime's naming
+/// convention rather than on observable activity (#13623). A runtime that
+/// streams its telemetry into, say, `<task>-<backend>-runtime-stdout.log` was
+/// invisible: the watchdog read zero progress while that file grew to 94KB, and
+/// killed a healthy provider as stalled. Nothing else writes here, so counting
+/// every file cannot manufacture liveness the provider did not earn.
 fn runtime_progress_snapshot(root: &Path) -> BTreeMap<PathBuf, u64> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return BTreeMap::new();
@@ -1705,10 +1803,6 @@ fn runtime_progress_snapshot(root: &Path) -> BTreeMap<PathBuf, u64> {
     entries
         .flatten()
         .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-            if !name.contains("progress") {
-                return None;
-            }
             let path = entry.path();
             let metadata = path.metadata().ok()?;
             metadata.is_file().then_some((path, metadata.len()))
@@ -1723,6 +1817,50 @@ fn runtime_progress_advanced(
     current
         .iter()
         .any(|(path, size)| *size > previous.get(path).copied().unwrap_or_default())
+}
+
+/// Liveness evidence sampled from the provider's execution workspace rather
+/// than from process output. A provider that streams nothing to stdout/stderr
+/// until it serializes its final outcome still leaves a trail on disk: files
+/// it edits become uncommitted worktree changes, and files it commits move
+/// HEAD. Either is proof of live, ongoing work (#13626).
+#[derive(Default, Clone, PartialEq, Eq)]
+struct WorkspaceProgressSnapshot {
+    files_changed: Option<usize>,
+    head_sha: Option<String>,
+}
+
+fn workspace_progress_snapshot(root: &Path) -> WorkspaceProgressSnapshot {
+    WorkspaceProgressSnapshot {
+        files_changed: crate::agent_task_service::worktree_files_changed(root),
+        head_sha: homeboy_core::git::head_sha(root),
+    }
+}
+
+/// True when two workspace samples both produced a reading and those readings
+/// differ. A sample that failed to read (`None`, e.g. a transient `git`
+/// failure or a non-repository root) must never be compared against a
+/// present reading — that would either manufacture false progress or mask a
+/// real stall depending on which side went missing.
+fn workspace_progress_advanced(
+    previous: &WorkspaceProgressSnapshot,
+    current: &WorkspaceProgressSnapshot,
+) -> bool {
+    if let (Some(previous_files), Some(current_files)) =
+        (previous.files_changed, current.files_changed)
+    {
+        if previous_files != current_files {
+            return true;
+        }
+    }
+    if let (Some(previous_head), Some(current_head)) =
+        (previous.head_sha.as_deref(), current.head_sha.as_deref())
+    {
+        if previous_head != current_head {
+            return true;
+        }
+    }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1836,7 +1974,7 @@ fn classify_stall_or_rate_limit(
         AgentTaskOutcomeStatus::ProviderError,
         AgentTaskFailureClassification::Stalled,
         format!(
-            "provider '{provider_id}' produced no process output or structured runtime progress before liveness_timeout_ms={liveness_timeout_ms}"
+            "provider '{provider_id}' produced no process output, structured runtime progress, or workspace file activity before liveness_timeout_ms={liveness_timeout_ms}"
         ),
     )
 }

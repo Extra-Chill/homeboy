@@ -627,12 +627,19 @@ fn config_default_backend() -> Option<String> {
 /// declared backend and reports each verdict, so the operator is sent to one
 /// command that answers "which backend is usable here?" instead of guessing a
 /// backend per invocation (#12569).
+///
+/// A fresh or reset `agent_task` config (`{}`) hits this same path with no
+/// discoverable way back to a working default short of reading source or an
+/// old backup, so the remediation also names `providers --set-default`, which
+/// derives and writes a live-verified `default_backend`/`rotation` in one
+/// step (#13634).
 fn missing_default_backend_error(available_backends: &[String]) -> Error {
     const PROBLEM: &str =
         "agent-task cook requires --backend because no default backend policy is configured";
 
     let mut tried = vec![
         "Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.".to_string(),
+        "Run `homeboy agent-task providers --set-default` to derive and persist a working default_backend (and rotation) from live backend readiness.".to_string(),
     ];
 
     let problem = if available_backends.is_empty() {
@@ -894,7 +901,14 @@ mod tests {
             error.details["tried"][0].as_str(),
             Some("Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.")
         );
+        // A lost or empty `agent_task` config must recover without archaeology:
+        // point at the command that derives and writes a working default from
+        // live readiness (#13634).
         assert!(error.details["tried"][1]
+            .as_str()
+            .expect("set-default remediation")
+            .contains("--set-default"));
+        assert!(error.details["tried"][2]
             .as_str()
             .expect("readiness caveat")
             .contains("--validate-readiness"));
@@ -910,7 +924,7 @@ mod tests {
             "an empty catalog must not advertise an empty list: {}",
             error.message
         );
-        assert!(error.details["tried"][1]
+        assert!(error.details["tried"][2]
             .as_str()
             .expect("discovery hint")
             .contains("homeboy agent-task providers"));

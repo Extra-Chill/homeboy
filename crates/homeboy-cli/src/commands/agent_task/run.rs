@@ -2830,8 +2830,16 @@ where
         }
         agent_task_lifecycle::ClaimOutcome::Acquired => {
             let dispatched: CmdResult<Value> = (|| {
-                let dispatcher =
-                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+                let record = lifecycle_store.read_record(run_id)?;
+                let pre_execution_runtime_recovery =
+                    agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+                        recipe, &record, false,
+                    );
+                let dispatcher = if pre_execution_runtime_recovery {
+                    None
+                } else {
+                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
+                };
                 let attempt = recipe
                     .attempts
                     .iter()
@@ -2844,8 +2852,11 @@ where
                             None,
                         )
                     })?;
-                let mut options =
-                    agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?;
+                let mut options = if pre_execution_runtime_recovery {
+                    agent_task_service::reconstruct_options_for_pre_execution_recovery(recipe)?
+                } else {
+                    agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?
+                };
                 options.initial_run_id = attempt.run_id.clone();
                 options.initial_plan = attempt.plan.clone();
                 agent_task_service::authorize_cook_continue_route(&options)?;
@@ -2902,7 +2913,14 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             }
             Err(error) => {
                 return Ok((
-                    cook_continuation_preflight_report(None, Value::Null, phases, "recipe", &error),
+                    cook_continuation_preflight_report(
+                        None,
+                        args.artifact_id.as_deref(),
+                        Value::Null,
+                        phases,
+                        "recipe",
+                        &error,
+                    ),
                     1,
                 ))
             }
@@ -2920,6 +2938,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 return Ok((
                     cook_continuation_preflight_report(
                         selected_run_id,
+                        args.artifact_id.as_deref(),
                         Value::Null,
                         phases,
                         "selection",
@@ -2943,6 +2962,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    args.artifact_id.as_deref(),
                     candidate_fingerprint,
                     phases,
                     "model_provenance",
@@ -2952,7 +2972,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ));
         }
     }
-    let record = match agent_task_service::reconcile_recipe_attempt_for_continuation(
+    let record = match agent_task_service::preflight_recipe_attempt_for_continuation(
         &recipe, &run_id,
     ) {
         Ok(record) => {
@@ -2968,6 +2988,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    args.artifact_id.as_deref(),
                     candidate_fingerprint,
                     phases,
                     "lifecycle",
@@ -2987,6 +3008,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         return Ok((
             cook_continuation_preflight_report(
                 selected_run_id,
+                args.artifact_id.as_deref(),
                 candidate_fingerprint,
                 phases,
                 "lifecycle",
@@ -3006,6 +3028,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    args.artifact_id.as_deref(),
                     candidate_fingerprint,
                     phases,
                     "transport",
@@ -3038,6 +3061,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    args.artifact_id.as_deref(),
                     candidate_fingerprint,
                     phases,
                     "transport",
@@ -3047,8 +3071,30 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ))
         }
     };
-    let terminal_review =
-        agent_task_service::terminal_review_form_continuation_is_eligible(&attempt.plan, &record)?;
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .expect("continuation selection is recipe-bound");
+    let terminal_review = match agent_task_service::terminal_review_form_continuation_is_eligible(
+        &attempt.plan,
+        &record,
+    ) {
+        Ok(eligible) => eligible,
+        Err(error) => {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    args.artifact_id.as_deref(),
+                    candidate_fingerprint,
+                    phases,
+                    "candidate_admission",
+                    &error,
+                ),
+                1,
+            ))
+        }
+    };
     let historical_terminal =
         agent_task_service_direct::historical_terminal_continuation_is_eligible(
             &recipe,
@@ -3068,6 +3114,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    args.artifact_id.as_deref(),
                     candidate_fingerprint,
                     phases,
                     "recipe",
@@ -3084,6 +3131,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
+                    args.artifact_id.as_deref(),
                     candidate_fingerprint,
                     phases,
                     "transport",
@@ -3097,6 +3145,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         return Ok((
             cook_continuation_preflight_report(
                 selected_run_id,
+                args.artifact_id.as_deref(),
                 candidate_fingerprint,
                 phases,
                 "provider_workspace_baseline",
@@ -3113,8 +3162,20 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-continue-preflight/v1",
             "admitted": true,
-            "selected_attempt": { "run_id": selected_run_id },
+            "run_id": selected_run_id,
+            "selected_attempt": { "run_id": run_id },
+            "selected_artifact": { "artifact_id": args.artifact_id },
             "candidate_fingerprint": candidate_fingerprint,
+            "continuation_command": agent_task_service_direct::cook_continue_command(
+                None,
+                &run_id,
+                args.rearm,
+                args.artifact_id.as_deref(),
+            ),
+            "evidence_refs": [{
+                "run_id": run_id,
+                "ref": format!("homeboy://agent-task/run/{run_id}/evidence"),
+            }],
             "continuation": {
                 "path": if historical_terminal {
                     "historical_terminal"
@@ -3134,17 +3195,43 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
 
 fn cook_continuation_preflight_report(
     selected_run_id: Option<String>,
+    artifact_id: Option<&str>,
     candidate_fingerprint: Value,
     mut phases: Vec<Value>,
     phase: &str,
     error: &homeboy::core::Error,
 ) -> Value {
     phases.push(serde_json::json!({ "phase": phase, "status": "blocked", "reason": format!("{:?}", error.code), "message": error.message }));
+    let run_id = selected_run_id.clone();
+    let continuation_command = run_id.as_deref().map(|run_id| {
+        agent_task_service_direct::cook_continue_command(None, run_id, false, artifact_id)
+    });
+    let evidence_refs = run_id
+        .as_deref()
+        .map(|run_id| {
+            serde_json::json!([{
+                "run_id": run_id,
+                "ref": format!("homeboy://agent-task/run/{run_id}/evidence"),
+            }])
+        })
+        .unwrap_or_default();
     serde_json::json!({
         "schema": "homeboy/agent-task-cook-continue-preflight/v1",
         "admitted": false,
+        "run_id": run_id,
         "selected_attempt": { "run_id": selected_run_id },
+        "selected_artifact": { "artifact_id": artifact_id },
         "candidate_fingerprint": candidate_fingerprint,
+        "continuation_command": continuation_command,
+        "failure_context": {
+            "diagnostic": {
+                "code": format!("{:?}", error.code),
+                "message": error.message,
+                "details": error.details,
+            },
+            "next_action": { "command": continuation_command },
+        },
+        "evidence_refs": evidence_refs,
         "phases": phases,
         "side_effects": { "provider_dispatch": false, "git_mutation": false, "github_mutation": false, "finalization": false }
     })
@@ -8276,6 +8363,9 @@ mod tests {
 
             assert_eq!(exit_code, 1);
             assert_eq!(report["admitted"], false);
+            assert!(report.get("run_id").is_some());
+            assert!(report.get("failure_context").is_some());
+            assert!(!report.to_string().contains("<run-id>"));
             assert_eq!(report["phases"][0]["phase"], "recipe");
             assert_eq!(report["side_effects"]["provider_dispatch"], false);
             assert_eq!(report["side_effects"]["git_mutation"], false);

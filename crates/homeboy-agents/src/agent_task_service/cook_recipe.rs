@@ -1471,6 +1471,48 @@ pub fn reconcile_recipe_attempt_for_continuation(
     Ok(record)
 }
 
+/// Validate an existing continuation target without refreshing runner state or
+/// materializing its artifact projection.
+pub fn preflight_recipe_attempt_for_continuation(
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    validate_recipe_attempt_record(recipe, run_id, &record)?;
+    let finalized_candidate =
+        super::cook_promotion::persisted_promotion_for_attempt_in_store(&lifecycle_store, run_id)?
+            .is_some_and(|promotion| {
+                promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                    && promotion.finalization_eligible(false)
+            });
+    if finalized_candidate {
+        return Ok(record);
+    }
+    if let Some(reason) =
+        agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
+            &lifecycle_store,
+            run_id,
+        )?
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation.artifact_projection",
+            format!(
+                "Cook `{}` attempt `{run_id}` is terminal but its controller-owned artifact projection is not ready: {reason}",
+                recipe.cook_id
+            ),
+            Some(run_id.to_string()),
+            Some(vec![format!(
+                "Retry `{}` after the runner artifact can be harvested.",
+                super::cook_continue_command(None, run_id, false, None)
+            )]),
+        )
+        .with_retryable(true));
+    }
+    Ok(record)
+}
+
 pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
     default_store()?.enqueue_terminal_continuation(cook_id, run_id)
 }
@@ -1845,14 +1887,34 @@ pub fn reconstruct_options_for_pre_execution_recovery(
 
 /// Whether an attempt that never reached provider execution may be rebuilt by
 /// the current controller without replaying a historical external transport.
+/// A queued retry proves that boundary through its immutable retry origin.
 pub fn local_pre_execution_runtime_recovery_is_eligible(
     recipe: &AgentTaskCookRecipe,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     explicit_local_override: bool,
 ) -> bool {
-    super::cook_pre_execution::retryable_pre_execution_failure(record)
-        && (explicit_local_override
-            || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local"))
+    let local_transport = explicit_local_override
+        || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local");
+    if !local_transport {
+        return false;
+    }
+    if super::cook_pre_execution::retryable_pre_execution_failure(record) {
+        return true;
+    }
+
+    let origin = &record.metadata["retry_origin"]["pre_execution_failure"];
+    let current_runtime = homeboy_core::build_identity::current().display;
+    record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        && recipe.runtime_generation != current_runtime
+        && record.metadata["controller_identity"].as_str() == Some(current_runtime.as_str())
+        && record.metadata["retry_of"].is_string()
+        && record.metadata["provider_executions_consumed"].as_u64() == Some(0)
+        && record.metadata["provider_run_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && (origin["retryable"] == Value::Bool(true)
+            || origin["phase"].as_str() == Some("local_retry_supervisor"))
+        && origin["provider_executions_consumed"].as_u64() == Some(0)
 }
 
 /// Reconstruct the policy used to adopt an already-prepared candidate. Adoption

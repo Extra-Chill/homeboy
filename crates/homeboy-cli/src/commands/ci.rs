@@ -1,6 +1,7 @@
 mod external_check_detail_resolver;
 mod failure_log_triage;
 mod gate;
+mod pins;
 mod plan;
 mod scope;
 
@@ -17,6 +18,7 @@ pub fn test_external_check_detail_resolver_pipe_holder_cleanup() {
 }
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use failure_log_triage::{CiFailureTriageOutput, CiFailureTriageRequest};
@@ -71,6 +73,14 @@ pub enum CiCommand {
     DifferentialGate(CiDifferentialGateArgs),
     /// Summarize failed GitHub Actions runs for a pull request without dumping raw logs.
     Triage(CiTriageArgs),
+    /// Report how far this repository's workflow action pins have drifted from
+    /// their upstream releases.
+    ///
+    /// A commit-pinned reusable workflow or action freezes another repository
+    /// at a point in time, and nothing expires that freeze. The failure is
+    /// silent: a fix exists, is released, is believed to be running, and is
+    /// not. See #13437.
+    Pins(CiPinsArgs),
 }
 
 #[derive(Args)]
@@ -98,6 +108,46 @@ pub struct CiDifferentialGateArgs {
     /// Evidence for candidate failures, such as log excerpts or artifact refs.
     #[arg(long = "head-evidence")]
     pub head_evidence: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct CiPinsArgs {
+    /// Repository root containing `.github/workflows` and `homeboy.json`.
+    #[arg(long, default_value = ".")]
+    pub path: PathBuf,
+
+    /// Workflow directory to scan, relative to `--path`.
+    #[arg(long, default_value = ".github/workflows")]
+    pub workflows: PathBuf,
+
+    /// Exit non-zero when any pin is at least this many commits behind its
+    /// upstream release. Omitted, the command reports and exits zero, so it is
+    /// safe to add before anyone is ready to enforce it.
+    #[arg(long)]
+    pub max_commits_behind: Option<u64>,
+
+    /// Also exit non-zero when a pin's repository could not be attributed or
+    /// verified. Off by default: an unresolved pin is a gap in this check's
+    /// configuration, not evidence about the pin.
+    #[arg(long)]
+    pub fail_on_unresolved: bool,
+
+    /// Rewrite behind pins to their upstream release commit.
+    ///
+    /// Plan-only without it: the report already names every edit it would make,
+    /// so the default run is safe to put anywhere.
+    #[command(flatten)]
+    pub mutation: super::utils::args::MutationArgs,
+
+    /// Include tag and branch pins in the report. They cannot go stale, so by
+    /// default only commit pins are listed and floating ones are counted.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Map an input key to the repository it refers to, as `key=owner/repo`.
+    /// Repeatable. Overrides `ci.pin_repositories` in `homeboy.json`.
+    #[arg(long = "input-repository", value_parser = super::parse_key_val)]
+    pub input_repositories: Vec<(String, String)>,
 }
 
 #[derive(Args)]
@@ -253,7 +303,10 @@ pub enum CiOutput {
     Scope(CiScopeCommandOutput),
     DifferentialGate(CiDifferentialGateCommandOutput),
     Triage(CiFailureTriageOutput),
+    Pins(CiPinsCommandOutput),
 }
+
+pub type CiPinsCommandOutput = CommandReport<pins::PinsReport>;
 
 pub type CiDifferentialGateCommandOutput = CommandReport<DifferentialGateDecision>;
 
@@ -298,6 +351,7 @@ pub fn run(args: CiArgs) -> CmdResult<CiOutput> {
         CiCommand::Scope(args) => run_scope(args),
         CiCommand::DifferentialGate(args) => run_differential_gate(args),
         CiCommand::Triage(args) => run_triage(args),
+        CiCommand::Pins(args) => run_pins(args),
     }
 }
 
@@ -320,6 +374,61 @@ fn run_differential_gate(args: CiDifferentialGateArgs) -> CmdResult<CiOutput> {
         CiOutput::DifferentialGate(CiDifferentialGateCommandOutput {
             command: "ci.differential-gate",
             report: decision,
+        }),
+        exit_code,
+    ))
+}
+
+/// Input-key to repository mapping declared in `homeboy.json`.
+///
+/// Read the same way the audit layer rules are: pull the key, deserialize, and
+/// treat any failure as "not configured". A malformed block must not take the
+/// command down, because reporting the pins it *can* attribute is still useful.
+fn configured_pin_repositories(root: &std::path::Path) -> BTreeMap<String, String> {
+    let Ok(content) = std::fs::read_to_string(root.join("homeboy.json")) else {
+        return BTreeMap::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return BTreeMap::new();
+    };
+    value
+        .get("ci")
+        .and_then(|ci| ci.get("pin_repositories"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn run_pins(args: CiPinsArgs) -> CmdResult<CiOutput> {
+    let mut mapping = configured_pin_repositories(&args.path);
+    // An explicit flag beats configuration, so a run can be corrected without
+    // editing the repository.
+    mapping.extend(args.input_repositories.iter().cloned());
+
+    let files = pins::read_workflow_files(&args.path, &args.path.join(&args.workflows));
+    let resolved: Vec<_> = files
+        .iter()
+        .flat_map(|(label, contents)| pins::discover_in_file(label, contents, &mapping))
+        .map(pins::resolve_pin)
+        .collect();
+
+    let bumps = pins::plan_bumps(&resolved);
+    let applied = if args.mutation.is_apply() {
+        pins::apply_bumps_to_files(&args.path, &bumps)
+    } else {
+        Vec::new()
+    };
+
+    let report = pins::PinsReport::new(files.len(), resolved, bumps, applied, args.mutation.mode());
+    let exit_code = i32::from(report.exceeds(args.max_commits_behind, args.fail_on_unresolved));
+
+    Ok((
+        CiOutput::Pins(CiPinsCommandOutput {
+            command: "ci.pins",
+            report: if args.all {
+                report
+            } else {
+                report.without_floating()
+            },
         }),
         exit_code,
     ))

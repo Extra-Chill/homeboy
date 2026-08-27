@@ -4,6 +4,85 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.363.1] - 2026-08-27
+
+### Fixed
+- count one archive referenced twice once
+
+## [0.363.0] - 2026-08-27
+
+### Added
+- decide repair convergence as a pure function
+- bump stale workflow pins instead of only reporting them
+
+### Changed
+- apply rustfmt
+- rustfmt command_runner.rs workspace liveness check
+- agent-task: treat workspace file activity as provider liveness evidence
+
+### Fixed
+- disclose legacy secrets file migration on auth mutations
+- skip provider rotation entries known to be over their usage cap
+- contain deterministic gate process trees
+- surface live cook phase/attempt/gate status while running
+- recover default backend from live provider readiness
+- seed per-worktree cargo targets instead of sharing one
+- diff against merge-base instead of a moving branch tip
+- keep the staged convergence decision warning-clean
+- pin commit identity to the target remote's host policy on create
+- skip entity matching for nested unrecognized subcommands
+- pin differential baseline to merge-base, not moving tip
+- elide large install scripts in unscoped config show
+- surface admission readiness, not just connectivity
+- distinguish presence-only readiness from live verification
+
+## [0.362.0] - 2026-08-27
+
+### Added
+- give a doctor remediation a machine-runnable form
+- report workflow action-pin staleness
+
+### Fixed
+- stop reading forwarded arguments as Homeboy's own
+- reuse exact promotion gates
+
+## [0.361.18] - 2026-08-27
+
+### Fixed
+- gate the resolver fixture target on test-support
+- measure liveness from provider artifact activity
+- refuse incomparable legacy baselines
+
+## [0.361.17] - 2026-08-27
+
+### Fixed
+- bind retry ownership at reservation
+
+## [0.361.16] - 2026-08-27
+
+### Fixed
+- recover queued retry runtime
+- preserve retry child diagnostics
+- initialize composed disclosure state
+- disclose substantive Cook retries
+- bound worktree path resolution
+
+## [0.361.15] - 2026-08-26
+
+### Fixed
+- preserve head recovery source
+- preserve live pending handoff
+- trust immutable unpushed target
+
+## [0.361.14] - 2026-08-26
+
+### Changed
+- Route loop supervision through Work jobs
+
+### Fixed
+- stage detached recovery from immutable SHA
+- distinguish absent recovery releases
+
 ## [0.361.13] - 2026-08-26
 
 ### Changed

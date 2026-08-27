@@ -39,6 +39,15 @@ pub struct AgentTaskProviderDispatchabilityCheck {
 pub struct AgentTaskProviderDispatchabilityCredentialCheck {
     pub ready: bool,
     pub missing: Vec<String>,
+    /// `true` only when a provider-declared live readiness probe
+    /// (`readiness_invocation`) actually ran and confirmed the credential
+    /// works. `false` means `ready` reflects presence only: the declared
+    /// credential material was found somewhere Homeboy can read it, which is
+    /// not proof it is still valid — a revoked or expired token is still
+    /// present on disk (#13628). Callers that need a go/no-go signal for
+    /// provider-owned auth must not treat presence-only readiness as
+    /// equivalent to a live-verified one.
+    pub verified: bool,
 }
 
 pub fn evaluate_provider_dispatchability(
@@ -102,6 +111,9 @@ pub fn evaluate_provider_dispatchability_with_config(
                 credentials: AgentTaskProviderDispatchabilityCredentialCheck {
                     ready: credentials_ready,
                     missing: Vec::new(),
+                    // A route that never resolved to one provider was never
+                    // probed, so nothing here was live-verified.
+                    verified: false,
                 },
                 configuration: AgentTaskProviderDispatchabilityCheck {
                     ready: configuration_ready,
@@ -182,6 +194,15 @@ pub fn evaluate_provider_dispatchability_with_config(
             reason: (!probe_runtime).then_some("not requested".to_string()),
         }
     };
+    // `runtime.ready` alone conflates two very different situations: a
+    // provider-declared probe actually ran and passed, versus no probe being
+    // declared at all (in which case `run_provider_readiness_invocation`
+    // trivially returns ready). Only the former is a live verification of the
+    // provider's credentials; the latter is still presence-only, and reporting
+    // it as "ready" without qualification is exactly how a revoked-but-present
+    // credential gets reported dispatchable (#13628).
+    let credentials_verified =
+        probe_runtime && provider.readiness_invocation.is_some() && runtime.ready;
     let (state, ready, reason) = if !model_ready {
         (
             "model_unavailable",
@@ -208,8 +229,16 @@ pub fn evaluate_provider_dispatchability_with_config(
         )
     } else if !probe_runtime {
         ("ready", true, "live runtime readiness was not requested")
-    } else {
+    } else if credentials_verified {
         ("ready", true, "all dispatchability checks passed")
+    } else {
+        (
+            "ready",
+            true,
+            "credentials and configuration are present, but the provider declares no live \
+             readiness probe to confirm them; presence is not proof a provider-owned credential \
+             is still valid",
+        )
     };
     AgentTaskProviderDispatchability {
         state,
@@ -227,6 +256,7 @@ pub fn evaluate_provider_dispatchability_with_config(
             credentials: AgentTaskProviderDispatchabilityCredentialCheck {
                 ready: credentials.dispatchable,
                 missing: credentials.missing,
+                verified: credentials_verified,
             },
             configuration,
             runtime,
@@ -371,6 +401,105 @@ mod tests {
             providers: vec![provider],
             ..Default::default()
         }
+    }
+
+    /// The exact shape of #13628: a provider whose declared credential is
+    /// physically present (a `json-file` source Homeboy can read) but that
+    /// declares no live readiness probe of its own. `--validate-readiness`
+    /// used to report this as fully "ready" with no way to tell presence
+    /// apart from a genuine live check — indistinguishable from a provider
+    /// whose token had actually been confirmed to still work. A revoked
+    /// refresh token is still present on disk, so presence-only readiness
+    /// must not be reported the same way as a live-verified one.
+    fn provider_with_present_but_unverifiable_credential(
+        auth_path: &std::path::Path,
+    ) -> super::super::AgentTaskExecutorProvider {
+        serde_json::from_value(json!({
+            "id": "revocable.agent-task-executor",
+            "backend": "revocable",
+            "capabilities": ["cli_runtime", "provider_owned_auth"],
+            "provider_defaults": {
+                "revocable": {
+                    "required_secret_env": ["HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN"],
+                    "secret_env_sources": {
+                        "HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN": {
+                            "source": "json-file",
+                            "path": auth_path,
+                            "field": "token"
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("provider fixture")
+    }
+
+    #[test]
+    fn presence_only_credentials_report_ready_but_not_verified() {
+        let auth = tempfile::NamedTempFile::new().expect("auth file");
+        // The credential material is present, exactly like a revoked-but-still-
+        // on-disk refresh token (#13628): Homeboy can read it, but reading it
+        // is not proof the issuing account still honors it.
+        std::fs::write(auth.path(), r#"{"token":"revoked-but-present-token"}"#)
+            .expect("write auth");
+        let provider = provider_with_present_but_unverifiable_credential(auth.path());
+        let catalog = catalog(provider);
+
+        let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
+
+        assert_eq!(verdict.state, "ready");
+        assert!(
+            verdict.ready,
+            "Homeboy has no contrary evidence, so dispatch must not be blocked"
+        );
+        assert!(
+            verdict.checks.credentials.ready,
+            "the declared credential is present"
+        );
+        assert!(
+            !verdict.checks.credentials.verified,
+            "no provider-declared readiness probe ran, so this is presence only, not a live \
+             verification — reporting it as verified is exactly the #13628 defect"
+        );
+        assert!(
+            !verdict.reason.contains("all dispatchability checks passed"),
+            "the reason must not claim full validation when only presence was checked: {}",
+            verdict.reason
+        );
+    }
+
+    #[test]
+    fn a_live_readiness_probe_that_passes_reports_verified_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let script = root.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'k',identity:{}}));",
+        )
+        .expect("readiness script");
+        let mut live_provider = provider_with_present_but_unverifiable_credential(
+            root.path().join("unused-auth.json").as_path(),
+        );
+        std::fs::write(
+            root.path().join("unused-auth.json"),
+            r#"{"token":"present-and-live-checked"}"#,
+        )
+        .expect("write auth");
+        live_provider.readiness_invocation = Some(CommandInvocation {
+            argv: vec!["node".to_string(), script.display().to_string()],
+            ..CommandInvocation::default()
+        });
+        let catalog = catalog(live_provider);
+
+        let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
+
+        assert!(verdict.ready);
+        assert!(
+            verdict.checks.credentials.verified,
+            "a provider-declared readiness probe ran and passed, so this is a genuine live \
+             verification"
+        );
+        assert_eq!(verdict.reason, "all dispatchability checks passed");
     }
 
     #[test]

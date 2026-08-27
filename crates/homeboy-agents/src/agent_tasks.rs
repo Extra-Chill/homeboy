@@ -259,15 +259,15 @@ pub mod dispatch_service {
 /// PR finalization contracts and backends.
 pub mod finalization {
     pub use super::super::agent_task_finalization::{
-        finalize_pr, finalize_pr_with_backend, preflight_pr, preflight_pr_with_backend,
-        validate_publication_intent, AgentTaskGateResult, AgentTaskPrEvidence,
-        AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
-        AgentTaskPrFinalizationOutcome, AgentTaskPrFinalizationReport, AgentTaskPrRef,
-        AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
-        AgentTaskPublicationIntent, AgentTaskPublicationProof, AgentTaskPublicationTarget,
-        RealAgentTaskPrFinalizationBackend, AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA,
-        AGENT_TASK_PR_FINALIZATION_SCHEMA, AGENT_TASK_PUBLICATION_INTENT_SCHEMA,
-        AGENT_TASK_PUBLICATION_PROOF_SCHEMA,
+        finalize_pr, finalize_pr_with_backend, hydrate_manual_verification_dependencies,
+        preflight_pr, preflight_pr_with_backend, validate_publication_intent, AgentTaskGateResult,
+        AgentTaskGateSetupEvidence, AgentTaskPrEvidence, AgentTaskPrFinalizationBackend,
+        AgentTaskPrFinalizationOptions, AgentTaskPrFinalizationOutcome,
+        AgentTaskPrFinalizationReport, AgentTaskPrRef, AgentTaskPrRuntimeGuardrails,
+        AgentTaskPrSourceRelationship, AgentTaskPrVerification, AgentTaskPublicationIntent,
+        AgentTaskPublicationProof, AgentTaskPublicationTarget, RealAgentTaskPrFinalizationBackend,
+        AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA, AGENT_TASK_PR_FINALIZATION_SCHEMA,
+        AGENT_TASK_PUBLICATION_INTENT_SCHEMA, AGENT_TASK_PUBLICATION_PROOF_SCHEMA,
     };
 }
 
@@ -492,11 +492,11 @@ pub mod scheduler {
 /// Secret-env mapping and resolution helpers.
 pub mod secrets {
     pub use super::super::agent_task_secrets::{
-        map_secret_to_env, map_secret_to_keychain_bundle, remove_secret_mapping,
-        resolve_secret_env, resolve_secret_env_with_fallbacks, secret_env_status,
-        secret_env_status_with_fallbacks, set_config_secret, set_keychain_bundle,
-        set_keychain_secret, validate_secret_env, AgentTaskSecretEnvStatus,
-        AgentTaskSecretResolutionError,
+        legacy_secrets_file, map_secret_to_env, map_secret_to_keychain_bundle,
+        remove_secret_mapping, resolve_secret_env, resolve_secret_env_with_fallbacks,
+        secret_env_status, secret_env_status_for_scope, secret_env_status_with_fallbacks,
+        set_config_secret, set_keychain_bundle, set_keychain_secret, validate_secret_env,
+        AgentTaskSecretEnvStatus, AgentTaskSecretResolutionError,
     };
 }
 
@@ -520,9 +520,9 @@ pub mod service {
         normalize_plan_workspaces, offloaded_status_remediation,
         persist_manual_finalization_intent, persist_manual_finalization_receipt,
         persist_manual_finalization_retry_intent, persist_provider_boundary_replay_evidence,
-        preflight_cook_continuation_admission, prepare_manual_finalization_identity,
-        promotion_is_resumable, read_plan, reconcile_recipe_attempt_for_continuation,
-        reconstruct_adoption_options_with_dispatcher,
+        preflight_cook_continuation_admission, preflight_recipe_attempt_for_continuation,
+        prepare_manual_finalization_identity, promotion_is_resumable, read_plan,
+        reconcile_recipe_attempt_for_continuation, reconstruct_adoption_options_with_dispatcher,
         reconstruct_options_for_pre_execution_recovery, reconstruct_options_with_dispatcher,
         reconstruct_options_with_local_placement_override, record_replacement_gate_proof,
         recover_cook_pr, recover_terminal_transport_proxy_evidence, register_cook_batch_job_driver,

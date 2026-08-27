@@ -6018,6 +6018,7 @@ mod tests {
 
             let primary = home.path().join("primary");
             fs::create_dir(&primary).expect("primary");
+            init_git_primary(&primary);
             write_component_registration(home.path(), "homeboy", &primary);
         });
         with_materialized_cook_batch_worktrees(|| {
@@ -6509,6 +6510,7 @@ mod tests {
                 .status()
                 .expect("git commit")
                 .success());
+            init_git_primary(&source);
             write_component_registration(home.path(), "fixture", &source);
 
             let mut plan = test_batch_plan();
@@ -7729,6 +7731,39 @@ fi
         .expect("component registration");
     }
 
+    /// Make a registered primary answer default-branch resolution.
+    ///
+    /// `cook_batch_args` plans from `origin/main`, and repository planning now
+    /// resolves that against the registered primary before anything else runs.
+    /// A bare directory has no branch and no remote, so every case built on one
+    /// fails in repository resolution before reaching the behavior it asserts.
+    /// The remote ref is published locally because a fixture must not need a
+    /// network to resolve its own source ref.
+    ///
+    /// This is deliberately not folded into `write_component_registration`: the
+    /// large-registry case registers hundreds of unrelated components while
+    /// measuring elapsed time, and only the planning target needs a repository.
+    fn init_git_primary(path: &Path) {
+        std::fs::create_dir_all(path).expect("primary fixture directory");
+        for args in [
+            ["init", "-b", "main"].as_slice(),
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Homeboy Test"].as_slice(),
+            ["commit", "--allow-empty", "-m", "initial"].as_slice(),
+            ["update-ref", "refs/remotes/origin/main", "HEAD"].as_slice(),
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(path)
+                    .status()
+                    .expect("initialize primary fixture")
+                    .success(),
+                "git {args:?} failed"
+            );
+        }
+    }
+
     #[test]
     fn fanout_dry_run_bounds_gate_workspace_lookup_in_a_large_registry() {
         with_isolated_home(|home| {
@@ -7736,6 +7771,7 @@ fi
             std::fs::create_dir(&target).expect("target workspace");
             std::fs::write(target.join("homeboy.json"), r#"{"id":"fixture"}"#)
                 .expect("target manifest");
+            init_git_primary(&target);
             write_component_registration(home.path(), "fixture", &target);
 
             for index in 0..300 {
@@ -7786,7 +7822,7 @@ fi
         with_isolated_home(|home| {
             let primary = home.path().join("primary");
             std::fs::create_dir(&primary).expect("primary directory");
-            git(&primary, &["init"]);
+            init_git_primary(&primary);
             write_component_registration(home.path(), "fixture", &primary);
 
             let mut slug = cook_batch_args();
@@ -7807,7 +7843,7 @@ fi
             let private_sentinel = "PRIVATE_GATE_SENTINEL_INVALID_REPO";
             let primary = home.path().join("primary");
             std::fs::create_dir(&primary).expect("primary directory");
-            git(&primary, &["init"]);
+            init_git_primary(&primary);
             write_component_registration(home.path(), "fixture", &primary);
 
             let mut handle = cook_batch_args();
@@ -8057,7 +8093,7 @@ fi
     }
 
     fn with_materialized_cook_batch_worktrees(test: impl FnOnce()) {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
             let mut config = homeboy::core::defaults::load_config();
             config.agent_task.default_backend = Some("sandbox".to_string());
             config.worktree_providers.clear();
@@ -8066,6 +8102,33 @@ fi
             );
             homeboy::core::defaults::save_config(&config)
                 .expect("configure fixture default backend");
+            // `--repo homeboy` only resolves against a registered primary, so the
+            // fixture has to own that registration as well as the worktrees it
+            // adopts. Without it every cook-batch case fails in repository
+            // resolution before reaching the behavior under test.
+            let primary = home.path().join("cook-batch-primary");
+            std::fs::create_dir_all(&primary).expect("create primary fixture");
+            for args in [
+                ["init", "-b", "main"].as_slice(),
+                ["config", "user.email", "test@example.com"].as_slice(),
+                ["config", "user.name", "Homeboy Test"].as_slice(),
+                ["commit", "--allow-empty", "-m", "initial"].as_slice(),
+                // The planned source ref has to resolve without a network, so the
+                // fixture publishes `origin/main` locally rather than fetching it.
+                ["update-ref", "refs/remotes/origin/main", "HEAD"].as_slice(),
+            ] {
+                assert!(
+                    Command::new("git")
+                        .args(args)
+                        .current_dir(&primary)
+                        .status()
+                        .expect("initialize primary fixture")
+                        .success(),
+                    "git {args:?} failed"
+                );
+            }
+            init_git_primary(&primary);
+            write_component_registration(home.path(), "homeboy", &primary);
             let worktrees = tempfile::tempdir().expect("managed worktree fixtures");
             for (handle, name) in [
                 ("homeboy@fix-issue-6453-homeboy", "issue-6453"),
@@ -8799,6 +8862,7 @@ fi
                 r#"{"scripts":{"lint":["check"]}}"#,
             )
             .expect("component manifest");
+            init_git_primary(&source);
             write_component_registration(home.path(), "fixture", &source);
 
             let mut args = cook_batch_args();
@@ -9651,6 +9715,7 @@ fi
                     .unwrap()
                     .success());
             }
+            init_git_primary(&source);
             write_component_registration(home.path(), "fanout-dry-run-fixture", &source);
 
             let mut args = cook_batch_args();
@@ -9877,6 +9942,7 @@ fi
                 r#"{"scripts":{"lint":["check"],"test":["check"]}}"#,
             )
             .expect("component manifest");
+            init_git_primary(&primary);
             write_component_registration(home.path(), "fixture", &primary);
 
             for gate in [
@@ -9946,6 +10012,7 @@ fi
                     .unwrap()
                     .success());
             }
+            init_git_primary(&source);
             write_component_registration(home.path(), "fanout-mixed-fixture", &source);
             worktree::queue_create(worktree::WorktreeQueueCreateOptions {
                 repo: "fanout-mixed-fixture".to_string(),
