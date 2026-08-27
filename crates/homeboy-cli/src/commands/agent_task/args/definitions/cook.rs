@@ -1026,14 +1026,15 @@ pub struct AgentTaskCookArgs {
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle
     /// is `<repo>@<branch-slug>`, where the slug replaces every character of
     /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
-    /// `repo@fix-1234-x`. Existing destinations are reused. Creating a missing
-    /// one is not a built-in capability: it requires an enabled worktree
-    /// provider with a `commands.ensure` argv template; previewing creation
-    /// additionally requires its non-mutating `commands.plan` counterpart.
-    /// Without ensure, create the destination first with `homeboy worktree
-    /// create`. When omitted, an explicit --cwd is the canonical destination.
-    /// Otherwise, --repo plus --task-url derives an issue-owned destination through that
-    /// same configured provider. An explicit --workspace or --cwd Git checkout
+    /// `repo@fix-1234-x`. Existing destinations are reused. A missing destination
+    /// is created after durable Cook admission through an enabled worktree
+    /// provider with `commands.ensure`, or through Homeboy's built-in local
+    /// provider when no configured provider declares creation capability.
+    /// Previewing that creation additionally requires the provider's
+    /// non-mutating `commands.plan` counterpart. When omitted, an explicit
+    /// --cwd is the canonical destination. Otherwise, --repo plus --task-url
+    /// derives an issue-owned destination through the same provider boundary.
+    /// An explicit --workspace or --cwd Git checkout
     /// can infer --repo when its remote maps to exactly one
     /// configured component; an explicit --repo must match that checkout. When
     /// paired with --cwd, this must name the same existing local or active

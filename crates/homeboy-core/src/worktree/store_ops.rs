@@ -165,6 +165,23 @@ fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<Strin
     reasons
 }
 
+/// Pin the repository-local commit identity in a freshly materialized
+/// worktree to whatever the target remote's host policy declares, instead of
+/// leaving it to fall back to whatever ambient `~/.gitconfig` identity the
+/// provisioning environment happens to carry (#13647). Linked worktrees share
+/// their source checkout's repository config, so this also corrects the
+/// identity used by any sibling worktree of the same remote going forward.
+///
+/// A no-op when no policy is configured for the remote's host — Homeboy does
+/// not invent an identity, it only pins one that is already declared.
+fn pin_worktree_identity(worktree_path: &Path) -> Result<()> {
+    let path = worktree_path.to_string_lossy();
+    if let Some(identity) = git::resolve_host_identity_policy(&path)? {
+        git::configure_identity(&path, &identity)?;
+    }
+    Ok(())
+}
+
 pub(super) fn create_with_store(
     options: WorktreeCreateOptions,
     store_dir: &Path,
@@ -297,6 +314,7 @@ fn create_with_store_unlocked(
             true,
             "git worktree add",
         )?;
+        pin_worktree_identity(&worktree_path)?;
         let current = create_evidence(&record, "registered".to_string())?;
         return Ok(WorktreeCreateOutput {
             record,
@@ -323,6 +341,7 @@ fn create_with_store_unlocked(
         "git worktree add",
     )?;
     ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
+    pin_worktree_identity(&worktree_path)?;
 
     let mut record = TaskWorktreeRecord {
         id,
@@ -337,6 +356,7 @@ fn create_with_store_unlocked(
         cleanup_policy: options
             .cleanup_policy
             .unwrap_or_else(|| CleanupPolicy::default_for_run(options.run_id.as_deref())),
+        terminal_disposition: None,
         branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
         created_at: chrono::Utc::now().to_rfc3339(),
         state: TaskWorktreeState::Active,
@@ -1016,7 +1036,7 @@ fn unpushed_branch_commit_count(source: &Path, branch: &str, base_ref: &str) -> 
     })
 }
 
-fn list_adopted_with_store(store_dir: &Path) -> Result<Vec<AdoptedWorkspaceRecord>> {
+pub(super) fn list_adopted_with_store(store_dir: &Path) -> Result<Vec<AdoptedWorkspaceRecord>> {
     if !store_dir.exists() {
         return Ok(Vec::new());
     }

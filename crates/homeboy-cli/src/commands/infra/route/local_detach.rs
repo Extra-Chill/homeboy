@@ -302,12 +302,21 @@ pub(super) fn intercept_local_cook_retry(
             (pid, start_identity, launch_token)
         }
     };
+    let child_session_ref = launch_token
+        .1
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| {
+            Error::internal_unexpected("detached retry session reference is unavailable")
+        })?;
     let controller_job = match submit_cook_retry_controller_job(
         &controller_client,
         cook_id,
         &run_id,
         pid,
         &start_identity,
+        child_session_ref,
     ) {
         Ok(job) => job,
         Err(error) => {
@@ -461,12 +470,15 @@ fn record_retry_launcher_failure(
 /// concurrent caller advances the recipe.
 fn retry_child_args(normalized_args: &[String], run_id: &str) -> Vec<String> {
     let mut args = Vec::with_capacity(normalized_args.len() + 2);
+    // Only a run-id flag before the bare separator is Homeboy's own. Stripping one
+    // past it would rewrite a forwarded argument instead of this retry (#11577).
+    let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
     let mut index = usize::from(
         normalized_args
             .first()
             .is_some_and(|arg| arg == "homeboy" || arg.ends_with("/homeboy")),
     );
-    while index < normalized_args.len() {
+    while index < owned {
         let arg = &normalized_args[index];
         if arg == "--new-run-id" {
             index += 2;
@@ -477,8 +489,11 @@ fn retry_child_args(normalized_args: &[String], run_id: &str) -> Vec<String> {
         }
         index += 1;
     }
+    // The pin belongs to Homeboy, so it stays ahead of the separator and the
+    // forwarded tail is carried through untouched.
     args.push("--new-run-id".to_string());
     args.push(run_id.to_string());
+    args.extend_from_slice(&normalized_args[owned..]);
     args
 }
 
@@ -516,7 +531,12 @@ fn consume_local_cook_launch_token() -> bool {
     ) else {
         return false;
     };
-    consume_local_cook_launch_token_at(&token, &PathBuf::from(path))
+    let consumed = consume_local_cook_launch_token_at(&token, &PathBuf::from(path));
+    if consumed {
+        std::env::remove_var(LOCAL_COOK_LAUNCH_TOKEN_ENV);
+        std::env::remove_var(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV);
+    }
+    consumed
 }
 
 fn local_cook_launch_token_is_present() -> bool {
@@ -635,6 +655,14 @@ pub(super) fn intercept_local_detached_cook(
     provider_placement: Option<&str>,
     provider_runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
+    if !matches!(
+        &cli.command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+        })
+    ) {
+        return Ok(None);
+    }
     // The detached child cannot enter Cook admission until its parent publishes
     // the one-use token carrying the exact durable supervisor identity.
     if local_cook_launch_token_is_present() {
@@ -769,12 +797,7 @@ pub(super) fn intercept_local_detached_cook(
             &mut child,
             handoff_timeout(),
         )?;
-        if handoff.state != DetachedHandoffState::Accepted {
-            let reason = if handoff.state == DetachedHandoffState::ExitedBeforeHandoff {
-                "detached Cook exited before materializing an executable plan"
-            } else {
-                "detached Cook did not materialize an executable plan before the bounded handoff deadline"
-            };
+        if let Some(reason) = detached_handoff_rejection_reason(handoff.state) {
             let _ = controller_client.cancel(controller_job.job_id(), reason);
             terminate_and_reap_detached_child(&mut child);
             return Err(empty_detached_plan_error(
@@ -782,13 +805,12 @@ pub(super) fn intercept_local_detached_cook(
                 reason,
             ));
         }
-        crate::commands::agent_task::run::announce_durable_cook_identity(
-            Some(&cook_id),
-            handoff
-                .run_id
-                .as_deref()
-                .expect("accepted handoff has run id"),
-        );
+        if let Some(run_id) = handoff.run_id.as_deref() {
+            crate::commands::agent_task::run::announce_durable_cook_identity(
+                Some(&cook_id),
+                run_id,
+            );
+        }
         let envelope = handoff_envelope(
             &cook_id,
             pid,
@@ -900,12 +922,14 @@ fn submit_cook_retry_controller_job(
     run_id: &str,
     pid: u32,
     start_identity: &homeboy::core::process::ProcessStartIdentity,
+    child_session_ref: &str,
 ) -> homeboy::core::Result<ControllerJobHandoff> {
     let submission = homeboy::agents::agent_task_service::cook_retry_job_submission(
         cook_id,
         run_id,
         pid,
         start_identity,
+        child_session_ref,
     )?;
     let job = client.submit(submission)?;
     Ok(ControllerJobHandoff::Owned {
@@ -1260,6 +1284,11 @@ impl DetachedHandoffState {
             Self::ExitedBeforeHandoff => "exited_before_handoff",
         }
     }
+}
+
+fn detached_handoff_rejection_reason(state: DetachedHandoffState) -> Option<&'static str> {
+    (state == DetachedHandoffState::ExitedBeforeHandoff)
+        .then_some("detached Cook exited before materializing an executable plan")
 }
 
 fn handoff_timeout() -> Duration {
@@ -1669,6 +1698,22 @@ mod tests {
         let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
         assert!(consume_local_cook_launch_token_at(token.as_ref(), &path));
         assert!(!consume_local_cook_launch_token_at(token.as_ref(), &path));
+    }
+
+    #[test]
+    fn consumed_launch_token_is_not_inherited_by_nested_cook() {
+        let directory = tempfile::tempdir().expect("temporary token directory");
+        let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
+        let _env = super::super::tests::EnvGuard::set_many(&[
+            (LOCAL_COOK_LAUNCH_TOKEN_ENV, Some(token.as_str())),
+            (
+                LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV,
+                Some(path.to_str().expect("UTF-8 token path")),
+            ),
+        ]);
+
+        assert!(consume_local_cook_launch_token());
+        assert!(!local_cook_launch_token_is_present());
     }
 
     #[test]
@@ -2505,6 +2550,7 @@ mod tests {
                 .expect("observe bounded pending handoff");
 
             assert_eq!(handoff.state, DetachedHandoffState::Pending);
+            assert_eq!(detached_handoff_rejection_reason(handoff.state), None);
             assert_eq!(
                 agent_task_lifecycle::status(cook_id)
                     .expect("pending status command resolves")
@@ -2826,6 +2872,10 @@ mod tests {
                     .expect("observe exited handoff");
 
             assert_eq!(handoff.state, DetachedHandoffState::ExitedBeforeHandoff);
+            assert_eq!(
+                detached_handoff_rejection_reason(handoff.state),
+                Some("detached Cook exited before materializing an executable plan")
+            );
             assert_eq!(handoff.run_id, None);
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("the observer terminalizes the exited handoff parent");

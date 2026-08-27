@@ -1,5 +1,5 @@
 use super::*;
-use types::{RunnerCheck, RunnerDoctorStatus, ToolProbe};
+use types::{RunnerCheck, RunnerDoctorStatus, RunnerRepairAction, ToolProbe};
 
 pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
     if probe.available {
@@ -158,16 +158,26 @@ pub(crate) fn homeboy_version_skew_check(
     let refresh_ref = homeboy_product_identity::build_identity()
         .git_commit
         .unwrap_or_else(|| format!("v{local_version}"));
-    Some(warning_with_details(
-        "homeboy.version_skew",
-        format!(
-            "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
-        ),
-        Some(format!(
-            "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {refresh_ref} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
-        )),
-        details,
-    ))
+    Some(
+        warning_with_details(
+            "homeboy.version_skew",
+            format!(
+                "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
+            ),
+            Some(format!(
+                "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {refresh_ref} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
+            )),
+            details,
+        )
+        // Every argument in the sentence above is already known here. Carrying
+        // it typed as well is the difference between a fix a person retypes and
+        // one a repair loop can run: `refresh_ref` is the same value in both,
+        // pinned by `version_skew_action_and_prose_carry_the_same_ref`.
+        .with_action(RunnerRepairAction::RefreshHomeboy {
+            git_ref: Some(refresh_ref.clone()),
+            allow_downgrade: false,
+        }),
+    )
 }
 
 fn normalize_homeboy_build_identity(identity: &str) -> &str {
@@ -181,6 +191,7 @@ pub fn ok(id: impl Into<String>, message: String, remediation: Option<String>) -
         status: RunnerDoctorStatus::Ok,
         message,
         remediation,
+        remediation_action: None,
         details: BTreeMap::new(),
     }
 }
@@ -191,6 +202,7 @@ pub fn warning(id: impl Into<String>, message: String, remediation: Option<Strin
         status: RunnerDoctorStatus::Warning,
         message,
         remediation,
+        remediation_action: None,
         details: BTreeMap::new(),
     }
 }
@@ -206,6 +218,7 @@ pub(super) fn warning_with_details(
         status: RunnerDoctorStatus::Warning,
         message,
         remediation,
+        remediation_action: None,
         details,
     }
 }
@@ -221,6 +234,7 @@ pub fn error(
         status: RunnerDoctorStatus::Error,
         message,
         remediation,
+        remediation_action: None,
         details,
     }
 }
@@ -296,6 +310,7 @@ pub(super) fn ok_with_details(
         status: RunnerDoctorStatus::Ok,
         message,
         remediation: None,
+        remediation_action: None,
         details,
     }
 }

@@ -191,6 +191,7 @@ Inspect CI reproduction profiles and discovered CI surfaces
 | `homeboy review ci scope` | Resolve a CI event context into the Homeboy scope (changed vs full) and the per-command `--changed-since` flags |
 | `homeboy review ci differential-gate` | Classify differential CI results without blaming a PR for a red baseline |
 | `homeboy review ci triage` | Summarize failed GitHub Actions runs for a pull request without dumping raw logs |
+| `homeboy review ci pins` | Report how far this repository's workflow action pins have drifted from their upstream releases |
 
 ## `homeboy review ci list`
 
@@ -324,3 +325,24 @@ Summarize failed GitHub Actions runs for a pull request without dumping raw logs
 | `--max-runs` | `<MAX_RUNS>` | Maximum failed workflow runs to inspect. Use 0 for the default |
 | `--max-snippets-per-job` | `<MAX_SNIPPETS_PER_JOB>` | Maximum relevant log snippet lines to retain per failed job. Use 0 for the default |
 | `--context-lines` | `<CONTEXT_LINES>` | Context lines around relevant log matches. Use 0 for the default |
+
+## `homeboy review ci pins`
+
+```sh
+homeboy review ci pins [OPTIONS]
+```
+
+Report how far this repository's workflow action pins have drifted from their upstream releases.
+
+A commit-pinned reusable workflow or action freezes another repository at a point in time, and nothing expires that freeze. The failure is silent: a fix exists, is released, is believed to be running, and is not. See #13437.
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--path` | `<PATH>` | Repository root containing `.github/workflows` and `homeboy.json` |
+| `--workflows` | `<WORKFLOWS>` | Workflow directory to scan, relative to `--path` |
+| `--max-commits-behind` | `<MAX_COMMITS_BEHIND>` | Exit non-zero when any pin is at least this many commits behind its upstream release. Omitted, the command reports and exits zero, so it is safe to add before anyone is ready to enforce it |
+| `--fail-on-unresolved` | flag | Also exit non-zero when a pin's repository could not be attributed or verified. Off by default: an unresolved pin is a gap in this check's configuration, not evidence about the pin |
+| `--apply` | flag | Execute the mutation. Without this flag the command reports a plan only |
+| `--dry-run` | flag | Explicitly request the plan-only default. Never mutates |
+| `--all` | flag | Include tag and branch pins in the report. They cannot go stale, so by default only commit pins are listed and floating ones are counted |
+| `--input-repository` | `<INPUT_REPOSITORIES>` | Map an input key to the repository it refers to, as `key=owner/repo`. Repeatable. Overrides `ci.pin_repositories` in `homeboy.json` |

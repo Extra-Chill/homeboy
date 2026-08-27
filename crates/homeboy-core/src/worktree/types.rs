@@ -73,6 +73,8 @@ pub struct TaskWorktreeRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     pub cleanup_policy: CleanupPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_disposition: Option<String>,
     #[serde(default)]
     pub branch_cleanup_intent: BranchCleanupIntent,
     pub created_at: String,
@@ -621,7 +623,7 @@ pub struct WorktreeQueueCreateRequest {
     pub task_url: Option<String>,
     pub task_ref: Option<String>,
     pub run_id: Option<String>,
-    pub provider_lifecycle: Option<crate::worktree_providers::WorktreeProviderLifecycleIntent>,
+    pub provider_lifecycle: Option<crate::worktree_provider::WorktreeProvisionLifecycle>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

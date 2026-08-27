@@ -59,14 +59,24 @@ fi
 # Duplicate GitHub contexts must be rejected here, before any execution is
 # interpreted: two gates claiming one context makes both the ruleset payload
 # and the execution aggregation ambiguous.
+#
+# Emptiness is refused for the same reason. Every artifact below is DERIVED from
+# `.gates`, so a manifest declaring nothing derives a ruleset that requires
+# nothing, and `--check` would then faithfully report that as current. That is
+# #12833 -- a main ruleset enforcing zero status checks -- reached through
+# generation rather than through live drift, and it must fail at declaration
+# time rather than be discovered after a PR merges ahead of a red gate. A
+# terminal gate is required for the same reason: it is the aggregate that proves
+# the others actually executed, and a policy that quietly loses it keeps every
+# individual context while losing the proof that any of them ran.
 
 jq -e '
   (.schema == "homeboy/required-gates/v1") and
   (.gates | type == "array") and
-  ((.gates | map(.id) | length) >= 0) and
+  ((.gates | length) > 0) and
   ([.gates[].id] | (length == (unique | length))) and
   ([.gates[].context] | (length == (unique | length))) and
-  ([.gates[] | select(.terminal == true)] | length <= 1) and
+  ([.gates[] | select(.terminal == true)] | length == 1) and
   all(.gates[];
     (.id | type == "string" and length > 0) and
     (.context | type == "string" and startswith("homeboy / ")) and
@@ -87,7 +97,7 @@ jq -e '
   all(.gates[] | select(.terminal == true);
     .required_status_check == true)
 ' "${manifest}" >/dev/null || {
-  echo "required-gates manifest ${manifest} is structurally invalid (duplicate ids, duplicate contexts, unknown emission/aggregation kinds, or a non-required terminal gate)" >&2
+  echo "required-gates manifest ${manifest} is structurally invalid (no gates, no single terminal gate, duplicate ids, duplicate contexts, unknown emission/aggregation kinds, or a non-required terminal gate)" >&2
   exit 1
 }
 

@@ -43,12 +43,35 @@ mod lab_source_path_tests {
             std::fs::create_dir_all(&store).expect("worktree store");
             let worktree_path = home.path().join("homeboy@smoke");
             std::fs::create_dir_all(&worktree_path).expect("worktree path");
+            let initialized = std::process::Command::new("git")
+                .args(["init", "-b", "smoke"])
+                .current_dir(&worktree_path)
+                .output()
+                .expect("initialize worktree repository");
+            assert!(initialized.status.success());
+            let committed = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Homeboy Test",
+                    "-c",
+                    "user.email=homeboy@example.test",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "fixture",
+                ])
+                .current_dir(&worktree_path)
+                .output()
+                .expect("commit worktree fixture");
+            assert!(committed.status.success());
+            let source_checkout = home.path().join("homeboy");
+            std::fs::create_dir_all(&source_checkout).expect("source checkout");
             std::fs::write(
                 store.join("homeboy_smoke.json"),
                 serde_json::json!({
                     "id": "homeboy@smoke",
                     "component_id": "homeboy",
-                    "source_checkout": home.path().join("homeboy").display().to_string(),
+                    "source_checkout": source_checkout,
                     "worktree_path": worktree_path.display().to_string(),
                     "branch": "smoke",
                     "base_ref": "HEAD",

@@ -1449,7 +1449,7 @@ fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::ti
 ///
 /// `reconcile_stale_active_runs` had exactly two callers — `cleanup` and
 /// `agent-task active --reconcile --apply` — so a detached cook whose owner
-/// died stayed `running` forever. Controller waits had none at all.
+/// died stayed `running` forever. Loop Work jobs own controller waits.
 fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let Some(interval) = orchestration_tick_interval() else {
@@ -1462,20 +1462,17 @@ fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::
     })
 }
 
-/// One pass per mechanism, per interval.
+/// One pass per remaining global mechanism, per interval.
 ///
-/// The two mechanisms are isolated from each other and from the loop: a
+/// The mechanisms are isolated from each other and from the loop: a
 /// reconcile that panics costs one pass, not the tick and not the daemon.
-/// Overlap is impossible by construction — the sleep happens after both
+/// Overlap is impossible by construction — the sleep happens after all
 /// passes return, exactly as the schedule ticker does it — and across
 /// processes the daemon owner lock already guarantees a single ticker.
 fn orchestration_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
     loop {
         isolated_tick(|| {
             let _ = orchestration::reconcile_stale_active_runs();
-        });
-        isolated_tick(|| {
-            let _ = orchestration::reconcile_controller_waits();
         });
         isolated_tick(|| {
             let _ = orchestration::reconcile_unmaterialized_cook_admissions();
@@ -3942,7 +3939,7 @@ fn controller_job_id_from_path(path: &str, suffix: &str) -> Result<Uuid> {
     })
 }
 
-fn hex_digest(value: &serde_json::Value) -> Result<String> {
+pub(crate) fn hex_digest(value: &serde_json::Value) -> Result<String> {
     let encoded =
         serde_json::to_vec(value).map_err(|error| Error::internal_unexpected(error.to_string()))?;
     Ok(content_hash::sha256_hex(&encoded))
