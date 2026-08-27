@@ -53,11 +53,9 @@ fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> 
         .cloned()
         .unwrap_or_else(|| json!({ "fixture_mode": "success" }));
     let mut outcome = AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: request.task_id.clone(),
         status: AgentTaskOutcomeStatus::Succeeded,
         summary: Some("fixture provider wrote deterministic smoke artifacts".to_string()),
-        failure_classification: None,
         artifacts: vec![
             fixture_artifact("patch", "patch", &patch_path, Some("text/x-patch")),
             fixture_artifact(
@@ -67,7 +65,6 @@ fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> 
                 Some("application/json"),
             ),
         ],
-        typed_artifacts: Vec::new(),
         evidence_refs: vec![AgentTaskEvidenceRef {
             kind: "transcript".to_string(),
             uri: transcript_path.display().to_string(),
@@ -79,10 +76,8 @@ fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> 
                 .to_string(),
             data: json!({ "artifact_root": artifact_root.display().to_string() }),
         }],
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
         metadata,
+        ..Default::default()
     };
     let _ = std::fs::write(
         &result_path,

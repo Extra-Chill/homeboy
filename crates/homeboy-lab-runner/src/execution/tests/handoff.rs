@@ -404,6 +404,7 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
             &["homeboy".to_string(), "trace".to_string()],
             &job,
             None,
+            false,
             None,
         )
         .expect("persist handoff run");
@@ -435,6 +436,7 @@ fn reverse_handoff_persists_broker_transport_for_post_disconnect_refresh() {
             &command,
             &job,
             None,
+            false,
             Some("http://127.0.0.1:4321"),
         )
         .expect("persist reverse handoff run");
@@ -472,6 +474,7 @@ fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
             &command,
             &job,
             None,
+            false,
             None,
         )
         .expect("accepted handoff mirror");
@@ -548,6 +551,7 @@ fn transient_daemon_transport_drop_keeps_the_durable_job_recoverable() {
             &command,
             &job,
             None,
+            false,
             None,
         )
         .expect("accepted handoff mirror");

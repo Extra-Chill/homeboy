@@ -382,7 +382,7 @@ pub(super) fn execute_artifact_deploy(
                 base_path,
                 &ctx.client,
                 effect.as_ref(),
-                prepared.local_version.as_ref(),
+                post_deploy_expected_version(prepared),
             ) {
                 Ok(PostDeployVerification::Verified(version)) => version,
                 Ok(PostDeployVerification::AppliedUnverified(error)) => {
@@ -471,6 +471,15 @@ pub(super) fn execute_artifact_deploy(
             with_prepared_artifact_source(result, prepared)
         }
     }
+}
+
+pub(super) fn post_deploy_expected_version(prepared: &PreparedComponentDeploy) -> Option<&String> {
+    prepared
+        .config
+        .prepared_artifact
+        .as_ref()
+        .map(|artifact| &artifact.version)
+        .or(prepared.local_version.as_ref())
 }
 
 fn with_prepared_artifact_source(

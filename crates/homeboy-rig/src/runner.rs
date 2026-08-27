@@ -1247,7 +1247,7 @@ pub fn preflight_effective_component_checkouts(rig: &RigSpec) -> Result<()> {
     for component in rig.components.values() {
         let path = expand_vars(rig, &component.path);
         let path = shellexpand::tilde(&path).into_owned();
-        homeboy_core::worktree_providers::resolve_worktree_provider_path(Path::new(&path))?;
+        homeboy_core::worktree_provider::resolve_configured_worktree_path(Path::new(&path))?;
     }
     Ok(())
 }
@@ -1284,12 +1284,19 @@ fn component_status(
         }
         _ => (declared, "installed_default".to_string()),
     };
-    match homeboy_core::worktree_providers::resolve_worktree_provider_path(Path::new(&path)) {
-        Ok(Some(resolution)) => RigComponentStatusReport {
+    match homeboy_core::worktree_provider::resolve_configured_worktree_path(Path::new(&path)) {
+        Ok(Some(target)) => RigComponentStatusReport {
             id: id.to_string(),
-            path: resolution.worktree.path,
-            source: format!("provider:{}", resolution.provider_id),
-            r#ref: Some(resolution.worktree.branch),
+            path: target.path.display().to_string(),
+            source: match target.provider {
+                homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => {
+                    "provider:native".to_string()
+                }
+                homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
+                    format!("provider:{provider}")
+                }
+            },
+            r#ref: target.branch,
             freshness: "current".to_string(),
             error: None,
         },

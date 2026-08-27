@@ -35,22 +35,22 @@ pub(super) fn harvest_uncommitted_patch(
     if outcome.artifacts.iter().any(is_actionable_patch_artifact) {
         return Ok(());
     }
-    // This checkout belongs solely to this dispatch. Staging all changes makes
-    // Git's binary patch generation include tracked, staged, and untracked files.
-    // Homeboy-owned runner metadata is excluded from the diff so it never lands
-    // in a candidate patch as checkout drift. (#8534)
-    git_output(
-        root,
-        &[
-            "add",
-            "--all",
-            "--",
-            ".",
-            RUNNER_METADATA_EXCLUDE_PATHSPECS[0],
-            RUNNER_METADATA_EXCLUDE_PATHSPECS[1],
-        ],
-    )?;
-    let mut uncommitted_patch_args = vec![
+    // Reconstruct the working-tree candidate without writing the attempt's live
+    // index. Timeout recovery can overlap a provider's final Git operation, and
+    // a linked worktree keeps that index lock in the source repository's
+    // administrative directory (#13448).
+    let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
+        command: "create attempt harvest Git index".to_string(),
+        cwd: root.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let index_path = index.path().display().to_string();
+    let index_env: &[(&str, &str)] = &[("GIT_INDEX_FILE", index_path.as_str())];
+    git_output_with_env(root, &["read-tree", "HEAD"], index_env)?;
+    let mut add_args = vec!["add", "--all", "--", "."];
+    add_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    git_output_with_env(root, &add_args, index_env)?;
+    let mut uncommitted_check_args = vec![
         "diff",
         "--cached",
         "--binary",
@@ -60,14 +60,32 @@ pub(super) fn harvest_uncommitted_patch(
         "--",
         ".",
     ];
-    uncommitted_patch_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
-    let patch = git_output_raw(root, &uncommitted_patch_args)?;
-    if patch.trim().is_empty() {
+    uncommitted_check_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    if git_output_raw_with_env(root, &uncommitted_check_args, index_env)?
+        .trim()
+        .is_empty()
+    {
         return Ok(());
     }
-    let mut uncommitted_changed_args = vec!["diff", "--cached", "--name-only", "HEAD", "--", "."];
+    // If the provider committed before its final edits, preserve one complete
+    // candidate against the immutable task base. Otherwise this artifact would
+    // omit the commits while still claiming `base` as its application base, and
+    // committed harvest would skip it because a patch already exists.
+    let mut candidate_patch_args = vec![
+        "diff",
+        "--cached",
+        "--binary",
+        "--full-index",
+        "--find-renames",
+        base,
+        "--",
+        ".",
+    ];
+    candidate_patch_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    let patch = git_output_raw_with_env(root, &candidate_patch_args, index_env)?;
+    let mut uncommitted_changed_args = vec!["diff", "--cached", "--name-only", base, "--", "."];
     uncommitted_changed_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
-    let changed_files = git_changed_files(root, &uncommitted_changed_args)?;
+    let changed_files = git_changed_files_with_env(root, &uncommitted_changed_args, index_env)?;
     let path = attempt_patch_path(running, "uncommitted")?;
     std::fs::write(&path, patch.as_bytes()).map_err(|error| HarvestError::ArtifactWrite {
         path: path.clone(),
@@ -334,7 +352,15 @@ fn committed_change_metadata_for_range(
 }
 
 fn git_changed_files(cwd: &Path, args: &[&str]) -> Result<Vec<String>, HarvestError> {
-    Ok(git_output(cwd, args)?
+    git_changed_files_with_env(cwd, args, &[])
+}
+
+fn git_changed_files_with_env(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<Vec<String>, HarvestError> {
+    Ok(git_output_with_env(cwd, args, env)?
         .lines()
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned)
@@ -979,33 +1005,52 @@ mod committed_harvest_tests {
     }
 
     #[test]
-    fn uncommitted_harvest_excludes_homeboy_runner_metadata_drift() {
+    fn uncommitted_harvest_ignores_the_linked_index_lock_and_preserves_commits() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
         let workspace = temp.path().join("workspace");
-        std::fs::create_dir(&workspace).expect("workspace");
-        git(&workspace, &["init", "-b", "main"]);
-        git(&workspace, &["config", "user.email", "test@example.com"]);
-        git(&workspace, &["config", "user.name", "Homeboy Test"]);
-        std::fs::write(workspace.join("file.txt"), "base\n").expect("base file");
+        std::fs::create_dir(&source).expect("source");
+        git(&source, &["init", "-b", "main"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(source.join("file.txt"), "base\n").expect("base file");
         // The runner metadata exists at the baseline; the runner rewrites it after
         // materialization, which is checkout drift, not provider output. (#8534)
-        std::fs::create_dir_all(workspace.join(".homeboy")).expect(".homeboy dir");
+        std::fs::create_dir_all(source.join(".homeboy")).expect(".homeboy dir");
         std::fs::write(
-            workspace.join(".homeboy/runner-workspace.json"),
+            source.join(".homeboy/runner-workspace.json"),
             "{\"stage\":\"baseline\"}\n",
         )
         .expect("runner metadata baseline");
-        git(&workspace, &["add", "-A"]);
-        git(&workspace, &["commit", "-m", "base"]);
+        git(&source, &["add", "-A"]);
+        git(&source, &["commit", "-m", "base"]);
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                workspace.to_str().expect("UTF-8 worktree path"),
+                "HEAD",
+            ],
+        );
         let base = git(&workspace, &["rev-parse", "HEAD"]);
 
-        // The provider edits one file; the runner rewrites its metadata (drift).
+        // The provider commits one edit, then makes another uncommitted edit;
+        // the runner also rewrites its metadata (drift).
         std::fs::write(workspace.join("file.txt"), "provider change\n").expect("provider edit");
+        git(&workspace, &["add", "file.txt"]);
+        git(&workspace, &["commit", "-m", "provider commit"]);
+        std::fs::write(workspace.join("late.txt"), "late provider change\n")
+            .expect("late provider edit");
         std::fs::write(
             workspace.join(".homeboy/runner-workspace.json"),
             "{\"stage\":\"final\"}\n",
         )
         .expect("runner metadata drift");
+        let index_lock =
+            PathBuf::from(git(&workspace, &["rev-parse", "--absolute-git-dir"])).join("index.lock");
+        std::fs::write(&index_lock, b"held by provider").expect("hold linked-worktree index lock");
 
         let request = AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -1075,6 +1120,16 @@ mod committed_harvest_tests {
         outcome.status = AgentTaskOutcomeStatus::Succeeded;
         harvest_uncommitted_patch(&mut outcome, &running).expect("harvest uncommitted patch");
 
+        assert!(
+            index_lock.exists(),
+            "harvest must not remove another owner's lock"
+        );
+        assert_eq!(
+            git(&workspace, &["diff", "--cached", "--name-only"]),
+            "",
+            "harvest must not stage candidate bytes in the linked-worktree index"
+        );
+
         let patch_path = outcome.artifacts[0]
             .path
             .clone()
@@ -1082,11 +1137,25 @@ mod committed_harvest_tests {
         let patch = std::fs::read_to_string(&patch_path).expect("read patch");
         assert!(
             patch.contains("file.txt") && patch.contains("+provider change"),
-            "the provider edit must be captured: {patch}"
+            "the provider commit must be captured: {patch}"
+        );
+        assert!(
+            patch.contains("late.txt") && patch.contains("+late provider change"),
+            "the provider's uncommitted edit must be captured: {patch}"
         );
         assert!(
             !patch.contains("runner-workspace.json"),
             "Homeboy runner metadata drift must be excluded from the candidate patch: {patch}"
+        );
+        git(&source, &["apply", "--check", &patch_path]);
+        git(&source, &["apply", &patch_path]);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).expect("applied committed edit"),
+            "provider change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("late.txt")).expect("applied uncommitted edit"),
+            "late provider change\n"
         );
     }
 

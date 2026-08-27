@@ -2640,19 +2640,15 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
                 ..AgentTaskAggregateTotals::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "cook-conductor".to_string(),
                 status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
                 summary: Some("Remote provider agent task failed.".to_string()),
                 failure_classification: Some(AgentTaskFailureClassification::Provider),
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
                 evidence_refs: vec![AgentTaskEvidenceRef {
                     kind: "provider-run".to_string(),
                     uri: "homeboy://provider/runs/provider-run-1".to_string(),
                     label: Some("Provider run".to_string()),
                 }],
-                diagnostics: Vec::new(),
                 outputs: serde_json::json!({
                     "provider_run_result": {
                         "schema": "custom-provider/agent-task-run-result/v1",
@@ -2665,12 +2661,11 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
                         }
                     }
                 }),
-                workflow: None,
-                follow_up: None,
                 metadata: serde_json::json!({
                     "provider": "fixture.agent-task-executor",
                     "remote_run_id": "provider-run-1",
                 }),
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -2955,19 +2950,10 @@ fn aggregate_source_loads_completed_run_without_path_spelunking() {
             ..AgentTaskAggregateTotals::default()
         },
         outcomes: vec![AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "task-a".to_string(),
             status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }],
         events: Vec::new(),
         artifact_lineage: Vec::new(),
@@ -3974,11 +3960,13 @@ fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
                 "local_retry_supervisor",
                 &Error::internal_unexpected(
                     "local Cook retry launcher exited before provider execution",
-                ),
+                )
+                .with_retryable(true),
             )
             .expect("strict lock must not re-enter during terminal persistence");
 
             assert_eq!(failed.state, AgentTaskRunState::Failed);
+            assert_eq!(failed.metadata["pre_execution_failure"]["retryable"], true);
             assert_eq!(
                 store.read_aggregate(run_id).expect("aggregate").status,
                 AgentTaskAggregateStatus::Failed

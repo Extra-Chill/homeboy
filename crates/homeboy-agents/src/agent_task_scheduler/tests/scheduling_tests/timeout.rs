@@ -6,6 +6,122 @@ use super::shared::*;
 mod timeout_tests {
     use super::*;
 
+    struct ReturnedTimeoutOnceExecutor {
+        calls: Arc<AtomicUsize>,
+        running: Arc<AtomicUsize>,
+        max_running: Arc<AtomicUsize>,
+    }
+
+    impl AgentTaskExecutorAdapter for ReturnedTimeoutOnceExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let running = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_running.fetch_max(running, Ordering::SeqCst);
+            self.running.fetch_sub(1, Ordering::SeqCst);
+            let mut result = outcome(
+                request.task_id,
+                if call == 0 {
+                    AgentTaskOutcomeStatus::Timeout
+                } else {
+                    AgentTaskOutcomeStatus::Succeeded
+                },
+            );
+            if call == 0 {
+                result.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+            }
+            result
+        }
+    }
+
+    struct ReturnedTimeoutExecutor;
+
+    impl AgentTaskExecutorAdapter for ReturnedTimeoutExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let mut result = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
+            result.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+            result
+        }
+    }
+
+    #[test]
+    fn retries_a_returned_provider_timeout_with_declared_budget() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let max_running = Arc::new(AtomicUsize::new(0));
+        let scheduler = AgentTaskScheduler::new(Arc::new(ReturnedTimeoutOnceExecutor {
+            calls: Arc::clone(&calls),
+            running: Arc::new(AtomicUsize::new(0)),
+            max_running: Arc::clone(&max_running),
+        }));
+        let mut plan = plan_with_tasks(1);
+        plan.options.retry.max_attempts = 2;
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(2, 1, 0);
+        plan.options.retry.retryable_failure_classifications =
+            vec![AgentTaskFailureClassification::Timeout];
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::Succeeded,
+            "{aggregate:#?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(max_running.load(Ordering::SeqCst), 1);
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "task-1" && event.state == AgentTaskState::Queued && event.attempt == 2
+        }));
+        let retry = aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.retry_attempt")
+            .expect("timeout retry evidence");
+        assert_eq!(retry.data["status"], "timeout");
+    }
+
+    #[test]
+    fn persistent_timeout_stops_after_declared_same_provider_budget() {
+        let scheduler = AgentTaskScheduler::new(Arc::new(ReturnedTimeoutExecutor));
+        let mut plan = plan_with_tasks(1);
+        plan.options.retry.max_attempts = 3;
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(3, 1, 0);
+        plan.options.retry.retryable_failure_classifications =
+            vec![AgentTaskFailureClassification::Timeout];
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Timeout
+        );
+        assert_eq!(
+            aggregate
+                .events
+                .iter()
+                .filter(|event| event.state == AgentTaskState::Running)
+                .map(|event| event.attempt)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            2
+        );
+        assert_eq!(
+            aggregate.outcomes[0]
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.class == "agent_task.retry_attempt")
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn normalizes_slow_task_to_timeout() {
         let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
@@ -94,11 +210,9 @@ mod timeout_tests {
         fs::write(
             &agent_result_path,
             serde_json::to_string(&AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "task-1".to_string(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("patch ready".to_string()),
-                failure_classification: None,
                 artifacts: vec![AgentTaskArtifact {
                     schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                     id: "fix".to_string(),
@@ -114,17 +228,13 @@ mod timeout_tests {
                     sha256: None,
                     metadata: json!({ "role": "patch" }),
                 }],
-                typed_artifacts: Vec::new(),
                 evidence_refs: vec![AgentTaskEvidenceRef {
                     kind: "runtime_bundle".to_string(),
                     uri: artifact_root.display().to_string(),
                     label: Some("runtime bundle".to_string()),
                 }],
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
                 metadata: json!({}),
+                ..Default::default()
             })
             .expect("agent result json"),
         )

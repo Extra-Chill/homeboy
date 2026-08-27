@@ -2,8 +2,8 @@ use serde::{Serialize, Serializer};
 
 use homeboy::core::git::{
     GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrFleetOutput, GithubPrOutput,
-    GithubPrReadinessOutput, PrLandOutput, PrMergeabilityReconcileOutput, PrPolicyDecision,
-    PrRefreshOutput,
+    GithubPrReadinessOutput, PatchPreservationEvidence, PrLandOutput,
+    PrMergeabilityReconcileOutput, PrPolicyDecision, PrRefreshOutput,
 };
 use homeboy::core::BulkResult;
 
@@ -19,6 +19,7 @@ pub enum GitCommandOutput {
     Policy(PrPolicyDecision),
     Fleet(GithubPrFleetOutput),
     Land(PrLandOutput),
+    Patch(PatchPreservationEvidence),
 }
 
 impl Serialize for GitCommandOutput {
@@ -40,6 +41,7 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Policy(output) => ("policy", serde_json::to_value(output)),
             GitCommandOutput::Fleet(output) => ("fleet", serde_json::to_value(output)),
             GitCommandOutput::Land(output) => ("land", serde_json::to_value(output)),
+            GitCommandOutput::Patch(output) => ("patch", serde_json::to_value(output)),
         };
 
         let mut payload = payload.map_err(serde::ser::Error::custom)?;

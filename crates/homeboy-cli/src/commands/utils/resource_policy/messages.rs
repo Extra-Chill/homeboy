@@ -57,7 +57,7 @@ pub(super) fn primary_action(
         return "No configured Homeboy Lab runner is expected for this host. Wait for controller pressure to fall or defer verification to CI. Local execution requires an explicit, authorized `--placement local` override.".to_string();
     }
     if warning.message.contains("Lab runner inventory is") {
-        return "This portable command requires a ready Lab runner. Follow the listed runner recovery command or defer verification until Lab is available. Local execution requires an explicit, authorized `--placement local` override.".to_string();
+        return "This portable command requires a ready Lab runner. Follow the listed runner recovery command or retry the unchanged request after Lab admission recovers.".to_string();
     }
     if warning.message.contains("--runner") {
         "Pass --runner <id> when Lab offload supports this mode.".to_string()
@@ -90,8 +90,20 @@ pub(super) fn warning_message(
                 } else {
                     readiness.remediation_commands.join("; ")
                 };
+            let failed_predicate = readiness.reasons.iter().find(|reason| {
+                !matches!(
+                    reason.as_str(),
+                    "stale_daemon"
+                        | "daemon_freshness_unavailable"
+                        | "active_jobs_unavailable"
+                        | "active_jobs_not_queried"
+                )
+            });
+            let predicate = failed_predicate
+                .map(|reason| format!("Lab admission predicate `{reason}` failed. "))
+                .unwrap_or_default();
             return format!(
-                "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Lab runner inventory is {} (available runner IDs: {}). {}",
+                "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} {predicate}Lab runner inventory is {} (available runner IDs: {}). {}",
                 command.label,
                 readiness.state.as_str(),
                 if readiness.available_runner_ids.is_empty() { "none".to_string() } else { readiness.available_runner_ids.join(", ") },
@@ -113,7 +125,7 @@ pub(super) fn warning_message(
     )
 }
 
-pub(super) fn runner_pinned_controller_notice(
+pub(super) fn lab_routed_controller_notice(
     command: HotCommand,
     recommendation: ResourceRecommendation,
     resources: &DoctorOutput,

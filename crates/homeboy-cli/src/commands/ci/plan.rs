@@ -14,6 +14,8 @@
 
 use serde::Serialize;
 
+use crate::commands::utils::output::command_output_stem;
+
 /// Event context a CI run is reacting to. Mirrors the action's `SCOPE_CONTEXT`
 /// (`pr | push | cron | manual`) but stays runner-agnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -132,23 +134,7 @@ impl CiPlan {}
 /// leading/trailing `-`, and falls back to a stable default when empty. Matches
 /// the action's `command_output_stem` so existing artifact names stay stable.
 fn output_stem(command: &str) -> String {
-    let mut stem = String::with_capacity(command.len());
-    let mut last_was_sep = false;
-    for ch in command.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-            stem.push(ch);
-            last_was_sep = false;
-        } else if !last_was_sep {
-            stem.push('-');
-            last_was_sep = true;
-        }
-    }
-    let trimmed = stem.trim_matches('-');
-    if trimmed.is_empty() {
-        "homeboy-output".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    command_output_stem(command)
 }
 
 /// Split a raw, comma-separated request into trimmed, non-empty command tokens.

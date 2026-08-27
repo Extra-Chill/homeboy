@@ -3,6 +3,14 @@
 > [!IMPORTANT]
 > **The checked-in policy requires the eight status checks below.**
 >
+> The single source of truth for that policy is
+> [`../../.github/required-gates-manifest.json`](../../.github/required-gates-manifest.json).
+> The live-ruleset payload
+> ([`../../.github/required-gates-ruleset.json`](../../.github/required-gates-ruleset.json)),
+> the table below, and every validator are derived from or validated against
+> that manifest; `.github/generate-required-gates-artifacts.sh --check` fails
+> when any of them drift from it.
+>
 > The live `main` ruleset (`13680120`) is audited hourly against that policy.
 > Audit is read-only and fails closed with a replayable before/desired/after
 > artifact when the ruleset drifts. It never changes GitHub state.
@@ -14,6 +22,20 @@
 > evidence records a policy version, source revision, and canonical policy
 > fingerprint so an operator can replay the decision.
 
+## Declared Gates
+
+<!-- BEGIN GENERATED: required-gate-manifest; source of truth: .github/required-gates-manifest.json. Regenerate with .github/generate-required-gates-artifacts.sh. -->
+| logical id | GitHub context | producer | status check |
+| --- | --- | --- | --- |
+| `declaration` | `homeboy / Required Gates Declaration` | `required-gates-declaration` | required |
+| `workspace-tests-compile` | `homeboy / Workspace Tests Compile` | `workspace-tests-compile` | required |
+| `windows-compile` | `homeboy / Windows Compile` | `windows-compile` | required |
+| `rustfmt` | `homeboy / Rustfmt` | `rustfmt` | required |
+| `audit` | `homeboy / Audit` | `homeboy-fast` > `Audit` | required |
+| `lint` | `homeboy / Lint` | `homeboy-fast` > `Lint` | required |
+| `test` | `homeboy / Test` | `homeboy` -> `Extra-Chill/homeboy-action/.github/workflows/ci.yml` (`Test`) | required |
+| `executed` | `homeboy / Required Gates Executed` | `required-gates-executed` | required |
+<!-- END GENERATED: required-gate-manifest -->
 
 Three different things can be true or false here, and conflating them is what
 caused #11084 and #12573:

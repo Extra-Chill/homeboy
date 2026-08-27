@@ -138,6 +138,7 @@ fn record_pre_execution_failure_locked(
     let retryable = error.retryable == Some(true);
     let failure_classification = pre_execution_failure_classification(error);
     let candidate_adoption_recovery = candidate_adoption_recovery(phase);
+    let error_code = reported_error_code(error);
     let outcomes = plan
         .tasks
         .iter()
@@ -190,10 +191,10 @@ fn record_pre_execution_failure_locked(
         "pre_execution_failure".to_string(),
         json!({
             "phase": phase,
-            "error_code": error.code.as_str(),
+            "error_code": error_code,
             "failure_classification": failure_classification,
             "retryable": retryable,
-            "failure_code": error.details.get("field").cloned().unwrap_or_else(|| json!(error.code.as_str())),
+            "failure_code": error.details.get("field").cloned().unwrap_or_else(|| json!(error_code)),
             "message": error.message,
             "details": error.details.clone(),
             "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
@@ -410,12 +411,13 @@ pub(crate) fn build_pre_execution_failure_outcome(
     let retryable = error.retryable == Some(true);
     let failure_classification = pre_execution_failure_classification(error);
     let candidate_adoption_recovery = candidate_adoption_recovery(phase);
+    let error_code = reported_error_code(error);
     let diagnostic = AgentTaskDiagnostic {
         class: "pre_execution_failure".to_string(),
         message: error.message.clone(),
         data: json!({
             "phase": phase,
-            "error_code": error.code.as_str(),
+            "error_code": error_code,
             "retryable": retryable,
             "details": error.details.clone(),
             "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
@@ -432,16 +434,28 @@ pub(crate) fn build_pre_execution_failure_outcome(
         failure_classification: Some(failure_classification),
         artifacts: Vec::new(),
         typed_artifacts: Vec::new(),
-        evidence_refs: vec![AgentTaskEvidenceRef {
+        evidence_refs: std::iter::once(AgentTaskEvidenceRef {
             kind: "agent-task-pre-execution-failure".to_string(),
             uri: format!("homeboy://agent-task/run/{run_id}/status"),
             label: Some("Agent-task pre-execution failure".to_string()),
-        }],
+        })
+        .chain(
+            error
+                .details
+                .pointer("/child_command_result/child_result_evidence/evidence_uri")
+                .and_then(Value::as_str)
+                .map(|uri| AgentTaskEvidenceRef {
+                    kind: "detached-child-command-result".to_string(),
+                    uri: uri.to_string(),
+                    label: Some("Bounded detached child command result".to_string()),
+                }),
+        )
+        .collect(),
         diagnostics: vec![diagnostic],
         outputs: json!({
             "schema": "homeboy/agent-task-pre-execution-failure/v1",
             "phase": phase,
-            "error_code": error.code.as_str(),
+            "error_code": error_code,
             "retryable": retryable,
             "message": error.message,
             "details": error.details.clone(),
@@ -452,12 +466,21 @@ pub(crate) fn build_pre_execution_failure_outcome(
         metadata: json!({
             "kind": "pre_execution_failure",
             "phase": phase,
-            "error_code": error.code.as_str(),
+            "error_code": error_code,
             "retryable": retryable,
             "provider_executions_consumed": 0,
             "candidate_adoption_recovery": candidate_adoption_recovery,
         }),
     }
+}
+
+fn reported_error_code(error: &Error) -> &str {
+    error
+        .details
+        .get("child_command_result")
+        .and_then(Value::as_object)
+        .and_then(|_| error.details["child_reported_error_code"].as_str())
+        .unwrap_or_else(|| error.code.as_str())
 }
 
 fn candidate_adoption_recovery(phase: &str) -> Option<serde_json::Value> {
@@ -2466,24 +2489,15 @@ mod tests {
             queue: AgentTaskQueueStatus::default(),
         };
         aggregate.outcomes.push(AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "task".to_string(),
             status: AgentTaskOutcomeStatus::Succeeded,
-            summary: None,
-            failure_classification: None,
             artifacts: vec![
                 artifact("patch", "patch", Some("runner-a")),
                 artifact("transcript", "transcript", None),
                 artifact("result", "result", None),
                 artifact("runtime-log", "runtime-log", None),
             ],
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         });
 
         assert_eq!(

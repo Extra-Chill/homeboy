@@ -20,6 +20,11 @@ pub(super) struct RetryOnceExecutor {
 }
 
 #[derive(Default)]
+pub(super) struct TimeoutOnceExecutor {
+    pub(super) attempts: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
 pub(super) struct RetryTwiceExecutor {
     pub(super) attempts: Arc<AtomicUsize>,
 }
@@ -61,6 +66,28 @@ impl AgentTaskExecutorAdapter for RetryOnceExecutor {
         };
 
         outcome(request.task_id, status)
+    }
+}
+
+impl AgentTaskExecutorAdapter for TimeoutOnceExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut result = outcome(
+            request.task_id,
+            if attempt == 1 {
+                AgentTaskOutcomeStatus::Timeout
+            } else {
+                AgentTaskOutcomeStatus::Succeeded
+            },
+        );
+        if attempt == 1 {
+            result.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+        }
+        result
     }
 }
 
@@ -131,7 +158,6 @@ impl AgentTaskExecutorAdapter for RuntimeBundleOutcomeExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Failed,
             summary: Some(
@@ -175,7 +201,6 @@ impl AgentTaskExecutorAdapter for RuntimeBundleOutcomeExecutor {
                     metadata: json!({ "artifact": "files/transcript.json" }),
                 },
             ],
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "sample-runtime-artifact-bundle".to_string(),
                 uri: self
@@ -194,9 +219,7 @@ impl AgentTaskExecutorAdapter for RuntimeBundleOutcomeExecutor {
                 data: Value::Null,
             }],
             outputs: json!({ "runtime_status": "succeeded" }),
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -439,19 +462,13 @@ impl AgentTaskExecutorAdapter for OutputTemplateExecutor {
         };
 
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
             artifacts,
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
             outputs,
-            workflow: None,
-            follow_up: None,
             metadata,
+            ..Default::default()
         }
     }
 }
@@ -561,7 +578,6 @@ pub(super) fn request(task_id: &str) -> AgentTaskRequest {
 
 pub(super) fn outcome(task_id: String, status: AgentTaskOutcomeStatus) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id,
         status,
         summary: Some(format!("{status:?}")),
@@ -569,18 +585,13 @@ pub(super) fn outcome(task_id: String, status: AgentTaskOutcomeStatus) -> AgentT
             AgentTaskOutcomeStatus::Failed => Some(AgentTaskFailureClassification::ExecutionFailed),
             _ => None,
         },
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
         evidence_refs: vec![AgentTaskEvidenceRef {
             kind: "log".to_string(),
             uri: "artifact://task/log".to_string(),
             label: Some("task log".to_string()),
         }],
-        diagnostics: Vec::new(),
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
         metadata: json!({}),
+        ..Default::default()
     }
 }
 

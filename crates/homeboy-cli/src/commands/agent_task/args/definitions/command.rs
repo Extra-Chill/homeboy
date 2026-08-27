@@ -68,17 +68,19 @@ pub enum AgentTaskCommand {
     /// By default Cook observes until the lifecycle is terminal and returns the
     /// terminal Cook report.
     ///
-    /// `--detach-after-handoff` returns once the run is durably accepted. Its
-    /// result describes a submission, not an outcome. It is honored on every
-    /// placement: with `--placement local` the Cook is re-executed in its own
-    /// session, so it survives a client that is interrupted or times out.
+    /// `--detach-after-handoff` returns once the controller durably owns the
+    /// run. Its submission result reports `accepted` after executable-attempt
+    /// materialization or `pending` while a live supervised child is still
+    /// preparing. It is honored on every placement: with `--placement local`
+    /// the Cook is re-executed in its own session, so it survives a client that
+    /// is interrupted or times out.
     ///
     /// Do not infer the wait policy from client interactivity. An orchestration
     /// client that needs the detached contract should pass
     /// `--detach-after-handoff` rather than rely on the default, and read the
     /// terminal outcome from `agent-task status <run-id>` in either case.
     #[command(
-        after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test' --preview\n\nUse --help-full for the complete advanced option reference."
+        after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nNo default configured (agent_task.default_backend unset, e.g. a fresh or reset agent_task: {}): run `homeboy agent-task providers --set-default` to live-probe every declared backend and write a working default_backend/rotation from what actually authenticates here.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test' --preview\n\nUse --help-full for the complete advanced option reference."
     )]
     Cook(Box<AgentTaskCookArgs>),
     /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
@@ -200,6 +202,8 @@ pub enum AgentTaskCommand {
     ///
     /// `--backend X` filters the presentation to X so output stays within caller
     /// display limits; pass `--catalog` for the full multi-backend catalog.
+    /// `--set-default` recovers a lost or empty `agent_task` config by writing
+    /// a live-verified `default_backend`/`rotation` (#13634).
     Providers(ProvidersArgs),
     /// Manage markdown prompts in Homeboy-owned storage.
     ///
@@ -251,6 +255,14 @@ pub struct CookContinueArgs {
     /// without dispatching another provider execution.
     #[arg(long = "artifact-id", value_name = "ID")]
     pub artifact_id: Option<String>,
+    /// Explicitly increase the provider timeout for a new retry attempt. The
+    /// override and its operator authority are retained in the Cook recipe.
+    #[arg(
+        long = "timeout-ms",
+        value_name = "MS",
+        conflicts_with_all = ["preflight", "rearm", "artifact_id"]
+    )]
+    pub timeout_ms: Option<u64>,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
@@ -439,6 +451,25 @@ pub struct ProvidersArgs {
     /// Emit the unfiltered provider DTO catalog for machine admission clients.
     #[arg(long, hide = true)]
     pub machine_catalog: bool,
+    /// Live-probe every declared backend and, if at least one is ready right
+    /// now, persist it as `agent_task.default_backend` with the remaining
+    /// ready backends recorded as an `agent_task.rotation` fallback chain.
+    ///
+    /// Recovers a lost or empty `agent_task` config (`{}`) — which otherwise
+    /// silently disables `agent-task cook` with no default and no documented
+    /// shape to restore one — without reading source or an old backup
+    /// (#13634). Implies `--validate-readiness`. Writes nothing and fails if
+    /// no declared backend is currently ready; run `agent-task providers
+    /// --validate-readiness` to see why each one failed.
+    ///
+    /// Written `agent_task.rotation` shape:
+    /// `{"entries": [{"backend": "NAME"}, ...], "max_attempts": N,
+    /// "liveness_timeout_ms": N}` — each entry may also set `selector`,
+    /// `model`, and `provider_config`, and both `max_attempts` and
+    /// `liveness_timeout_ms` are optional. Edit it directly with `homeboy
+    /// config set /agent_task/rotation <json> --json`.
+    #[arg(long = "set-default")]
+    pub set_default: bool,
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskDoctorArgs {

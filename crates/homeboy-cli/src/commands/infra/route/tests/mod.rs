@@ -76,7 +76,7 @@ impl EnvGuard {
         Self::set_many(&[(name, None)])
     }
 
-    fn set_many(changes: &[(&'static str, Option<&str>)]) -> Self {
+    pub(super) fn set_many(changes: &[(&'static str, Option<&str>)]) -> Self {
         let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let mut previous = Vec::with_capacity(changes.len());
         for (name, value) in changes {

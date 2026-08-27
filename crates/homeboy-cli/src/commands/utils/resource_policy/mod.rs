@@ -15,7 +15,7 @@ use classification::{
     is_lab_offloadable_fanout_coordinator, is_local_registry_management, is_plan_only_command,
 };
 use messages::{
-    append_local_placement, primary_action, runner_pinned_controller_notice, severity_str,
+    append_local_placement, lab_routed_controller_notice, primary_action, severity_str,
     warning_message,
 };
 
@@ -45,6 +45,10 @@ pub(crate) fn parsed_command_preflight_input(
         PlacementIntent, ProvenanceRequirement, ResourceAdmissionRequirement, ResourceHeat,
         RunnerIntent, RunnerNormalization,
     };
+
+    // A runner flag Homeboy owns can only appear before the bare separator.
+    // Reading past it lets a forwarded `--runner` be mistaken for our own (#11577).
+    let normalized_args = crate::command_capability::homeboy_owned_args(normalized_args);
 
     let resource_admission =
         hot_command(&cli.command).map_or(ResourceAdmissionRequirement::Exempt, |command| {
@@ -236,6 +240,7 @@ const PRESSURE_RETRY_AFTER_SECONDS: u64 = 60;
 #[serde(rename_all = "snake_case")]
 enum ResourceAdmissionRecoveryKind {
     Defer,
+    Retry,
     LocalOverride,
     RunnerConnection,
     RunnerAvailability,
@@ -565,7 +570,7 @@ pub(crate) fn evaluate_with_runner_hint(
 /// runner. This is placement evidence, not a local-execution warning: the
 /// runner handoff owns reporting an authorized fallback if remote preparation
 /// later fails.
-pub(crate) fn explicit_runner_controller_notice(
+pub(crate) fn lab_routed_controller_notice_message(
     command: HotCommand,
     resources: &DoctorOutput,
     runner_id: &str,
@@ -573,7 +578,7 @@ pub(crate) fn explicit_runner_controller_notice(
     command
         .engages_resource_admission(resources.recommendation)
         .then(|| {
-            runner_pinned_controller_notice(command, resources.recommendation, resources, runner_id)
+            lab_routed_controller_notice(command, resources.recommendation, resources, runner_id)
         })
 }
 
@@ -598,15 +603,54 @@ pub(crate) fn admits_warm_runner_coordination(
             .as_ref()
             .is_none_or(|memory| memory.recommendation == ResourceRecommendation::Ok)
         && resources.processes.recommendation == ResourceRecommendation::Ok
-        && selected_runner.is_some_and(|runner_id| {
-            lab_readiness.is_some_and(|readiness| {
-                readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-                    && readiness
-                        .available_runner_ids
-                        .iter()
-                        .any(|available| available == runner_id)
-            })
-        })
+        && selected_runner
+            .is_some_and(|runner_id| lab_readiness_admits_runner(runner_id, lab_readiness))
+}
+
+/// Whether `lab_readiness` reports `runner_id` as Lab-admitted: connected,
+/// ready, and present in the live available-runner set. This is the same
+/// predicate `resolve_parsed_command_preflight` re-verifies for any selected
+/// runner, so every caller deciding admission must agree with it.
+pub(crate) fn lab_readiness_admits_runner(
+    runner_id: &str,
+    lab_readiness: Option<&LabRunnerReadiness>,
+) -> bool {
+    lab_readiness.is_some_and(|readiness| {
+        readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+            && readiness
+                .available_runner_ids
+                .iter()
+                .any(|available| available == runner_id)
+    })
+}
+
+/// Whether the selected Lab runner is admitted to run a warm-runner-
+/// coordination command's provider attempt.
+///
+/// `admits_warm_runner_coordination` gates *opportunistic* offload on
+/// controller pressure: a warm/hot controller may keep coordinating despite
+/// its own pressure because the provider attempt can move to Lab. Required
+/// Lab placement (`--runner <id>` or `--placement lab`) is a routing decision
+/// the operator already made, not a pressure trade-off, so its admission must
+/// depend only on the selected runner's own Lab readiness — the same plain
+/// check every other lab-offload command uses. Gating a required, genuinely
+/// `ConnectedReady` runner on unrelated controller pressure refused an
+/// explicit runner that `runner status` reported ready (#13631), and let
+/// `cook --preview` (which never evaluates pressure) appear to pass when the
+/// real dispatch would then refuse on this exact mismatch (#13632).
+pub(crate) fn runner_admits_lab_dispatch(
+    command: HotCommand,
+    resources: &DoctorOutput,
+    selected_runner: Option<&str>,
+    lab_readiness: Option<&LabRunnerReadiness>,
+    required_lab_placement: bool,
+) -> bool {
+    if !required_lab_placement && command.allows_warm_runner_coordination {
+        return admits_warm_runner_coordination(command, resources, selected_runner, lab_readiness);
+    }
+    command.lab_offload_supported
+        && selected_runner
+            .is_some_and(|runner_id| lab_readiness_admits_runner(runner_id, lab_readiness))
 }
 
 /// Permit automatic controller execution only when Lab is disconnected and the
@@ -676,11 +720,12 @@ pub(crate) fn non_interactive_preflight_error(
         None,
     );
     if let Some(recovery) = recovery {
-        if let Some(choice) = recovery
-            .choices
-            .iter()
-            .find(|choice| choice.kind == ResourceAdmissionRecoveryKind::LocalOverride)
-        {
+        if let Some(choice) = recovery.choices.iter().find(|choice| {
+            matches!(
+                choice.kind,
+                ResourceAdmissionRecoveryKind::Retry | ResourceAdmissionRecoveryKind::LocalOverride
+            )
+        }) {
             error.details["rerun_command"] = serde_json::Value::String(choice.command.clone());
         }
         error.details["recovery"] =
@@ -695,6 +740,8 @@ pub(crate) fn admission_recovery(
     lab_readiness: Option<&LabRunnerReadiness>,
 ) -> Option<ResourceAdmissionRecovery> {
     let local_override = local_override_command(args)?;
+    let retry = crate::core::engine::shell::quote_args(args);
+    let preserves_lab_request = lab_readiness.is_some();
     let mut choices = vec![
         ResourceAdmissionRecoveryChoice {
             kind: ResourceAdmissionRecoveryKind::Defer,
@@ -703,12 +750,32 @@ pub(crate) fn admission_recovery(
             requires_operator_authorization: None,
         },
         ResourceAdmissionRecoveryChoice {
+            kind: if preserves_lab_request {
+                ResourceAdmissionRecoveryKind::Retry
+            } else {
+                ResourceAdmissionRecoveryKind::LocalOverride
+            },
+            command: if preserves_lab_request {
+                retry
+            } else {
+                local_override.clone()
+            },
+            retry_after_seconds: None,
+            requires_operator_authorization: (!preserves_lab_request).then_some(true),
+        },
+    ];
+    if preserves_lab_request
+        && !lab_readiness.is_some_and(|readiness| {
+            readiness.state == crate::runner::runners::LabRunnerReadinessState::Stale
+        })
+    {
+        choices.push(ResourceAdmissionRecoveryChoice {
             kind: ResourceAdmissionRecoveryKind::LocalOverride,
             command: local_override,
             retry_after_seconds: None,
             requires_operator_authorization: Some(true),
-        },
-    ];
+        });
+    }
     // An absent inventory is intentional configuration, not a broken runner.
     // A ready inventory also cannot justify repair. Keep recovery action kinds
     // aligned with the observed state so repair is only advertised for stale
@@ -755,15 +822,19 @@ fn local_override_command(args: &[String]) -> Option<String> {
         return None;
     }
     let mut command = args.to_vec();
-    if let Some(index) = command
+    // Only a placement flag before the bare separator is Homeboy's own. Rewriting
+    // one past it would retarget a forwarded argument instead of this run (#11577).
+    let owned = crate::command_capability::homeboy_owned_args(args).len();
+    if let Some(index) = command[..owned]
         .iter()
         .position(|arg| arg == "--placement" || arg.starts_with("--placement="))
     {
         if command[index] == "--placement" {
-            if let Some(value) = command.get_mut(index + 1) {
-                *value = "local".to_string();
+            // The value has to be the flag's own, so it must also precede the separator.
+            if index + 1 < owned {
+                command[index + 1] = "local".to_string();
             } else {
-                command.push("local".to_string());
+                command.insert(index + 1, "local".to_string());
             }
         } else {
             command[index] = "--placement=local".to_string();
@@ -1238,8 +1309,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_runner_notice_separates_controller_overhead_from_runner_workload() {
-        let notice = explicit_runner_controller_notice(
+    fn lab_routed_notice_separates_controller_overhead_from_runner_workload() {
+        let notice = lab_routed_controller_notice_message(
             lab_supported_hot("worktree cleanup"),
             &resources(ResourceRecommendation::Warm),
             "homeboy-lab",
@@ -1703,6 +1774,70 @@ mod tests {
             &resources,
             Some("missing-lab"),
             Some(&ready),
+        ));
+    }
+
+    /// #13631/#13632: an operator who explicitly pins `--runner homeboy-lab`
+    /// (or forces `--placement lab`) to a genuinely `ConnectedReady` runner
+    /// has already made the routing decision; that admission must not
+    /// additionally require the *controller* to be under warm/hot pressure.
+    /// Before this fix, `runner_admits_offload` for a cook/fanout coordinator
+    /// was always `admits_warm_runner_coordination`'s pressure-gated result,
+    /// so an idle controller (`ResourceRecommendation::Ok`) refused an
+    /// explicitly requested, fully ready runner — exactly the dispatch
+    /// refusal the issue reported (`runner status` said ready, cook admission
+    /// refused), and exactly why `cook --preview` (which never evaluates
+    /// controller pressure) could report success for a placement the real,
+    /// pressure-gated dispatch would then refuse.
+    #[test]
+    fn required_lab_placement_admits_a_ready_runner_regardless_of_controller_pressure() {
+        let command = HotCommand {
+            label: "agent-task cook/run-plan/retry --run",
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: true,
+            offload_only_when_hot: false,
+        };
+        let ready = ready_lab();
+
+        for recommendation in [
+            ResourceRecommendation::Ok,
+            ResourceRecommendation::Warm,
+            ResourceRecommendation::Hot,
+        ] {
+            let idle_resources = resources(recommendation);
+            assert!(
+                runner_admits_lab_dispatch(
+                    command,
+                    &idle_resources,
+                    Some("homeboy-lab"),
+                    Some(&ready),
+                    true,
+                ),
+                "required lab placement of a ready runner must be admitted at {recommendation:?} controller pressure"
+            );
+        }
+
+        // The exact same idle-controller inputs, without required placement
+        // (automatic/default selection), still require warm/hot pressure —
+        // this fix does not change opportunistic offload semantics.
+        let idle_resources = resources(ResourceRecommendation::Ok);
+        assert!(!runner_admits_lab_dispatch(
+            command,
+            &idle_resources,
+            Some("homeboy-lab"),
+            Some(&ready),
+            false,
+        ));
+
+        // Required placement of a genuinely unready runner still refuses.
+        let not_ready = disconnected_lab();
+        assert!(!runner_admits_lab_dispatch(
+            command,
+            &idle_resources,
+            Some("homeboy-lab"),
+            Some(&not_ready),
+            true,
         ));
     }
 
@@ -2189,7 +2324,7 @@ mod tests {
 
         assert_eq!(
             error.details["rerun_command"].as_str(),
-            Some("homeboy --placement local fuzz run")
+            Some("homeboy fuzz run")
         );
         assert!(error.details.get("resume_command").is_none());
         assert!(error
@@ -2226,13 +2361,16 @@ mod tests {
         assert_eq!(value["run_created"], false);
         assert_eq!(value["choices"][0]["kind"], "defer");
         assert_eq!(value["choices"][0]["retry_after_seconds"], 60);
-        assert_eq!(value["choices"][1]["kind"], "local_override");
+        assert_eq!(value["choices"][1]["kind"], "retry");
         assert_eq!(
             value["choices"][1]["command"],
-            "homeboy --placement local agent-task cook --prompt 'fix resource admission'"
+            "homeboy agent-task cook --prompt 'fix resource admission'"
         );
-        assert_eq!(value["choices"][1]["requires_operator_authorization"], true);
-        assert_eq!(value["choices"].as_array().expect("choices").len(), 2);
+        assert!(value["choices"][1]
+            .get("requires_operator_authorization")
+            .is_none());
+        assert_eq!(value["choices"][2]["kind"], "local_override");
+        assert_eq!(value["choices"].as_array().expect("choices").len(), 3);
 
         let warning = evaluate_with_runner_hint(
             lab_supported_hot("agent-task cook/run-plan/retry --run"),
@@ -2245,7 +2383,7 @@ mod tests {
         assert_eq!(error.details["run_created"], false);
         assert_eq!(
             error.details["rerun_command"],
-            "homeboy --placement local agent-task cook --prompt 'fix resource admission'"
+            "homeboy agent-task cook --prompt 'fix resource admission'"
         );
         assert!(error.details.get("resume_command").is_none());
         assert_eq!(
@@ -2286,11 +2424,18 @@ mod tests {
         .expect("argv produces recovery");
 
         let value = serde_json::to_value(recovery).expect("recovery serializes");
+        assert_eq!(value["choices"][1]["kind"], "retry");
+        assert_eq!(value["choices"][1]["command"], "homeboy audit");
         assert_eq!(value["choices"][2]["kind"], "runner_recovery");
         assert_eq!(
             value["choices"][2]["command"],
             "homeboy runner refresh homeboy-lab"
         );
+        assert!(value["choices"]
+            .as_array()
+            .expect("choices")
+            .iter()
+            .all(|choice| choice["kind"] != "local_override"));
     }
 
     #[test]
@@ -2324,7 +2469,7 @@ mod tests {
         .expect("argv produces recovery");
 
         let value = serde_json::to_value(recovery).expect("recovery serializes");
-        assert_eq!(value["choices"].as_array().expect("choices").len(), 2);
+        assert_eq!(value["choices"].as_array().expect("choices").len(), 3);
     }
 
     #[test]
@@ -2359,7 +2504,8 @@ mod tests {
         assert!(error.message.contains("homeboy runner connect homeboy-lab"));
         assert!(error
             .message
-            .contains("explicit, authorized `--placement local` override"));
+            .contains("retry the unchanged request after Lab admission recovers"));
+        assert!(!error.message.contains("--placement local"));
     }
 
     #[test]

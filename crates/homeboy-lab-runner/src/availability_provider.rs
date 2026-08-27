@@ -19,7 +19,14 @@ impl RunnerAvailabilityProvider for RunnerAvailability {
             // gap without the runner dropping out of service (#11106).
             Ok(status)
                 if status.connected
-                    && status.admission_blocking_stale_daemon().is_none()
+                    && crate::load(runner_id).is_ok_and(|runner| {
+                        !crate::lab::offload::metadata::lab_runner_homeboy_has_blocking_status_drift(
+                            &status,
+                            crate::lab::offload::metadata::require_exact_runner_version(
+                                &runner.settings,
+                            ),
+                        )
+                    })
                     && status.active_job_state == RunnerActiveJobState::Available =>
             {
                 AgentTaskLoopRunnerAvailability::Available

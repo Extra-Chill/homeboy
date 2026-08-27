@@ -49,6 +49,16 @@ fn provider_secret_env(
     request: Option<&AgentTaskRequest>,
 ) -> Vec<String> {
     let mut names = Vec::new();
+    names.extend(
+        provider
+            .invocation
+            .env
+            .iter()
+            .filter(|env| {
+                env.source.as_deref() == Some("secret_env") || env.redacted.unwrap_or(false)
+            })
+            .map(|env| env.name.clone()),
+    );
     for readiness in &provider.runner_readiness {
         names.extend(readiness.secret_env.iter().cloned());
     }
@@ -141,6 +151,30 @@ pub(super) fn provider_secret_sources(
                 sources.extend(provider_config_secret_sources(defaults));
             }
         }
+    }
+    sources
+}
+
+/// Every secret source a provider declares for itself, independent of any
+/// dispatch request: its unconditional `secret_env_requirements` sources plus
+/// every `provider_defaults` entry's `secret_env_sources` (regardless of which
+/// default a request would eventually select).
+///
+/// This is the single source-resolution path behind `agent-task auth status`,
+/// `agent-task providers --secret-env`, and provider credential readiness
+/// (`--validate-readiness`). Those three surfaces used to assemble this same
+/// merge independently; a provider whose declared source resolved differently
+/// under one assembly than another could report a secret as configured in one
+/// place and missing in another for no reason a caller could see (#13629).
+/// Routing all three through this one function makes that divergence
+/// structurally impossible rather than something each call site has to keep
+/// in sync by hand.
+pub(super) fn provider_declared_secret_sources(
+    provider: &AgentTaskExecutorProvider,
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let mut sources = provider_secret_sources(provider, None);
+    for provider_default in provider.provider_defaults.values() {
+        sources.extend(provider_config_secret_sources(provider_default));
     }
     sources
 }

@@ -131,7 +131,7 @@ pub fn registered() -> Result<Vec<Component>> {
 /// checkout cannot delay rows for every other registered component. Callers
 /// that need repo-owned portable fields must explicitly use [`registered`].
 pub fn registered_base() -> Result<Vec<Component>> {
-    registered_base_core(None)
+    registered_base_at(None)
 }
 
 /// [`registered`] against an already-resolved config root (#7505).
@@ -178,7 +178,7 @@ fn registered_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
     Ok(components)
 }
 
-fn registered_base_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
+pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Component>> {
     let projects = projects_at(config_root).unwrap_or_default();
     let mut components = Vec::new();
     let mut seen = HashSet::new();

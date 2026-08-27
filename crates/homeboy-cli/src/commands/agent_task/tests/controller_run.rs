@@ -791,12 +791,9 @@ impl AgentTaskExecutorAdapter for ArtifactCapturingExecutor {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
 
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
             typed_artifacts: vec![
                 AgentTaskTypedArtifact {
                     name: "patch".to_string(),
@@ -815,12 +812,7 @@ impl AgentTaskExecutorAdapter for ArtifactCapturingExecutor {
                     metadata: Value::Null,
                 },
             ],
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }

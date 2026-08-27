@@ -2227,19 +2227,22 @@ impl RunnerStaleDaemonWarning {
         self.message = format!(
             "connected runner configured job command binary `{configured_binary}` is incompatible with controller `{controller_build_identity}`; the daemon matches the configured binary, but controller compatibility requires convergence before admission"
         );
-        if controller_version_matches {
-            if let Some(controller_commit) =
-                homeboy_upgrade::upgrade::parse_build_identity_display(&controller_build_identity)
-                    .filter(|identity| identity.git_dirty != Some(true))
-                    .and_then(|identity| identity.git_commit)
-            {
-                self.set_recovery(vec![
-                    crate::daemon_repair::refresh_homeboy_downgrade_action(
-                        runner_id,
-                        &controller_commit,
-                    ),
-                ]);
-            }
+        if let Some(controller_commit) =
+            homeboy_upgrade::upgrade::parse_build_identity_display(&controller_build_identity)
+                .filter(|identity| identity.git_dirty != Some(true))
+                .and_then(|identity| identity.git_commit)
+        {
+            self.set_recovery(vec![if controller_version_matches {
+                crate::daemon_repair::refresh_homeboy_downgrade_action(
+                    runner_id,
+                    &controller_commit,
+                )
+            } else {
+                crate::daemon_repair::refresh_homeboy_action_for_ref(
+                    runner_id,
+                    Some(&controller_commit),
+                )
+            }]);
         }
         self
     }

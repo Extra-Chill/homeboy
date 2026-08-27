@@ -37,6 +37,14 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         })
     }
 
+    fn hydrate_optional_gate_proof(
+        &mut self,
+        run_id: &str,
+    ) -> Result<Option<AgentTaskPrDurableGateProof>> {
+        let record = crate::agent_task_lifecycle::status(run_id)?;
+        optional_gate_proof(record)
+    }
+
     fn hydrate_run_in_store(
         &mut self,
         lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -65,6 +73,14 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             run_id: record.run_id,
             promotion,
         })
+    }
+
+    fn hydrate_optional_gate_proof_in_store(
+        &mut self,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<Option<AgentTaskPrDurableGateProof>> {
+        optional_gate_proof(lifecycle_store.read_record(run_id)?)
     }
 
     fn validate_candidate(&mut self, options: &AgentTaskPrFinalizationOptions) -> Result<()> {
@@ -610,6 +626,26 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         }
         Ok(state.to_string())
     }
+}
+
+fn optional_gate_proof(
+    record: crate::agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<Option<AgentTaskPrDurableGateProof>> {
+    let Some(value) = record.metadata.get("latest_promotion").cloned() else {
+        return Ok(None);
+    };
+    let promotion = serde_json::from_value(value).map_err(|_| {
+        Error::validation_invalid_argument(
+            "run_id",
+            "durable latest promotion record is invalid",
+            None,
+            None,
+        )
+    })?;
+    Ok(Some(AgentTaskPrDurableGateProof {
+        run_id: record.run_id,
+        promotion,
+    }))
 }
 
 fn committed_changed_files(path: &str, base: &str) -> Result<Vec<String>> {

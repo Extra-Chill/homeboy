@@ -59,6 +59,7 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
             status: RunnerDoctorStatus::Warning,
             message: "m".repeat(4_000),
             remediation: Some("homeboy runner doctor local --repair".to_string()),
+            remediation_action: None,
             details: BTreeMap::from([("large".to_string(), "d".repeat(4_000))]),
         })
         .collect();
@@ -87,6 +88,7 @@ fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
             status: RunnerDoctorStatus::Ok,
             message: "ready".to_string(),
             remediation: None,
+            remediation_action: None,
             details: BTreeMap::new(),
         })
         .chain(std::iter::once(types::RunnerCheck {
@@ -94,6 +96,7 @@ fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
             status: RunnerDoctorStatus::Error,
             message: "runner is unavailable".to_string(),
             remediation: Some("homeboy runner doctor local --repair".to_string()),
+            remediation_action: None,
             details: BTreeMap::new(),
         }))
         .collect();
@@ -124,6 +127,7 @@ fn compact_doctor_hard_bounds_oversized_identity_and_command_metadata() {
         status: RunnerDoctorStatus::Error,
         message: "message-".repeat(10_000),
         remediation: Some("command-".repeat(10_000)),
+        remediation_action: None,
         details: BTreeMap::new(),
     }];
 
@@ -163,6 +167,7 @@ fn compact_doctor_falls_back_when_escaped_untrusted_fields_exceed_the_wire_budge
             status: RunnerDoctorStatus::Error,
             message: escaped.clone(),
             remediation: Some(escaped.clone()),
+            remediation_action: None,
             details: BTreeMap::new(),
         })
         .collect();
@@ -187,6 +192,7 @@ fn compact_doctor_uses_pretty_stdout_bytes_at_the_boundary() {
                     status: RunnerDoctorStatus::Error,
                     message: "m".repeat(*length),
                     remediation: Some("r".repeat(*length)),
+                    remediation_action: None,
                     details: BTreeMap::new(),
                 })
                 .collect();
@@ -215,6 +221,7 @@ fn compact_doctor_uses_pretty_stdout_bytes_at_the_boundary() {
             status: RunnerDoctorStatus::Error,
             message: "m".repeat(length),
             remediation: Some("r".repeat(length)),
+            remediation_action: None,
             details: BTreeMap::new(),
         })
         .collect();
@@ -294,6 +301,7 @@ fn provider_check(provider_id: &str, status: RunnerDoctorStatus) -> types::Runne
         status,
         message: "provider readiness".to_string(),
         remediation: None,
+        remediation_action: None,
         details: BTreeMap::from([("provider_id".to_string(), provider_id.to_string())]),
     }
 }

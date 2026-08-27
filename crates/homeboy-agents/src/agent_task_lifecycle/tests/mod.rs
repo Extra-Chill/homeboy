@@ -236,19 +236,12 @@ pub(super) fn outcome_with_refs(
     evidence_refs: Vec<AgentTaskEvidenceRef>,
 ) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: task_id.to_string(),
         status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
         summary: Some("ok".to_string()),
-        failure_classification: None,
         artifacts,
-        typed_artifacts: Vec::new(),
         evidence_refs,
-        diagnostics: Vec::new(),
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     }
 }
 
@@ -387,19 +380,10 @@ pub(super) fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
             ..AgentTaskAggregateTotals::default()
         },
         outcomes: vec![AgentTaskOutcome {
-            schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "task-a".to_string(),
             status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }],
         events: vec![AgentTaskProgressEvent {
             task_id: "task-a".to_string(),

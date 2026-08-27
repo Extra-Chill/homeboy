@@ -50,7 +50,7 @@ Show available extensions with compatibility status
 | Option | Value | Description |
 | --- | --- | --- |
 | `-p`, `--project` | `<PROJECT>` | Project ID to filter compatible extensions |
-| `--skip-ready-check` | flag | Report installed metadata only. Skips each extension's ready_check, so `ready_reason` is `ready_check_skipped` instead of a live answer |
+| `--live-readiness` | flag | Run live readiness probes concurrently and refresh cached readiness |
 
 ## `homeboy extension diff-installed`
 
@@ -82,7 +82,7 @@ Show detailed information about a extension
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--skip-ready-check` | flag | Report installed metadata only. Skips the extension's ready_check, so `ready_reason` is `ready_check_skipped` instead of a live answer |
+| `--live-readiness` | flag | Run the live readiness probe and refresh cached readiness |
 
 ## `homeboy extension run`
 

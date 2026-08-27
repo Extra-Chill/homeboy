@@ -1870,10 +1870,51 @@ pub fn reconstruct_options_with_dispatcher(
 /// Reconstruct immutable Cook inputs for a lifecycle-validated local placement
 /// transition. The caller proves the transition against the durable run record;
 /// this only relaxes reconstruction of the superseded Lab transport.
-pub(crate) fn reconstruct_options_with_local_placement_override(
+pub fn reconstruct_options_with_local_placement_override(
     recipe: &AgentTaskCookRecipe,
 ) -> Result<AgentTaskCookServiceOptions> {
     reconstruct_recipe_options(recipe, None, true, false)
+}
+
+/// Reconstruct an attempt that failed before any provider execution. There is
+/// no executed provider behavior to preserve, so a current controller may
+/// replace the stale runtime and local dispatcher under continuation admission.
+pub fn reconstruct_options_for_pre_execution_recovery(
+    recipe: &AgentTaskCookRecipe,
+) -> Result<AgentTaskCookServiceOptions> {
+    reconstruct_recipe_options(recipe, None, false, false)
+}
+
+/// Whether an attempt that never reached provider execution may be rebuilt by
+/// the current controller without replaying a historical external transport.
+/// A queued retry proves that boundary through its immutable retry origin.
+pub fn local_pre_execution_runtime_recovery_is_eligible(
+    recipe: &AgentTaskCookRecipe,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    explicit_local_override: bool,
+) -> bool {
+    let local_transport = explicit_local_override
+        || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local");
+    if !local_transport {
+        return false;
+    }
+    if super::cook_pre_execution::retryable_pre_execution_failure(record) {
+        return true;
+    }
+
+    let origin = &record.metadata["retry_origin"]["pre_execution_failure"];
+    let current_runtime = homeboy_core::build_identity::current().display;
+    record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        && recipe.runtime_generation != current_runtime
+        && record.metadata["controller_identity"].as_str() == Some(current_runtime.as_str())
+        && record.metadata["retry_of"].is_string()
+        && record.metadata["provider_executions_consumed"].as_u64() == Some(0)
+        && record.metadata["provider_run_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && (origin["retryable"] == Value::Bool(true)
+            || origin["phase"].as_str() == Some("local_retry_supervisor"))
+        && origin["provider_executions_consumed"].as_u64() == Some(0)
 }
 
 /// Reconstruct the policy used to adopt an already-prepared candidate. Adoption
@@ -2923,19 +2964,10 @@ mod tests {
                 ..Default::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "task".to_string(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("ok".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }],
             events: vec![AgentTaskProgressEvent {
                 task_id: "task".to_string(),

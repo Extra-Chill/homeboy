@@ -8,6 +8,7 @@ use crate::ownership;
 use crate::{git, paths};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 mod queue_ops;
 mod store_ops;
@@ -29,12 +30,12 @@ pub use types::{
     WorktreeCreateReconciliation, WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization,
     WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence, WorktreeInventoryOptions,
     WorktreeInventoryOutput, WorktreeInventoryRecord, WorktreeListOutput,
-    WorktreeLivenessAuthority, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
-    WorktreeQueueCreateRequest, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
-    WorktreeQueueLockHolder, WorktreeReconciliationAction, WorktreeReconciliationAuthority,
-    WorktreeReconciliationResult, WorktreeRemoveOptions, WorktreeRemoveOutput,
-    WorktreeSafetyReport, WorktreeStatusOutput, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
-    TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+    WorktreeLivenessAuthority, WorktreeQueueCreateFailure, WorktreeQueueCreateOptions,
+    WorktreeQueueCreateOutput, WorktreeQueueCreateRequest, WorktreeQueueCreateRow,
+    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeReconciliationAction,
+    WorktreeReconciliationAuthority, WorktreeReconciliationResult, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+    TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
 /// The managed handle a repo and branch pair resolves to. Creation slugifies the
@@ -56,6 +57,21 @@ pub fn adopt(options: WorktreeAdoptOptions) -> Result<WorktreeAdoptOutput> {
 
 pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
+}
+
+pub(crate) fn list_workspace_refs() -> Result<Vec<WorkspaceRefRecord>> {
+    let mut records = list()?
+        .worktrees
+        .into_iter()
+        .map(WorkspaceRefRecord::Task)
+        .collect::<Vec<_>>();
+    records.extend(
+        list_adopted_with_store(&adopted_metadata_dir()?)?
+            .into_iter()
+            .map(WorkspaceRefRecord::Adopted),
+    );
+    records.sort_by(|left, right| left.handle().cmp(right.handle()));
+    Ok(records)
 }
 
 pub fn inventory(
@@ -105,6 +121,57 @@ pub fn persist_terminal_workspace_authority(
                 store_ops::write_record_unlocked(&store, &record)
             }
         }
+    })
+}
+
+/// Bind one terminal outcome to the native lifecycle owner. Cleanup remains a
+/// separate authority-gated operation; finalization only makes successful runs
+/// eligible and durably preserves every non-successful workspace.
+pub fn finalize_provider_lifecycle(
+    id: &str,
+    owner_run_ref: &str,
+    disposition: crate::worktree_provider::WorktreeTerminalDisposition,
+) -> Result<TaskWorktreeRecord> {
+    with_task_worktree_registry_write_lock(|| {
+        let store = metadata_dir()?;
+        let mut record = read_record(&store, id)?;
+        if record.run_id.as_deref() != Some(owner_run_ref) {
+            return Err(Error::validation_invalid_argument(
+                "owner_run_ref",
+                "native worktree lifecycle owner does not match the finalization request",
+                Some(owner_run_ref.to_string()),
+                None,
+            ));
+        }
+        if let Some(existing) = record.terminal_disposition.as_deref() {
+            if existing != disposition.as_str() {
+                return Err(Error::validation_invalid_argument(
+                    "terminal_disposition",
+                    "native worktree lifecycle already finalized with a different disposition",
+                    Some(existing.to_string()),
+                    None,
+                ));
+            }
+            return Ok(record);
+        }
+        record.cleanup_policy =
+            if disposition == crate::worktree_provider::WorktreeTerminalDisposition::Succeeded {
+                CleanupPolicy::RemoveWhenSafe
+            } else {
+                CleanupPolicy::PreserveOnFailure
+            };
+        record.terminal_disposition = Some(disposition.as_str().to_string());
+        record.lifecycle_revision = record.lifecycle_revision.checked_add(1).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lifecycle_revision",
+                "task worktree lifecycle revision overflowed during finalization",
+                Some(id.to_string()),
+                None,
+            )
+        })?;
+        record.terminal_workspace_authority = None;
+        store_ops::write_record_unlocked(&store, &record)?;
+        Ok(record)
     })
 }
 
@@ -330,7 +397,27 @@ pub(crate) fn with_task_worktree_registry_read_lock<T>(
         .get_or_init(|| RwLock::new(()))
         .read()
         .map_err(|_| Error::internal_unexpected("task worktree registry read gate poisoned"))?;
-    let lock = open_task_worktree_registry_lock()?;
+    let store = metadata_dir()?;
+    let parent = store.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree store has no parent: {}",
+            store.display()
+        ))
+    })?;
+    let lock = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(parent.join("task-worktrees.lock"))
+    {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return operation(),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("open task worktree registry lock for read".to_string()),
+            ));
+        }
+    };
     lock.lock_shared().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -453,19 +540,49 @@ pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput>
 /// every caller's test fixtures.
 #[cfg(test)]
 pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
+    record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Active);
+}
+
+#[cfg(test)]
+pub(crate) fn record_active_with_source_for_test(
+    id: &str,
+    source_checkout: &Path,
+    worktree_path: &Path,
+) {
+    record_for_test(
+        id,
+        source_checkout,
+        worktree_path,
+        TaskWorktreeState::Active,
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn record_removed_for_test(id: &str, worktree_path: &Path) {
+    record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Removed);
+}
+
+#[cfg(test)]
+fn record_for_test(
+    id: &str,
+    source_checkout: &Path,
+    worktree_path: &Path,
+    state: TaskWorktreeState,
+) {
     let record = TaskWorktreeRecord {
         id: id.to_string(),
         component_id: "fixture".to_string(),
-        source_checkout: worktree_path.to_string_lossy().to_string(),
+        source_checkout: source_checkout.to_string_lossy().to_string(),
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch: format!("task/{id}"),
         base_ref: "main".to_string(),
         task_url: None,
         run_id: None,
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+        terminal_disposition: None,
         branch_cleanup_intent: BranchCleanupIntent::default(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
-        state: TaskWorktreeState::Active,
+        state,
         workspace_identity: Some(
             WorkspaceIdentity::new("task-worktree", format!("fixture/{id}"))
                 .expect("test workspace identity"),
@@ -475,6 +592,12 @@ pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
     };
     let store = metadata_dir().expect("task worktree store");
     write_record(&store, &record).expect("write task worktree record");
+}
+
+pub(crate) fn safety_report_for_provider(
+    record: &TaskWorktreeRecord,
+) -> Result<WorktreeSafetyReport> {
+    safety_report(record)
 }
 
 #[cfg(test)]
@@ -511,6 +634,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                         command,
                         WorktreeQueueCreateStatus::Failed,
                     );
+                    row.failure = Some(queue_failure(&error));
                     row.error = Some(error.message);
                     rows.push(row);
                 }
@@ -527,12 +651,19 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     None,
                 )
             })?;
-            crate::worktree_providers::provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
-                &crate::worktree_providers::WorktreeProviderCreateIntent {
-                    handle: handle.clone(), repo: options.repo.clone(), base: options.from.clone(),
-                    head: request.branch.clone(), task_url,
-                }, lifecycle, &crate::defaults::load_config(),
-            ).map(|provision| provision.resolution.worktree.path)
+            crate::worktree_provider::ensure_worktree_provision_from_config(
+                &crate::worktree_provider::WorktreeProvisionIntent {
+                    handle: handle.clone(),
+                    repo: options.repo.clone(),
+                    base: options.from.clone(),
+                    head: request.branch.clone(),
+                    task_url,
+                },
+                lifecycle,
+                None,
+                &crate::defaults::load_config(),
+            )
+            .map(|provision| provision.destination.ownership.path)
         } else {
             create(WorktreeCreateOptions {
                 component_id: options.repo.clone(),
@@ -562,6 +693,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     command,
                     WorktreeQueueCreateStatus::Failed,
                 );
+                row.failure = Some(queue_failure(&error));
                 row.error = Some(error.message);
                 rows.push(row);
                 for queued_request in options.requests.iter().take(total).skip(index + 1) {
@@ -584,6 +716,34 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
         dry_run: options.dry_run,
         rows,
     })
+}
+
+fn queue_failure(error: &Error) -> WorktreeQueueCreateFailure {
+    let provider_id = error
+        .details
+        .get("worktree_provider_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let classification = error
+        .details
+        .get("worktree_provider_call_classification")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| error.code.as_str())
+        .to_string();
+    let phase = error
+        .details
+        .get("worktree_provider_phase")
+        .and_then(Value::as_str)
+        .unwrap_or("worktree_preflight")
+        .to_string();
+    WorktreeQueueCreateFailure {
+        code: error.code.as_str().to_string(),
+        classification,
+        phase,
+        message: error.message.clone(),
+        provider_id,
+        details: error.details.clone(),
+    }
 }
 
 /// Validate a prospective native worktree creation and return the exact path

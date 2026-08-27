@@ -6,7 +6,31 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use homeboy_error::{ActionSafety, ExecutableAction};
 use homeboy_extension_contract::ExtensionManifest;
+
+pub const EXTENSION_RELINK_ACTION_ID: &str = "extension.relink";
+pub const EXTENSION_UNINSTALL_ACTION_ID: &str = "extension.uninstall";
+
+/// Exact lifecycle actions for repairing a dangling extension registration.
+pub fn broken_extension_link_repair_actions(id: &str) -> Vec<ExecutableAction> {
+    vec![
+        ExecutableAction::new(
+            EXTENSION_RELINK_ACTION_ID,
+            format!("Relink extension '{id}'"),
+            "homeboy",
+            ["extension", "relink", id, "<path>"],
+            ActionSafety::Mutating,
+        ),
+        ExecutableAction::new(
+            EXTENSION_UNINSTALL_ACTION_ID,
+            format!("Remove stale extension registration '{id}'"),
+            "homeboy",
+            ["extension", "uninstall", id],
+            ActionSafety::Mutating,
+        ),
+    ]
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokenExtensionLink {
@@ -364,7 +388,7 @@ fn broken_extension_link_at(path: &Path, id: &str) -> Option<BrokenExtensionLink
 }
 
 fn broken_extension_error(link: &BrokenExtensionLink) -> Error {
-    Error::new(
+    let error = Error::new(
         ErrorCode::ExtensionNotFound,
         format!(
             "Extension '{}' is linked but its target is missing",
@@ -378,9 +402,13 @@ fn broken_extension_error(link: &BrokenExtensionLink) -> Error {
         }),
     )
     .with_hint(format!(
-        "Relink it with: homeboy extension relink {} <path>",
-        link.id
-    ))
+        "Relink it with `homeboy extension relink {} <path>` or remove the stale registration with `homeboy extension uninstall {}`.",
+        link.id, link.id
+    ));
+
+    broken_extension_link_repair_actions(&link.id)
+        .into_iter()
+        .fold(error, Error::with_action)
 }
 
 /// Whether an extension exposes `tool` as its CLI entrypoint.
@@ -738,6 +766,27 @@ mod tests {
             assert!(err.hints.iter().any(|hint| hint
                 .message
                 .contains("homeboy extension relink sample-runtime")));
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains("homeboy extension uninstall sample-runtime")));
+            let actions: Vec<ExecutableAction> =
+                serde_json::from_value(err.details[homeboy_error::ACTIONS_DETAILS_KEY].clone())
+                    .expect("typed repair actions");
+            assert_eq!(
+                actions
+                    .iter()
+                    .map(|action| action.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![EXTENSION_RELINK_ACTION_ID, EXTENSION_UNINSTALL_ACTION_ID]
+            );
+            assert_eq!(
+                actions[0].args,
+                ["extension", "relink", "sample-runtime", "<path>"]
+            );
+            assert_eq!(
+                actions[1].args,
+                ["extension", "uninstall", "sample-runtime"]
+            );
         });
     }
 

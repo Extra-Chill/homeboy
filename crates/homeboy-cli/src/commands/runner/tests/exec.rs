@@ -19,6 +19,68 @@ fn test_lifecycle_store() -> homeboy::agents::agent_tasks::lifecycle::AgentTaskL
     homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment()
         .expect("lifecycle store")
 }
+
+#[test]
+fn runner_exec_generates_a_persisted_run_for_declared_outputs() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        runner::create(
+            &format!(
+                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create local runner");
+
+        let (output, exit_code) = exec_with_hydration(
+            "lab-local",
+            Some(workspace.path().display().to_string()),
+            None,
+            false,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            None,
+            Vec::new(),
+            vec!["output".to_string()],
+            Vec::new(),
+            false,
+            false,
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "mkdir output && printf generated > output/result.txt".to_string(),
+            ],
+            Vec::new(),
+        )
+        .expect("runner exec with generated run id");
+
+        assert_eq!(exit_code, 0);
+        let run_id = output.mirror_run_id.expect("persisted runner exec run id");
+        let generated = run_id
+            .strip_prefix("runner-exec-")
+            .expect("generated runner exec prefix");
+        uuid::Uuid::parse_str(generated).expect("generated UUID");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run(&run_id)
+            .expect("read generated run")
+            .expect("generated run persisted");
+        assert_eq!(run.metadata_json["kind"], "runner_exec");
+        let artifacts = store.list_artifacts(&run_id).expect("generated artifacts");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].kind, "result_txt");
+        assert_eq!(artifacts[0].metadata_json["artifact_dir"], "output");
+    });
+}
 use homeboy::runner::runners::{
     self as runner, promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts_in_store,
     RunnerExecMode, RunnerExecOutput,

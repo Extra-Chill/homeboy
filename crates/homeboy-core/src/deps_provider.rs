@@ -56,6 +56,23 @@ pub(crate) struct DependencyProviderCommand {
     pub cwd: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DependencyProviderReusableState {
+    pub command: DependencyProviderCommand,
+    pub reusable_exit_codes: Vec<i32>,
+    pub reusable_reason: String,
+    pub stale_reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DependencyProviderHydrationPlan {
+    pub provider_id: String,
+    pub install: DependencyProviderCommand,
+    pub install_success_exit_codes: Vec<i32>,
+    pub reusable: Option<DependencyProviderReusableState>,
+    pub outputs: Vec<DependencyInstallOutput>,
+}
+
 impl DependencyProviderCommand {
     pub fn new(program: impl Into<String>, args: Vec<String>, cwd: impl Into<PathBuf>) -> Self {
         Self {
@@ -172,6 +189,23 @@ impl DependencyProvider {
             DependencyProvider::Extension(_) | DependencyProvider::ComponentScript(_) => {
                 Ok(Vec::new())
             }
+        }
+    }
+
+    pub(crate) fn hydration_plan(
+        &self,
+        component: &Component,
+        path: &Path,
+    ) -> Result<Option<DependencyProviderHydrationPlan>> {
+        let context = DependencyProviderContext { component, path };
+        match self {
+            DependencyProvider::Manifest(provider) => provider.hydration_plan(context),
+            DependencyProvider::Adapter(provider) => provider.hydration_plan(context),
+            DependencyProvider::Extension(provider) => provider.hydration_plan(context),
+            // Component-owned ecosystems can declare this standalone contract
+            // through the local manifest provider. Do not invoke legacy deps
+            // scripts speculatively: they may not support planning actions.
+            DependencyProvider::ComponentScript(_) => Ok(None),
         }
     }
 }
@@ -375,6 +409,40 @@ impl AdapterDependencyProvider {
 
     fn install_outputs(&self) -> Result<Vec<DependencyInstallOutput>> {
         dependency_install_outputs(&self.adapter.package_manager().outputs)
+    }
+
+    fn hydration_plan(
+        &self,
+        _context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderHydrationPlan>> {
+        let manager = self.adapter.package_manager();
+        let Some(install) = manager.commands.install.as_ref() else {
+            return Ok(None);
+        };
+        let reusable =
+            manager
+                .commands
+                .reusable
+                .as_ref()
+                .map(|command| DependencyProviderReusableState {
+                    command: self.command(command),
+                    reusable_exit_codes: command.success_codes(),
+                    reusable_reason: command
+                        .reusable_reason
+                        .clone()
+                        .unwrap_or_else(|| "provider_declared_state_reusable".to_string()),
+                    stale_reason: command
+                        .stale_reason
+                        .clone()
+                        .unwrap_or_else(|| "provider_declared_state_stale".to_string()),
+                });
+        Ok(Some(DependencyProviderHydrationPlan {
+            provider_id: manager.id.clone(),
+            install: self.command(install),
+            install_success_exit_codes: install.success_codes(),
+            reusable,
+            outputs: self.install_outputs()?,
+        }))
     }
 
     fn run(&self, command: &AdapterCommand, operation: &str) -> Result<DependencyCommandResult> {
@@ -673,6 +741,7 @@ fn read_installed_dependency_adapter(path: &Path) -> Result<InstalledDependencyA
                 manager.commands.status.as_ref(),
                 manager.commands.install.as_ref(),
                 manager.commands.update.as_ref(),
+                manager.commands.reusable.as_ref(),
             ]
             .into_iter()
             .flatten()
@@ -752,6 +821,7 @@ struct AdapterCommands {
     status: Option<AdapterCommand>,
     install: Option<AdapterCommand>,
     update: Option<AdapterCommand>,
+    reusable: Option<AdapterCommand>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -761,6 +831,20 @@ struct AdapterCommand {
     success_exit_codes: Vec<i32>,
     #[serde(default)]
     requires_lockfile: bool,
+    #[serde(default)]
+    reusable_reason: Option<String>,
+    #[serde(default)]
+    stale_reason: Option<String>,
+}
+
+impl AdapterCommand {
+    fn success_codes(&self) -> Vec<i32> {
+        if self.success_exit_codes.is_empty() {
+            vec![0]
+        } else {
+            self.success_exit_codes.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -819,6 +903,36 @@ impl ManifestDependencyProvider {
 
     fn install_outputs(&self) -> Result<Vec<DependencyInstallOutput>> {
         dependency_install_outputs(&self.manifest.outputs)
+    }
+
+    fn hydration_plan(
+        &self,
+        context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderHydrationPlan>> {
+        let Some(install) = self.manifest.commands.install.as_ref() else {
+            return Ok(None);
+        };
+        let reusable = self.manifest.commands.reusable.as_ref().map(|command| {
+            DependencyProviderReusableState {
+                command: self.command(command, context, None, None),
+                reusable_exit_codes: command.success_codes(),
+                reusable_reason: command
+                    .reusable_reason
+                    .clone()
+                    .unwrap_or_else(|| "provider_declared_state_reusable".to_string()),
+                stale_reason: command
+                    .stale_reason
+                    .clone()
+                    .unwrap_or_else(|| "provider_declared_state_stale".to_string()),
+            }
+        });
+        Ok(Some(DependencyProviderHydrationPlan {
+            provider_id: self.manifest.provider.clone(),
+            install: self.command(install, context, None, None),
+            install_success_exit_codes: install.success_codes(),
+            reusable,
+            outputs: self.install_outputs()?,
+        }))
     }
 
     fn status_with_filter(&self, package_filter: Option<&str>) -> ProviderDependencyStatus {
@@ -974,12 +1088,29 @@ fn dependency_install_outputs(
 struct DependencyAdapterCommands {
     install: Option<DependencyAdapterCommand>,
     update: Option<DependencyAdapterCommand>,
+    reusable: Option<DependencyAdapterCommand>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct DependencyAdapterCommand {
     argv: Vec<String>,
     cwd: Option<PathBuf>,
+    #[serde(default)]
+    success_exit_codes: Vec<i32>,
+    #[serde(default)]
+    reusable_reason: Option<String>,
+    #[serde(default)]
+    stale_reason: Option<String>,
+}
+
+impl DependencyAdapterCommand {
+    fn success_codes(&self) -> Vec<i32> {
+        if self.success_exit_codes.is_empty() {
+            vec![0]
+        } else {
+            self.success_exit_codes.clone()
+        }
+    }
 }
 
 fn read_dependency_adapter_manifest(path: &Path) -> Result<DependencyAdapterManifest> {
@@ -999,6 +1130,7 @@ fn read_dependency_adapter_manifest(path: &Path) -> Result<DependencyAdapterMani
     for command in [
         manifest.commands.install.as_ref(),
         manifest.commands.update.as_ref(),
+        manifest.commands.reusable.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -1186,6 +1318,21 @@ impl ExtensionDependencyProvider {
             plan.command.into_iter().skip(1).collect(),
             context.path,
         )))
+    }
+
+    fn hydration_plan(
+        &self,
+        context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderHydrationPlan>> {
+        let status = self.status(DependencyProviderStatusRequest {
+            context,
+            package_filter: None,
+        })?;
+        let args = vec!["install-command".to_string()];
+        let output = self.run(context.component, context.path, &args)?;
+        let plan: ExtensionInstallCommandOutput =
+            parse_extension_output(&output.stdout, "deps install-command")?;
+        hydration_plan_from_extension_output(status.package_manager, context.path, plan)
     }
 }
 
@@ -1383,6 +1530,81 @@ struct ExtensionStatusOutput {
 #[derive(Debug, Deserialize)]
 struct ExtensionInstallCommandOutput {
     command: Vec<String>,
+    #[serde(default)]
+    success_exit_codes: Vec<i32>,
+    #[serde(default)]
+    reusable: Option<ExtensionReusableStateOutput>,
+    #[serde(default)]
+    outputs: Vec<DependencyAdapterOutput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtensionReusableStateOutput {
+    command: Vec<String>,
+    #[serde(default)]
+    reusable_exit_codes: Vec<i32>,
+    #[serde(default)]
+    reusable_reason: Option<String>,
+    #[serde(default)]
+    stale_reason: Option<String>,
+}
+
+fn success_codes(codes: Vec<i32>) -> Vec<i32> {
+    if codes.is_empty() {
+        vec![0]
+    } else {
+        codes
+    }
+}
+
+fn hydration_plan_from_extension_output(
+    provider_id: String,
+    path: &Path,
+    plan: ExtensionInstallCommandOutput,
+) -> Result<Option<DependencyProviderHydrationPlan>> {
+    if plan.command.is_empty() {
+        return Ok(None);
+    }
+    if plan
+        .reusable
+        .as_ref()
+        .is_some_and(|reusable| reusable.command.is_empty())
+    {
+        return Err(Error::validation_invalid_argument(
+            "dependency_provider",
+            "Dependency provider reusable-state declaration returned an empty command".to_string(),
+            None,
+            None,
+        ));
+    }
+    let reusable = plan.reusable.map(|reusable| {
+        let command = DependencyProviderCommand::new(
+            reusable.command.first().cloned().unwrap_or_default(),
+            reusable.command.into_iter().skip(1).collect(),
+            path,
+        );
+        DependencyProviderReusableState {
+            command,
+            reusable_exit_codes: success_codes(reusable.reusable_exit_codes),
+            reusable_reason: reusable
+                .reusable_reason
+                .unwrap_or_else(|| "provider_declared_state_reusable".to_string()),
+            stale_reason: reusable
+                .stale_reason
+                .unwrap_or_else(|| "provider_declared_state_stale".to_string()),
+        }
+    });
+    Ok(Some(DependencyProviderHydrationPlan {
+        provider_id,
+        install: DependencyProviderCommand::new(
+            plan.command.first().cloned().unwrap_or_default(),
+            plan.command.into_iter().skip(1).collect(),
+            path,
+        ),
+        install_success_exit_codes: success_codes(plan.success_exit_codes),
+        reusable,
+        outputs: dependency_install_outputs(&plan.outputs)?,
+    }))
 }
 
 fn parse_extension_output<T: for<'de> Deserialize<'de>>(stdout: &str, action: &str) -> Result<T> {
@@ -1427,6 +1649,12 @@ mod tests {
             _path_override: Option<String>,
             script_args: &[String],
         ) -> Result<ComponentScriptOutput> {
+            self.output(script_args)
+        }
+    }
+
+    impl FixtureRunner {
+        fn output(&self, script_args: &[String]) -> Result<ComponentScriptOutput> {
             let stdout = match script_args {
                 [action] if action == "status" => {
                     "{\"package_manager\":\"fixture\",\"packages\":[]}\n"

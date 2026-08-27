@@ -19,7 +19,7 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
 };
 use crate::agent_task_secrets::validate_secret_env;
-use homeboy_core::{defaults, worktree, worktree_providers, Error, Result};
+use homeboy_core::{defaults, worktree, Error, Result};
 
 use super::agent_task_dispatch_service::{
     initial_provider_route_from_policy, AgentTaskDispatchRequest, AgentTaskModelSelection,
@@ -203,7 +203,10 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let secret_env = dispatch_secret_env(request, &provider_config);
     let runtime_dependency_graph_evidence = (!runtime_dependency_graph.is_empty())
         .then(|| runtime_dependency_graph.to_evidence_value());
-    let command_policy = resolve_dispatch_command_policy(request)?;
+    let managed_worktree = workspace_target
+        .as_ref()
+        .is_some_and(DispatchWorkspaceTarget::is_managed);
+    let command_policy = resolve_dispatch_command_policy(request, managed_worktree)?;
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
         let resolved_prompt = if prompt_spec.is_literal {
@@ -218,6 +221,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
             resolved_prompt.content.clone(),
             request.task_url.as_deref(),
             &command_policy,
+            managed_worktree,
         );
         let task_id = prompt_spec.task_id.clone().unwrap_or_else(|| {
             request
@@ -521,6 +525,7 @@ fn dispatch_instructions(
     instructions: String,
     task_url: Option<&str>,
     command_policy: &AgentCommandPolicy,
+    managed_worktree: bool,
 ) -> String {
     // The command policy is stated in the prompt as well as enforced. Homeboy
     // structurally refuses a denied command at its own tool boundary, but a
@@ -528,12 +533,17 @@ fn dispatch_instructions(
     // crosses that boundary — for those runtimes the agent has to be told, in
     // terms it cannot miss, what it may not run and what to do instead.
     let constraints = command_policy.prompt_constraints();
-    let instructions = match constraints {
+    let mut instructions = match constraints {
         Some(constraints) if !instructions.contains("Command policy (declared by the operator") => {
             format!("{instructions}\n\n{constraints}")
         }
         _ => instructions,
     };
+    if managed_worktree && !instructions.contains("Parallel worktree patch preservation:") {
+        instructions.push_str(
+            "\n\nParallel worktree patch preservation:\n- Never use `git stash`; its stack is shared by every worktree in the repository.\n- Before current-base reconciliation, run `homeboy git patch preserve <operation-id> --path <worktree>`. Restore only with `homeboy git patch restore <operation-id> --path <worktree>`, never by stack position.\n- Keep the durable patch evidence until restoration and cleanup state are recorded.",
+        );
+    }
 
     if task_url.is_none() || instructions.contains("Generated change guardrails") {
         return instructions;
@@ -572,35 +582,12 @@ fn resolve_dispatch_workspace(
         return Ok(Some(DispatchWorkspaceTarget::path(path, "workspace-path")));
     }
 
-    if let Some(record) = worktree::resolve_workspace_ref_if_present(workspace)? {
-        if record.state() != &worktree::TaskWorktreeState::Active {
-            return Err(Error::validation_invalid_argument(
-                "workspace",
-                format!(
-                    "Homeboy workspace '{}' is no longer active",
-                    record.handle()
-                ),
-                Some(workspace.clone()),
-                None,
-            ));
-        }
-        let root = std::path::PathBuf::from(record.path());
-        if !root.is_dir() {
-            return Err(Error::validation_invalid_argument(
-                "workspace",
-                format!(
-                    "Homeboy workspace '{}' points at a missing directory {}; recreate or remove the stale record",
-                    record.handle(),
-                    root.display()
-                ),
-                Some(workspace.clone()),
-                None,
-            ));
-        }
-        return DispatchWorkspaceTarget::workspace_ref(record).map(Some);
-    }
-
-    let resolution = worktree_providers::resolve_worktree_provider(workspace).map_err(|error| {
+    let target = homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
+        workspace,
+        &homeboy_core::defaults::load_config(),
+        homeboy_core::worktree_provider::WorktreeMutationContext::default(),
+    )
+    .map_err(|error| {
         if error
             .details
             .pointer("/workspace/classification")
@@ -624,14 +611,28 @@ fn resolve_dispatch_workspace(
             ]),
         )
     })?;
-    let root = std::path::PathBuf::from(&resolution.worktree.path);
+    if target.provider == homeboy_core::worktree_provider::WorktreeProviderIdentity::Native {
+        let record = worktree::resolve_workspace_ref_if_present(workspace)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "native provider selected workspace `{workspace}` without a registry record"
+            ))
+        })?;
+        return DispatchWorkspaceTarget::workspace_ref(record).map(Some);
+    }
+    let root = target.path.clone();
     if !root.is_dir() {
+        let provider = match &target.provider {
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => "native",
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
+                provider
+            }
+        };
         return Err(Error::validation_invalid_argument(
             "workspace",
             format!(
                 "managed worktree '{}' resolved by provider '{}' points at a missing directory {}",
                 workspace,
-                resolution.provider_id,
+                provider,
                 root.display()
             ),
             Some(workspace.clone()),
@@ -639,7 +640,7 @@ fn resolve_dispatch_workspace(
         ));
     }
 
-    Ok(Some(DispatchWorkspaceTarget::provider(resolution)))
+    Ok(Some(DispatchWorkspaceTarget::provider(target)))
 }
 
 #[derive(Debug, Clone)]
@@ -655,6 +656,13 @@ pub(crate) struct DispatchWorkspaceTarget {
 }
 
 impl DispatchWorkspaceTarget {
+    fn is_managed(&self) -> bool {
+        matches!(
+            self.kind.as_deref(),
+            Some("homeboy-worktree" | "worktree-provider")
+        )
+    }
+
     fn path(root: std::path::PathBuf, kind: &str) -> Self {
         let slug = root
             .file_name()
@@ -724,26 +732,43 @@ impl DispatchWorkspaceTarget {
         })
     }
 
-    fn provider(resolution: worktree_providers::WorktreeProviderResolution) -> Self {
-        let root = std::path::PathBuf::from(&resolution.worktree.path);
+    fn provider(target: homeboy_core::worktree_provider::WorktreeMutationTarget) -> Self {
+        let root = target.path;
+        let provider_id = match target.provider {
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => {
+                "native".to_string()
+            }
+            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
+                provider
+            }
+        };
+        let safety =
+            target
+                .safety
+                .unwrap_or(homeboy_core::worktree_provider::WorktreeProviderSafety {
+                    dirty: false,
+                    unpushed: false,
+                    primary: false,
+                    missing: false,
+                });
         Self {
             root: root.clone(),
-            slug: Some(resolution.worktree.handle.clone()),
+            slug: Some(target.handle.clone()),
             kind: Some("worktree-provider".to_string()),
             component_id: None,
-            branch: Some(resolution.worktree.branch.clone()),
+            branch: target.branch.clone(),
             base_ref: None,
             workspace_identity: None,
             metadata: serde_json::json!({
                 "kind": "worktree-provider",
-                "provider_id": resolution.provider_id,
-                "handle": resolution.worktree.handle,
+                "provider_id": provider_id,
+                "handle": target.handle,
                 "root": root.display().to_string(),
-                "branch": resolution.worktree.branch,
+                "branch": target.branch,
                 "safety": {
-                    "dirty": resolution.worktree.safety.dirty,
-                    "unpushed": resolution.worktree.safety.unpushed,
-                    "primary": resolution.worktree.safety.primary,
+                    "dirty": safety.dirty,
+                    "unpushed": safety.unpushed,
+                    "primary": safety.primary,
                 },
             }),
         }
@@ -794,7 +819,7 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
 mod tests {
     use super::*;
     use crate::agent_task::{AgentCommandPolicyMode, AgentCommandRule};
-    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA};
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_dispatch_service::{
         dispatch, DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
     };
@@ -812,6 +837,7 @@ mod tests {
             "Implement the tracked change.".to_string(),
             Some("https://example.test/issues/1"),
             &AgentCommandPolicy::default(),
+            false,
         );
 
         assert!(instructions.contains("successful gates remain authoritative"));
@@ -826,6 +852,7 @@ mod tests {
             "Implement the tracked change.".to_string(),
             None,
             &AgentCommandPolicy::default(),
+            false,
         );
 
         assert_eq!(instructions, "Implement the tracked change.");
@@ -839,12 +866,38 @@ mod tests {
             ..AgentCommandPolicy::default()
         };
 
-        let instructions =
-            dispatch_instructions("Implement the tracked change.".to_string(), None, &policy);
+        let instructions = dispatch_instructions(
+            "Implement the tracked change.".to_string(),
+            None,
+            &policy,
+            false,
+        );
 
         assert!(instructions.contains("`cargo test`"));
         assert!(instructions.contains("this host routes builds to CI"));
         assert!(instructions.contains("Make your edits, commit"));
+    }
+
+    #[test]
+    fn managed_worktree_refuses_repository_global_stash_and_guides_safe_recovery() {
+        let request = dispatch_request(DispatchRequestOverrides::default());
+        let policy = resolve_dispatch_command_policy(&request, true).expect("managed policy");
+
+        let decision = policy.evaluate("git stash push -u");
+        let denial = decision.denial().expect("stash denied");
+        assert_eq!(denial.matched_pattern.as_deref(), Some("git stash*"));
+        assert!(denial.reason.contains("repository-global"));
+
+        let instructions = dispatch_instructions(
+            "Reconcile with the current base.".to_string(),
+            None,
+            &policy,
+            true,
+        );
+        assert!(instructions.contains("Never use `git stash`"));
+        assert!(instructions.contains("homeboy git patch preserve <operation-id>"));
+        assert!(instructions.contains("homeboy git patch restore <operation-id>"));
+        assert!(instructions.contains("durable patch evidence"));
     }
 
     #[test]
@@ -2190,19 +2243,10 @@ mod tests {
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("ok".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }
         }
     }

@@ -4,8 +4,7 @@ use super::*;
 use crate::agent_task::{
     AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskFailureClassification,
     AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
-    AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
-    AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
@@ -52,16 +51,15 @@ fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
     .run(plan);
 
     let usage = execution_budget_usage(&aggregate);
-    let remaining = budget_remaining(
-        &crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 1),
-        usage,
-    )
-    .expect("remaining total budget");
+    let mut budget = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 1);
+    budget.deadline_unix_ms = Some(u64::MAX);
+    let remaining = budget_remaining(&budget, usage).expect("remaining total budget");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(usage.executions, 2);
     assert_eq!(usage.provider_rotations, 1);
     assert_eq!(remaining.max_provider_executions, 1);
     assert_eq!(remaining.max_provider_rotations, 0);
+    assert_eq!(remaining.deadline_unix_ms, budget.deadline_unix_ms);
 }
 
 #[test]
@@ -2155,7 +2153,7 @@ fn dead_owner_process_run_is_classified_stale_and_reconciled() {
             // runner job (local controller-owned run). A very large PID is not
             // a live process on this host.
             record.metadata = serde_json::json!({
-                "runner_pid": u32::MAX,
+                "runner_pid": i32::MAX as u32,
             });
         })
         .expect("dead-owner record stored");
@@ -3159,19 +3157,10 @@ impl AgentTaskExecutorAdapter for SucceedingExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3203,13 +3192,10 @@ impl AgentTaskExecutorAdapter for TimeoutExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Timeout,
             summary: Some("provider exceeded timeout_ms=50".to_string()),
             failure_classification: Some(AgentTaskFailureClassification::Timeout),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "executor-result".to_string(),
                 uri: "file:///tmp/executor-result.json".to_string(),
@@ -3220,10 +3206,7 @@ impl AgentTaskExecutorAdapter for TimeoutExecutor {
                 message: "provider exceeded timeout_ms=50".to_string(),
                 data: serde_json::json!({ "timeout_ms": 50 }),
             }],
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3245,19 +3228,10 @@ impl AgentTaskExecutorAdapter for CountingExecutor {
     ) -> AgentTaskOutcome {
         self.calls.fetch_add(1, Ordering::SeqCst);
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3274,23 +3248,14 @@ impl AgentTaskExecutorAdapter for RotationThenSuccess {
     ) -> AgentTaskOutcome {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: if call == 0 {
                 AgentTaskOutcomeStatus::ProviderError
             } else {
                 AgentTaskOutcomeStatus::Succeeded
             },
-            summary: None,
             failure_classification: (call == 0).then_some(AgentTaskFailureClassification::Provider),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3306,19 +3271,10 @@ impl AgentTaskExecutorAdapter for CapturingExecutor {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3396,19 +3352,10 @@ fn aggregate_with_outcome(metadata: Value) -> AgentTaskAggregate {
             ..Default::default()
         },
         outcomes: vec![AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "service-task".to_string(),
             status: AgentTaskOutcomeStatus::Succeeded,
-            summary: None,
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
             metadata,
+            ..Default::default()
         }],
         events: Vec::new(),
         artifact_lineage: Vec::new(),

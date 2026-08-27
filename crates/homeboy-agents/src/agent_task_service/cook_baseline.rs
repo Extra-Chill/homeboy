@@ -411,6 +411,10 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                     failure_fingerprint: String::new(),
                     matches_candidate_failure: false,
                     result: AgentTaskGateDifferentialResult::Inconclusive,
+                    diagnostic: Some(
+                        "candidate gate declares package artifacts without recorded digests, so the immutable base cannot reconstruct the same inputs"
+                            .to_string(),
+                    ),
                 });
                 continue;
             };
@@ -441,6 +445,10 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                         failure_fingerprint: String::new(),
                         matches_candidate_failure: false,
                         result: AgentTaskGateDifferentialResult::Inconclusive,
+                        diagnostic: Some(
+                            "baseline replay resolved different package artifacts than the candidate recorded, so the two runs are not comparable"
+                                .to_string(),
+                        ),
                     });
                     baseline_run_dir.finish(true);
                     continue;
@@ -463,6 +471,10 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                         ),
                         matches_candidate_failure: false,
                         result: AgentTaskGateDifferentialResult::Inconclusive,
+                        diagnostic: Some(
+                            "baseline replay exceeded the gate timeout before producing a comparable result"
+                                .to_string(),
+                        ),
                     });
                     Ok(())
                 }
@@ -504,6 +516,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                         } else {
                             AgentTaskGateDifferentialResult::CandidateRegression
                         },
+                        diagnostic: None,
                     });
                     if matches {
                         gate.accept_inherited_failure();
@@ -526,6 +539,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                         ),
                         matches_candidate_failure: false,
                         result: AgentTaskGateDifferentialResult::CandidateRegression,
+                        diagnostic: None,
                     });
                     Ok(())
                 }
@@ -536,12 +550,12 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                         failure_fingerprint: String::new(),
                         matches_candidate_failure: false,
                         result: AgentTaskGateDifferentialResult::Inconclusive,
+                        diagnostic: Some(format!("baseline replay failed: {error}")),
                     });
                     // Preserve the inconclusive evidence and leave the candidate
                     // gate red. A baseline execution failure must never convert a
                     // candidate failure into an infrastructure error that loses
                     // its durable comparison result.
-                    let _ = error;
                     Ok(())
                 }
             };
@@ -944,6 +958,16 @@ mod tests {
                 AgentTaskGateEnvironment::default(),
             );
             gate.status = AgentTaskGateStatus::Failed;
+            gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+                classification: AgentTaskGateFailureClassification::CandidateCode,
+                summary: "candidate gate failed".to_string(),
+                command: command.to_string(),
+                exit_code: 1,
+                stdout_tail: String::new(),
+                stderr_tail: candidate_output.to_string(),
+                agent_feedback: "Repair the candidate gate failure.".to_string(),
+                diagnostics: Vec::new(),
+            });
             promotion.deterministic_gates.push(gate);
 
             let result = compare_gate_failures_to_verified_base(

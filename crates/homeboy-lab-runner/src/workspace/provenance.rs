@@ -981,8 +981,7 @@ mod tests {
     use super::*;
     use homeboy_agents::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
-        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
-        AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
     };
     use homeboy_agents::agent_task_scheduler::{
         AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
@@ -1594,19 +1593,10 @@ mod tests {
             }
             self.dispatched.store(true, Ordering::SeqCst);
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("provider completed".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: serde_json::Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: serde_json::Value::Null,
+                ..Default::default()
             }
         }
     }

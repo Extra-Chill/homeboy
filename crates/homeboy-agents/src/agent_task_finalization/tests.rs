@@ -5,7 +5,7 @@ use super::*;
 use crate::{
     agent_task::{
         AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
-        AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+        AGENT_TASK_ARTIFACT_SCHEMA,
     },
     agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
@@ -109,6 +109,12 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 None,
             )
         })
+    }
+    fn hydrate_optional_gate_proof(
+        &mut self,
+        _run_id: &str,
+    ) -> Result<Option<AgentTaskPrDurableGateProof>> {
+        Ok(self.gate_proof.clone())
     }
     fn hydrate_run_in_store(
         &mut self,
@@ -997,6 +1003,7 @@ fn pr_body_reports_iterator_evidence_metadata() {
     };
     options.evidence.verification = AgentTaskPrVerification {
         targeted_checks_run: vec!["cargo test pr_body".to_string()],
+        dependency_hydration: Vec::new(),
         targeted_checks_unavailable: None,
         ci_expected: vec!["Homeboy CI".to_string()],
         manual_reviewer_check: None,
@@ -1329,6 +1336,147 @@ fn requires_a_real_durable_run_unless_manual_mode_is_selected() {
         .expect_err("missing run blocks finalization");
     assert!(error.message.contains("durable run was not found"));
     assert!(!backend.committed);
+}
+
+#[test]
+fn manual_finalization_inherits_only_exact_green_candidate_bound_promotion_gates() {
+    let candidate = json!({
+        "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
+        "commit": "candidate-sha",
+        "tree": "candidate-tree",
+        "candidate_sha256": "candidate-digest"
+    });
+    let mut promotion: AgentTaskPromotionReport = serde_json::from_value(json!({
+        "status": "applied",
+        "source": { "kind": "aggregate", "task_id": "task", "run_id": "cook-3678" },
+        "to_worktree": "worktree",
+        "target": { "worktree": "worktree", "path": "/repo" },
+        "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch" },
+        "changed_files": ["src/lib.rs"],
+        "deterministic_gates": [
+            { "id": "test", "status": "succeeded", "command": ["sh", "-lc", "cargo test"], "exit_code": 0, "candidate_checkout": candidate },
+            { "id": "package", "status": "succeeded", "command": ["sh", "-lc", "cargo package"], "exit_code": 0, "candidate_checkout": candidate }
+        ],
+        "gate_results": [],
+        "verified_base": { "base": "main", "sha": "verified-base" },
+        "provenance": {
+            "candidate": {
+                "kind": "git",
+                "fingerprint": {
+                    "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                    "target_path": "/repo",
+                    "head": "candidate-parent",
+                    "base": "base-parent",
+                    "changed_files": ["src/lib.rs"],
+                    "sha256": "candidate-digest",
+                    "tree": "candidate-tree"
+                }
+            },
+            "candidate_checkout": candidate
+        },
+        "operator_notification": { "status": "completed", "message": "complete" }
+    }))
+    .expect("green promotion receipt");
+    promotion.normalize_gate_outcome();
+    let mut finalization = options();
+    finalization.gate_results.clear();
+    finalization.normalized_gate_results.clear();
+    finalization.changed_files = vec!["src/lib.rs".to_string()];
+    finalization.review_dossier.how_to_test.clear();
+    let mut backend = MockBackend {
+        candidate_state: Some(AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        }),
+        gate_proof: Some(AgentTaskPrDurableGateProof {
+            run_id: "cook-3678".to_string(),
+            promotion: promotion.clone(),
+        }),
+        ..Default::default()
+    };
+
+    let report = preflight_pr_with_backend(finalization.clone(), &mut backend)
+        .expect("exact green promotion is inherited");
+
+    assert_eq!(report.status, "validated");
+    assert_eq!(report.normalized_gate_results, promotion.gate_results);
+    assert_eq!(report.review_dossier.how_to_test.len(), 2);
+    assert_eq!(backend.candidate_validation_calls, 1);
+    let inherited = report
+        .inherited_gate_evidence
+        .clone()
+        .expect("inheritance is represented explicitly");
+    assert_eq!(inherited.status, "verified_inherited");
+    assert_eq!(inherited.gate_ids, ["test", "package"]);
+    assert_eq!(inherited.gate_command_sha256.len(), 2);
+    assert_eq!(inherited.target_worktree, "worktree");
+
+    finalization.verified_base_sha = Some("drifted-base".to_string());
+    let error = preflight_pr_with_backend(
+        finalization.clone(),
+        &mut MockBackend {
+            gate_proof: Some(AgentTaskPrDurableGateProof {
+                run_id: "cook-3678".to_string(),
+                promotion: promotion.clone(),
+            }),
+            ..Default::default()
+        },
+    )
+    .expect_err("base drift invalidates inheritance");
+    assert!(error.message.contains("run fresh verification"));
+
+    let mut mismatched_candidate = promotion.clone();
+    mismatched_candidate.provenance["candidate"]["fingerprint"]["tree"] =
+        json!("different-candidate-tree");
+    finalization.verified_base_sha = Some("verified-base".to_string());
+    let error = preflight_pr_with_backend(
+        finalization.clone(),
+        &mut MockBackend {
+            gate_proof: Some(AgentTaskPrDurableGateProof {
+                run_id: "cook-3678".to_string(),
+                promotion: mismatched_candidate,
+            }),
+            ..Default::default()
+        },
+    )
+    .expect_err("candidate tree drift invalidates inheritance");
+    assert!(error.message.contains("exact promoted candidate tree"));
+
+    let mut changed_command = promotion.clone();
+    changed_command.deterministic_gates[0].command[2] = "cargo test changed".to_string();
+    changed_command.normalize_gate_outcome();
+    finalization.normalized_gate_results = report.normalized_gate_results.clone();
+    finalization.inherited_gate_evidence = Some(inherited.clone());
+    let error = preflight_pr_with_backend(
+        finalization.clone(),
+        &mut MockBackend {
+            gate_proof: Some(AgentTaskPrDurableGateProof {
+                run_id: "cook-3678".to_string(),
+                promotion: changed_command,
+            }),
+            ..Default::default()
+        },
+    )
+    .expect_err("gate command drift invalidates persisted inheritance");
+    assert!(error.message.contains("no longer matches"));
+
+    let mut stale = promotion;
+    stale.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+    stale.deterministic_gates[0].exit_code = 1;
+    stale.normalize_gate_outcome();
+    finalization.normalized_gate_results = report.normalized_gate_results;
+    let error = preflight_pr_with_backend(
+        finalization,
+        &mut MockBackend {
+            gate_proof: Some(AgentTaskPrDurableGateProof {
+                run_id: "cook-3678".to_string(),
+                promotion: stale,
+            }),
+            ..Default::default()
+        },
+    )
+    .expect_err("a red replacement receipt invalidates persisted inheritance");
+    assert!(error.message.contains("run fresh verification"));
 }
 
 #[test]
@@ -2786,11 +2934,9 @@ fn durable_task(task_id: &str, backend: &str, model: Option<&str>) -> AgentTaskR
 
 fn durable_succeeded_outcome(task_id: &str, metadata: serde_json::Value) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: task_id.to_string(),
         status: AgentTaskOutcomeStatus::Succeeded,
         summary: Some("succeeded".to_string()),
-        failure_classification: None,
         artifacts: vec![AgentTaskArtifact {
             schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             id: format!("{task_id}-patch"),
@@ -2806,13 +2952,8 @@ fn durable_succeeded_outcome(task_id: &str, metadata: serde_json::Value) -> Agen
             sha256: None,
             metadata: serde_json::Value::Null,
         }],
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
-        outputs: serde_json::Value::Null,
-        workflow: None,
-        follow_up: None,
         metadata,
+        ..Default::default()
     }
 }
 
@@ -2957,10 +3098,12 @@ fn options() -> AgentTaskPrFinalizationOptions {
             source_relationships: Vec::new(),
             overrides: Vec::new(),
         },
+        composed_ai_model_disclosure: false,
         review_profile: crate::agent_task_review_dossier::default_profile(),
         manual_finalization: true,
         expected_candidate_sha: None,
         verified_candidate_sha: None,
+        inherited_gate_evidence: None,
         protected_branches: vec![
             "main".to_string(),
             "master".to_string(),

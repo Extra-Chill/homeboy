@@ -952,7 +952,6 @@ mod tests {
             panic!("Cook command");
         };
         assert!(draft.draft_pr);
-
         assert!(crate::cli_surface::Cli::try_parse_from([
             "homeboy",
             "agent-task",
@@ -963,6 +962,27 @@ mod tests {
             "homeboy@existing",
             "--no-finalize",
             "--draft-pr",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn self_repair_bootstrap_cannot_disable_finalization() {
+        assert!(crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "repair the provider",
+            "--repo",
+            "homeboy",
+            "--task-url",
+            "https://github.com/Extra-Chill/homeboy/issues/13410",
+            "--cwd",
+            "/tmp/homeboy-self-repair",
+            "--worktree-provider-self-repair",
+            "fixture",
+            "--no-finalize",
         ])
         .is_err());
     }
@@ -1002,13 +1022,13 @@ pub struct AgentTaskCookArgs {
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle
     /// is `<repo>@<branch-slug>`, where the slug replaces every character of
     /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
-    /// `repo@fix-1234-x`. Existing destinations are reused. Creating a missing
-    /// one is not a built-in capability: it requires an enabled worktree
-    /// provider with a `commands.ensure` argv template, and without one you must
-    /// create the destination first with `homeboy worktree create`. When
+    /// `repo@fix-1234-x`. Existing destinations are reused. A missing destination
+    /// is created after durable Cook admission through an enabled worktree
+    /// provider with `commands.ensure`, or through Homeboy's built-in local
+    /// provider when no configured provider declares creation capability. When
     /// omitted, an explicit --cwd is the canonical destination. Otherwise,
-    /// --repo plus --task-url derives an issue-owned destination through that
-    /// same configured provider. An explicit --workspace or --cwd Git checkout
+    /// --repo plus --task-url derives an issue-owned destination through the
+    /// same provider boundary. An explicit --workspace or --cwd Git checkout
     /// can infer --repo when its remote maps to exactly one
     /// configured component; an explicit --repo must match that checkout. When
     /// paired with --cwd, this must name the same existing local or active
@@ -1016,6 +1036,18 @@ pub struct AgentTaskCookArgs {
     /// authority.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
+    /// Temporarily use the explicit clean --cwd as workspace authority while
+    /// repairing the configured provider that owns this repository. The
+    /// provider must declare its repository under
+    /// settings.worktree_provider_self_repair; normal Cook gates, review, PR
+    /// finalization, and durable provenance remain active.
+    #[arg(
+        long,
+        value_name = "PROVIDER_ID",
+        requires = "cwd",
+        conflicts_with_all = ["workspace", "to_worktree", "no_finalize"]
+    )]
+    pub worktree_provider_self_repair: Option<String>,
     #[arg(
         long,
         value_name = "COMMAND",
@@ -1060,8 +1092,9 @@ pub struct AgentTaskCookArgs {
     #[arg(long)]
     pub no_progress: bool,
     /// Base branch the finalized pull request targets and the branch changes are
-    /// diffed against. When omitted, Cook resolves repository evidence before
-    /// falling back to `main`.
+    /// diffed against. When omitted, Cook resolves configured repository or
+    /// remote default-branch evidence before retaining its deferred `main`
+    /// compatibility default when the provider has not materialized a checkout.
     #[arg(long, value_name = "BRANCH")]
     pub base: Option<String>,
     /// Head branch to push and open the PR from. Defaults to the branch the

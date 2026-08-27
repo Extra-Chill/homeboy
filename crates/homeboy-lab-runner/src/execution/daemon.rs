@@ -232,16 +232,27 @@ pub(super) fn exec_via_daemon(
                 let store = lease_store
                     .as_ref()
                     .expect("lease store is opened whenever run_id is present");
-                if !store.claim_running_runner_exec_recovery_source(
-                    run_id,
-                    "foreground-runner-exec",
-                    &token,
-                    &job.id.to_string(),
-                )? {
+                let runner_job_id = job.id.to_string();
+                let claimed = if run_id_owns_generic_exec {
+                    store.bind_and_claim_running_runner_exec_source(
+                        run_id,
+                        "foreground-runner-exec",
+                        &token,
+                        &runner_job_id,
+                    )?
+                } else {
+                    store.claim_running_runner_exec_recovery_source(
+                        run_id,
+                        "foreground-runner-exec",
+                        &token,
+                        &runner_job_id,
+                    )?
+                };
+                if !claimed {
                     return Err(runner_exec_source_claim_error(
                         store,
                         run_id,
-                        &job.id.to_string(),
+                        &runner_job_id,
                     )?);
                 }
                 *foreground_source_lease.borrow_mut() = Some((run_id.to_string(), token));
@@ -306,6 +317,8 @@ pub(super) fn exec_via_daemon(
             );
             let request = if run_id_owns_generic_exec {
                 request.with_generic_runner_exec_run()
+            } else if run_id.is_some() {
+                request.with_agent_task_run()
             } else {
                 request
             };
@@ -1145,6 +1158,33 @@ mod admission_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn daemon_capability_preflight_overlays_job_env_on_runner_env() {
+        let runner_env = HashMap::from([
+            (
+                "HOMEBOY_COMMAND".to_string(),
+                "/runner/bin/homeboy".to_string(),
+            ),
+            ("PATH".to_string(), "/runner/bin:/usr/bin".to_string()),
+        ]);
+        let request_env = HashMap::from([
+            ("PATH".to_string(), "/job/bin:/usr/bin".to_string()),
+            ("COOK_ATTEMPT".to_string(), "2".to_string()),
+        ]);
+
+        let effective = effective_capability_preflight_env(&runner_env, &request_env);
+
+        assert_eq!(
+            effective.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some("/runner/bin/homeboy")
+        );
+        assert_eq!(
+            effective.get("PATH").map(String::as_str),
+            Some("/job/bin:/usr/bin")
+        );
+        assert_eq!(effective.get("COOK_ATTEMPT").map(String::as_str), Some("2"));
+    }
+
+    #[test]
     fn strict_admission_requires_protocol_token_and_server_expiry() {
         assert!(strict_admission_response_is_complete(
             true,
@@ -1467,9 +1507,18 @@ pub(super) fn preflight_runner_capability_plan(
     // Probe the command and state authority that this job will receive, not
     // merely the runner's persisted configuration.
     let mut effective_runner = runner.clone();
-    effective_runner.env = request_env.clone();
+    effective_runner.env = effective_capability_preflight_env(&runner.env, request_env);
     let capabilities = runner_capability_snapshot_for_preflight(&effective_runner, preflight)?;
     validate_runner_capability_preflight(&runner.id, preflight, &capabilities, request_env)
+}
+
+fn effective_capability_preflight_env(
+    runner_env: &HashMap<String, String>,
+    request_env: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut env = runner_env.clone();
+    env.extend(request_env.clone());
+    env
 }
 
 pub(super) fn fetch_daemon_job(client: &Client, local_url: &str, job_id: &str) -> Result<Job> {

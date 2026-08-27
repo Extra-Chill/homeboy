@@ -218,6 +218,29 @@ impl LocalControllerJobClient {
         Self::connect()
     }
 
+    /// Connect to the current daemon build, first applying its canonical idle
+    /// restart when authoritative status proves that no durable jobs are active.
+    ///
+    /// The lease-bound stop is a compare-and-swap on the daemon observed by the
+    /// report. A concurrent replacement therefore causes the stop to refuse
+    /// rather than terminating an unobserved owner, and the final connection
+    /// re-runs exact-build validation before any controller job is submitted.
+    pub fn connect_current_build_recovering_idle() -> Result<Self> {
+        let status = read_status()?;
+        if recovery_actions::authorizes_automatic_idle_restart(&status) {
+            match status.freshness.lease_id.as_deref() {
+                Some(lease_id) => {
+                    stop_for_lease(lease_id)?;
+                }
+                None => {
+                    stop()?;
+                }
+            }
+            start_background(DEFAULT_ADDR)?;
+        }
+        Self::connect_current_build()
+    }
+
     pub fn connect() -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
@@ -758,19 +781,6 @@ pub struct DaemonStateLossRecoveryResult {
     pub affected_job_count: usize,
     pub evidence_snapshot_path: String,
     pub ownership_proof: Vec<String>,
-    pub retry_guidance: String,
-    pub replacement: DaemonStartResult,
-}
-
-/// Compatibility result for the local reconciliation helper used by lifecycle
-/// tests. The CLI uses `DaemonLeaselessRecoveryResult`, which includes the
-/// structured ownership evidence returned by remote recovery.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct DaemonLeaselessOrphanReconciliationResult {
-    pub snapshot_path: String,
-    pub affected_job_ids: Vec<String>,
-    pub affected_job_count: usize,
-    pub no_owner_proof: Vec<String>,
     pub retry_guidance: String,
     pub replacement: DaemonStartResult,
 }
@@ -1439,7 +1449,7 @@ fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::ti
 ///
 /// `reconcile_stale_active_runs` had exactly two callers — `cleanup` and
 /// `agent-task active --reconcile --apply` — so a detached cook whose owner
-/// died stayed `running` forever. Controller waits had none at all.
+/// died stayed `running` forever. Loop Work jobs own controller waits.
 fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let Some(interval) = orchestration_tick_interval() else {
@@ -1452,20 +1462,17 @@ fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::
     })
 }
 
-/// One pass per mechanism, per interval.
+/// One pass per remaining global mechanism, per interval.
 ///
-/// The two mechanisms are isolated from each other and from the loop: a
+/// The mechanisms are isolated from each other and from the loop: a
 /// reconcile that panics costs one pass, not the tick and not the daemon.
-/// Overlap is impossible by construction — the sleep happens after both
+/// Overlap is impossible by construction — the sleep happens after all
 /// passes return, exactly as the schedule ticker does it — and across
 /// processes the daemon owner lock already guarantees a single ticker.
 fn orchestration_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
     loop {
         isolated_tick(|| {
             let _ = orchestration::reconcile_stale_active_runs();
-        });
-        isolated_tick(|| {
-            let _ = orchestration::reconcile_controller_waits();
         });
         isolated_tick(|| {
             let _ = orchestration::reconcile_unmaterialized_cook_admissions();
@@ -3932,7 +3939,7 @@ fn controller_job_id_from_path(path: &str, suffix: &str) -> Result<Uuid> {
     })
 }
 
-fn hex_digest(value: &serde_json::Value) -> Result<String> {
+pub(crate) fn hex_digest(value: &serde_json::Value) -> Result<String> {
     let encoded =
         serde_json::to_vec(value).map_err(|error| Error::internal_unexpected(error.to_string()))?;
     Ok(content_hash::sha256_hex(&encoded))

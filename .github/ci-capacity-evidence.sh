@@ -3,9 +3,14 @@
 set -euo pipefail
 
 config="${CI_CAPACITY_CONFIG:-.github/ci-capacity.json}"
+manifest="${REQUIRED_GATES_MANIFEST:-.github/required-gates-manifest.json}"
 run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")"
 jobs="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" | jq -s '{jobs: map(.jobs[]) }')"
-required='["homeboy / Required Gates Declaration","homeboy / Workspace Tests Compile","homeboy / Windows Compile","homeboy / Rustfmt","homeboy / Audit","homeboy / Lint","homeboy / Test"]'
+# The critical path spans every required, non-terminal gate context, derived
+# from the one policy manifest rather than restated here (#13125).
+required="$(jq -c '
+  [.gates[] | select(.required_status_check == true and .terminal != true) | .context]
+' "${manifest}")"
 
 jq -n --argjson run "${run}" --argjson jobs "${jobs}" --argjson required "${required}" --slurpfile config "${config}" '
   def seconds($from; $to): (($to | fromdateiso8601) - ($from | fromdateiso8601));
