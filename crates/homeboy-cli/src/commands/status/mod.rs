@@ -422,12 +422,12 @@ const GLOBAL_ACTIVITY_LIMIT: i64 = 100;
 /// registered inventory size.
 fn global_status(controller: ControllerStaleness) -> CmdResult<StatusResult> {
     let daemon_status = daemon::read_status()?;
-    let admitting_work = daemon_status.running && daemon_status.fresh && daemon_status.reachable;
+    let admitting_work = daemon_status.admits_work();
     let blocker = (!admitting_work).then(|| {
         daemon_status
             .stale_reason
             .clone()
-            .unwrap_or_else(|| "daemon is not running, fresh, and reachable".to_string())
+            .unwrap_or_else(|| "daemon is not live, fresh, and reachable".to_string())
     });
 
     let registered_runners = runner::list()?;

@@ -487,14 +487,43 @@ pub struct DaemonState {
     pub runtime_paths: DaemonRuntimeSnapshot,
 }
 
+/// Independent observations of one daemon session lease.
+///
+/// Each field answers exactly one question (#13621):
+///
+/// - [`DaemonStatus::running`] — is the recorded daemon process alive?
+/// - [`DaemonStatus::reachable`] — is the daemon API reachable from the lease?
+/// - [`DaemonStatus::fresh`] — does the daemon binary match this Homeboy build?
+/// - [`DaemonStatus::replacement_blocked`] — is replacing it blocked, and why?
+///
+/// A live daemon running an older build therefore reports
+/// `running: true, reachable: true, fresh: false`; process death is never
+/// inferred from a build mismatch. [`DaemonStatus::admits_work`] is the
+/// derived predicate for the one question that needs all three facts.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DaemonStatus {
+    /// The daemon process recorded by the lease is alive. This is pure
+    /// process liveness: it says nothing about build compatibility.
     pub running: bool,
+    /// The daemon binary matches the invoking Homeboy build.
     pub fresh: bool,
+    /// The daemon API endpoint is reachable from a live lease.
     pub reachable: bool,
     pub freshness: DaemonFreshnessReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
+    /// Whether replacing this daemon is blocked right now. A fresh daemon is
+    /// never blocked (nothing to replace); a stale daemon is blocked when the
+    /// recorded evidence authorizes no repair and a replacement would destroy
+    /// protected durable work or act on unattributed ownership.
+    pub replacement_blocked: bool,
+    /// Evidence-drawn reason naming what blocks replacement. `None` when
+    /// replacement is not blocked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement_blocked_reason: Option<String>,
+    /// Plain-language liveness, freshness, and replacement-safety summary,
+    /// rendered from the same evidence as the fields above.
+    pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<DaemonState>,
     pub state_path: String,
@@ -511,6 +540,49 @@ pub struct DaemonStatus {
     /// not imply an OS-level cause for a dead daemon.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub termination_evidence: Option<DaemonTerminationEvidence>,
+}
+
+impl DaemonStatus {
+    /// The daemon is a live, reachable session running this exact Homeboy
+    /// build — the daemon a caller may submit work to right now.
+    ///
+    /// Deliberately a predicate over the independent liveness, reachability,
+    /// and freshness fields rather than an overloaded `running` field: build
+    /// incompatibility must not masquerade as process death (#13621).
+    pub fn admits_work(&self) -> bool {
+        self.running && self.fresh && self.reachable
+    }
+
+    /// Render [`DaemonStatus::summary`] from the status's own evidence.
+    pub fn render_summary(&self) -> String {
+        let mut summary = if self.running && self.reachable {
+            "daemon process is live and its API is reachable".to_string()
+        } else if self.running {
+            "daemon process is live but its API is unreachable".to_string()
+        } else if self.state.is_some() {
+            "daemon process is dead".to_string()
+        } else {
+            "no daemon lease is recorded and the daemon API is unreachable".to_string()
+        };
+        if self.fresh {
+            summary.push_str("; binary is fresh (matches this Homeboy build)");
+        } else if let Some(reason) = &self.stale_reason {
+            summary.push_str(&format!("; binary is stale: {reason}"));
+        } else {
+            summary.push_str("; binary is stale");
+        }
+        if self.replacement_blocked {
+            summary.push_str(&format!(
+                "; replacement is blocked: {}",
+                self.replacement_blocked_reason
+                    .as_deref()
+                    .unwrap_or("the recorded evidence authorizes no replacement")
+            ));
+        } else if !self.fresh {
+            summary.push_str("; replacement is not blocked: an authorized repair plan is recorded");
+        }
+        summary
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1162,12 +1234,34 @@ pub fn read_status() -> Result<DaemonStatus> {
     } else {
         validation.stale_reason.clone()
     };
-    Ok(DaemonStatus {
-        running: validation.running && validation.fresh && validation.reachable,
+    // A stale daemon with an authorized repair plan (a restartable stop/start,
+    // an adoption, or an explicit reconciliation) can be replaced through that
+    // plan. A stale daemon with no plan — protected active jobs, a corrupt
+    // lease, an unreachable transport, or conflicting foreground candidates —
+    // has its replacement blocked, with the blocker named in evidence terms.
+    let replacement_blocked = !freshness.fresh && freshness.repair_plan.is_empty();
+    let replacement_blocked_reason = replacement_blocked.then(|| {
+        if freshness.active_jobs > 0 {
+            format!(
+                "{} active durable job(s) are protected from implicit replacement",
+                freshness.active_jobs
+            )
+        } else {
+            freshness
+                .ownership_evidence
+                .clone()
+                .unwrap_or_else(|| "the recorded evidence authorizes no replacement".to_string())
+        }
+    });
+    let mut status = DaemonStatus {
+        running: validation.running,
         fresh: validation.fresh,
         reachable: validation.reachable,
         freshness,
         stale_reason,
+        replacement_blocked,
+        replacement_blocked_reason,
+        summary: String::new(),
         state: validation.state,
         state_path,
         state_identity,
@@ -1177,7 +1271,9 @@ pub fn read_status() -> Result<DaemonStatus> {
             .then(read_termination_evidence)
             .transpose()?
             .flatten(),
-    })
+    };
+    status.summary = status.render_summary();
+    Ok(status)
 }
 
 fn has_conflicting_process_candidates(candidates: &[DaemonProcessCandidate]) -> bool {
