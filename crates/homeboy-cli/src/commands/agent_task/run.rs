@@ -1211,7 +1211,7 @@ mod preview_tests {
 
     #[cfg(unix)]
     #[test]
-    fn preview_plans_an_absent_issue_workspace_without_ensuring_it() {
+    fn preview_plans_an_absent_explicit_workspace_and_execution_uses_the_same_intent() {
         use std::os::unix::fs::PermissionsExt;
 
         crate::test_support::with_isolated_home(|home| {
@@ -1223,10 +1223,13 @@ mod preview_tests {
             std::fs::write(
                 &provider,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\nresolve) printf '%s\\n' '{{\"worktrees\":[]}}' ;;\nplan) printf '%s\\n' \"$0\" \"$@\" > '{}'; printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@fix-issue-12890-repo\",\"path\":\"{}\",\"branch\":\"fix/issue-12890-repo\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nensure) touch '{}' ;;\nesac\n",
+                    "#!/bin/sh\ncase \"$1\" in\nresolve) if [ -d '{}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@fix-issue-12890-repo\",\"path\":\"{}\",\"branch\":\"fix/issue-12890-repo\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi ;;\nplan) printf '%s\\n' \"$0\" \"$@\" > '{}'; printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@fix-issue-12890-repo\",\"path\":\"{}\",\"branch\":\"fix/issue-12890-repo\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}' ;;\nensure) printf '%s\\n' \"$0\" \"$@\" > '{}'; git init --quiet -b fix/issue-12890-repo '{}' ;;\nesac\n",
+                    planned_workspace.display(),
+                    planned_workspace.display(),
                     plan_argv.display(),
                     planned_workspace.display(),
                     marker.display(),
+                    planned_workspace.display(),
                 ),
             )
             .expect("write provider");
@@ -1265,7 +1268,19 @@ mod preview_tests {
                             "{owner_run_ref}".to_string(),
                             "{cleanup_policy}".to_string(),
                         ]),
-                        ensure: Some(vec![provider.display().to_string(), "ensure".to_string()]),
+                        ensure: Some(vec![
+                            provider.display().to_string(),
+                            "ensure".to_string(),
+                            "{handle}".to_string(),
+                            "{repo}".to_string(),
+                            "{base}".to_string(),
+                            "{head}".to_string(),
+                            "{task_url}".to_string(),
+                            "{idempotency_key}".to_string(),
+                            "{purpose}".to_string(),
+                            "{owner_run_ref}".to_string(),
+                            "{cleanup_policy}".to_string(),
+                        ]),
                         ..Default::default()
                     },
                     list_result_mapping: Some(
@@ -1303,11 +1318,15 @@ mod preview_tests {
                     "fixture",
                     "--task-url",
                     "https://example.test/owner/repo/issues/12890",
+                    "--to-worktree",
+                    "fixture@fix-issue-12890-repo",
+                    "--head",
+                    "fix/issue-12890-repo",
                     "--no-finalize",
                 ]),
                 None,
             )
-            .expect("plan absent issue workspace");
+            .expect("plan absent explicit workspace");
 
             assert_eq!(exit_code, 0);
             assert_eq!(preview["resolved"]["workspace"]["action"], "planned_create");
@@ -1345,6 +1364,78 @@ mod preview_tests {
             assert_eq!(
                 std::fs::read_dir(home).expect("read isolated home").count(),
                 before
+            );
+
+            let intent = WorktreeProviderCreateIntent {
+                handle: "fixture@fix-issue-12890-repo".to_string(),
+                repo: "fixture".to_string(),
+                base: "main".to_string(),
+                head: "fix/issue-12890-repo".to_string(),
+                task_url: "https://example.test/owner/repo/issues/12890".to_string(),
+            };
+            let lifecycle = WorktreeProviderLifecycleIntent {
+                purpose: "agent_task_cook".to_string(),
+                owner_run_ref: "preview-owner".to_string(),
+                cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+            };
+            let provision = homeboy::core::worktree_providers::provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
+                &intent,
+                &lifecycle,
+                &config,
+            )
+            .expect("execution provisions the explicitly planned workspace");
+            assert_eq!(provision.action, "ensured");
+            assert_eq!(provision.resolution.worktree.handle, intent.handle);
+            assert_eq!(
+                provision.resolution.worktree.path,
+                preview["resolved"]["workspace"]["path"]
+            );
+            assert_eq!(
+                std::fs::read_to_string(&marker).expect("captured ensure argv"),
+                std::fs::read_to_string(&plan_argv)
+                    .expect("captured plan argv")
+                    .replacen("\nplan\n", "\nensure\n", 1)
+            );
+
+            let ensure_call = std::fs::read_to_string(&marker).expect("captured ensure argv");
+            config
+                .worktree_providers
+                .get_mut("fixture")
+                .expect("fixture provider")
+                .commands
+                .plan = None;
+            homeboy::core::defaults::save_config(&config).expect("save unsupported plan config");
+            let unsupported = preview_cook(
+                cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--backend",
+                    "fixture",
+                    "--prompt",
+                    "implement another issue",
+                    "--repo",
+                    "fixture",
+                    "--task-url",
+                    "https://example.test/owner/repo/issues/12891",
+                    "--to-worktree",
+                    "fixture@fix-issue-12891-repo",
+                    "--head",
+                    "fix/issue-12891-repo",
+                    "--no-finalize",
+                ]),
+                None,
+            )
+            .expect_err("explicit creation preview requires provider planning capability");
+            assert_eq!(
+                unsupported.details["worktree_provider_planning"],
+                "unsupported"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&marker).expect("ensure call remains unchanged"),
+                ensure_call,
+                "refused preview must not invoke ensure"
             );
         });
     }
@@ -4001,10 +4092,19 @@ fn resolve_cook_preview_destination(
             homeboy::core::worktree_provider::WorktreeMutationContext::default(),
         ) {
             Ok(target) => target,
-            Err(error)
-                if issue_derived && error.details["worktree_provider_lookup"] == "not_found" =>
-            {
-                let intent = cook_workspace_create_intent(&args)?;
+            // An explicit destination reaches planning too: previewing a missing
+            // one is the point of #13515, so a not-found provider is planned
+            // whether or not the destination was derived from an issue.
+            Err(lookup_error) if lookup_error.details["worktree_provider_lookup"] == "not_found" => {
+                // Planning a creation needs an intent to plan. An explicit
+                // handle that cannot describe one — no --repo to create it
+                // under — is simply an absent destination, which the lookup
+                // failure already reports precisely.
+                let intent = match cook_workspace_create_intent(&args) {
+                    Ok(intent) => intent,
+                    Err(error) if issue_derived => return Err(error),
+                    Err(_) => return Err(lookup_error),
+                };
                 let lifecycle = WorktreeProviderLifecycleIntent {
                     purpose: "agent_task_cook".to_string(),
                     owner_run_ref: args
@@ -4017,8 +4117,19 @@ fn resolve_cook_preview_destination(
                     &intent, &lifecycle, &config,
                 ) {
                     Ok(plan) => plan,
-                    Err(error) => {
+                    Err(error) if issue_derived => {
                         return Ok((args, unresolved_provider_preview(&handle, error, &config)));
+                    }
+                    // A provider that can ensure but cannot plan is a real
+                    // answer about this destination, so it is reported. Any
+                    // other planning failure means no provider owns the handle
+                    // at all, which the original lookup already says better.
+                    Err(error) => {
+                        return Err(if error.details["worktree_provider_planning"] == "unsupported" {
+                            error
+                        } else {
+                            lookup_error
+                        })
                     }
                 };
                 let WorktreeProvisionPlan::Planned(destination) = plan else {
