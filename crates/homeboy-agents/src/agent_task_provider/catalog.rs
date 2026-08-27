@@ -5,8 +5,8 @@ use super::resolution::{
 };
 use super::runner_readiness::provider_executable_env;
 use super::secrets::{
-    apply_provider_runner_secret_env_contracts_with_providers, provider_config_secret_sources,
-    provider_runner_secret_env_for_plan_with_providers, provider_secret_sources,
+    apply_provider_runner_secret_env_contracts_with_providers, provider_declared_secret_sources,
+    provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers,
 };
 use super::*;
@@ -624,10 +624,7 @@ pub fn provider_secret_sources_for_providers(
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
     let mut sources = HashMap::new();
     for provider in providers {
-        sources.extend(provider_secret_sources(provider, None));
-        for defaults in provider.provider_defaults.values() {
-            sources.extend(provider_config_secret_sources(defaults));
-        }
+        sources.extend(provider_declared_secret_sources(provider));
     }
     sources
 }
@@ -649,10 +646,7 @@ pub fn provider_secret_sources_for_backend(
         .collect();
     let mut sources = HashMap::new();
     for provider in scoped {
-        sources.extend(provider_secret_sources(provider, None));
-        for defaults in provider.provider_defaults.values() {
-            sources.extend(provider_config_secret_sources(defaults));
-        }
+        sources.extend(provider_declared_secret_sources(provider));
     }
     sources
 }

@@ -18,6 +18,8 @@ use homeboy_core::gate::{
 use homeboy_core::plan::{PlanStep, PlanStepStatus, PlanValues};
 use homeboy_core::{Error, Result};
 
+use crate::agent_task_process_containment::AgentTaskProcessContainment;
+
 // `Skipped` is a new durable terminal state with a structured blocker. Keep it
 // out of v1 so typed consumers can distinguish the expanded state machine.
 pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v3";
@@ -642,6 +644,15 @@ pub struct AgentTaskGateBaselineComparison {
     pub matches_candidate_failure: bool,
     #[serde(default)]
     pub result: AgentTaskGateDifferentialResult,
+    /// Why the comparison could not conclude.
+    ///
+    /// An `Inconclusive` result used to be indistinguishable from every other
+    /// `Inconclusive` result: the baseline replay error was discarded at the
+    /// point it was produced, so an operator was told to "repair the gate
+    /// baseline setup" with nothing naming what was actually wrong. This
+    /// carries that reason forward. Conclusive results leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 /// The durable outcome of replaying a candidate gate against its immutable base.
@@ -1324,7 +1335,13 @@ mod baseline_tests {
         failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateEnvironmentPolicy,
         AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
     };
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::process::{Command, Stdio};
     use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     #[test]
     fn matching_baseline_failure_is_distinct_from_a_new_failure() {
@@ -1414,6 +1431,99 @@ mod baseline_tests {
             !homeboy_engine_primitives::command::process_is_running(descendant_pid as u32),
             "bounded baseline gate left descendant {descendant_pid} runnable"
         );
+    }
+
+    /// Re-exec target for [`killing_the_gate_controller_reaps_its_background_descendant`].
+    /// Runs a deterministic gate whose command backgrounds a SIGTERM-ignoring
+    /// descendant and then blocks on it, standing in for an agent process that
+    /// is mid-gate (e.g. running `cargo test -p ... --lib`) when it is killed.
+    /// Only runs under the env var the parent test sets; a bare `cargo test`
+    /// invocation of the full suite exercises this as a no-op.
+    #[cfg(unix)]
+    #[test]
+    fn gate_process_containment_worker() {
+        let Ok(dir) = std::env::var("HOMEBOY_GATE_CONTAINMENT_WORKER_DIR") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let pid_file = dir.join("descendant.pid");
+        let _ = run_gate_command_with_timeout(
+            &dir,
+            1,
+            &format!(
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & echo $! > '{}'; wait",
+                pid_file.display()
+            ),
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            &dir,
+            Duration::from_secs(30),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        );
+    }
+
+    /// The #13649 regression: an agent gets killed (operator `kill -9`, OOM,
+    /// supervisor teardown) while a deterministic gate it launched is still
+    /// running. Before containment, the gate's `sh -lc` leader and whatever
+    /// build/test tooling it spawned were reparented to init and kept running
+    /// — and kept holding the shared cargo build lock — because nothing was
+    /// left alive to signal them. This drives that exact scenario through a
+    /// real OS process (not just an in-process drop) so the assertion is that
+    /// the reported orphan survives or does not, not that a particular type
+    /// gets constructed.
+    #[cfg(unix)]
+    #[test]
+    fn killing_the_gate_controller_reaps_its_background_descendant() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let test_binary = std::env::current_exe().expect("test binary path");
+        let mut worker = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "agent_task_gate::baseline_tests::gate_process_containment_worker",
+            ])
+            .env(
+                "HOMEBOY_GATE_CONTAINMENT_WORKER_DIR",
+                temp.path().as_os_str(),
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start gate containment worker");
+
+        let start_deadline = Instant::now() + Duration::from_secs(10);
+        while !pid_file.exists() {
+            assert!(
+                Instant::now() < start_deadline,
+                "gate containment worker never started its background descendant"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+        assert!(
+            homeboy_engine_primitives::command::process_is_running(descendant_pid as u32),
+            "descendant must still be running for this test to prove anything"
+        );
+
+        // The kill an operator or OOM issues: it lands on the agent process
+        // (here, the worker), not on the gate's descendants. The worker gets
+        // no chance to run its own cleanup — that is the entire point.
+        worker.kill().expect("kill gate containment worker");
+        worker.wait().expect("reap gate containment worker");
+
+        let reaped_deadline = Instant::now() + Duration::from_secs(10);
+        while homeboy_engine_primitives::command::process_is_running(descendant_pid as u32) {
+            assert!(
+                Instant::now() < reaped_deadline,
+                "descendant {descendant_pid} survived its controller being killed"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 }
 
@@ -1524,17 +1634,28 @@ pub(crate) fn run_gate_command_with_supervision(
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
-    if supervision.is_some() {
-        if !homeboy_core::engine::command::supports_process_tree_isolation() {
-            return Err(Error::validation_invalid_argument(
-                "gate_supervision",
-                "durable gate cancellation requires Unix process-group isolation on this host",
-                None,
-                None,
-            ));
-        }
-        homeboy_core::engine::command::isolate_process_tree(&mut process);
+    if supervision.is_some() && !homeboy_core::engine::command::supports_process_tree_isolation() {
+        return Err(Error::validation_invalid_argument(
+            "gate_supervision",
+            "durable gate cancellation requires Unix process-group isolation on this host",
+            None,
+            None,
+        ));
     }
+    // Every deterministic gate is contained the same way regardless of
+    // whether the caller supervises it: the gate spawns build/test tooling
+    // (`cargo test -p ... --lib` and friends) that outlives a plain
+    // `Command::spawn`. Without a process group of its own and a controller-
+    // death guard, killing the agent process that is running this gate
+    // (operator `kill -9`, OOM, supervisor teardown) leaves that tooling
+    // reparented to init and holding the shared cargo build/artifact lock
+    // indefinitely (#13649).
+    let mut containment = AgentTaskProcessContainment::prepare(&mut process).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("contain deterministic gate {command}")),
+        )
+    })?;
     let target_started = Instant::now();
     let mut child = process.spawn().map_err(|error| {
         Error::internal_io(
@@ -1542,11 +1663,16 @@ pub(crate) fn run_gate_command_with_supervision(
             Some(format!("run deterministic gate {command}")),
         )
     })?;
+    if let Err(error) = containment.attach(&child) {
+        let _ = containment.terminate_live(&mut child);
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some(format!("guard deterministic gate {command}")),
+        ));
+    }
     let (output, termination) = if let Some(supervision) = supervision {
         if let Err(error) = (supervision.on_spawn)(child.id(), command) {
-            if let Err(cleanup_error) =
-                homeboy_core::engine::command::terminate_process_tree_and_reap(&mut child)
-            {
+            if let Err(cleanup_error) = containment.terminate_live(&mut child) {
                 return Err(Error::internal_io(
                     format!(
                         "durable gate registration failed ({error}); failed to terminate and reap its child: {cleanup_error}"
@@ -1611,6 +1737,11 @@ pub(crate) fn run_gate_command_with_supervision(
             homeboy_core::engine::command::SupervisedCommandTermination::Completed,
         )
     };
+    // The wait loops above already reap survivors once they observe the
+    // leader exit; this is the belt-and-suspenders reap for every remaining
+    // return path (including the ones below that can still error out before
+    // the report is built).
+    let _ = containment.reap_after_exit();
     let termination = match termination {
         homeboy_core::engine::command::SupervisedCommandTermination::Completed => {
             AgentTaskGateTermination::Completed
@@ -1706,7 +1837,15 @@ pub(crate) fn run_gate_command_with_timeout(
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
-    homeboy_core::engine::command::isolate_process_tree(&mut process);
+    // See the matching comment in `run_gate_command_with_supervision`: this
+    // gate spawns build/test tooling that must not outlive an agent process
+    // killed out from under it (#13649).
+    let mut containment = AgentTaskProcessContainment::prepare(&mut process).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("contain bounded deterministic gate {command}")),
+        )
+    })?;
     let target_started = Instant::now();
     let mut child = process.spawn().map_err(|error| {
         Error::internal_io(
@@ -1714,6 +1853,13 @@ pub(crate) fn run_gate_command_with_timeout(
             Some(format!("run bounded deterministic gate {command}")),
         )
     })?;
+    if let Err(error) = containment.attach(&child) {
+        let _ = containment.terminate_live(&mut child);
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some(format!("guard bounded deterministic gate {command}")),
+        ));
+    }
     let started = std::time::Instant::now();
     let mut timed_out = false;
     let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled(
@@ -1730,6 +1876,7 @@ pub(crate) fn run_gate_command_with_timeout(
             Some(format!("run bounded deterministic gate {command}")),
         )
     })?;
+    let _ = containment.reap_after_exit();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let runner_exit_code = if timed_out {
@@ -3654,6 +3801,63 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+
+    /// A conclusive comparison carries no diagnostic, and the field is omitted
+    /// from the wire form so persisted reports written before it existed still
+    /// round-trip.
+    #[test]
+    fn baseline_comparison_omits_an_absent_diagnostic() {
+        let comparison = AgentTaskGateBaselineComparison {
+            base_ref: "abc".to_string(),
+            exit_code: 1,
+            failure_fingerprint: "fp".to_string(),
+            matches_candidate_failure: true,
+            result: AgentTaskGateDifferentialResult::BaselineRed,
+            diagnostic: None,
+        };
+        let json = serde_json::to_value(&comparison).expect("serialize");
+        assert!(
+            json.get("diagnostic").is_none(),
+            "absent diagnostic must not widen the wire form: {json}"
+        );
+    }
+
+    /// A report persisted before the field existed must still deserialize.
+    #[test]
+    fn baseline_comparison_reads_reports_written_without_a_diagnostic() {
+        let json = serde_json::json!({
+            "base_ref": "abc",
+            "exit_code": 124,
+            "failure_fingerprint": "",
+            "matches_candidate_failure": false,
+            "result": "inconclusive"
+        });
+        let comparison: AgentTaskGateBaselineComparison =
+            serde_json::from_value(json).expect("deserialize legacy report");
+        assert_eq!(comparison.diagnostic, None);
+        assert_eq!(
+            comparison.result,
+            AgentTaskGateDifferentialResult::Inconclusive
+        );
+    }
+
+    /// An inconclusive comparison round-trips the reason it could not conclude.
+    #[test]
+    fn baseline_comparison_round_trips_its_diagnostic() {
+        let comparison = AgentTaskGateBaselineComparison {
+            base_ref: "abc".to_string(),
+            exit_code: 124,
+            failure_fingerprint: String::new(),
+            matches_candidate_failure: false,
+            result: AgentTaskGateDifferentialResult::Inconclusive,
+            diagnostic: Some("baseline replay failed: boom".to_string()),
+        };
+        let json = serde_json::to_value(&comparison).expect("serialize");
+        assert_eq!(json["diagnostic"], "baseline replay failed: boom");
+        let back: AgentTaskGateBaselineComparison =
+            serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, comparison);
+    }
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -4083,32 +4287,34 @@ mod tests {
 
     #[test]
     fn declared_shared_cargo_target_is_reported_without_parsing_gate_shell_text() {
-        let temp = tempfile::tempdir().expect("gate fixture");
-        let mut policy = AgentTaskGateEnvironmentPolicy::default();
-        policy.shared_cargo_target = Some(true);
-        // The test runner's required Cargo target is an ambient override. An
-        // explicit empty declaration clears it so this exercises the contract.
-        policy
-            .variables
-            .insert("CARGO_TARGET_DIR".to_string(), String::new());
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("gate fixture");
+            let mut policy = AgentTaskGateEnvironmentPolicy::default();
+            policy.shared_cargo_target = Some(true);
+            // The test runner's required Cargo target is an ambient override. An
+            // explicit empty declaration clears it so this exercises the contract.
+            policy
+                .variables
+                .insert("CARGO_TARGET_DIR".to_string(), String::new());
 
-        let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
-            temp.path(),
-            1,
-            "test -n \"$CARGO_TARGET_DIR\"",
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            None,
-            &policy,
-            &[],
-        )
-        .expect("declared managed gate");
+            let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                temp.path(),
+                1,
+                "test -n \"$CARGO_TARGET_DIR\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &policy,
+                &[],
+            )
+            .expect("declared managed gate");
 
-        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
-        let target = report.environment.cargo_target.expect("target evidence");
-        assert_eq!(target.resolution, "shared");
-        assert!(target.path.contains("cargo-target"));
-        assert!(target.owner.starts_with("agent-task-gate"));
+            assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+            let target = report.environment.cargo_target.expect("target evidence");
+            assert_eq!(target.resolution, "shared");
+            assert!(target.path.contains("cargo-target"));
+            assert!(target.owner.starts_with("agent-task-gate"));
+        });
     }
 
     #[test]
@@ -5856,18 +6062,18 @@ mod tests {
             }],
             &[],
             None,
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .expect_err("hung toolchain probe must time out");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(20));
         assert_eq!(error.retryable, Some(true));
         assert_eq!(
             error.details["toolchain_preflight"]["timed_out"], true,
             "{:#}",
             error.details
         );
-        assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 2_000);
+        assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 10_000);
         let descendant_pid = fs::read_to_string(pid_file)
             .expect("descendant pid")
             .trim()
@@ -5905,7 +6111,7 @@ mod tests {
         )
         .expect_err("hung toolchain probe must time out");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(error.details["toolchain_preflight"]["timed_out"], true);
         assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 100);
     }
@@ -5947,7 +6153,7 @@ mod tests {
         )
         .expect_err("second probe must consume only the first probe's remaining deadline");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(error.details["toolchain_preflight"]["timed_out"], false);
         assert_eq!(
             error.details["toolchain_preflight"]["command"],

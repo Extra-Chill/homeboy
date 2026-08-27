@@ -1183,7 +1183,7 @@ fn incomplete_recovery_delivers_identity_bound_artifacts_to_the_finalizer() {
     let adoption = release_step_block(host, "name: Create remote draft adoption manifest");
 
     assert!(preserve.contains(
-        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.release-exists == 'true' && needs.plan.outputs.draft-complete != 'true'"
     ));
     assert!(preserve.contains(".isDraft' existing-release.json)\" != \"false\""));
     assert!(preserve.contains("done < <(jq -r '.[]' <<< \"${EXPECTED_ASSETS}\")"));
@@ -1294,7 +1294,7 @@ fn release_recovery_reconciles_rebuilt_assets_before_the_finalizer() {
         "recovery must reconcile authoritative local artifacts before finalization"
     );
     assert!(reconcile.contains(
-        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.release-exists == 'true' && needs.plan.outputs.draft-complete != 'true'"
     ));
     assert!(reconcile.contains("ASSET_DIR=artifacts RECONCILE=true REQUIRE_ANNOUNCE_ASSETS=false"));
     assert!(reconcile.contains("git show \"${CONTROL_SHA}:.github/release-asset-completeness.sh\""));
@@ -1305,6 +1305,53 @@ fn release_recovery_reconciles_rebuilt_assets_before_the_finalizer() {
         helper.contains("gh release upload \"${RELEASE_TAG}\" \"${ASSET_DIR}/${asset}\" --clobber")
     );
     assert!(helper.contains("Could not re-read the asset inventory"));
+}
+
+/// Runs 32977620578 and 32994515251 reached recovery with a fresh tag but no
+/// GitHub Release. Remote reconciliation cannot precede the finalizer that owns
+/// creation of that Release; an existing remote inventory is the discriminator.
+#[test]
+fn release_routes_remote_recovery_only_when_a_release_inventory_exists() {
+    let workflow = release_workflow();
+    let plan = job_section(workflow, "plan");
+    let host = job_section(workflow, "host");
+    let probe = release_step_block(
+        plan,
+        "name: Probe existing draft for a complete asset inventory",
+    );
+    let preserve = release_step_block(host, "name: Preserve existing published asset bytes");
+    let recovery = release_step_block(host, "name: Create authoritative recovery manifest");
+    let reconcile = release_step_block(host, "name: Reconcile rebuilt recovery assets");
+
+    assert!(plan.contains("release-exists: ${{ steps.draft-probe.outputs.release-exists }}"));
+    assert!(probe.contains("RELEASE_EXISTS=unknown"));
+    assert!(probe.contains("RELEASE_EXISTS=false"));
+    assert!(probe.contains("RELEASE_EXISTS=true"));
+    assert!(probe.contains("release-exists=${RELEASE_EXISTS}"));
+
+    let route_guard = release_step_block(host, "name: Require resolved recovery release routing");
+    assert!(route_guard.contains(
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+    ));
+    assert!(route_guard.contains("RELEASE_EXISTS: ${{ needs.plan.outputs.release-exists }}"));
+    assert!(route_guard.contains("exit 1"));
+
+    let existing_release_route = "needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.release-exists == 'true' && needs.plan.outputs.draft-complete != 'true'";
+    for (name, step) in [("preservation", preserve), ("reconciliation", reconcile)] {
+        assert!(
+            step.contains(existing_release_route),
+            "remote {name} must require an observed Release inventory: {step}"
+        );
+    }
+
+    assert!(recovery.contains(
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+    ));
+    assert!(
+        !recovery.contains("release-exists"),
+        "an absent Release must still receive the authoritative rebuilt-artifact manifest"
+    );
+    assert!(host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"));
 }
 
 /// Recovery is allowed — required — to run a control binary NEWER than the tag

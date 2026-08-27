@@ -26,7 +26,7 @@ use crate::agent_task_scheduler::{
 };
 use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
-use homeboy_core::{config, worktree, Error, Result};
+use homeboy_core::{config, worktree, worktree_provider, Error, Result};
 
 pub const AGENT_TASK_PLAN_VALIDATION_SCHEMA: &str = "homeboy/agent-task-plan-validation/v1";
 
@@ -1658,6 +1658,29 @@ struct CookRetryReservation {
     created: bool,
 }
 
+fn local_cook_retry_reservation_metadata(
+    cook_id: &str,
+    retry_run_id: &str,
+    lease_started_at: chrono::DateTime<chrono::Utc>,
+    launcher_pid: u32,
+    launcher_start_identity: homeboy_core::process::ProcessStartIdentity,
+) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([
+        ("cook_id".to_string(), json!(cook_id)),
+        (
+            "local_cook_supervisor".to_string(),
+            json!({
+                "state": "pending",
+                "pinned_run_id": retry_run_id,
+                "lease_started_at": lease_started_at.to_rfc3339(),
+                "lease_expires_at": (lease_started_at + chrono::Duration::seconds(agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
+                "launcher_pid": launcher_pid,
+                "launcher_process_start_identity": launcher_start_identity,
+            }),
+        ),
+    ])
+}
+
 fn reserve_cook_retry_lifecycle(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     source: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -1695,17 +1718,13 @@ fn reserve_cook_retry_lifecycle(
                     &source.run_id,
                     Some(retry_run_id),
                     force,
-                    serde_json::Map::from_iter([(
-                        "local_cook_supervisor".to_string(),
-                        json!({
-                            "state": "pending",
-                            "pinned_run_id": retry_run_id,
-                            "lease_started_at": lease_started_at.to_rfc3339(),
-                            "lease_expires_at": (lease_started_at + chrono::Duration::seconds(agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
-                            "launcher_pid": launcher_pid,
-                            "launcher_process_start_identity": launcher_start_identity,
-                        }),
-                    )]),
+                    local_cook_retry_reservation_metadata(
+                        &retry.cook_id,
+                        retry_run_id,
+                        lease_started_at,
+                        launcher_pid,
+                        launcher_start_identity,
+                    ),
                     preflight,
                 )?;
             let result = json!({ "run_id": retry_run_id });
@@ -1845,10 +1864,8 @@ fn retryable_cook_attempt(
             .is_some_and(|selection| {
                 selection.run_id == source.run_id && selection.selected_artifact_id.is_none()
             });
-    if !retryable_pre_execution_failure && !failed_provider_without_candidate && !acceptance_repair
-    {
-        return Ok(None);
-    }
+    let source_is_retryable =
+        retryable_pre_execution_failure || failed_provider_without_candidate || acceptance_repair;
     let replaces_source_attempt = source.metadata["pre_execution_failure"].is_object()
         && source.metadata["provider_executions_consumed"]
             .as_u64()
@@ -1969,6 +1986,9 @@ fn retryable_cook_attempt(
             recipe_replacement: materialized_attempt_seen,
             replaces_source_attempt: false,
         }));
+    }
+    if !source_is_retryable {
+        return Ok(None);
     }
     let max_attempts = recipe
         .retry_budget
@@ -2487,44 +2507,73 @@ fn prepare_component_worktree_workspace(
         )
     })?;
     let cleanup_policy = cleanup_policy_for_workspace(request.workspace.cleanup.as_deref());
-    let created = worktree::create(worktree::WorktreeCreateOptions {
+    let task_url = request.workspace.task_url.clone().or_else(|| {
+        request
+            .source_refs
+            .iter()
+            .find(|source| source.kind == "task")
+            .or_else(|| request.source_refs.first())
+            .map(source_uri)
+    });
+    let created = worktree_provider::create_worktree(worktree::WorktreeCreateOptions {
         component_id: component_id.clone(),
         branch,
         from: request.workspace.base_ref.clone(),
-        task_url: request.workspace.task_url.clone().or_else(|| {
-            request
-                .source_refs
-                .iter()
-                .find(|source| source.kind == "task")
-                .or_else(|| request.source_refs.first())
-                .map(source_uri)
-        }),
+        task_url,
         run_id: run_id.map(str::to_string),
-        cleanup_policy,
+        cleanup_policy: cleanup_policy.clone(),
     })?;
-    let record = created.record;
-    let cleanup = cleanup_lifecycle_policy(&record.cleanup_policy);
+    let (root, cleanup, materialization) = match created {
+        worktree_provider::WorktreeProviderCreateOutput::Native(created) => {
+            let record = created.record;
+            let cleanup = cleanup_lifecycle_policy(&record.cleanup_policy).to_string();
+            let root = record.worktree_path.clone();
+            let materialization = serde_json::json!({
+                "kind": "homeboy-worktree",
+                "id": record.id,
+                "component_id": record.component_id,
+                "branch": record.branch,
+                "base_ref": record.base_ref,
+                "root": record.worktree_path,
+                "source_checkout": record.source_checkout,
+                "task_url": record.task_url,
+                "run_id": record.run_id,
+                "cleanup_policy": cleanup.clone(),
+            });
+            (root, cleanup, materialization)
+        }
+        worktree_provider::WorktreeProviderCreateOutput::Configured(provision) => {
+            let cleanup_policy =
+                cleanup_policy.unwrap_or(worktree::CleanupPolicy::PreserveOnFailure);
+            let cleanup = cleanup_lifecycle_policy(&cleanup_policy).to_string();
+            let evidence = worktree_provider::ConfiguredWorktreeCreateEvidence::from(provision);
+            let root = evidence.path.clone();
+            let materialization = serde_json::json!({
+                "kind": "worktree-provider",
+                "provider": evidence.provider,
+                "id": evidence.handle,
+                "component_id": component_id.clone(),
+                "branch": evidence.branch,
+                "root": evidence.path,
+                "task_url": evidence.task_url,
+                "run_id": run_id,
+                "cleanup_policy": cleanup.clone(),
+                "provision_action": evidence.provision_action,
+                "idempotency_key": evidence.idempotency_key,
+            });
+            (root, cleanup, materialization)
+        }
+    };
     request.workspace.kind = None;
     request.workspace.mode = AgentTaskWorkspaceMode::Existing;
-    request.workspace.root = Some(record.worktree_path.clone());
+    request.workspace.root = Some(root);
     request.workspace.slug = Some(component_id);
     request.workspace.component_id = None;
     request.workspace.branch = None;
     request.workspace.base_ref = None;
     request.workspace.task_url = None;
-    request.workspace.cleanup = Some(cleanup.to_string());
-    request.workspace.materialization = serde_json::json!({
-        "kind": "homeboy-worktree",
-        "id": record.id,
-        "component_id": record.component_id,
-        "branch": record.branch,
-        "base_ref": record.base_ref,
-        "root": record.worktree_path,
-        "source_checkout": record.source_checkout,
-        "task_url": record.task_url,
-        "run_id": record.run_id,
-        "cleanup_policy": cleanup,
-    });
+    request.workspace.cleanup = Some(cleanup);
+    request.workspace.materialization = materialization;
 
     Ok(())
 }
@@ -2835,6 +2884,39 @@ mod tests {
             homeboy_core::ErrorCode::ValidationInvalidArgument
         );
         assert!(error.message.contains("cleanup_deadline_ms"));
+    }
+
+    #[test]
+    fn local_retry_reservation_is_live_before_recipe_binding() {
+        let run_id = "local-retry-reservation";
+        let started_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("lease timestamp")
+            .with_timezone(&chrono::Utc);
+        let launcher_pid = std::process::id();
+        let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
+            .expect("inspect launcher identity")
+            .expect("launcher is live");
+        let metadata = local_cook_retry_reservation_metadata(
+            "local-retry-cook",
+            run_id,
+            started_at,
+            launcher_pid,
+            launcher_start_identity,
+        );
+        let record: agent_task_lifecycle::AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": run_id,
+            "plan_id": "local-retry-plan",
+            "state": "queued",
+            "submitted_at": started_at.to_rfc3339(),
+            "plan_path": "plan.json",
+            "metadata": metadata,
+        }))
+        .expect("reservation record");
+
+        assert_eq!(record.metadata["cook_id"], "local-retry-cook");
+        assert!(record
+            .has_live_pending_local_cook_supervisor(started_at + chrono::Duration::seconds(1)));
     }
 
     #[test]

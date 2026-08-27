@@ -235,11 +235,22 @@ pub struct RunnerExecutionCapability {
     pub next_action: String,
 }
 
+/// `available` reports Lab **admission** readiness (the same predicate cook
+/// dispatch enforces via `resolve_parsed_command_preflight`), not raw session
+/// connectivity. A runner can be connected without being admitted (stale
+/// daemon, missing capabilities, capacity blocked, ...); in that case
+/// `available` is `false` even though `connected_runner_ids` is non-empty, and
+/// `reasons`/`next_action` explain what would admit it (#13631).
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct LabRunnerConnectionCapability {
     pub available: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub connected_runner_ids: Vec<String>,
+    /// Non-empty exactly when at least one runner is connected but not
+    /// admitted, explaining the gap between connectivity and dispatch
+    /// readiness.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
 }

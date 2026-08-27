@@ -420,89 +420,12 @@ pub struct WorktreeProviderSplitResolution {
     pub safety: WorktreeProviderSafetyAttestation,
 }
 
-/// Explicit destination inputs required to create a managed worktree without
-/// inferring repository or branch policy from a product-specific provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeProviderCreateIntent {
-    pub handle: String,
-    pub repo: String,
-    pub base: String,
-    pub head: String,
-    pub task_url: String,
-}
-
-/// Typed lifecycle intent attached to a provider-owned workspace request.
-/// Providers own any product-specific interpretation; Homeboy only preserves
-/// this generic ownership contract through argv substitution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeProviderLifecycleIntent {
-    pub purpose: String,
-    pub owner_run_ref: String,
-    pub cleanup_policy: WorktreeProviderCleanupPolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorktreeProviderCleanupPolicy {
-    RemoveOnSuccess,
-    PreserveOnFailure,
-}
-
-impl WorktreeProviderCleanupPolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::RemoveOnSuccess => "remove_on_success",
-            Self::PreserveOnFailure => "preserve_on_failure",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorktreeProviderTerminalDisposition {
-    Succeeded,
-    Failed,
-    Cancelled,
-    TimedOut,
-    Interrupted,
-}
-
-impl WorktreeProviderTerminalDisposition {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::TimedOut => "timed_out",
-            Self::Interrupted => "interrupted",
-        }
-    }
-
-    fn owner_outcome(self) -> &'static str {
-        match self {
-            Self::Succeeded => "success",
-            Self::Failed | Self::Cancelled | Self::TimedOut | Self::Interrupted => "failure",
-        }
-    }
-
-    fn lifecycle_state(self) -> &'static str {
-        match self {
-            Self::Succeeded => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::TimedOut => "timed_out",
-            Self::Interrupted => "interrupted",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeProviderFinalization {
-    pub provider_id: String,
-    pub handle: String,
-    pub disposition: WorktreeProviderTerminalDisposition,
-    pub owner_outcome: String,
-    pub lifecycle_state: String,
-    pub inspection_path: String,
-}
+pub type WorktreeProviderCreateIntent = crate::worktree_provider::WorktreeProvisionIntent;
+pub type WorktreeProviderLifecycleIntent = crate::worktree_provider::WorktreeProvisionLifecycle;
+pub type WorktreeProviderCleanupPolicy = crate::worktree_provider::WorktreeCleanupPolicy;
+pub type WorktreeProviderTerminalDisposition =
+    crate::worktree_provider::WorktreeTerminalDisposition;
+pub type WorktreeProviderFinalization = crate::worktree_provider::WorktreeFinalization;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeProviderProvision {
@@ -807,7 +730,14 @@ pub fn resolve_worktree_provider_from_config(
     handle: &str,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderResolution> {
-    resolve_worktree_provider_with_policy_from_config(handle, config, false, None, None)
+    resolve_worktree_provider_with_policy_from_config(handle, config, false, true, None, None)
+}
+
+pub(crate) fn observe_worktree_provider_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
+    resolve_worktree_provider_with_policy_from_config(handle, config, false, false, None, None)
 }
 
 /// Resolve a workspace only from providers explicitly authorized for apply operations.
@@ -1574,6 +1504,7 @@ pub fn resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination
         handle,
         config,
         true,
+        true,
         gate_feedback_baseline,
         trusted_unpushed_destination,
     )
@@ -2338,6 +2269,7 @@ fn resolve_worktree_provider_with_policy_from_config(
     handle: &str,
     config: &HomeboyConfig,
     require_apply_enabled: bool,
+    validate_safety: bool,
     gate_feedback_baseline: Option<&serde_json::Value>,
     trusted_unpushed_destination: Option<&TrustedUnpushedWorktree>,
 ) -> Result<WorktreeProviderResolution> {
@@ -2347,28 +2279,25 @@ fn resolve_worktree_provider_with_policy_from_config(
         .cloned()
         .collect::<Vec<_>>();
     provider_ids.sort();
-    let mut attempted = Vec::new();
-    let mut not_apply_enabled = Vec::new();
-
     for provider_id in provider_ids.iter().cloned() {
         let provider = &config.worktree_providers[&provider_id];
         if !provider.enabled {
             continue;
         }
         if require_apply_enabled && !provider.apply_enabled {
-            not_apply_enabled.push(provider_id);
             continue;
         }
         if let Some(command) = provider.commands.resolve.as_ref() {
-            attempted.push(provider_id.clone());
             let worktrees = run_provider_resolve_command(&provider_id, provider, command, handle)?;
             if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
-                validate_provider_handle(
-                    &provider_id,
-                    &worktree,
-                    gate_feedback_baseline,
-                    trusted_unpushed_destination,
-                )?;
+                if validate_safety {
+                    validate_provider_handle(
+                        &provider_id,
+                        &worktree,
+                        gate_feedback_baseline,
+                        trusted_unpushed_destination,
+                    )?;
+                }
                 return Ok(WorktreeProviderResolution {
                     provider_id,
                     worktree,
@@ -2379,15 +2308,16 @@ fn resolve_worktree_provider_with_policy_from_config(
         let Some(command) = provider.commands.list.as_ref() else {
             continue;
         };
-        attempted.push(provider_id.clone());
         let worktrees = run_provider_list_command(&provider_id, provider, command)?;
         if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
-            validate_provider_handle(
-                &provider_id,
-                &worktree,
-                gate_feedback_baseline,
-                trusted_unpushed_destination,
-            )?;
+            if validate_safety {
+                validate_provider_handle(
+                    &provider_id,
+                    &worktree,
+                    gate_feedback_baseline,
+                    trusted_unpushed_destination,
+                )?;
+            }
             return Ok(WorktreeProviderResolution {
                 provider_id,
                 worktree,
@@ -2395,6 +2325,76 @@ fn resolve_worktree_provider_with_policy_from_config(
         }
     }
 
+    Err(worktree_provider_not_found_error(
+        handle,
+        config,
+        require_apply_enabled,
+    ))
+}
+
+pub(crate) fn is_worktree_provider_not_found(error: &Error) -> bool {
+    error.details["worktree_provider_lookup"] == "not_found"
+}
+
+pub(crate) fn list_enabled_worktree_providers_from_config(
+    config: &HomeboyConfig,
+) -> Result<Vec<WorktreeProviderResolution>> {
+    let mut provider_ids = config
+        .worktree_providers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    let mut resolutions = Vec::new();
+    for provider_id in provider_ids {
+        let provider = &config.worktree_providers[&provider_id];
+        if !provider.enabled {
+            continue;
+        }
+        let Some(command) = provider.commands.list.as_ref() else {
+            continue;
+        };
+        resolutions.extend(
+            run_provider_list_command(&provider_id, provider, command)?
+                .into_iter()
+                .map(|worktree| WorktreeProviderResolution {
+                    provider_id: provider_id.clone(),
+                    worktree,
+                }),
+        );
+    }
+    Ok(resolutions)
+}
+
+pub(crate) fn worktree_provider_not_found_error(
+    handle: &str,
+    config: &HomeboyConfig,
+    require_apply_enabled: bool,
+) -> Error {
+    let mut provider_ids = config
+        .worktree_providers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    let attempted = provider_ids
+        .iter()
+        .filter(|provider_id| {
+            let provider = &config.worktree_providers[*provider_id];
+            provider.enabled
+                && (!require_apply_enabled || provider.apply_enabled)
+                && (provider.commands.resolve.is_some() || provider.commands.list.is_some())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let not_apply_enabled = provider_ids
+        .iter()
+        .filter(|provider_id| {
+            let provider = &config.worktree_providers[*provider_id];
+            require_apply_enabled && provider.enabled && !provider.apply_enabled
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let configured = if provider_ids.is_empty() {
         "no worktree providers are configured".to_string()
     } else {
@@ -2435,7 +2435,7 @@ fn resolve_worktree_provider_with_policy_from_config(
     error.details["worktree_provider_call_classification"] = Value::String("not_found".to_string());
     error.details["worktree_provider_phase"] =
         Value::String("worktree_provider_lookup".to_string());
-    Err(error)
+    error
 }
 
 fn run_provider_resolve_command(

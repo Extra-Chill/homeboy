@@ -17,6 +17,7 @@ fn providers_output_includes_core_capability_contract() {
             catalog: false,
             full: false,
             machine_catalog: false,
+            set_default: false,
         })
         .expect("providers output");
 
@@ -66,6 +67,7 @@ fn providers_output_declares_the_scope_it_observed() {
             catalog: false,
             full: false,
             machine_catalog: false,
+            set_default: false,
         });
 
         if let Some(value) = previous {

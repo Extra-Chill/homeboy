@@ -410,18 +410,25 @@ homeboy agent-task finalize-pr --recover cook-9750 \
   --review-override 'compatibility=No public compatibility impact.@reviewed issue #9750'
 ```
 
-Manual finalization can execute one candidate-bound verification command and
-derive its gate result plus reviewer evidence from that result:
+Manual finalization first reuses every authoritative green gate from the same
+run's durable promotion receipt when its base, target worktree, candidate tree
+and digest, and exact commands remain bound to the current candidate. The report
+labels these gates as `verified_inherited`; any stale, red, or malformed receipt
+requires fresh verification instead of silently accepting it.
+
+Fresh manual finalization can execute repeated candidate-bound verification
+commands and derive separate gate results plus reviewer evidence from them:
 
 ```bash
 homeboy agent-task finalize-pr --manual-finalization \
   --verify 'cargo test --locked' ...
 ```
 
-`--verify` runs only against a clean committed candidate in an isolated detached
-checkout, before Homeboy reserves a manual-finalization lifecycle record. It
-derives the durable gate result, targeted-check evidence, and reviewer test
-step. Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain
+Each `--verify` runs against the same clean committed candidate in an isolated
+detached checkout, before Homeboy reserves a manual-finalization lifecycle
+record. Homeboy hydrates declared dependencies there, retains structured setup
+provenance, and derives one durable gate result and reviewer test step per
+command. Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain
 the explicit external-proof import path for verification that already occurred;
 they cannot be combined with `--verify`.
 
@@ -1099,6 +1106,16 @@ readiness is reported, not propagated, so this sweep answers `agent-task cook`'s
 missing-`--backend` error instead of failing with the same precondition (#12569).
 A supplied `--backend` still fails fast: that query names one backend and has no
 fuller picture to report.
+
+A `ready` verdict means "no reason found to block dispatch," not "confirmed to
+work." `dispatchability.checks.credentials.verified` distinguishes the two: it
+is `true` only when the routed provider declared its own live readiness probe
+(`readiness_invocation`) and that probe ran and passed. When it is `false`,
+`ready: true` reflects presence only — the declared credential material is
+readable somewhere, which is not proof it is still valid. A revoked or expired
+provider-owned credential (e.g. an OAuth refresh token) stays present on disk
+after revocation, so presence-only readiness must not be read as a live
+go/no-go signal for that class of credential (#13628).
 
 ## Repo-Local Gate Tasks
 

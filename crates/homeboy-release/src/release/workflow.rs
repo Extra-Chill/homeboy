@@ -2244,7 +2244,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_release_already_at_head_keeps_default_branch_preflight_strict() {
+    fn apply_release_already_at_head_runs_default_branch_preflight_before_skip() {
         let temp = tempfile::tempdir().expect("tempdir");
         setup_release_already_at_head_fixture(temp.path());
 
@@ -2256,11 +2256,11 @@ mod tests {
         })
         .expect("apply path should return a failed preflight run, not bypass strictness");
 
-        assert_eq!(exit_code, 1);
-        assert_eq!(result.status, "failed");
-        let run = result.run.expect("failed preflight run");
+        assert_eq!(exit_code, SKIPPED_RELEASE_EXIT_CODE);
+        assert_eq!(result.status, "skipped");
+        let run = result.run.expect("strict preflight run");
         assert!(run.result.steps.iter().any(|step| {
-            step.id == "preflight.default_branch" && step.status == ReleaseStepStatus::Failed
+            step.id == "preflight.default_branch" && step.status == ReleaseStepStatus::Success
         }));
     }
 
@@ -2283,6 +2283,12 @@ mod tests {
         run_in(dir, &["git", "add", "."]);
         run_in(dir, &["git", "commit", "-q", "-m", "release: v1.2.3"]);
         run_in(dir, &["git", "tag", "v1.2.3"]);
+        let repository = dir.to_string_lossy().to_string();
+        run_in(dir, &["git", "remote", "add", "origin", &repository]);
+        run_in(
+            dir,
+            &["git", "fetch", "origin", "main:refs/remotes/origin/main"],
+        );
         run_in(
             dir,
             &["git", "checkout", "-q", "-b", "feature/retry-release"],

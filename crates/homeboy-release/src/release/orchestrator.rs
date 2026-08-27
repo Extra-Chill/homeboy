@@ -14,7 +14,7 @@ use super::types::{
     ReleaseOptions, ReleasePlan, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
     ReleaseStepResult, ReleaseStepStatus, ReleaseWorkspaceOutput,
 };
-use homeboy_core::worktree_providers::WorktreeProviderTerminalDisposition;
+use homeboy_core::worktree_provider::WorktreeTerminalDisposition;
 
 /// Execute a release end-to-end.
 ///
@@ -38,7 +38,8 @@ pub(crate) fn run_with_plan(
     // cleanup, and the deploy checkpoint. A release therefore cannot package
     // into one home and then record its state against another (#7505).
     let component = super::context::load_component(component_id, options)?;
-    let mut workspace = super::workspace::ReleaseWorkspace::select(roots, &component)?;
+    let mut workspace =
+        super::workspace::ReleaseWorkspace::select(roots, &component, options.pipeline.head)?;
     let mut workspace_options = options.clone();
     workspace_options.path_override = Some(workspace.component.local_path.clone());
     let checkout_guard =
@@ -54,9 +55,9 @@ pub(crate) fn run_with_plan(
     ) {
         Ok((plan, mut run)) => {
             let disposition = if matches!(run.result.status, ReleaseStepStatus::Success) {
-                WorktreeProviderTerminalDisposition::Succeeded
+                WorktreeTerminalDisposition::Succeeded
             } else {
-                WorktreeProviderTerminalDisposition::Failed
+                WorktreeTerminalDisposition::Failed
             };
             let output = workspace.finalize(disposition, release_was_pushed(&run.result.steps));
             if let Some(error) = &output.finalization_error {
@@ -71,8 +72,7 @@ pub(crate) fn run_with_plan(
             // A provisioned workspace must remain recoverable even when checkout
             // rollback itself fails. Attempt both terminal operations and retain
             // both errors rather than silently dropping the provider finalizer.
-            let finalization =
-                workspace.finalize(WorktreeProviderTerminalDisposition::Interrupted, false);
+            let finalization = workspace.finalize(WorktreeTerminalDisposition::Interrupted, false);
             let finalization_error = finalization.finalization_error;
             let restore_error = checkout_guard
                 .as_ref()

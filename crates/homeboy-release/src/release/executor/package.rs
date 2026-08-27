@@ -107,15 +107,16 @@ pub(crate) fn run_package(
         ));
         }
 
-        let extra_config = package_build_config(skip_build_validation);
         let mut responses = Vec::new();
         for extension in package_extensions {
+            let provider_config =
+                package_provider_config(component, &extension.id, skip_build_validation);
             let payload = build_release_payload(
                 state,
                 component_id,
                 component_local_path,
                 component_source_path,
-                extra_config.as_ref(),
+                provider_config.as_ref(),
             );
             let response = run_package_action_with_retry(&extension.id, &payload)
                 .map_err(|err| package_provider_error(&extension.id, err))?;
@@ -804,6 +805,21 @@ fn package_build_config(
         serde_json::Value::Bool(true),
     );
     Some(config)
+}
+
+fn package_provider_config(
+    component: &Component,
+    extension_id: &str,
+    skip_build_validation: bool,
+) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+    let mut config: std::collections::HashMap<_, _> =
+        extension::extract_component_extension_settings(component, extension_id)
+            .into_iter()
+            .collect();
+    if let Some(release_config) = package_build_config(skip_build_validation) {
+        config.extend(release_config);
+    }
+    (!config.is_empty()).then_some(config)
 }
 
 pub(crate) fn build_release_payload(

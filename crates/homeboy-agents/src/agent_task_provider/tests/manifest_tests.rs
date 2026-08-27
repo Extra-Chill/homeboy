@@ -189,6 +189,7 @@ fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
             run_id: None,
             attempt: 1,
             cancellation: AgentTaskCancellationToken::default(),
+            lifecycle_store: None,
         },
     );
 
@@ -277,6 +278,7 @@ process.stdin.on('end', () => {
             ),
             attempt: 1,
             cancellation: Default::default(),
+            lifecycle_store: None,
         },
     );
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
@@ -363,6 +365,7 @@ process.stdin.once('data', input => {
             run_id: None,
             attempt: 1,
             cancellation: Default::default(),
+            lifecycle_store: None,
         },
     );
 
@@ -428,6 +431,7 @@ fn runtime_tool_cannot_claim_capability_without_a_probe() {
             run_id: None,
             attempt: 1,
             cancellation: Default::default(),
+            lifecycle_store: None,
         },
     );
 
@@ -475,6 +479,7 @@ fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
             run_id: None,
             attempt: 1,
             cancellation: Default::default(),
+            lifecycle_store: None,
         },
     );
 
@@ -516,6 +521,7 @@ fn runtime_tool_readiness_obeys_the_command_policy() {
             run_id: None,
             attempt: 1,
             cancellation: Default::default(),
+            lifecycle_store: None,
         },
     );
 
@@ -562,6 +568,7 @@ fn runtime_tool_capability_probe_obeys_the_command_policy() {
             run_id: None,
             attempt: 1,
             cancellation: Default::default(),
+            lifecycle_store: None,
         },
     );
 

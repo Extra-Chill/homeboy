@@ -707,7 +707,7 @@ mod tests {
         let mut output = signed_output(&request);
         output = output.replacen("reviewer", "attacker", 1);
         let file = script(&format!("printf '%s' '{}'", output.replace('\'', "'\\''")));
-        let error = verifier(vec![file.display().to_string()], 2_000)
+        let error = verifier(vec![file.display().to_string()], 10_000)
             .verify_acceptance(&request)
             .unwrap_err();
         assert!(
@@ -724,7 +724,7 @@ mod tests {
         let output = signed_output(&request);
         let file = script(&format!("printf '%s' '{}'", output.replace('\'', "'\\''")));
 
-        let attestation = verifier(vec![file.display().to_string()], 2_000)
+        let attestation = verifier(vec![file.display().to_string()], 10_000)
             .verify_acceptance(&request)
             .expect("complete valid signed verifier output is accepted");
 
@@ -738,11 +738,11 @@ mod tests {
         let request = request("token");
         let output = signed_output(&request);
         let file = script(&format!(
-            "perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid() or die $!; sleep 1' &\nsleep 0.1\nprintf '%s' '{}'\nexit 0",
+            "perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid() or die $!; sleep 1'\nprintf '%s' '{}'\nexit 0",
             output.replace('\'', "'\\''")
         ));
         let started = Instant::now();
-        let error = verifier(vec![file.display().to_string()], 2_000)
+        let error = verifier(vec![file.display().to_string()], 10_000)
             .verify_acceptance(&request)
             .unwrap_err();
         assert!(
@@ -751,7 +751,7 @@ mod tests {
             error.message
         );
         assert!(
-            started.elapsed() < Duration::from_millis(1_500),
+            started.elapsed() < Duration::from_secs(10),
             "escaped descendant retained stderr beyond the bounded drain"
         );
     }

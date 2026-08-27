@@ -183,6 +183,7 @@ impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
             },
             verification: AgentTaskPrVerification {
                 targeted_checks_run: args.targeted_checks_run,
+                dependency_hydration: Vec::new(),
                 targeted_checks_unavailable: args.targeted_checks_unavailable,
                 ci_expected: args.ci_expected,
                 manual_reviewer_check: args.manual_reviewer_check,
@@ -900,15 +901,30 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
     }
     let path = args.path.expect("clap requires --path without --recover");
     let mut verified_candidate_sha = None;
-    if let Some(command) = args.verify.as_deref() {
-        let verification = execute_manual_verification(&path, command)?;
+    let mut dependency_hydration = Vec::new();
+    if !args.verify.is_empty() {
+        let verification = execute_manual_verification(&path, &args.verify)?;
         verified_candidate_sha = Some(verification.candidate_sha);
-        args.gate_results = vec![format!("manual-verify=passed:{}", verification.command)];
-        args.evidence.targeted_checks_run = vec![verification.command.clone()];
-        args.test_steps = vec![format!(
-            "{}=>passes as recorded by Homeboy's deterministic gate",
-            verification.command
-        )];
+        dependency_hydration = verification.dependency_hydration;
+        args.gate_results = verification
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                let name = if verification.commands.len() == 1 {
+                    "manual-verify".to_string()
+                } else {
+                    format!("manual-verify-{}", index + 1)
+                };
+                format!("{name}=passed:{command}")
+            })
+            .collect();
+        args.evidence.targeted_checks_run = verification.commands.clone();
+        args.test_steps = verification
+            .commands
+            .iter()
+            .map(|command| format!("{command}=>passes as recorded by Homeboy's deterministic gate"))
+            .collect();
     }
     let mut run_id = args
         .run_id
@@ -929,7 +945,8 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         .cloned()
         .map(HomeboyGateResult::from)
         .collect();
-    let evidence: AgentTaskPrEvidence = args.evidence.try_into()?;
+    let mut evidence: AgentTaskPrEvidence = args.evidence.try_into()?;
+    evidence.verification.dependency_hydration = dependency_hydration;
     let how_to_test = if args.test_steps.is_empty() {
         let legacy_steps: Vec<AgentTaskReviewTestStep> = evidence
             .verification
@@ -1023,10 +1040,12 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         evidence,
         ai_used_for: args.ai_used_for,
         review_dossier,
+        composed_ai_model_disclosure: false,
         review_profile,
         manual_finalization: args.manual_finalization,
         expected_candidate_sha: None,
         verified_candidate_sha,
+        inherited_gate_evidence: None,
         protected_branches: args.protected_branches,
         draft_pr: false,
     };
@@ -1098,6 +1117,7 @@ pub(crate) fn record_replacement_gate_proof(
         &args.run_id,
         replacement,
         args.authorize_external_proof,
+        args.accept_inherited_failures,
     )?;
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
@@ -1132,7 +1152,7 @@ fn should_persist_manual_preflight_intent(
 
 fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> {
     let mut errors = Vec::new();
-    if args.verify.is_some() {
+    if !args.verify.is_empty() {
         if !args.manual_finalization {
             errors.push(homeboy::core::Error::validation_invalid_argument(
                 "verify",
@@ -1224,16 +1244,17 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
 /// Run against a detached worktree so the declared gate cannot observe later
 /// working-tree edits or mutate the candidate finalization publishes.
 struct ManualVerification {
-    command: String,
+    commands: Vec<String>,
     candidate_sha: String,
+    dependency_hydration:
+        Vec<homeboy::agents::agent_tasks::finalization::AgentTaskGateSetupEvidence>,
 }
 
 fn execute_manual_verification(
     path: &str,
-    command: &str,
+    commands: &[String],
 ) -> homeboy::core::Result<ManualVerification> {
-    let command = command.trim();
-    if command.is_empty() {
+    if commands.iter().any(|command| command.trim().is_empty()) {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "verify",
             "verification command must be non-empty",
@@ -1279,16 +1300,58 @@ fn execute_manual_verification(
             String::from_utf8_lossy(&add.stderr).trim().to_string(),
         ));
     }
-    let output = Command::new("sh")
-        .args(["-lc", command])
-        .current_dir(&checkout_path)
-        .output()
-        .map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("run manual deterministic verification".to_string()),
+    let verification = (|| {
+        let setup =
+            homeboy::agents::agent_tasks::finalization::hydrate_manual_verification_dependencies(
+                checkout.path(),
+            )?;
+        if manual_checkout_has_tracked_changes(&checkout_path)? {
+            let mut error = homeboy::core::Error::validation_invalid_argument(
+                "verify",
+                "dependency hydration changed tracked candidate files; refusing to verify bytes that differ from the committed candidate",
+                None,
+                None,
+            );
+            error.details = serde_json::json!({ "dependency_hydration": setup });
+            return Err(error);
+        }
+        let mut evidence = Vec::new();
+        for command in commands {
+            let command = command.trim();
+            let mut child = Command::new("sh")
+                .args(["-lc", command])
+                .current_dir(&checkout_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| {
+                    homeboy::core::Error::internal_io(
+                        error.to_string(),
+                        Some("run manual deterministic verification".to_string()),
+                    )
+                })?;
+            let output = homeboy::core::engine::command::wait_with_bounded_output_until_cancelled(
+                &mut child,
+                32 * 1024,
+                || false,
             )
-        })?;
+            .map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("capture manual deterministic verification".to_string()),
+                )
+            })?;
+            let candidate_unchanged = !manual_checkout_has_tracked_changes(&checkout_path)?;
+            evidence.push(serde_json::json!({
+                "command": ["sh", "-lc", homeboy::core::redaction::redact_string(command)],
+                "exit_code": output.status.code().unwrap_or(1),
+                "stdout": bounded_manual_gate_output(&output.stdout),
+                "stderr": bounded_manual_gate_output(&output.stderr),
+                "candidate_unchanged": candidate_unchanged,
+            }));
+        }
+        Ok::<_, homeboy::core::Error>((setup, evidence))
+    })();
     let remove = Command::new("git")
         .args(["worktree", "remove", "--force", &checkout_path])
         .current_dir(path)
@@ -1299,24 +1362,58 @@ fn execute_manual_verification(
             String::from_utf8_lossy(&remove.stderr).trim().to_string(),
         ));
     }
-    if !output.status.success() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
+    let (setup, evidence) = verification?;
+    if evidence.iter().any(|command| {
+        command["exit_code"].as_i64() != Some(0)
+            || command["candidate_unchanged"].as_bool() != Some(true)
+    }) {
+        let mut error = homeboy::core::Error::validation_invalid_argument(
             "verify",
-            format!(
-                "manual deterministic gate failed with exit code {}",
-                output.status.code().unwrap_or(1)
-            ),
-            Some(command.to_string()),
+            "one or more manual deterministic gates failed or changed tracked candidate files; inspect command_evidence for captured stdout and stderr",
+            None,
             Some(vec![
-                "Fix the candidate and rerun the same --verify command before finalization."
+                "Fix the candidate and rerun the same --verify commands before finalization."
                     .to_string(),
             ]),
-        ));
+        );
+        error.details = serde_json::json!({
+            "dependency_hydration": setup,
+            "command_evidence": evidence,
+        });
+        return Err(error);
     }
     Ok(ManualVerification {
-        command: command.to_string(),
+        commands: commands
+            .iter()
+            .map(|command| command.trim().to_string())
+            .collect(),
         candidate_sha,
+        dependency_hydration: setup,
     })
+}
+
+fn bounded_manual_gate_output(bytes: &[u8]) -> String {
+    const LIMIT: usize = 32 * 1024;
+    let bytes = if bytes.len() > LIMIT {
+        &bytes[bytes.len() - LIMIT..]
+    } else {
+        bytes
+    };
+    homeboy::core::redaction::redact_string(&String::from_utf8_lossy(bytes))
+}
+
+fn manual_checkout_has_tracked_changes(path: &str) -> homeboy::core::Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(homeboy::core::Error::git_command_failed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 fn git_output(path: &str, args: &[&str]) -> homeboy::core::Result<String> {
@@ -1756,7 +1853,65 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     } else {
         AgentTaskProviderCatalog::discover()
     };
+    if args.set_default {
+        return write_default_backend_from_readiness(&catalog);
+    }
     providers_with_catalog(args, catalog)
+}
+
+/// Live-probes every declared backend and, when at least one is dispatchable
+/// right now, persists it as `agent_task.default_backend` with the remaining
+/// ready backends recorded as an `agent_task.rotation` fallback chain.
+///
+/// A fresh or reset `agent_task` config (`{}`) offers no default and no
+/// discoverable path back to one short of reading source or an old backup
+/// (#13634). This closes that gap by deriving a working configuration from
+/// what actually authenticates here, rather than only documenting the shape.
+fn write_default_backend_from_readiness(catalog: &AgentTaskProviderCatalog) -> CmdResult<Value> {
+    let ready_backends = dispatchable_backend_choices(catalog, true)
+        .into_iter()
+        .map(|choice| choice.backend)
+        .collect::<Vec<_>>();
+
+    let Some((default_backend, rotation_backends)) = ready_backends.split_first() else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "backend",
+            "cannot set a default backend: no declared backend passed a live readiness probe here",
+            None,
+            Some(vec![
+                "Run `homeboy agent-task providers --validate-readiness` to see why each declared backend is not ready.".to_string(),
+                "Fix credentials/config for at least one backend, then retry `homeboy agent-task providers --set-default`.".to_string(),
+            ]),
+        ));
+    };
+
+    let rotation = if rotation_backends.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({
+            "entries": rotation_backends
+                .iter()
+                .map(|backend| serde_json::json!({ "backend": backend }))
+                .collect::<Vec<_>>(),
+        }))
+    };
+
+    let mut config = homeboy::core::defaults::load_config();
+    config.agent_task.default_backend = Some(default_backend.clone());
+    config.agent_task.rotation = rotation.clone();
+    homeboy::core::defaults::save_config(&config)?;
+
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-providers-default-written/v1",
+            "written": true,
+            "default_backend": default_backend,
+            "rotation": rotation,
+            "ready_backends": ready_backends,
+            "config_path": homeboy::core::defaults::config_path().ok(),
+        }),
+        0,
+    ))
 }
 
 fn providers_with_catalog(
@@ -1963,7 +2118,10 @@ fn providers_with_catalog(
                 declared_backends,
             ),
             "diagnostics": shown_diagnostics,
-            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
+            // Explicit `--secret-env` names win; otherwise report every secret
+            // the shown providers declare, so this agrees with `agent-task
+            // auth status` about the same secrets by construction (#13629).
+            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_for_scope(&args.secret_env, &fallback_sources),
         }),
         0,
     ))
@@ -3294,6 +3452,7 @@ mod tests {
             catalog: false,
             full: false,
             machine_catalog: false,
+            set_default: false,
         });
 
         assert_eq!(
@@ -3347,6 +3506,7 @@ mod tests {
             catalog: false,
             full: false,
             machine_catalog: false,
+            set_default: false,
         }
     }
 
@@ -3555,6 +3715,95 @@ mod tests {
         });
     }
 
+    /// The reported defect (#13634): a fresh/reset `agent_task` config (`{}`)
+    /// offers no default and no discoverable path back to one short of
+    /// reading source or an old backup. `--set-default` must derive a working
+    /// `default_backend`/`rotation` from what actually authenticates *right
+    /// now* and persist it, not merely print a suggestion.
+    #[test]
+    fn providers_set_default_writes_default_backend_and_rotation_from_live_readiness() {
+        crate::test_support::with_isolated_home(|_| {
+            // Starts exactly at the reported defect: no default_backend, no
+            // rotation.
+            let before = homeboy::core::defaults::load_config();
+            assert_eq!(before.agent_task.default_backend, None);
+            assert_eq!(before.agent_task.rotation, None);
+
+            let mut alpha = provider("alpha.provider", "alpha");
+            alpha.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                }))
+                .expect("alpha readiness invocation"),
+            );
+            let mut zeta = provider("zeta.provider", "zeta");
+            zeta.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                }))
+                .expect("zeta readiness invocation"),
+            );
+            // A backend whose declared credential is not configured here —
+            // the shape of a revoked/never-set credential (#11479) — must
+            // never be chosen as the written default.
+            let mut revoked = credential_declaring_provider();
+            revoked.id = "revoked.provider".to_string();
+            revoked.backend = "revoked".to_string();
+
+            let catalog = provider_catalog(vec![alpha, zeta, revoked]);
+            let output = write_default_backend_from_readiness(&catalog)
+                .expect("at least one backend is live-ready")
+                .0;
+
+            assert_eq!(output["written"], true);
+            assert_eq!(output["default_backend"], "alpha");
+            assert_eq!(
+                output["rotation"],
+                serde_json::json!({ "entries": [ { "backend": "zeta" } ] })
+            );
+            assert_eq!(
+                output["ready_backends"],
+                serde_json::json!(["alpha", "zeta"])
+            );
+
+            // The fix must durably repair the config on disk — a printed
+            // suggestion reproduces the reported defect, it does not fix it.
+            let persisted = homeboy::core::defaults::load_config();
+            assert_eq!(
+                persisted.agent_task.default_backend.as_deref(),
+                Some("alpha")
+            );
+            assert_eq!(
+                persisted.agent_task.rotation,
+                Some(serde_json::json!({ "entries": [ { "backend": "zeta" } ] }))
+            );
+        });
+    }
+
+    #[test]
+    fn providers_set_default_fails_closed_and_writes_nothing_when_no_backend_is_ready() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut dead = credential_declaring_provider();
+            dead.id = "dead.provider".to_string();
+            dead.backend = "dead".to_string();
+            let catalog = provider_catalog(vec![dead]);
+
+            let error = write_default_backend_from_readiness(&catalog)
+                .expect_err("no declared backend passes a live readiness probe");
+            assert!(
+                error.message.contains("no declared backend"),
+                "{}",
+                error.message
+            );
+
+            // A written default that cannot dispatch is worse than the
+            // explicit `selection_required` failure it would replace.
+            let after = homeboy::core::defaults::load_config();
+            assert_eq!(after.agent_task.default_backend, None);
+            assert_eq!(after.agent_task.rotation, None);
+        });
+    }
+
     #[test]
     fn providers_report_selection_required_with_matching_identity_catalog() {
         crate::test_support::with_isolated_home(|_| {
@@ -3621,6 +3870,64 @@ mod tests {
                 Some(
                     "Agent task providers\nStatus: credentials_missing\nProviders shown: 1\nNext: homeboy agent-task providers --backend claude-code --selector claude-code.agent-task-executor --validate-readiness".to_string()
                 )
+            );
+        });
+    }
+
+    /// #13629: `agent-task providers --secret-env` used to return an empty
+    /// list whenever the operator passed no explicit `--secret-env` names,
+    /// even though `agent-task auth status` defaults to reporting every
+    /// secret the scope declares. The two commands answer the same question
+    /// about the same backend and must agree.
+    #[test]
+    fn providers_secret_env_defaults_to_every_declared_secret_like_auth_status() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+                "id": "claude-code.agent-task-executor",
+                "backend": "claude-code",
+                "capabilities": ["cli_runtime", "provider_owned_auth"],
+                "provider_defaults": {
+                    "claude-code": {
+                        "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                        "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                        "secret_env_sources": {
+                            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
+                                "source": "env",
+                                "env_var": "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("provider fixture");
+            let mut args = providers_args();
+            args.backend = Some("claude-code".to_string());
+            let output = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect("provider report")
+                .0;
+
+            let secret_env = output["secret_env"]
+                .as_array()
+                .expect("secret_env is an array");
+            assert!(
+                !secret_env.is_empty(),
+                "no explicit --secret-env was passed, so the shown backend's declared secret \
+                 must still be reported by default, not silently omitted"
+            );
+            assert!(
+                secret_env
+                    .iter()
+                    .any(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"),
+                "the declared credential must be named: {secret_env:?}"
+            );
+            assert_eq!(
+                secret_env
+                    .iter()
+                    .find(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
+                    .expect("declared credential entry")["configured"],
+                false,
+                "unconfigured in this hermetic test environment, matching auth status"
             );
         });
     }
@@ -4757,7 +5064,9 @@ mod tests {
                 "--changed-file",
                 "feature.txt",
                 "--verify",
-                "false",
+                "printf 'first gate output'",
+                "--verify",
+                "printf 'Authorization: Bearer manual-secret' >&2; false",
                 "--ai-model",
                 "fixture-model",
                 "--ai-used-for",
@@ -4765,8 +5074,60 @@ mod tests {
             ]);
             assert!(failed_gate
                 .message
-                .contains("manual deterministic gate failed"));
+                .contains("manual deterministic gates failed"));
+            assert_eq!(
+                failed_gate.details["command_evidence"]
+                    .as_array()
+                    .expect("captured command evidence")
+                    .len(),
+                2
+            );
+            assert_eq!(
+                failed_gate.details["command_evidence"][0]["stdout"],
+                "first gate output"
+            );
+            assert_eq!(
+                failed_gate.details["command_evidence"][1]["stderr"],
+                "Authorization: Bearer [REDACTED]"
+            );
+            assert!(!failed_gate.to_string().contains("manual-secret"));
             assert!(agent_task_lifecycle::status("manual-cli-failed-gate-13077").is_err());
+            let changed_checkout = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--run-id",
+                "manual-cli-mutating-gate-13447",
+                "--path",
+                checkout.to_str().expect("checkout path"),
+                "--base",
+                "main",
+                "--verified-base-sha",
+                &base_sha,
+                "--head",
+                "feature",
+                "--title",
+                "Manual mutating gate",
+                "--commit-message",
+                "fixture",
+                "--changed-file",
+                "feature.txt",
+                "--verify",
+                "printf 'changed by gate' > feature.txt",
+                "--ai-model",
+                "fixture-model",
+                "--ai-used-for",
+                "CLI immutable gate coverage",
+            ]);
+            assert!(changed_checkout
+                .message
+                .contains("changed tracked candidate files"));
+            assert_eq!(
+                changed_checkout.details["command_evidence"][0]["candidate_unchanged"],
+                false
+            );
+            assert!(agent_task_lifecycle::status("manual-cli-mutating-gate-13447").is_err());
             let race_gate = format!(
                 "printf 'mutated\\n' > '{}'",
                 checkout.join("feature.txt").display()

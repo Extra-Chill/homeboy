@@ -64,7 +64,17 @@ pub(super) fn extension_artifact_declarations(worktree: &Path) -> Vec<ArtifactDe
 /// tree is output, never an install scope, so nested discovery must not walk
 /// into one — that is what turns scope discovery into a recursive glob.
 fn prune_directory_names(owned: &[(String, Vec<ArtifactCleanupDeclaration>)]) -> HashSet<String> {
-    let mut names = HashSet::new();
+    // Built-in Cargo artifacts are cleanup outputs too. Never let nested
+    // extension scope discovery turn their potentially enormous trees back
+    // into an inventory traversal before pressure cleanup can remove them.
+    let mut names: HashSet<String> = super::BUILTIN_ARTIFACT_PATHS
+        .iter()
+        .filter_map(|(path, _)| Path::new(path).components().next())
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
     for (_, declarations) in owned {
         for declaration in declarations {
             let mut components = Path::new(&declaration.path).components();
@@ -367,9 +377,9 @@ mod tests {
             vec![declaration("dependency-tree", "deps/inner", Vec::new())],
         )];
 
-        assert_eq!(
-            prune_directory_names(&owned),
-            HashSet::from(["deps".to_string()])
-        );
+        let names = prune_directory_names(&owned);
+        assert!(names.contains("deps"));
+        assert!(names.contains("target"));
+        assert!(names.contains(".cargo-target"));
     }
 }

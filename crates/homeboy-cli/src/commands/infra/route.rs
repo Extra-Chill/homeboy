@@ -1296,7 +1296,11 @@ fn stage_unmaterialized_cook_replay_intent(
     let mut index = 0usize;
     let mut has_run_id = false;
     let mut has_notification_route = false;
-    while index < normalized_args.len() {
+    // Only flags before the bare separator are Homeboy's own. Rewriting a
+    // forwarded `--prompt` or `--verify` into a replay reference would corrupt
+    // the argument the provider was asked to run (#11577).
+    let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
+    while index < owned {
         let arg = &normalized_args[index];
         if arg == "--notification-route" || arg.starts_with("--notification-route=") {
             has_notification_route = true;
@@ -1419,6 +1423,18 @@ fn stage_unmaterialized_cook_replay_intent(
             ]);
             input_refs.push(reference);
         }
+    }
+    // Carry the forwarded tail through verbatim, separator included, so the
+    // provider receives exactly what it was given. Secret and credential
+    // rejection still applies: a secret is no less secret past the separator.
+    for argument in &normalized_args[owned..] {
+        if homeboy::core::redaction::redact_string(argument) != *argument {
+            return Err(unsafe_inline_replay_error(
+                argument.split('=').next().unwrap_or(argument),
+            ));
+        }
+        reject_credential_bearing_url(argument)?;
+        argv.push(argument.clone());
     }
     let staging_prefix = root.display().to_string();
     let published_prefix = published_root.display().to_string();

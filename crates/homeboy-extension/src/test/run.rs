@@ -108,14 +108,14 @@ fn runtime_test_evidence(
     runner_succeeded: bool,
     counts: Option<&TestCounts>,
     failures: Option<&TestAnalysisInput>,
-    internal_plan: Option<Result<RuntimeTestPlan, &'static str>>,
+    internal_plan: Option<Result<RuntimeTestPlan, String>>,
 ) -> TestRuntimeEvidence {
     let invalid = |reason: &str| TestRuntimeEvidence::InvalidEvidence {
         reason: reason.to_string(),
     };
     let plan = match runtime_test_plan(ci_env, source_path, inventory_profile, internal_plan) {
         Ok(plan) => plan,
-        Err(reason) => return invalid(reason),
+        Err(reason) => return invalid(&reason),
     };
 
     let mut failed_test_ids = failures
@@ -175,21 +175,21 @@ fn runtime_test_plan(
     ci_env: &[(String, String)],
     source_path: &Path,
     inventory_profile: Option<&InventoryProfile>,
-    internal_plan: Option<Result<RuntimeTestPlan, &'static str>>,
-) -> Result<RuntimeTestPlan, &'static str> {
+    internal_plan: Option<Result<RuntimeTestPlan, String>>,
+) -> Result<RuntimeTestPlan, String> {
     if let Some(path) = runtime_evidence_path(ci_env, TEST_SHARD_MANIFEST_ENV) {
         let Some(profile) = inventory_profile else {
-            return Err("runtime shard manifest cannot be bound to this extension");
+            return Err("runtime shard manifest cannot be bound to this extension".to_string());
         };
         return runtime_plan_from_shard(path, source_path, profile);
     }
     let Some(path) = runtime_evidence_path(ci_env, TEST_INVENTORY_FILE_ENV) else {
-        return internal_plan.unwrap_or(Err(
-            "test adapter did not provide an exact runtime test plan",
-        ));
+        return internal_plan.unwrap_or_else(|| {
+            Err("test adapter did not provide an exact runtime test plan".to_string())
+        });
     };
     let Some(profile) = inventory_profile else {
-        return Err("test adapter inventory cannot be bound to this extension");
+        return Err("test adapter inventory cannot be bound to this extension".to_string());
     };
     runtime_plan_from_inventory(path, source_path, profile)
 }
@@ -205,10 +205,11 @@ fn runtime_plan_from_shard(
     path: &str,
     source_path: &Path,
     profile: &InventoryProfile,
-) -> Result<RuntimeTestPlan, &'static str> {
-    let raw = std::fs::read(path).map_err(|_| "runtime shard manifest is missing or unreadable")?;
+) -> Result<RuntimeTestPlan, String> {
+    let raw = std::fs::read(path)
+        .map_err(|_| "runtime shard manifest is missing or unreadable".to_string())?;
     let mut manifest = serde_json::from_slice::<TestShardManifest>(&raw)
-        .map_err(|_| "runtime shard manifest is malformed")?;
+        .map_err(|_| "runtime shard manifest is malformed".to_string())?;
     if manifest.schema != "homeboy/test-shard-manifest/v1"
         || manifest.id.trim().is_empty()
         || manifest.runner.trim().is_empty()
@@ -218,7 +219,7 @@ fn runtime_plan_from_shard(
         || manifest.tests.is_empty()
         || manifest.tests.iter().any(|id| id.trim().is_empty())
     {
-        return Err("runtime shard manifest violates the identity/provenance contract");
+        return Err("runtime shard manifest violates the identity/provenance contract".to_string());
     }
     manifest
         .tests
@@ -226,16 +227,18 @@ fn runtime_plan_from_shard(
         .for_each(|id| *id = id.trim().to_string());
     manifest.tests.sort();
     if manifest.tests.windows(2).any(|ids| ids[0] == ids[1]) {
-        return Err("runtime shard manifest contains duplicate test IDs");
+        return Err("runtime shard manifest contains duplicate test IDs".to_string());
     }
     let workspace_root = inventory_workspace_root(source_path, profile)
-        .ok_or("runtime shard manifest workspace cannot be resolved")?;
+        .ok_or_else(|| "runtime shard manifest workspace cannot be resolved".to_string())?;
     if workspace_fingerprint(&workspace_root, profile).as_deref()
         != Some(manifest.workspace_fingerprint.as_str())
         || runner_fingerprint(&workspace_root, &manifest.runner, profile).as_deref()
             != Some(manifest.runner_fingerprint.as_str())
     {
-        return Err("runtime shard manifest provenance does not match the current execution");
+        return Err(
+            "runtime shard manifest provenance does not match the current execution".to_string(),
+        );
     }
     let execution_fingerprint = execution_fingerprint(
         "shard_manifest",
@@ -259,9 +262,9 @@ fn runtime_plan_from_inventory(
     path: &str,
     source_path: &Path,
     profile: &InventoryProfile,
-) -> Result<RuntimeTestPlan, &'static str> {
-    let raw =
-        std::fs::read(path).map_err(|_| "runtime adapter inventory is missing or unreadable")?;
+) -> Result<RuntimeTestPlan, String> {
+    let raw = std::fs::read(path)
+        .map_err(|_| "runtime adapter inventory is missing or unreadable".to_string())?;
     runtime_plan_from_inventory_bytes(&raw, source_path, profile)
 }
 
@@ -269,9 +272,9 @@ fn runtime_plan_from_inventory_bytes(
     raw: &[u8],
     source_path: &Path,
     profile: &InventoryProfile,
-) -> Result<RuntimeTestPlan, &'static str> {
+) -> Result<RuntimeTestPlan, String> {
     let inventory = serde_json::from_slice::<TestInventoryEvidence>(&raw)
-        .map_err(|_| "runtime adapter inventory is malformed")?;
+        .map_err(|_| "runtime adapter inventory is malformed".to_string())?;
     if inventory.schema != TEST_INVENTORY_SCHEMA
         || inventory.runner.trim().is_empty()
         || !canonical_sha256(&inventory.runner_fingerprint)
@@ -289,16 +292,20 @@ fn runtime_plan_from_inventory_bytes(
             &inventory,
         )) != inventory.inventory_fingerprint
     {
-        return Err("runtime adapter inventory violates the identity/fingerprint contract");
+        return Err(
+            "runtime adapter inventory violates the identity/fingerprint contract".to_string(),
+        );
     }
     let workspace_root = inventory_workspace_root(source_path, profile)
-        .ok_or("runtime adapter inventory workspace cannot be resolved")?;
+        .ok_or_else(|| "runtime adapter inventory workspace cannot be resolved".to_string())?;
     if workspace_fingerprint(&workspace_root, profile).as_deref()
         != Some(inventory.workspace_fingerprint.as_str())
         || runner_fingerprint(&workspace_root, &inventory.runner, profile).as_deref()
             != Some(inventory.runner_fingerprint.as_str())
     {
-        return Err("runtime adapter inventory provenance does not match the current execution");
+        return Err(
+            "runtime adapter inventory provenance does not match the current execution".to_string(),
+        );
     }
     let mut tests = inventory
         .tests
@@ -308,7 +315,7 @@ fn runtime_plan_from_inventory_bytes(
         .collect::<Vec<_>>();
     tests.sort();
     if tests.is_empty() || tests.windows(2).any(|ids| ids[0] == ids[1]) {
-        return Err("runtime adapter inventory has no unique executed test IDs");
+        return Err("runtime adapter inventory has no unique executed test IDs".to_string());
     }
     let execution_fingerprint = execution_fingerprint(
         "adapter_inventory",
@@ -665,6 +672,33 @@ fn runner_fingerprint_from_version(runner: &str, version: &str) -> String {
     homeboy_engine_primitives::content_hash::sha256_hex(format!("{runner}\0{version}").as_bytes())
 }
 
+/// Concatenate the selected workspace files exactly as the inventory producers
+/// must, and hash the result.
+///
+/// # The ordering is by path *component*, and a producer must say so explicitly
+///
+/// `Ord for PathBuf` compares component by component, so this function is the
+/// arbiter of an ordering that is not the same as sorting the joined path text.
+/// The two disagree whenever a directory name is a prefix of a sibling followed
+/// by a byte below `/`:
+///
+/// ```text
+/// src/auth/handler.rs        # first here: "auth" < "auth-tokens"
+/// src/auth-tokens/token.rs   # first when sorting the joined text: '-' < '/'
+/// ```
+///
+/// Both sides then hash the same files in a different order, the workspace
+/// fingerprints never agree, and every inventory that producer writes is
+/// rejected as `WorkspaceFingerprintMismatch` — permanently, because no rerun
+/// changes a sort order. `Extra-Chill/extrachill-users` has `inc/auth/` beside
+/// `inc/auth-tokens/`, and its PRs could not obtain differential test evidence
+/// at all until its producer was fixed (#13494).
+///
+/// A Python producer must therefore sort by `PurePath.parts` explicitly and
+/// never by the joined string — and never by relying on `sorted()` over `Path`
+/// objects either, whose result *changed in Python 3.12* from string order to
+/// component order. An implicit sort makes the fingerprint depend on the
+/// interpreter that happened to be on the runner.
 fn workspace_fingerprint(root: &Path, profile: &InventoryProfile) -> Option<String> {
     fn collect(
         root: &Path,
@@ -753,6 +787,40 @@ fn unlink_test_inventory(binding: &TestInventoryBinding) -> bool {
         )
     };
     result == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+}
+
+/// The last thing the inventory producer said, for the reason string.
+///
+/// The producer runs with `passthrough(false)`, so its output goes nowhere:
+/// when it fails, the only surviving fact is a nonzero exit code. Every WordPress
+/// and Rust inventory producer explains itself on stderr before exiting
+/// (`WordPress test inventory error: ...`), so carrying a couple of lines turns
+/// an unattributable evidence failure into a named producer defect. Bounded on
+/// purpose — this is a diagnosis, not a log.
+#[cfg(unix)]
+fn producer_failure_detail(output: &crate::runner::RunnerOutput) -> String {
+    const DETAIL_LINES: usize = 3;
+    const DETAIL_CHARS: usize = 400;
+
+    let source = [output.stderr.as_str(), output.stdout.as_str()]
+        .into_iter()
+        .find(|stream| !stream.trim().is_empty());
+    let Some(source) = source else {
+        return String::new();
+    };
+    let (tail, _) = tail_lines(source.trim_end(), DETAIL_LINES);
+    let detail = tail.trim();
+    if detail.is_empty() {
+        return String::new();
+    }
+    let truncated = detail
+        .char_indices()
+        .nth(DETAIL_CHARS)
+        .map(|(index, _)| &detail[..index]);
+    match truncated {
+        Some(prefix) => format!(": {}…", prefix.replace('\n', " ")),
+        None => format!(": {}", detail.replace('\n', " ")),
+    }
 }
 
 #[cfg(unix)]
@@ -1520,12 +1588,19 @@ fn run_main_test_workflow_inner(
         && runtime_evidence_path(&args.ci_env, TEST_INVENTORY_FILE_ENV).is_none()
     {
         Some(match inventory_profile.as_ref() {
-            None => Err("test adapter inventory cannot be bound to this extension"),
+            None => Err("test adapter inventory cannot be bound to this extension".to_string()),
             Some(profile) => {
                 match test_inventory_binding(&args.ci_env, source_path, run_dir, profile, false)
                     .and_then(|binding| prepare_test_inventory(&binding).map(|()| binding))
                 {
-                    Err(_) => Err("internal runtime inventory binding could not be established"),
+                    // The typed rejection names which check failed. Collapsing
+                    // it into one static sentence is how #13494 stayed
+                    // undiagnosable across two full CI runs: the artifact said
+                    // the evidence was invalid and nothing anywhere said why.
+                    Err(rejection) => Err(format!(
+                        "internal runtime inventory binding could not be established: {}",
+                        rejection.message()
+                    )),
                     Ok(binding) => {
                         let producer = build_test_runner(
                             component,
@@ -1556,19 +1631,24 @@ fn run_main_test_workflow_inner(
                             .run()?;
                         if !output.success {
                             let _ = unlink_test_inventory(&binding);
-                            Err("internal runtime inventory producer failed")
+                            Err(format!(
+                                "internal runtime inventory producer failed (exit {}){}",
+                                output.exit_code,
+                                producer_failure_detail(&output)
+                            ))
                         } else {
                             match valid_test_inventory(&binding) {
-                                Err(_) => Err(
-                                    "internal runtime inventory producer emitted invalid evidence",
-                                ),
+                                Err(rejection) => Err(format!(
+                                    "internal runtime inventory producer emitted invalid evidence: {}",
+                                    rejection.message()
+                                )),
                                 Ok((inventory, bytes)) => {
                                     if !revalidate_test_inventory_binding(
                                         &binding,
                                         source_path,
                                         &inventory.runner,
                                     ) {
-                                        Err("internal runtime inventory provenance changed before execution")
+                                        Err("internal runtime inventory provenance changed before execution".to_string())
                                     } else {
                                         runtime_plan_from_inventory_bytes(
                                             &bytes,
@@ -1587,7 +1667,7 @@ fn run_main_test_workflow_inner(
         None
     };
     #[cfg(not(unix))]
-    let internal_runtime_plan: Option<Result<RuntimeTestPlan, &'static str>> = None;
+    let internal_runtime_plan: Option<Result<RuntimeTestPlan, String>> = None;
 
     let runner = build_test_runner(
         component,
@@ -4654,6 +4734,111 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         });
     }
 
+    /// An evidence failure has to name its own defect.
+    ///
+    /// The internal runtime producer path collapsed every `TestInventoryRejection`
+    /// into one sentence — "emitted invalid evidence" — so the CI sidecar, the
+    /// differential gate, and two full rerun cycles on
+    /// `Extra-Chill/extrachill-users#377` all reported that the evidence was
+    /// invalid and none of them could say which check failed (#13494). The typed
+    /// rejection already exists; the only thing missing was carrying it.
+    #[cfg(unix)]
+    #[test]
+    fn internal_runtime_inventory_rejection_names_the_failing_check() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let source = tempfile::tempdir().expect("source workspace");
+            std::fs::write(
+                source.path().join("Cargo.toml"),
+                "[package]\nname = \"inventory-rejection-reason\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .expect("workspace manifest");
+            std::fs::create_dir(source.path().join("src")).expect("source directory");
+            std::fs::write(source.path().join("src/lib.rs"), "pub fn fixture() {}\n")
+                .expect("source file");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/inventory-rejection-fixture");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("inventory-rejection-fixture.json"),
+                r#"{"name":"Inventory rejection fixture","version":"1.0.0","test":{"extension_script":"test.py"}}"#,
+            )
+            .expect("extension manifest");
+            let script = extension_dir.join("test.py");
+            // A producer whose workspace fingerprint disagrees with the parent's
+            // is exactly the shape of the reported defect: the document is
+            // well-formed, and only the provenance check can tell you so.
+            std::fs::write(
+                &script,
+                r##"#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import subprocess
+from pathlib import Path
+
+if os.environ.get("HOMEBOY_TEST_INVENTORY_ONLY") != "1":
+    raise SystemExit(0)
+
+root = Path(os.environ["HOMEBOY_COMPONENT_PATH"]).resolve()
+version = subprocess.check_output(["cargo", "--version"], cwd=root, text=True).strip()
+inventory = {
+    "schema": "homeboy/test-inventory/v1",
+    "runner": "cargo",
+    "runner_fingerprint": hashlib.sha256(f"cargo\0{version}".encode()).hexdigest(),
+    "workspace_fingerprint": "b" * 64,
+    "tests": [{
+        "id": "fixture::inventory",
+        "package": "fixture",
+        "target": "fixture-tests",
+        "target_kind": "test",
+        "name": "inventory",
+        "expected_outcome": "executed",
+    }],
+}
+inventory["inventory_fingerprint"] = hashlib.sha256(
+    json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory))
+"##,
+            )
+            .expect("producer script");
+            let mut permissions = std::fs::metadata(&script)
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("executable script");
+
+            let component = Component {
+                id: "inventory-rejection".to_string(),
+                local_path: source.path().to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "inventory-rejection-fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                fixture_workflow_args(&component),
+                &RunDir::create().expect("run directory"),
+            )
+            .expect("internal runtime plan is attempted");
+
+            let reason = match result.test_runtime_evidence {
+                Some(TestRuntimeEvidence::InvalidEvidence { reason }) => reason,
+                other => panic!("expected invalid runtime evidence, got {other:?}"),
+            };
+            assert!(
+                reason.contains(TestInventoryRejection::WorkspaceFingerprintMismatch.message()),
+                "the reason must name the failing provenance check, got: {reason}"
+            );
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn inventory_evidence_is_fresh_confined_and_fingerprint_bound() {
@@ -4753,6 +4938,83 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         assert_eq!(
             runner_fingerprint_from_version("nextest", "cargo-nextest 0.9.99 (fixture)"),
             "09c443d61494d183c1a8441ca0f568decd4130b51a0a5c3a66c846efc6991f78"
+        );
+    }
+
+    /// The ordering half of the producer contract, which #13494 was.
+    ///
+    /// This function is the arbiter, so what it does *is* the contract, and a
+    /// producer that sorts the joined path text instead of the components
+    /// disagrees with it exactly when a directory name is a prefix of a sibling
+    /// followed by a byte below `/` — `auth/` beside `auth-tokens/`. A workspace
+    /// shaped like that (`Extra-Chill/extrachill-users`) could never match its
+    /// own inventory, so every PR it opened failed the differential test gate
+    /// with `invalid_evidence` and no rerun could help.
+    ///
+    /// The expected order is written out literally rather than derived from a
+    /// Python subprocess: `sorted()` over `pathlib.Path` returned string order
+    /// before Python 3.12 and component order after it, so a Python oracle would
+    /// pin the interpreter on the runner instead of the contract.
+    ///
+    /// The fixture is asserted to be discriminating: if the two orders ever
+    /// agree here, this test proves nothing and says so.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_fingerprint_orders_by_path_components_not_joined_text() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let root = temp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            b"[package]\nname = \"sibling-prefix-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write manifest");
+        std::fs::create_dir_all(root.join("src/auth")).expect("create auth directory");
+        std::fs::create_dir_all(root.join("src/auth-tokens"))
+            .expect("create auth-tokens directory");
+        // Distinct bodies: identical contents would hash the same in either
+        // order and the fixture would silently stop discriminating.
+        std::fs::write(
+            root.join("src/auth/handler.rs"),
+            b"pub fn handler() -> &'static str {\n    \"auth\"\n}\n",
+        )
+        .expect("write auth source");
+        std::fs::write(
+            root.join("src/auth-tokens/token.rs"),
+            b"pub fn token() -> &'static str {\n    \"auth-tokens\"\n}\n",
+        )
+        .expect("write auth-tokens source");
+
+        let digest_in_order = |relatives: &[&str]| {
+            let mut content = String::new();
+            for relative in relatives {
+                content.push_str(relative);
+                content.push('\0');
+                content
+                    .push_str(&std::fs::read_to_string(root.join(relative)).expect("fixture file"));
+                content.push('\0');
+            }
+            homeboy_engine_primitives::content_hash::sha256_hex(content.as_bytes())
+        };
+        let component_order = [
+            "Cargo.toml",
+            "src/auth/handler.rs",
+            "src/auth-tokens/token.rs",
+        ];
+        let joined_text_order = [
+            "Cargo.toml",
+            "src/auth-tokens/token.rs",
+            "src/auth/handler.rs",
+        ];
+        assert_ne!(
+            digest_in_order(&component_order),
+            digest_in_order(&joined_text_order),
+            "fixture no longer discriminates between path-component and joined-text ordering"
+        );
+
+        assert_eq!(
+            workspace_fingerprint(root, &InventoryProfile::cargo()),
+            Some(digest_in_order(&component_order)),
+            "the workspace fingerprint must order its selection by path components"
         );
     }
 
