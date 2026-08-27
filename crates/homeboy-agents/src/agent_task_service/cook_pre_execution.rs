@@ -384,7 +384,11 @@ pub(crate) fn production_runtime_admission(
         homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
             &runtime_root,
             run_id,
-            || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+            || {
+                Ok(runtime_admission_cancellation_requested(
+                    &lifecycle_store.read_record(run_id)?,
+                ))
+            },
         )
         .map(|admission| admission.runtime)
     }
@@ -515,6 +519,17 @@ pub(crate) fn retryable_pre_execution_failure(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> bool {
     record.metadata["pre_execution_failure"]["retryable"] == Value::Bool(true)
+        || (record.metadata["pre_execution_failure"]["phase"] == "local_retry_supervisor"
+            && record.metadata["provider_executions_consumed"]
+                .as_u64()
+                .unwrap_or(0)
+                == 0)
+}
+
+pub(crate) fn runtime_admission_cancellation_requested(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    record.state.is_terminal() && !retryable_pre_execution_failure(record)
 }
 
 #[derive(Debug)]
@@ -611,7 +626,8 @@ fn provider_primary_failure(
     if run_id.is_empty() {
         return None;
     }
-    let compact = homeboy_core::worktree_providers::compact_provider_failure_details(details)?;
+    let compact =
+        homeboy_core::worktree_provider::compact_worktree_provider_failure_details(details)?;
     let provider_id = compact.get("provider_id")?.as_str()?.to_string();
     let operation = compact.get("operation")?.as_str()?.to_string();
     let exit_code = compact.get("exit_code")?.as_i64()?;
@@ -928,6 +944,87 @@ mod tests {
             &details,
         )
         .is_none());
+    }
+
+    #[test]
+    fn retryable_pre_execution_terminal_does_not_cancel_runtime_admission() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let lifecycle_store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+            let run_id = "retryable-pre-execution-admission";
+            let plan = plan("retryable-pre-execution-plan", "retry");
+            lifecycle_store
+                .submit_plan_with_runtime_admission_status(&plan, run_id, None, &|_| None, |_| {
+                    Ok(serde_json::json!({ "runtime": "test" }))
+                })
+                .expect("submit plan");
+            lifecycle_store
+                .record_pre_execution_failure(
+                    run_id,
+                    &plan,
+                    "local_retry_supervisor",
+                    &Error::internal_unexpected("launcher failed").with_retryable(true),
+                )
+                .expect("record retryable pre-execution failure");
+
+            let record = lifecycle_store.read_record(run_id).expect("read record");
+            assert!(record.state.is_terminal());
+            assert!(!runtime_admission_cancellation_requested(&record));
+            let rearmed = lifecycle_store
+                .submit_plan_with_current_runtime(&plan, run_id)
+                .expect("retryable pre-execution record reacquires runtime admission");
+            assert_eq!(
+                rearmed.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert_eq!(
+                rearmed.metadata["controller_runtime_recovery"]["reason"],
+                "retryable_pre_execution_failure"
+            );
+            assert_eq!(
+                rearmed.metadata["controller_runtime_recovery"]["provider_executions_consumed"],
+                0
+            );
+            assert_eq!(
+                rearmed.metadata["controller_runtime_recovery"]["previous"]["runtime"],
+                "test"
+            );
+            assert_eq!(
+                rearmed.metadata["controller_runtime_recovery"]["current"],
+                rearmed.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            );
+        });
+    }
+
+    #[test]
+    fn ordinary_terminal_record_cancels_runtime_admission() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let lifecycle_store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+            let run_id = "ordinary-terminal-admission";
+            let plan = plan("ordinary-terminal-plan", "stop");
+            lifecycle_store
+                .submit_plan_with_runtime_admission_status(&plan, run_id, None, &|_| None, |_| {
+                    Ok(serde_json::json!({ "runtime": "test" }))
+                })
+                .expect("submit plan");
+            lifecycle_store
+                .record_pre_execution_failure(
+                    run_id,
+                    &plan,
+                    "validate_inputs",
+                    &Error::validation_invalid_argument("input", "invalid fixture", None, None),
+                )
+                .expect("record terminal failure");
+
+            let record = lifecycle_store.read_record(run_id).expect("read record");
+            assert!(runtime_admission_cancellation_requested(&record));
+            let error = lifecycle_store
+                .submit_plan_with_current_runtime(&plan, run_id)
+                .expect_err("ordinary terminal record cancels runtime admission");
+            assert_eq!(error.retryable, Some(true));
+            assert!(error.message.contains("admission request was cancelled"));
+        });
     }
 
     fn recipe(cook_id: &str, run_id: &str, plan: AgentTaskPlan) -> AgentTaskCookRecipe {

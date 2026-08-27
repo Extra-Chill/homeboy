@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use homeboy_core::{git, worktree, worktree_providers};
+use homeboy_core::{git, worktree_provider};
 use homeboy_core::{Error, Result};
 
 use super::path_remap::{remap_local_path, LabPathRemap};
@@ -72,11 +72,8 @@ pub(crate) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
 }
 
 fn resolve_to_worktree_source_path(value: &str) -> Result<PathBuf> {
-    match worktree::resolve_if_present(value)? {
-        Some(record) => Ok(PathBuf::from(record.worktree_path)),
-        None => worktree_providers::resolve_worktree_provider_handle(value)
-            .map(|worktree| PathBuf::from(worktree.path)),
-    }
+    worktree_provider::resolve_worktree_ownership(value)
+        .map(|ownership| PathBuf::from(ownership.path))
 }
 
 fn resolve_workspace_source_path(value: &str) -> Result<PathBuf> {

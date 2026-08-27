@@ -191,6 +191,7 @@ fn repo_local_gate_execution_kind_runs_without_extension_provider() {
             run_id: Some("gate-run".to_string()),
             attempt: 1,
             cancellation: AgentTaskCancellationToken::default(),
+            lifecycle_store: None,
         },
     );
 

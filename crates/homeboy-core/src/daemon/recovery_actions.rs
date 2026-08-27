@@ -308,6 +308,26 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     }
 }
 
+/// Whether an admission preflight may apply this daemon's canonical idle
+/// restart without asking an operator to supply any additional evidence.
+///
+/// This policy is intentionally independent of the command requesting daemon
+/// admission. It trusts only the authoritative status report and accepts only
+/// the bounded stop/start plan: zero durable jobs, an explicitly restartable
+/// lease, no attestations, and no other mutation mixed into the plan.
+pub fn authorizes_automatic_idle_restart(status: &DaemonStatus) -> bool {
+    let plan = plan_recovery(status);
+    !status.fresh
+        && status.freshness.active_jobs == 0
+        && status.active_job_recovery_evidence.is_empty()
+        && status.freshness.restartable
+        && plan.executable
+        && plan.required_confirmations.is_empty()
+        && plan.steps.len() == 2
+        && plan.steps[0].code == DAEMON_STOP
+        && plan.steps[1].code == DAEMON_START
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +463,40 @@ mod tests {
         for step in &plan.steps {
             assert!(step.action.is_some(), "{} carries no argv", step.code);
         }
+        assert!(authorizes_automatic_idle_restart(&status));
+    }
+
+    #[test]
+    fn automatic_idle_restart_refuses_active_jobs_and_non_restart_plans() {
+        let active = status(
+            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            vec![
+                DaemonRepairStep::executable(DAEMON_STOP, stop_for_lease(LEASE_ID)),
+                DaemonRepairStep::executable(DAEMON_START, start()),
+            ],
+            1,
+        );
+        assert!(!authorizes_automatic_idle_restart(&active));
+
+        let mut inconsistent = status(
+            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            vec![
+                DaemonRepairStep::executable(DAEMON_STOP, stop_for_lease(LEASE_ID)),
+                DaemonRepairStep::executable(DAEMON_START, start()),
+            ],
+            0,
+        );
+        inconsistent
+            .active_job_recovery_evidence
+            .push(recovery_evidence(Uuid::nil()));
+        assert!(!authorizes_automatic_idle_restart(&inconsistent));
+
+        let diagnosis = status(
+            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            vec![DaemonRepairStep::executable(DAEMON_DIAGNOSE, diagnose())],
+            0,
+        );
+        assert!(!authorizes_automatic_idle_restart(&diagnosis));
     }
 
     #[test]

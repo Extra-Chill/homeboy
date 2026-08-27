@@ -682,6 +682,13 @@ fn classify_liveness(
     if live_local_cook_retry_supervisor(record) {
         return AgentTaskLiveness::Active;
     }
+    // Worktree lookup and materialization are controller-owned even when the
+    // eventual provider execution is destined for a runner. They precede the
+    // queued-to-running transition, so their fresh Cook heartbeat is the only
+    // possible owner during this phase.
+    if record.has_fresh_controller_pre_provider_heartbeat() {
+        return AgentTaskLiveness::Active;
+    }
     if record.state != agent_task_lifecycle::AgentTaskRunState::Running {
         if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;

@@ -555,7 +555,7 @@ mod tests {
     use super::{github_release, package_preflight, run_cleanup, run_package, PackageRequest};
     use crate::release::types::ReleaseState;
     use crate::release::types::{ReleaseArtifact, ReleaseStepStatus};
-    use homeboy_core::component::Component;
+    use homeboy_core::component::{Component, ScopedExtensionConfig};
     use homeboy_core::git::release_download::GitHubRepo;
     use homeboy_extension::ExtensionManifest;
     fn test_repo() -> GitHubRepo {
@@ -1375,6 +1375,86 @@ mod tests {
                 state.artifacts[0].path,
                 "build/intelligence-horse-theme.zip"
             );
+        });
+    }
+
+    #[test]
+    fn run_package_passes_only_provider_settings_with_release_overrides() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let component_dir = tempfile::tempdir().expect("component tempdir");
+            let payload_out = component_dir.path().join("package-payload.json");
+            let package = release_package_extension(
+                "nodejs",
+                &format!(
+                    "printf '%s' \"$HOMEBOY_SETTINGS_JSON\" > '{}'; \
+                     mkdir -p dist; printf artifact > dist/fixture.tgz; \
+                     printf '[{{\"path\":\"dist/fixture.tgz\"}}]'",
+                    payload_out.display()
+                ),
+            );
+            homeboy_extension::save_manifest(&package).expect("save package extension");
+
+            let mut component = Component::default();
+            component.extensions = Some(std::collections::HashMap::from([
+                (
+                    "nodejs".to_string(),
+                    ScopedExtensionConfig {
+                        settings: std::collections::HashMap::from([
+                            (
+                                "release_package_script".to_string(),
+                                serde_json::json!("release:package"),
+                            ),
+                            (
+                                "skip_build_validation".to_string(),
+                                serde_json::json!(false),
+                            ),
+                        ]),
+                        ..ScopedExtensionConfig::default()
+                    },
+                ),
+                (
+                    "other".to_string(),
+                    ScopedExtensionConfig {
+                        settings: std::collections::HashMap::from([(
+                            "must_not_leak".to_string(),
+                            serde_json::json!(true),
+                        )]),
+                        ..ScopedExtensionConfig::default()
+                    },
+                ),
+            ]));
+
+            let mut state = ReleaseState::default();
+            let result = run_package(
+                &test_roots(),
+                &[package],
+                &mut state,
+                &component,
+                "fixture",
+                &component_dir.path().to_string_lossy(),
+                PackageRequest {
+                    component_source_path: None,
+                    declared_build_artifact: None,
+                    skip_build_validation: true,
+                },
+            )
+            .expect("package step");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            let payload: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(payload_out).expect("captured package payload"),
+            )
+            .expect("valid package payload");
+            assert_eq!(
+                payload["config"]["release_package_script"],
+                serde_json::json!("release:package")
+            );
+            assert_eq!(
+                payload["config"]["skip_build_validation"],
+                serde_json::json!(true),
+                "release-owned transient config overrides component settings"
+            );
+            assert!(payload["config"].get("must_not_leak").is_none());
         });
     }
 

@@ -12,7 +12,8 @@
 //! ```
 
 use super::reference_docs::{
-    commands_without_description, documented_subcommands, write_cli_reference, WRITE_ENV,
+    commands_without_description, documented_subcommands, generated_command_index,
+    write_cli_reference, WRITE_ENV,
 };
 use super::Cli;
 use clap::CommandFactory;
@@ -102,4 +103,16 @@ fn commands_index_lists_each_command_once() {
         duplicates.is_empty(),
         "docs/commands/commands-index.md lists these commands more than once: {duplicates:?}"
     );
+}
+
+#[test]
+fn generated_command_index_includes_runtime_extension_commands() {
+    let index = generated_command_index();
+
+    for command in crate::command_contract::runtime_extension_command_doc_slugs() {
+        assert!(
+            index.contains(&format!("- [{command}]({command}.md)")),
+            "generated command index omitted registered runtime extension command `{command}`"
+        );
+    }
 }

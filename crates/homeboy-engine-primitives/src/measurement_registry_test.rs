@@ -76,7 +76,7 @@
 //! [`every_skip_rendering_gate_layer_decision_is_executed_by_a_fixture`]
 //! requires that fixture to exist and to actually spawn a shell.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// How a verdict-producing site establishes that it measured something.
@@ -392,6 +392,113 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
                registered so the scan records the script's complete terminal contract.",
     },
     GateLayerSite {
+        file: ".github/generate-required-gates-artifacts.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::PerUnitEvaluation,
+        renders_skip: false,
+        fixture: Some("regenerating_every_derived_artifact_is_a_no_op"),
+        note: "#13125. The only green is `--check` observing zero drift, and it is reached only \
+               after the manifest passed structural validation and each derived artifact was \
+               byte-compared against its committed counterpart individually. The ruleset payload \
+               is always generated and always compared; the documentation table is compared \
+               whenever an output path is configured, and a configured-but-absent document, or \
+               one missing its GENERATED markers, is a hard `exit 1` rather than a silently \
+               skipped comparison. The declaration's own non-emptiness is established upstream by \
+               the manifest validator, which refuses an empty gate list and a policy with no \
+               terminal gate -- without that, an empty `gates` array would derive a ruleset \
+               requiring no checks and this comparison would faithfully report it as current, \
+               which is the #12833 shape reached through generation rather than through drift.",
+    },
+    GateLayerSite {
+        file: ".github/generate-required-gates-artifacts.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: Some("a_duplicate_declared_context_is_refused_by_the_generator"),
+        note: "#13125, the refusal path: an absent or structurally invalid manifest, an absent or \
+               unmarked documentation target, a derived artifact that drifted from the manifest, \
+               or a generated payload that is not a JSON object. A non-zero exit cannot \
+               manufacture a pass, so it carries no measurement obligation of its own; it is \
+               registered because the scan keys on every exit in a gate script and an \
+               unregistered one is indistinguishable from an unexamined one. It is fixtured \
+               anyway, because the direction that matters here is that an ambiguous declaration \
+               lands on this exit rather than being interpreted after execution.",
+    },
+    GateLayerSite {
+        file: ".github/generate-required-gates-artifacts.sh",
+        decision: "exit 2",
+        basis: MeasurementBasis::NotAGate,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: argument misuse. The script accepts `write` or `--check` and refuses \
+               anything else with a usage message before it reads the manifest, so this exit \
+               renders no verdict about the gate policy at all.",
+    },
+    GateLayerSite {
+        file: ".github/manage-required-gates-ruleset.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: the drift refusal, projecting `matched != true`. This script's green is \
+               not an exit at all -- it falls off the end, and only after `matched` was \
+               established by re-reading the live ruleset through `gh api` AFTER any write and \
+               comparing that projection against the versioned policy. The measurement is a \
+               post-write observation of the remote rather than an assumption that the PUT \
+               succeeded, which is what makes `audit` and `reconcile` share one verdict. The \
+               end-to-end behaviour is exercised by `.github/test-manage-required-gates-ruleset.sh` \
+               in the `Required Gates Declaration` job; that is a shell fixture, so it cannot be \
+               named in the Rust `fixture` field.",
+    },
+    GateLayerSite {
+        file: ".github/manage-required-gates-ruleset.sh",
+        decision: "exit 2",
+        basis: MeasurementBasis::NotAGate,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: argument misuse -- an unrecognised flag, an operation that is neither \
+               `audit` nor `reconcile`, an absent policy file, or a missing evidence path. All \
+               are refused before any ruleset state is read, so this exit says nothing about the \
+               ruleset.",
+    },
+    GateLayerSite {
+        file: ".github/reconcile-required-gates-ruleset.sh",
+        decision: "exit \"${status}\"",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: the EXIT trap re-raising the status the script body already decided, \
+               after writing fallback failure evidence when a command died before detailed \
+               evidence existed. It cannot change a verdict; it exists so a non-zero one still \
+               leaves readable staged evidence behind rather than an empty file.",
+    },
+    GateLayerSite {
+        file: ".github/reconcile-required-gates-ruleset.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: `write_failure`, the single refusal path shared by every preflight \
+               stage -- absent repository, absent policy, missing administration token, \
+               unreadable or administrator-bypassable administration environment, a checkout that \
+               is not the current main tip, main advancing during preflight, and an absent or \
+               app-id-spoofed canonical check run. Each writes evidence naming its stage and \
+               reason before exiting, so a refusal identifies the precondition it measured rather \
+               than failing opaquely. This script has no `exit 0`: its green is reaching the \
+               reconcile and verification steps, whose verdicts belong to \
+               manage-required-gates-ruleset.sh and validate-required-gates.sh respectively.",
+    },
+    GateLayerSite {
+        file: ".github/reconcile-required-gates-ruleset.sh",
+        decision: "exit 2",
+        basis: MeasurementBasis::NotAGate,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: argument misuse -- an unrecognised flag or a missing `--evidence` path, \
+               refused before any repository, environment, or ruleset state is read. It renders \
+               no verdict about the ruleset.",
+    },
+    GateLayerSite {
         file: ".github/release-asset-completeness.sh",
         decision: "exit 0",
         basis: MeasurementBasis::PerUnitEvaluation,
@@ -438,6 +545,35 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
                Measurement::assess to bash: units>0 measured, units==0 with an empty configured \
                population is an honest zero (warn, pass), units==0 against a non-empty population \
                is Contradicted and a hard error.",
+    },
+    GateLayerSite {
+        file: ".github/test-manage-required-gates-ruleset.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::NotAGate,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: these lines are the body of a quoted heredoc that writes a fake `gh` \
+               executable into a scratch directory -- the stub's control flow, not this script's \
+               verdict. The line-oriented matcher cannot see heredoc boundaries, so rather than \
+               teach it a second parsing mode for one file, the artifact is recorded here as what \
+               it is. This script's own green is falling off the end.",
+    },
+    GateLayerSite {
+        file: ".github/test-manage-required-gates-ruleset.sh",
+        decision: "exit 1",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: this IS the fixture -- the shell test for the ruleset management \
+               scripts, run by the `homeboy / Required Gates Declaration` job, so its failure \
+               fails a required check. Every `exit 1` fires when a negative case was wrongly \
+               ACCEPTED: a drifted ruleset passing audit, a PR display context accepted as a main \
+               check-run name, a spoofed or absent check run, a missing administration token, an \
+               administrator-bypassable environment, or a failed ruleset write reported as \
+               success. Its population cannot be empty, because the scenarios are literal in the \
+               script and `set -e` stops at the first one that misbehaves. VERDICT_SITES exempts \
+               test-owned Rust by path; the gate layer has no such rule, so the same judgement is \
+               recorded explicitly here instead.",
     },
     GateLayerSite {
         file: ".github/validate-action-pin.sh",
@@ -665,10 +801,20 @@ const GATE_LAYER_EXTENSIONS: &[&str] = &["yml", "yaml", "sh"];
 /// deleting the port while keeping the registration fails.
 const SHELL_PREDICATE_MARKER: &str = "assess_measurement";
 
-/// The test file that owns gate-layer fixtures.
-const GATE_LAYER_FIXTURE_FILE: &str = "tests/release_workflow_test.rs";
+/// The test files that own gate-layer fixtures.
+///
+/// This was a single file until the required-gates manifest (#13125) landed its
+/// generator and its executing tests together in a second one. Naming the set
+/// rather than one file is the difference between a registration that can cite
+/// the fixture that already exists and one that has to claim `NO FIXTURE:`
+/// because the fixture lives in the wrong place — which would be a false debt
+/// marker, and this registry is only worth its cost while its claims are true.
+const GATE_LAYER_FIXTURE_FILES: &[&str] = &[
+    "tests/release_workflow_test.rs",
+    "tests/required_gates_policy_test.rs",
+];
 
-/// Proof that the fixture file executes shells rather than string-matching YAML.
+/// Proof that the fixture files execute shells rather than string-matching YAML.
 ///
 /// Without this, "has a fixture" degrades into "has a test that greps the
 /// workflow" — which is the exact failure the audit gate shipped for weeks.
@@ -905,6 +1051,29 @@ fn gate_layer_decision(relative: &str, line: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Every gate-layer fixture file, read once, keyed by its declared path.
+///
+/// Read eagerly and panic on an unreadable file rather than skipping it: a
+/// fixture file that silently vanishes would turn every "this fixture exists"
+/// assertion below into "no file claimed otherwise", which is the vacuous pass
+/// this whole registry exists to refuse.
+fn gate_layer_fixture_sources(root: &Path) -> BTreeMap<&'static str, String> {
+    GATE_LAYER_FIXTURE_FILES
+        .iter()
+        .map(|file| {
+            let contents = std::fs::read_to_string(root.join(file))
+                .unwrap_or_else(|error| panic!("{file} is unreadable: {error}"));
+            (*file, contents)
+        })
+        .collect()
+}
+
+/// Whether any gate-layer fixture file defines `fixture` as a test function.
+fn fixture_is_defined(fixtures: &BTreeMap<&'static str, String>, fixture: &str) -> bool {
+    let needle = format!("fn {fixture}(");
+    fixtures.values().any(|contents| contents.contains(&needle))
 }
 
 /// Discovered `(file, decision)` pairs across the whole gate layer.
@@ -1217,16 +1386,18 @@ fn no_gate_layer_registration_outlives_the_decision_it_describes() {
 #[test]
 fn every_skip_rendering_gate_layer_decision_is_executed_by_a_fixture() {
     let root = workspace_root();
-    let fixtures = std::fs::read_to_string(root.join(GATE_LAYER_FIXTURE_FILE))
-        .unwrap_or_else(|error| panic!("{GATE_LAYER_FIXTURE_FILE} is unreadable: {error}"));
+    let fixtures = gate_layer_fixture_sources(&root);
 
-    assert!(
-        fixtures.contains(GATE_LAYER_FIXTURE_EXECUTES_SHELL),
-        "{GATE_LAYER_FIXTURE_FILE} no longer spawns a shell ({GATE_LAYER_FIXTURE_EXECUTES_SHELL}), \
-         so every fixture it holds has degraded into a string match against YAML. That is the \
-         precise failure the post-merge audit gate shipped for weeks: it asserted the command it \
-         ran instead of what that command produced."
-    );
+    for file in GATE_LAYER_FIXTURE_FILES {
+        let contents = &fixtures[*file];
+        assert!(
+            contents.contains(GATE_LAYER_FIXTURE_EXECUTES_SHELL),
+            "{file} no longer spawns a shell ({GATE_LAYER_FIXTURE_EXECUTES_SHELL}), so every \
+             fixture it holds has degraded into a string match against YAML. That is the precise \
+             failure the post-merge audit gate shipped for weeks: it asserted the command it ran \
+             instead of what that command produced."
+        );
+    }
 
     // A skip-rendering decision must either name a fixture or carry the debt
     // marker. `renders_skip` is the obligation; the marker is the escape hatch,
@@ -1256,9 +1427,9 @@ fn every_skip_rendering_gate_layer_decision_is_executed_by_a_fixture() {
             continue;
         };
         assert!(
-            fixtures.contains(&format!("fn {fixture}(")),
-            "{} -> {} names fixture `{fixture}`, but no such test exists in \
-             {GATE_LAYER_FIXTURE_FILE}.\n\nEither the test was renamed and the registration was \
+            fixture_is_defined(&fixtures, fixture),
+            "{} -> {} names fixture `{fixture}`, but no such test exists in any of \
+             {GATE_LAYER_FIXTURE_FILES:?}.\n\nEither the test was renamed and the registration was \
              not, or the registration was aspirational. Both leave a decision unexercised while \
              claiming otherwise.",
             site.file,
@@ -1286,7 +1457,7 @@ fn every_skip_rendering_gate_layer_decision_is_executed_by_a_fixture() {
         "`should-release=false` must keep an executing fixture -- it is the acceptance case",
     );
     assert!(
-        fixtures.contains(&format!("fn {fixture}(")),
+        fixture_is_defined(&fixtures, fixture),
         "the #10706 acceptance case names fixture `{fixture}`, which does not exist"
     );
 }

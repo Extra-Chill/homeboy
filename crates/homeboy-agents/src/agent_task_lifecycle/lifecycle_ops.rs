@@ -400,7 +400,11 @@ pub fn submit_plan_in_store(
             homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
                 &runtime_root,
                 run_id,
-                || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+                || {
+                    Ok(crate::agent_task_service::cook_pre_execution::runtime_admission_cancellation_requested(
+                        &lifecycle_store.read_record(run_id)?,
+                    ))
+                },
             )
         },
     )
@@ -2599,6 +2603,16 @@ where
             .expect("submission metadata is an object")
             .extend(submission_metadata);
     }
+    if let Ok(job_id) = std::env::var("HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID") {
+        if !job_id.trim().is_empty() {
+            metadata["local_cook_supervisor"] = json!({
+                "state": "supervising",
+                "job_id": job_id,
+                "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+                "pinned_run_id": run_id,
+            });
+        }
+    }
 
     let mut record = AgentTaskRunRecord {
         schema: schemas::RUN.to_string(),
@@ -2626,7 +2640,12 @@ where
         metadata,
     };
     let mut preserved_controller_runtime = None;
+    let mut pre_execution_runtime_recovery = false;
     if let Ok(existing) = lifecycle_store.read_record(&run_id) {
+        pre_execution_runtime_recovery = execution_runner_id.is_none()
+            && crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
+                &existing,
+            );
         // A runner may re-submit the plan after the controller reserved a
         // side-effect claim. Claims are durable exactly-once ownership, not
         // plan-derived state, so replacing the record must retain them.
@@ -2715,7 +2734,7 @@ where
             // it once more before recording runtime provenance or dispatching
             // any provider work in case cancellation won immediately after.
             if let Ok(cancelled) = lifecycle_store.read_record(&run_id) {
-                if cancelled.state.is_terminal() {
+                if cancelled.state.is_terminal() && !pre_execution_runtime_recovery {
                     return Ok(cancelled);
                 }
             }
@@ -2732,7 +2751,12 @@ where
                     [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                     admission.runtime();
             }
-            lifecycle_store.write_record(&record)?;
+            if pre_execution_runtime_recovery {
+                record = lifecycle_store
+                    .rearm_pre_execution_record_with_runtime(&record, admission.runtime())?;
+            } else {
+                lifecycle_store.write_record(&record)?;
+            }
         }
         Err(error) => {
             // Cancellation is persisted before removing a queue entry. Do not
@@ -3396,6 +3420,62 @@ pub fn reserve_provider_execution_in_store(
     Ok(reservation)
 }
 
+/// Attach the complete, redacted launch contract to the reservation before the
+/// provider subprocess exists. Recovery can then distinguish a portable launch
+/// from one still bound to ambient controller credentials.
+pub fn record_provider_launch_context_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+    context: &crate::agent_task_provider::AgentTaskProviderLaunchContext,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let key = format!("{task_id}:{attempt}");
+    if context.run_id.as_deref() != Some(run_id.as_str())
+        || context.task_id != task_id
+        || context.attempt != attempt
+    {
+        return Err(Error::validation_invalid_argument(
+            "provider_launch_context",
+            "provider launch context identity does not match its reservation",
+            Some(key),
+            None,
+        ));
+    }
+    let value = serde_json::to_value(context).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize provider launch context".to_string()),
+        )
+    })?;
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
+        let Some(execution) = record.metadata["provider_executions"]
+            .as_array_mut()
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == key)
+            })
+        else {
+            return false;
+        };
+        if execution.get("launch_context").is_some() {
+            return execution["launch_context"] == value;
+        }
+        execution["launch_context"] = value.clone();
+        true
+    })?;
+    record.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_execution",
+            "cannot attach launch context to an unreserved or conflicting provider execution",
+            Some(key),
+            None,
+        )
+    })
+}
+
 /// Bind a reserved provider execution to the subprocess that actually runs it.
 ///
 /// Fanout workers are threads and therefore share the coordinator PID. The
@@ -3595,7 +3675,7 @@ pub fn record_cook_progress_with_activity_in_store(
             metadata.insert("cook_progress".to_string(), progress);
         }
         if !record.state.is_terminal()
-            && (!record.is_runner_backed() || record.has_fresh_controller_pre_provider_heartbeat())
+            && (!record.is_runner_backed() || record.is_controller_pre_provider_phase())
         {
             record.updated_at = Some(now_timestamp());
             update_lifecycle_heartbeat(record);

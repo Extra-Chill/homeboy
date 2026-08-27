@@ -30,6 +30,8 @@ use homeboy_review::review::{
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 
 use super::parse_key_val;
 use super::utils::args::{
@@ -340,6 +342,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         Some(ReviewCommand::Audit(args)) => {
             let requested_source = args.audit.release_readiness_source.clone();
             let component = args.audit.comp.load()?;
+            prepare_local_review_dependencies(&component)?;
             to_value_with_readiness_provenance(
                 audit::run(args.audit),
                 &component,
@@ -350,6 +353,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         Some(ReviewCommand::Lint(args)) => {
             let requested_source = args.release_readiness_source.clone();
             let component = args.comp.load()?;
+            prepare_local_review_dependencies(&component)?;
             to_value_with_readiness_provenance(
                 lint::run(review_lint_args(args)),
                 &component,
@@ -359,6 +363,7 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         Some(ReviewCommand::Test(args)) => {
             let requested_source = args.release_readiness_source.clone();
             let component = args.comp.load()?;
+            prepare_local_review_dependencies(&component)?;
             to_value_with_readiness_provenance(
                 test::run(args),
                 &component,
@@ -501,6 +506,10 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         changed_file_count,
     })?);
     observation::emit_early_lifecycle(&review_observation);
+    if let Err(error) = prepare_local_review_dependencies(&component) {
+        observation::finish_error(review_observation, &error);
+        return Err(error);
+    }
 
     let mut top_hints: Vec<String> = Vec::new();
 
@@ -668,6 +677,147 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     observation::finish_success(review_observation, &output, overall_exit);
 
     Ok((output, overall_exit))
+}
+
+fn prepare_local_review_dependencies(
+    component: &homeboy::core::component::Component,
+) -> homeboy::core::Result<()> {
+    let policy = homeboy::core::deps::DependencyHydrationPolicy::default();
+    let deadline_ms = policy.timeout.as_millis();
+    let started = Instant::now();
+    emit_local_review_setup_progress(LocalReviewSetupProgress {
+        phase: "dependency_setup",
+        status: "running",
+        component: &component.id,
+        provider: None,
+        current: None,
+        elapsed_ms: 0,
+        last_progress_ms_ago: None,
+        deadline_ms,
+    });
+
+    let component_id = component.id.clone();
+    let progress = Arc::new(
+        move |progress: &homeboy::core::deps::DependencyHydrationProgress| {
+            emit_local_review_setup_progress(LocalReviewSetupProgress {
+                phase: &progress.phase,
+                status: "heartbeat",
+                component: &component_id,
+                provider: Some(&progress.provider_id),
+                current: progress.current.as_deref(),
+                elapsed_ms: progress.elapsed_ms,
+                last_progress_ms_ago: progress.last_progress_ms_ago,
+                deadline_ms,
+            });
+        },
+    );
+    let policy = homeboy::core::deps::DependencyHydrationPolicy {
+        on_progress: progress,
+        ..policy
+    };
+    let outcomes = homeboy::core::deps::hydrate_declared_dependencies(
+        Path::new(&component.local_path),
+        "local_review",
+        ".",
+        &policy,
+    )?;
+
+    if let Some(failed) = outcomes
+        .iter()
+        .find(|outcome| outcome.status == homeboy::core::deps::DependencyHydrationStatus::Failed)
+    {
+        emit_local_review_setup_progress(LocalReviewSetupProgress {
+            phase: "dependency_setup",
+            status: "failed",
+            component: &component.id,
+            provider: Some(&failed.provider_id),
+            current: None,
+            elapsed_ms: started.elapsed().as_millis(),
+            last_progress_ms_ago: None,
+            deadline_ms,
+        });
+        return Err(homeboy::core::Error::dependency_step_failed(
+            "dependency.setup",
+            &component.id,
+            failed.exit_code,
+            vec![format!(
+                "provider={} termination={:?} reason={}",
+                failed.provider_id, failed.termination, failed.reason
+            )],
+            Vec::new(),
+            Some(format!(
+                "homeboy component setup {} --path {}",
+                component.id, component.local_path
+            )),
+            serde_json::to_value(failed).ok(),
+        ));
+    }
+
+    emit_local_review_setup_progress(LocalReviewSetupProgress {
+        phase: "dependency_setup",
+        status: "completed",
+        component: &component.id,
+        provider: None,
+        current: None,
+        elapsed_ms: started.elapsed().as_millis(),
+        last_progress_ms_ago: None,
+        deadline_ms,
+    });
+    Ok(())
+}
+
+struct LocalReviewSetupProgress<'a> {
+    phase: &'a str,
+    status: &'a str,
+    component: &'a str,
+    provider: Option<&'a str>,
+    current: Option<&'a str>,
+    elapsed_ms: u128,
+    last_progress_ms_ago: Option<u128>,
+    deadline_ms: u128,
+}
+
+fn emit_local_review_setup_progress(progress: LocalReviewSetupProgress<'_>) {
+    eprintln!("{}", format_local_review_setup_progress(&progress));
+    eprintln!(
+        "HOMEBOY_PROGRESS {}",
+        serde_json::json!({
+            "phase": progress.phase,
+            "current": progress.current.or(progress.provider).unwrap_or(progress.component),
+            "status": progress.status,
+            "component": progress.component,
+            "provider": progress.provider,
+            "elapsed_ms": progress.elapsed_ms,
+            "last_progress_ms_ago": progress.last_progress_ms_ago,
+            "deadline_ms": progress.deadline_ms,
+        })
+    );
+}
+
+fn format_local_review_setup_progress(progress: &LocalReviewSetupProgress<'_>) -> String {
+    let provider = progress
+        .provider
+        .map(|provider| format!(" provider={provider}"))
+        .unwrap_or_default();
+    let current = progress
+        .current
+        .map(|current| format!(" current={current}"))
+        .unwrap_or_default();
+    let last_progress = progress
+        .last_progress_ms_ago
+        .map(|elapsed| format!(" last_progress={elapsed}ms"))
+        .unwrap_or_default();
+    format!(
+        "[review] phase={} status={} component={}{}{} elapsed={}ms{} deadline={}ms",
+        progress.phase,
+        progress.status,
+        progress.component,
+        provider,
+        current,
+        progress.elapsed_ms,
+        last_progress,
+        progress.deadline_ms,
+    )
 }
 
 /// Return the persisted record rather than silently starting another expensive
@@ -1415,6 +1565,25 @@ mod tests {
         assert!(
             !args.should_use_self_check_dispatch(),
             "direct review lint must run the main lint workflow for every target form"
+        );
+    }
+
+    #[test]
+    fn local_review_setup_heartbeat_names_phase_current_elapsed_and_deadline() {
+        let rendered = format_local_review_setup_progress(&LocalReviewSetupProgress {
+            phase: "building",
+            status: "heartbeat",
+            component: "fixture",
+            provider: Some("declared-provider"),
+            current: Some("shared-component"),
+            elapsed_ms: 12_500,
+            last_progress_ms_ago: Some(250),
+            deadline_ms: 1_800_000,
+        });
+
+        assert_eq!(
+            rendered,
+            "[review] phase=building status=heartbeat component=fixture provider=declared-provider current=shared-component elapsed=12500ms last_progress=250ms deadline=1800000ms"
         );
     }
 

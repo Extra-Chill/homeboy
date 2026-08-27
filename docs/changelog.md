@@ -4,6 +4,174 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.18] - 2026-08-27
+
+### Fixed
+- gate the resolver fixture target on test-support
+- measure liveness from provider artifact activity
+- refuse incomparable legacy baselines
+
+## [0.361.17] - 2026-08-27
+
+### Fixed
+- bind retry ownership at reservation
+
+## [0.361.16] - 2026-08-27
+
+### Fixed
+- recover queued retry runtime
+- preserve retry child diagnostics
+- initialize composed disclosure state
+- disclose substantive Cook retries
+- bound worktree path resolution
+
+## [0.361.15] - 2026-08-26
+
+### Fixed
+- preserve head recovery source
+- preserve live pending handoff
+- trust immutable unpushed target
+
+## [0.361.14] - 2026-08-26
+
+### Changed
+- Route loop supervision through Work jobs
+
+### Fixed
+- stage detached recovery from immutable SHA
+- distinguish absent recovery releases
+
+## [0.361.13] - 2026-08-26
+
+### Changed
+- share cook work job lifecycle
+- migrate domain drivers to harness
+
+### Fixed
+- preserve queued provider liveness
+
+## [0.361.12] - 2026-08-26
+
+### Fixed
+- count runtime progress as liveness
+- recheck Cargo lock before removal
+- preserve configured capability env
+
+## [0.361.11] - 2026-08-26
+
+### Changed
+- complete provider lifecycle contract
+- close provider capability surface
+- unify mutation consumers
+- unify resume path observation
+- unify worktree creation
+- unify direct creation
+- migrate remaining inventory reads
+- scope worktree fixture import
+- route worktrees through providers
+- expose provider inventory in CLI
+- project provider worktrees
+- unify worktree lifecycle
+- unify worktree finalization
+- unify worktree provisioning
+- unify promotion worktree resolution
+- add provider ownership contract
+
+### Fixed
+- preserve provider resolution errors
+- honor shared target reserve pressure
+
+## [0.361.10] - 2026-08-26
+
+### Changed
+- extract reconcile run helpers
+- remove rolling findings residue
+
+## [0.361.9] - 2026-08-26
+
+### Changed
+- exercise controller harness recovery
+- add reusable driver handle harness
+
+### Fixed
+- consume retry launch token once
+- repair release test regressions
+
+## [0.361.8] - 2026-08-26
+
+### Changed
+- pin comparable differential baselines
+- pin composite cancellation repair
+- pin lazy differential baselines
+- compare tests against live base
+- isolate test sidecar producer
+
+### Fixed
+- register the required-gates ruleset scripts and refuse an empty gate declaration
+- parse normalized failure aliases
+- preserve wall timeout precedence
+- bound silent providers by default
+
+## [0.361.7] - 2026-08-26
+
+### Changed
+- persist explicit provider launch context
+
+### Fixed
+- admit non-repository build roots
+- stop reporting a fully-read empty process scope as a possible escape
+- accept inherited replacement proof
+- derive the required-gates fixtures from the manifest so the terminal-verdict tests measure again
+- maintain one rolling findings issue
+- rebind pre-execution runtime
+
+## [0.361.6] - 2026-08-26
+
+### Changed
+- isolate stdin snapshot fixture
+
+### Fixed
+- recover adopted candidate artifacts
+- bound explicit repository resolution
+- readmit pre-execution retries
+- preserve pre-execution recovery
+- repair handoff release gate
+- recover pre-execution continuations
+- Fix detached token routing for local Cook retries
+- verify prepared artifact version
+
+## [0.361.5] - 2026-08-25
+
+### Fixed
+- consume isolated test sidecars
+- exclude environments from process status
+- adopt clean unpushed cwd candidates
+
+## [0.361.4] - 2026-08-25
+
+### Fixed
+- stream local setup progress
+- reject empty detached handoffs
+- recover idle stale daemon
+- name the inventory rejection that invalidated runtime evidence
+
+## [0.361.3] - 2026-08-25
+
+### Fixed
+- budget the from-source build like the phases beside it
+- pass extension settings to packagers
+- delete BaselineInconclusive instead of excusing a red candidate
+- bound explicit repository resolution
+
+## [0.361.2] - 2026-08-25
+
+### Fixed
+- carry the reason a baseline comparison could not conclude
+- harden bounded pressure retention
+- bypass sizing under disk pressure
+- isolate cleanup deadlines
+- bind preview lifecycle before replay
+
 ## [0.361.1] - 2026-08-25
 
 ### Changed

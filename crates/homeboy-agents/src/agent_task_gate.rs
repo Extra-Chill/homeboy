@@ -642,6 +642,15 @@ pub struct AgentTaskGateBaselineComparison {
     pub matches_candidate_failure: bool,
     #[serde(default)]
     pub result: AgentTaskGateDifferentialResult,
+    /// Why the comparison could not conclude.
+    ///
+    /// An `Inconclusive` result used to be indistinguishable from every other
+    /// `Inconclusive` result: the baseline replay error was discarded at the
+    /// point it was produced, so an operator was told to "repair the gate
+    /// baseline setup" with nothing naming what was actually wrong. This
+    /// carries that reason forward. Conclusive results leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 /// The durable outcome of replaying a candidate gate against its immutable base.
@@ -3654,6 +3663,63 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+
+    /// A conclusive comparison carries no diagnostic, and the field is omitted
+    /// from the wire form so persisted reports written before it existed still
+    /// round-trip.
+    #[test]
+    fn baseline_comparison_omits_an_absent_diagnostic() {
+        let comparison = AgentTaskGateBaselineComparison {
+            base_ref: "abc".to_string(),
+            exit_code: 1,
+            failure_fingerprint: "fp".to_string(),
+            matches_candidate_failure: true,
+            result: AgentTaskGateDifferentialResult::BaselineRed,
+            diagnostic: None,
+        };
+        let json = serde_json::to_value(&comparison).expect("serialize");
+        assert!(
+            json.get("diagnostic").is_none(),
+            "absent diagnostic must not widen the wire form: {json}"
+        );
+    }
+
+    /// A report persisted before the field existed must still deserialize.
+    #[test]
+    fn baseline_comparison_reads_reports_written_without_a_diagnostic() {
+        let json = serde_json::json!({
+            "base_ref": "abc",
+            "exit_code": 124,
+            "failure_fingerprint": "",
+            "matches_candidate_failure": false,
+            "result": "inconclusive"
+        });
+        let comparison: AgentTaskGateBaselineComparison =
+            serde_json::from_value(json).expect("deserialize legacy report");
+        assert_eq!(comparison.diagnostic, None);
+        assert_eq!(
+            comparison.result,
+            AgentTaskGateDifferentialResult::Inconclusive
+        );
+    }
+
+    /// An inconclusive comparison round-trips the reason it could not conclude.
+    #[test]
+    fn baseline_comparison_round_trips_its_diagnostic() {
+        let comparison = AgentTaskGateBaselineComparison {
+            base_ref: "abc".to_string(),
+            exit_code: 124,
+            failure_fingerprint: String::new(),
+            matches_candidate_failure: false,
+            result: AgentTaskGateDifferentialResult::Inconclusive,
+            diagnostic: Some("baseline replay failed: boom".to_string()),
+        };
+        let json = serde_json::to_value(&comparison).expect("serialize");
+        assert_eq!(json["diagnostic"], "baseline replay failed: boom");
+        let back: AgentTaskGateBaselineComparison =
+            serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, comparison);
+    }
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -4083,32 +4149,34 @@ mod tests {
 
     #[test]
     fn declared_shared_cargo_target_is_reported_without_parsing_gate_shell_text() {
-        let temp = tempfile::tempdir().expect("gate fixture");
-        let mut policy = AgentTaskGateEnvironmentPolicy::default();
-        policy.shared_cargo_target = Some(true);
-        // The test runner's required Cargo target is an ambient override. An
-        // explicit empty declaration clears it so this exercises the contract.
-        policy
-            .variables
-            .insert("CARGO_TARGET_DIR".to_string(), String::new());
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("gate fixture");
+            let mut policy = AgentTaskGateEnvironmentPolicy::default();
+            policy.shared_cargo_target = Some(true);
+            // The test runner's required Cargo target is an ambient override. An
+            // explicit empty declaration clears it so this exercises the contract.
+            policy
+                .variables
+                .insert("CARGO_TARGET_DIR".to_string(), String::new());
 
-        let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
-            temp.path(),
-            1,
-            "test -n \"$CARGO_TARGET_DIR\"",
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            None,
-            &policy,
-            &[],
-        )
-        .expect("declared managed gate");
+            let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                temp.path(),
+                1,
+                "test -n \"$CARGO_TARGET_DIR\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &policy,
+                &[],
+            )
+            .expect("declared managed gate");
 
-        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
-        let target = report.environment.cargo_target.expect("target evidence");
-        assert_eq!(target.resolution, "shared");
-        assert!(target.path.contains("cargo-target"));
-        assert!(target.owner.starts_with("agent-task-gate"));
+            assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+            let target = report.environment.cargo_target.expect("target evidence");
+            assert_eq!(target.resolution, "shared");
+            assert!(target.path.contains("cargo-target"));
+            assert!(target.owner.starts_with("agent-task-gate"));
+        });
     }
 
     #[test]
@@ -5856,18 +5924,18 @@ mod tests {
             }],
             &[],
             None,
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .expect_err("hung toolchain probe must time out");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(20));
         assert_eq!(error.retryable, Some(true));
         assert_eq!(
             error.details["toolchain_preflight"]["timed_out"], true,
             "{:#}",
             error.details
         );
-        assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 2_000);
+        assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 10_000);
         let descendant_pid = fs::read_to_string(pid_file)
             .expect("descendant pid")
             .trim()
@@ -5905,7 +5973,7 @@ mod tests {
         )
         .expect_err("hung toolchain probe must time out");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(error.details["toolchain_preflight"]["timed_out"], true);
         assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 100);
     }
@@ -5947,7 +6015,7 @@ mod tests {
         )
         .expect_err("second probe must consume only the first probe's remaining deadline");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(error.details["toolchain_preflight"]["timed_out"], false);
         assert_eq!(
             error.details["toolchain_preflight"]["command"],

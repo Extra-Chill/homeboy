@@ -451,6 +451,44 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
     assert_eq!(store, state_dir.path().join("jobs.json"));
 }
 
+#[cfg(unix)]
+#[test]
+fn daemon_process_scan_never_serializes_inherited_environment() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let secret = "ghp_daemon_status_must_not_expose_this_value";
+    let mut process = Command::new("sh")
+        .args([
+            "-c",
+            "trap 'kill \"$child\" 2>/dev/null' TERM EXIT; sleep 30 & child=$!; wait \"$child\"",
+            "homeboy",
+            "daemon",
+            "serve",
+            "--addr",
+            "127.0.0.1:0",
+            "--state-dir",
+            state_dir.path().to_str().expect("UTF-8 state path"),
+        ])
+        .env("GH_TOKEN", secret)
+        .spawn()
+        .expect("daemon-shaped process");
+
+    let candidates = super::daemon_process_candidates(&state_dir.path().join("jobs.json"))
+        .expect("candidate scan");
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.pid == process.id())
+        .expect("spawned candidate");
+    let serialized = serde_json::to_string(candidate).expect("serialized candidate");
+
+    assert!(!candidate.cmdline.contains("GH_TOKEN"));
+    assert!(!candidate.cmdline.contains(secret));
+    assert!(!serialized.contains("GH_TOKEN"));
+    assert!(!serialized.contains(secret));
+
+    process.kill().expect("stop candidate process");
+    process.wait().expect("reap candidate process");
+}
+
 #[test]
 fn ambiguous_command_state_uses_explicit_process_store_without_home_fallback() {
     let selected_state = tempfile::tempdir().expect("selected state directory");

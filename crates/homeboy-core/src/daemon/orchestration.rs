@@ -1,7 +1,7 @@
 //! Daemon-driven orchestration hook.
 //!
-//! Stale-run reconciliation and controller wait resolution are implemented in
-//! `homeboy-agents` and were only ever advanced by a human typing a command.
+//! Stale-run reconciliation is implemented in `homeboy-agents` and was only
+//! ever advanced by a human typing a command.
 //! The daemon is the only long-lived process that can drive them, and it lives
 //! in `homeboy-core`, which must not depend on the agent-task subsystem.
 //!
@@ -25,14 +25,6 @@ pub trait OrchestrationDriver: Send + Sync {
     /// `agent-task active --reconcile --apply` command uses; the daemon only
     /// supplies the cadence.
     fn reconcile_stale_active_runs(&self) -> Result<Value>;
-
-    /// Resolve controller waits that durable state already satisfies.
-    ///
-    /// A controller parked in `Waiting` has no pending action, so `resume`
-    /// reports `idle` and exits. Nothing polls and nothing times out, which
-    /// makes `Waiting` a state with no automatic exit. Implementations resolve
-    /// only on unambiguous durable evidence.
-    fn reconcile_controller_waits(&self) -> Result<Value>;
 
     /// Advance durable Cooks that were admitted before a Lab destination was
     /// eligible. Implementations must not materialize work while blocked.
@@ -76,10 +68,6 @@ impl OrchestrationDriver for NoopOrchestrationDriver {
         Ok(Value::Null)
     }
 
-    fn reconcile_controller_waits(&self) -> Result<Value> {
-        Ok(Value::Null)
-    }
-
     fn reconcile_unmaterialized_cook_admissions(&self) -> Result<Value> {
         Ok(Value::Null)
     }
@@ -120,12 +108,6 @@ pub fn register_cook_admission_replay_driver(
 /// tick drives.
 pub fn reconcile_stale_active_runs() -> Result<Value> {
     active_driver().reconcile_stale_active_runs()
-}
-
-/// Drive one controller-wait reconcile pass. Public for the same reason as
-/// [`reconcile_stale_active_runs`].
-pub fn reconcile_controller_waits() -> Result<Value> {
-    active_driver().reconcile_controller_waits()
 }
 
 /// Drive one unmaterialized Cook admission pass.

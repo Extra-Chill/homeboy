@@ -57,7 +57,7 @@ mod tests {
     };
     use super::prepare::{failed_component_deploy_result, prepare_component_deploy};
     use super::release_plan::{release_artifact_plan, should_try_download_release_artifact};
-    use super::strategies::cleanup_deploy_build_artifact;
+    use super::strategies::{cleanup_deploy_build_artifact, post_deploy_expected_version};
     use super::{bound_captured_read, ReleaseArtifactPlan, ARTIFACT_VERSION_READ_LIMIT_BYTES};
     use crate::types::{DeployConfig, PreparedDeployArtifact};
     use homeboy_core::component::{
@@ -192,6 +192,56 @@ mod tests {
         assert!(
             durable_artifact.exists(),
             "caller-owned prepared artifacts remain outside downloaded-artifact cleanup"
+        );
+    }
+
+    #[test]
+    fn prepared_artifact_version_drives_post_deploy_verification_over_stale_checkout_version() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let durable_artifact = temp.path().join("release.tar.gz");
+        std::fs::write(&durable_artifact, "release payload").expect("artifact");
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().display().to_string(),
+            remote_path: "plugins/fixture".to_string(),
+            build_artifact: Some("build/fixture.tar.gz".to_string()),
+            extract_command: Some("tar -xzf {{artifact}}".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: vec![component.id.clone()],
+            force: true,
+            skip_build: true,
+            expected_version: Some("1.2.3".to_string()),
+            no_pull: true,
+            prepared_artifact: Some(PreparedDeployArtifact {
+                component_id: component.id.clone(),
+                path: "build/fixture.tar.gz".to_string(),
+                durable_path: durable_artifact.display().to_string(),
+                size_bytes: 15,
+                sha256: crate::sha256_file(&durable_artifact).expect("sha"),
+                version: "1.2.3".to_string(),
+                tag: "v1.2.3".to_string(),
+                source_commit: "0123456789abcdef".to_string(),
+            }),
+            ..DeployConfig::default()
+        };
+
+        let prepared = prepare_component_deploy(
+            &component,
+            &config,
+            "/srv/site",
+            &Project::default(),
+            Some("0.8.1".to_string()),
+            None,
+            None,
+        )
+        .expect("prepared artifact should pass local preflight");
+
+        assert_eq!(prepared.local_version.as_deref(), Some("0.8.1"));
+        assert_eq!(
+            post_deploy_expected_version(&prepared).map(String::as_str),
+            Some("1.2.3")
         );
     }
 

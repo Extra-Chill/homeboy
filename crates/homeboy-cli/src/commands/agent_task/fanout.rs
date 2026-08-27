@@ -1694,9 +1694,6 @@ fn finalize_provider_worktrees(
     report: &agent_task_service::AgentTaskCookBatchReport,
     previously_terminal: Option<&BTreeMap<String, String>>,
 ) -> Result<()> {
-    if !configured_provider_workspace_creation()? {
-        return Ok(());
-    }
     let config = homeboy::core::defaults::load_config();
     for cell in &report.cooks {
         if !cell.lifecycle().terminal {
@@ -1712,35 +1709,34 @@ fn finalize_provider_worktrees(
         if previously_terminal.is_some_and(|terminal| terminal.contains_key(&cook.run_id())) {
             continue;
         }
-        let resolution =
-            homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-                &cook.to_worktree,
-                &config,
-                None,
-            )?;
-        if homeboy::core::worktree_providers::worktree_provider_lifecycle_finalizer_argv_from_config(
-            &resolution.provider_id,
-            &config,
-        )?
-        .is_none()
-        {
-            continue;
-        }
         let disposition = if cell.exit_code == 0 {
-            homeboy::core::worktree_providers::WorktreeProviderTerminalDisposition::Succeeded
+            homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded
         } else {
-            homeboy::core::worktree_providers::WorktreeProviderTerminalDisposition::Failed
+            homeboy::core::worktree_provider::WorktreeTerminalDisposition::Failed
         };
-        homeboy::core::worktree_providers::finalize_apply_enabled_worktree_provider_from_config(
-            &resolution,
-            &homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
+        let finalization = homeboy::core::worktree_provider::finalize_worktree_from_config(
+            &cook.to_worktree,
+            &homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
                 purpose: "agent_task_cook".to_string(),
                 owner_run_ref: cook.run_id(),
-                cleanup_policy: homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+                cleanup_policy:
+                    homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
             },
             disposition,
             &config,
         )?;
+        if matches!(
+            finalization,
+            homeboy::core::worktree_provider::WorktreeFinalizationLookup::NotFound
+        ) && configured_provider_workspace_creation()?
+        {
+            return Err(
+                homeboy::core::worktree_provider::worktree_finalization_not_found_error(
+                    &cook.to_worktree,
+                    &config,
+                ),
+            );
+        }
     }
     Ok(())
 }
@@ -2881,10 +2877,10 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                 task_ref: cook.task_url.clone(),
                 run_id: Some(cook.run_id()),
                 provider_lifecycle: provider_workspace_creation.then(|| {
-                    homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
+                    homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
                         purpose: "agent_task_cook".to_string(),
                         owner_run_ref: cook.run_id(),
-                        cleanup_policy: homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+                        cleanup_policy: homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
                     }
                 }),
             }).collect(),
@@ -2930,14 +2926,12 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
             continue;
         }
         if cook.adopted_worktree {
-            let resolution = homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination_from_config(
+            let workspace = homeboy::core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
                 &cook.to_worktree,
                 &homeboy::core::defaults::load_config(),
-                None,
-                None,
+                homeboy::core::worktree_provider::WorktreeMutationContext::default(),
             )?;
-            let workspace = &resolution.worktree;
-            if workspace.branch != *branch {
+            if workspace.branch.as_deref() != Some(branch) {
                 return Err(Error::validation_invalid_argument(
                     "worktree",
                     "explicit worktree branch does not match its Cook child",
@@ -2965,11 +2959,8 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                     None,
                 ));
             }
-            let path = PathBuf::from(&workspace.path);
-            homeboy::core::worktree_providers::validate_task_worktree_root(
-                &path,
-                &cook.to_worktree,
-            )?;
+            let path = workspace.path.clone();
+            homeboy::core::worktree_provider::validate_worktree_root(&path, &cook.to_worktree)?;
             let base = homeboy::core::git::run_git(
                 &path,
                 &[
@@ -3005,7 +2996,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                 command: vec!["adopted".to_string(), cook.to_worktree.clone()],
                 retry_after_seconds: None,
                 active_lock_holder: None,
-                path: Some(workspace.path.clone()),
+                path: Some(workspace.path.display().to_string()),
                 error: None,
                 failure: None,
             });
@@ -3016,13 +3007,13 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
             continue;
         }
         if let Some(config) = &provider_config {
-            match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            match homeboy::core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
                     &cook.to_worktree,
                     config,
-                    None,
+                    homeboy::core::worktree_provider::WorktreeMutationContext::default(),
                 ) {
-                Ok(resolution) => {
-                    if resolution.worktree.branch != *branch {
+                Ok(workspace) => {
+                    if workspace.branch.as_deref() != Some(branch) {
                         return Err(Error::validation_invalid_argument(
                             "worktree",
                             "resolved provider worktree branch does not match its Cook child",
@@ -3030,10 +3021,10 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                             None,
                         ));
                     }
-                    if resolution.worktree.task_url.as_deref().is_some_and(|task_url| {
+                    if workspace.task_url.as_deref().is_some_and(|task_url| {
                         cook.task_url.as_deref().is_none_or(|expected| {
-                            homeboy::core::worktree_providers::normalize_task_url(task_url)
-                                != homeboy::core::worktree_providers::normalize_task_url(expected)
+                            homeboy::core::worktree_provider::normalize_worktree_task_url(task_url)
+                                != homeboy::core::worktree_provider::normalize_worktree_task_url(expected)
                         })
                     }) {
                         return Err(Error::validation_invalid_argument(
@@ -3050,7 +3041,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
                         command: Vec::new(),
                         retry_after_seconds: None,
                         active_lock_holder: None,
-                        path: Some(resolution.worktree.path),
+                        path: Some(workspace.path.display().to_string()),
                         error: None,
                         failure: None,
                     });
@@ -3230,7 +3221,7 @@ fn with_workspace_owner_repair_commands(
         else {
             continue;
         };
-        let intent = homeboy::core::worktree_providers::WorktreeProviderCreateIntent {
+        let intent = homeboy::core::worktree_provider::WorktreeProvisionIntent {
             handle: row.handle.clone(),
             repo: args.repo.clone(),
             base: cook_batch_from(args).to_string(),
@@ -3240,14 +3231,14 @@ fn with_workspace_owner_repair_commands(
                 .clone()
                 .expect("generated cooks have task URLs"),
         };
-        let lifecycle = homeboy::core::worktree_providers::WorktreeProviderLifecycleIntent {
+        let lifecycle = homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
             purpose: "agent_task_cook".to_string(),
             owner_run_ref: cook.run_id(),
             cleanup_policy:
-                homeboy::core::worktree_providers::WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+                homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
         };
         row.command =
-            homeboy::core::worktree_providers::worktree_provider_lifecycle_ensure_argv_from_config(
+            homeboy::core::worktree_provider::configured_worktree_lifecycle_ensure_argv_from_config(
                 &intent, &lifecycle, &config,
             )?;
     }
@@ -3263,23 +3254,18 @@ fn configured_provider_workspace_creation() -> Result<bool> {
 }
 
 fn active_registered_worktree_path(handle: &str) -> Option<String> {
-    if let Ok(status) = worktree::status(handle) {
-        return (status.record.state == worktree::TaskWorktreeState::Active
-            && !status.safety.worktree_missing)
-            .then_some(status.record.worktree_path);
-    }
-    match worktree::resolve_workspace_ref_if_present(handle)
-        .ok()
-        .flatten()?
+    if let Ok(workspace) =
+        homeboy::core::worktree_provider::observe_worktree_provider_workspace(handle)
     {
-        worktree::WorkspaceRefRecord::Adopted(record)
-            if record.state == worktree::TaskWorktreeState::Active
-                && std::path::Path::new(&record.path).is_dir() =>
-        {
-            Some(record.path)
-        }
-        _ => None,
+        return (!workspace.safety.missing).then_some(workspace.ownership.path);
     }
+    homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
+        handle,
+        homeboy::core::worktree_provider::WorktreeMutationContext::default(),
+    )
+    .ok()
+    .flatten()
+    .map(|target| target.path.display().to_string())
 }
 
 fn preflight_batch_cook_recipes(
@@ -5972,6 +5958,84 @@ mod tests {
         });
     }
 
+    #[test]
+    fn dispatcher_fanout_finalizes_native_failure_as_preserved() {
+        with_isolated_home(|home| {
+            let source = home.path().join("Developer/fixture");
+            std::fs::create_dir_all(&source).expect("source checkout");
+            for args in [
+                vec!["init", "--quiet", "-b", "main"],
+                vec!["config", "user.email", "test@example.com"],
+                vec!["config", "user.name", "Homeboy Test"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git runs")
+                    .success());
+            }
+            std::fs::write(source.join("homeboy.json"), r#"{"id":"fixture"}"#)
+                .expect("component manifest");
+            assert!(Command::new("git")
+                .args(["add", "."])
+                .current_dir(&source)
+                .status()
+                .expect("git add")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(&source)
+                .status()
+                .expect("git commit")
+                .success());
+            write_component_registration(home.path(), "fixture", &source);
+
+            let mut plan = test_batch_plan();
+            plan.cooks.truncate(1);
+            plan.cooks[0].to_worktree = "fixture@native-finalization".to_string();
+            homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                component_id: "fixture".to_string(),
+                branch: "native-finalization".to_string(),
+                from: Some("main".to_string()),
+                task_url: plan.cooks[0].task_url.clone(),
+                run_id: Some(plan.cooks[0].run_id()),
+                cleanup_policy: Some(homeboy::core::worktree::CleanupPolicy::RemoveWhenSafe),
+            })
+            .expect("native destination");
+            let report = agent_task_service::AgentTaskCookBatchReport {
+                schema: "homeboy/agent-task-cook-batch/v1",
+                batch_id: plan.fanout_id.clone(),
+                status: "failed".to_string(),
+                total: 1,
+                queued: 0,
+                running: 0,
+                succeeded: 0,
+                failed: 1,
+                cancelled: 0,
+                timed_out: 0,
+                cooks: vec![agent_task_service::AgentTaskCookBatchCellReport {
+                    cook_id: plan.cooks[0].cook_id.clone(),
+                    initial_run_id: plan.cooks[0].run_id(),
+                    status: "failed".to_string(),
+                    exit_code: 1,
+                    result: None,
+                    error: None,
+                }],
+            };
+
+            finalize_provider_worktrees(&plan, &report, None)
+                .expect("native terminal finalization");
+            let record = homeboy::core::worktree::resolve(&plan.cooks[0].to_worktree)
+                .expect("native record");
+            assert_eq!(
+                record.cleanup_policy,
+                homeboy::core::worktree::CleanupPolicy::PreserveOnFailure
+            );
+            assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+        });
+    }
+
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvRestore {
@@ -7031,7 +7095,7 @@ fi
     }
 
     fn with_materialized_cook_batch_worktrees(test: impl FnOnce()) {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
             let mut config = homeboy::core::defaults::load_config();
             config.agent_task.default_backend = Some("sandbox".to_string());
             config.worktree_providers.clear();
@@ -7040,6 +7104,32 @@ fi
             );
             homeboy::core::defaults::save_config(&config)
                 .expect("configure fixture default backend");
+            // `--repo homeboy` only resolves against a registered primary, so the
+            // fixture has to own that registration as well as the worktrees it
+            // adopts. Without it every cook-batch case fails in repository
+            // resolution before reaching the behavior under test.
+            let primary = home.path().join("cook-batch-primary");
+            std::fs::create_dir_all(&primary).expect("create primary fixture");
+            for args in [
+                ["init", "-b", "main"].as_slice(),
+                ["config", "user.email", "test@example.com"].as_slice(),
+                ["config", "user.name", "Homeboy Test"].as_slice(),
+                ["commit", "--allow-empty", "-m", "initial"].as_slice(),
+                // The planned source ref has to resolve without a network, so the
+                // fixture publishes `origin/main` locally rather than fetching it.
+                ["update-ref", "refs/remotes/origin/main", "HEAD"].as_slice(),
+            ] {
+                assert!(
+                    Command::new("git")
+                        .args(args)
+                        .current_dir(&primary)
+                        .status()
+                        .expect("initialize primary fixture")
+                        .success(),
+                    "git {args:?} failed"
+                );
+            }
+            write_component_registration(home.path(), "homeboy", &primary);
             let worktrees = tempfile::tempdir().expect("managed worktree fixtures");
             for (handle, name) in [
                 ("homeboy@fix-issue-6453-homeboy", "issue-6453"),

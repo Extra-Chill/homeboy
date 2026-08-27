@@ -3960,11 +3960,13 @@ fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
                 "local_retry_supervisor",
                 &Error::internal_unexpected(
                     "local Cook retry launcher exited before provider execution",
-                ),
+                )
+                .with_retryable(true),
             )
             .expect("strict lock must not re-enter during terminal persistence");
 
             assert_eq!(failed.state, AgentTaskRunState::Failed);
+            assert_eq!(failed.metadata["pre_execution_failure"]["retryable"], true);
             assert_eq!(
                 store.read_aggregate(run_id).expect("aggregate").status,
                 AgentTaskAggregateStatus::Failed

@@ -15,7 +15,9 @@ use crate::agent_task_executor_evidence::link_latest_executor_evidence;
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment,
 };
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -103,8 +105,7 @@ impl ProviderOutputCapture {
 pub(super) fn run_materialized_provider_command(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
-    run_id: Option<&str>,
-    execution_attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
     let mut retry_attempt = 1;
     // This state belongs to one invocation's retry sequence. It cannot couple
@@ -112,8 +113,7 @@ pub(super) fn run_materialized_provider_command(
     let mut prior_immediate_failure = None;
     loop {
         let started = Instant::now();
-        let mut outcome =
-            run_materialized_provider_command_once(request, provider, run_id, execution_attempt);
+        let mut outcome = run_materialized_provider_command_once(request, provider, execution);
         classify_provider_policy_denial(request, &mut outcome);
         classify_transient_provider_outcome(&mut outcome);
 
@@ -142,7 +142,7 @@ pub(super) fn run_materialized_provider_command(
                     }),
                 });
                 attach_runtime_tool_provenance(request, &mut outcome);
-                link_latest_executor_evidence(request, &mut outcome, run_id);
+                link_latest_executor_evidence(request, &mut outcome, execution.run_id.as_deref());
                 return outcome;
             }
             prior_immediate_failure = Some(failure.signature);
@@ -160,7 +160,7 @@ pub(super) fn run_materialized_provider_command(
             attach_runtime_tool_provenance(request, &mut outcome);
             // Preserve and link the latest raw executor input/result as
             // first-class run evidence before returning the final outcome.
-            link_latest_executor_evidence(request, &mut outcome, run_id);
+            link_latest_executor_evidence(request, &mut outcome, execution.run_id.as_deref());
             return outcome;
         }
 
@@ -611,16 +611,14 @@ impl ProviderContainmentReport {
 pub(super) fn run_materialized_provider_command_once(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
-    run_id: Option<&str>,
-    attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
     let mut containment_report = ProviderContainmentReport::default();
     let mut outcome = run_materialized_provider_command_once_contained(
         request,
         provider,
         &mut containment_report,
-        run_id,
-        attempt,
+        execution,
     );
     containment_report.annotate(&mut outcome);
     if let Err(error) = retain_failed_workspace_artifacts(&mut outcome, request) {
@@ -639,9 +637,10 @@ fn run_materialized_provider_command_once_contained(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
     containment_report: &mut ProviderContainmentReport,
-    run_id: Option<&str>,
-    attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
+    let run_id = execution.run_id.as_deref();
+    let attempt = execution.attempt;
     let command = render_provider_command_display(provider);
     let deadline_remaining_ms = crate::agent_task_timeout::remaining_execution_deadline_ms(
         request.limits.execution_deadline_unix_ms,
@@ -811,7 +810,54 @@ fn run_materialized_provider_command_once_contained(
         ));
     }
 
+    let launch_context = match AgentTaskProviderLaunchContext::materialize(
+        &request.request,
+        provider,
+        execution,
+        cwd.as_deref(),
+        &env,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.provider_launch_context_invalid",
+                error.to_string(),
+                json!({ "provider": provider.id }),
+            )
+        }
+    };
+    if let (Some(store), Some(run_id)) = (execution.lifecycle_store(), run_id) {
+        if let Err(error) = store.record_provider_launch_context(
+            run_id,
+            &request.request.task_id,
+            attempt,
+            &launch_context,
+        ) {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::Provider,
+                "agent_task.provider_launch_context_persistence_failed",
+                error.to_string(),
+                json!({ "provider": provider.id, "run_id": run_id }),
+            );
+        }
+    }
+
     let mut command_builder = Command::new(&program);
+    if let Err(error) = launch_context.apply_declared_environment(&mut command_builder) {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::ProviderError,
+            AgentTaskFailureClassification::InvalidInput,
+            "agent_task.provider_launch_environment_invalid",
+            error.to_string(),
+            json!({ "provider": provider.id }),
+        );
+    }
     command_builder.args(&args).envs(
         env.iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
@@ -916,12 +962,22 @@ fn run_materialized_provider_command_once_contained(
     if let Some(run_id) = run_id {
         // Failure to record this diagnostic identity must not interrupt provider
         // execution. The reservation remains the execution authority.
-        let _ = crate::agent_task_lifecycle::record_provider_execution_process(
-            run_id,
-            &request.request.task_id,
-            attempt,
-            child.id(),
-        );
+        if let Some(store) = execution.lifecycle_store() {
+            let _ = crate::agent_task_lifecycle::record_provider_execution_process_in_store(
+                store,
+                run_id,
+                &request.request.task_id,
+                attempt,
+                child.id(),
+            );
+        } else {
+            let _ = crate::agent_task_lifecycle::record_provider_execution_process(
+                run_id,
+                &request.request.task_id,
+                attempt,
+                child.id(),
+            );
+        }
     }
 
     if let Err(error) = containment.attach(&child) {
@@ -949,6 +1005,8 @@ fn run_materialized_provider_command_once_contained(
     // Progress and the wall timeout must share a monotonic clock. A system-clock
     // adjustment must never turn a stale provider into a live one.
     let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let mut runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
+    let mut runtime_progress_events = 0_u64;
 
     let (stdout_runtime_capture, stderr_runtime_capture) =
         runtime_output_captures(request, run_id, attempt);
@@ -990,27 +1048,39 @@ fn run_materialized_provider_command_once_contained(
         let _ = Write::write_all(&mut stdin, &input);
     }
 
-    let liveness_timeout = request
-        .limits
-        .liveness_timeout_ms
-        .map(Duration::from_millis);
+    let liveness_timeout_ms = crate::agent_task_timeout::effective_provider_liveness_timeout_ms(
+        request.limits.liveness_timeout_ms,
+    );
+    // The provider receives `requested_timeout_ms` and gets the process grace
+    // specifically to serialize its timeout outcome. A liveness deadline that
+    // is equal to or later than that provider deadline must not consume the
+    // grace first and misclassify the attempt as stalled.
+    let liveness_timeout = (liveness_timeout_ms < requested_timeout_ms)
+        .then_some(Duration::from_millis(liveness_timeout_ms));
     let (status, killed_for_liveness, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (Some(status), false, false),
             Ok(None) => {
                 let elapsed = started.elapsed();
+                let current_runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
+                if runtime_progress_advanced(&runtime_progress, &current_runtime_progress) {
+                    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                    last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+                    runtime_progress_events = runtime_progress_events.saturating_add(1);
+                }
+                runtime_progress = current_runtime_progress;
                 if elapsed >= process_timeout {
                     break (None, false, true);
                 }
-                if let Some(liveness) = liveness_timeout {
+                if let Some(liveness_timeout) = liveness_timeout {
                     let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
                         last_progress_ms.load(Ordering::SeqCst),
                     ));
-                    if progress_age >= liveness {
+                    if progress_age >= liveness_timeout {
                         break (None, true, false);
                     }
                     // Wake up at the earlier of process timeout and liveness deadline.
-                    let remaining_liveness = liveness.saturating_sub(progress_age);
+                    let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
                     let sleep_for = remaining_liveness
                         .min(process_timeout - elapsed)
                         .min(Duration::from_millis(50));
@@ -1060,7 +1130,7 @@ fn run_materialized_provider_command_once_contained(
             &stderr,
             &provider.id,
             liveness_timeout
-                .expect("liveness kill requires a configured liveness deadline")
+                .expect("liveness kill requires an earlier liveness deadline")
                 .as_millis(),
         );
         return failure_outcome(
@@ -1075,9 +1145,10 @@ fn run_materialized_provider_command_once_contained(
                 "deadline": "liveness",
                 "timeout_ms": requested_timeout_ms,
                 "process_timeout_ms": process_timeout.as_millis(),
-                "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+                "liveness_timeout_ms": liveness_timeout_ms,
                 "stdout_bytes": stdout_capture.total_bytes,
                 "stderr_bytes": stderr_capture.total_bytes,
+                "runtime_progress_events": runtime_progress_events,
             }),
         );
     }
@@ -1106,6 +1177,7 @@ fn run_materialized_provider_command_once_contained(
                 run_id,
                 requested_timeout_ms,
                 process_timeout.as_millis(),
+                liveness_timeout_ms,
                 cancellation_acknowledged,
                 &stdout_capture,
                 &stderr_capture,
@@ -1143,7 +1215,7 @@ fn run_materialized_provider_command_once_contained(
                     elapsed_ms: started.elapsed().as_millis(),
                     requested_timeout_ms,
                     process_timeout_ms: process_timeout.as_millis(),
-                    liveness_timeout_ms: request.limits.liveness_timeout_ms,
+                    liveness_timeout_ms: Some(liveness_timeout_ms),
                     execution_deadline_unix_ms: request.limits.execution_deadline_unix_ms,
                 },
             );
@@ -1163,6 +1235,8 @@ fn run_materialized_provider_command_once_contained(
                 &status,
                 &stdout,
                 &stderr,
+                stdout_capture.total_bytes,
+                stderr_capture.total_bytes,
                 &provider_output_redactions(request, provider),
             ),
         );
@@ -1227,6 +1301,8 @@ fn run_materialized_provider_command_once_contained(
                 &status,
                 &stdout,
                 &stderr,
+                stdout_capture.total_bytes,
+                stderr_capture.total_bytes,
                 &provider_output_redactions(request, provider),
             ),
         ),
@@ -1239,10 +1315,11 @@ fn provider_cargo_target(
     environment: &[(String, String)],
 ) -> homeboy_core::Result<Option<homeboy_core::ManagedCargoTarget>> {
     let Some(cwd) = cwd else { return Ok(None) };
-    let enabled =
-        homeboy_core::component::resolve_effective(None, Some(&cwd.to_string_lossy()), None)
-            .map(|component| component.managed_execution.shared_cargo_target)
-            .unwrap_or(false);
+    // Attempt worktrees execute from their own portable checkout state. Ambient
+    // registry resolution can scan unrelated registered repositories and cannot
+    // authoritatively configure this runner-local snapshot.
+    let enabled = homeboy_core::component::try_discover_from_portable(cwd)?
+        .is_some_and(|component| component.managed_execution.shared_cargo_target);
     if !enabled {
         return Ok(None);
     }
@@ -1503,7 +1580,8 @@ pub(super) fn run_provider_command(
     run_id: Option<&str>,
 ) -> AgentTaskOutcome {
     let materialized = test_executor_request(request);
-    run_materialized_provider_command(&materialized, provider, run_id, 1)
+    let context = test_execution_context(run_id);
+    run_materialized_provider_command(&materialized, provider, &context)
 }
 
 #[cfg(test)]
@@ -1512,7 +1590,19 @@ pub(super) fn run_provider_command_once(
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let materialized = test_executor_request(request);
-    run_materialized_provider_command_once(&materialized, provider, None, 1)
+    let context = test_execution_context(None);
+    run_materialized_provider_command_once(&materialized, provider, &context)
+}
+
+#[cfg(test)]
+fn test_execution_context(run_id: Option<&str>) -> AgentTaskExecutionContext {
+    AgentTaskExecutionContext {
+        plan_id: "provider-unit-test".to_string(),
+        run_id: run_id.map(str::to_string),
+        attempt: 1,
+        cancellation: crate::agent_task_scheduler::AgentTaskCancellationToken::default(),
+        lifecycle_store: None,
+    }
 }
 
 #[cfg(test)]
@@ -1608,6 +1698,41 @@ where
     })
 }
 
+/// Size every file the provider owns under its artifacts directory.
+///
+/// `artifacts_path` is handed to the provider as its private output directory,
+/// so a file growing there is the provider doing work — whatever it is named.
+///
+/// This deliberately does not filter on the file name. It used to require the
+/// name to contain `progress`, which made liveness depend on a runtime's naming
+/// convention rather than on observable activity (#13623). A runtime that
+/// streams its telemetry into, say, `<task>-<backend>-runtime-stdout.log` was
+/// invisible: the watchdog read zero progress while that file grew to 94KB, and
+/// killed a healthy provider as stalled. Nothing else writes here, so counting
+/// every file cannot manufacture liveness the provider did not earn.
+fn runtime_progress_snapshot(root: &Path) -> BTreeMap<PathBuf, u64> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return BTreeMap::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = path.metadata().ok()?;
+            metadata.is_file().then_some((path, metadata.len()))
+        })
+        .collect()
+}
+
+fn runtime_progress_advanced(
+    previous: &BTreeMap<PathBuf, u64>,
+    current: &BTreeMap<PathBuf, u64>,
+) -> bool {
+    current
+        .iter()
+        .any(|(path, size)| *size > previous.get(path).copied().unwrap_or_default())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn provider_timeout_diagnostic_data(
     request: &AgentTaskExecutorRequest,
@@ -1616,6 +1741,7 @@ fn provider_timeout_diagnostic_data(
     run_id: Option<&str>,
     timeout_ms: u64,
     process_timeout_ms: u128,
+    liveness_timeout_ms: u64,
     cancellation_acknowledged: bool,
     stdout: &ProviderOutputCapture,
     stderr: &ProviderOutputCapture,
@@ -1652,7 +1778,7 @@ fn provider_timeout_diagnostic_data(
         "deadline": "wall_clock",
         "timeout_ms": timeout_ms,
         "process_timeout_ms": process_timeout_ms,
-        "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+        "liveness_timeout_ms": liveness_timeout_ms,
         "output_event_count": stdout.events.saturating_add(stderr.events),
         "stdout_bytes": stdout.total_bytes,
         "stderr_bytes": stderr.total_bytes,
@@ -1718,7 +1844,7 @@ fn classify_stall_or_rate_limit(
         AgentTaskOutcomeStatus::ProviderError,
         AgentTaskFailureClassification::Stalled,
         format!(
-            "provider '{provider_id}' produced no stdout/stderr progress before liveness_timeout_ms={liveness_timeout_ms}"
+            "provider '{provider_id}' produced no process output or structured runtime progress before liveness_timeout_ms={liveness_timeout_ms}"
         ),
     )
 }
@@ -1730,6 +1856,8 @@ fn executor_process_diagnostic_data(
     status: &std::process::ExitStatus,
     stdout: &str,
     stderr: &str,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
     redactions: &[String],
 ) -> Value {
     let command = redact_sensitive_text(command, redactions);
@@ -1742,11 +1870,11 @@ fn executor_process_diagnostic_data(
         "exit_code": status.code(),
         "signal": exit_signal(status),
         "stdout": bounded_executor_output(&stdout),
-        "stdout_bytes": stdout.len(),
-        "stdout_truncated": stdout.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stdout_bytes": stdout_bytes,
+        "stdout_truncated": stdout_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
         "stderr": bounded_executor_output(&stderr),
-        "stderr_bytes": stderr.len(),
-        "stderr_truncated": stderr.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stderr_bytes": stderr_bytes,
+        "stderr_truncated": stderr_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
         "remediation_hints": provider_process_remediation_hints(&stdout, &stderr),
     })
 }
@@ -1853,6 +1981,8 @@ fn signal_termination_outcome(
         status,
         stdout,
         stderr,
+        stdout.len() as u64,
+        stderr.len() as u64,
         &provider_output_redactions(request, provider),
     );
     if let Some(object) = data.as_object_mut() {
@@ -1953,6 +2083,8 @@ fn surface_provider_process_failure(
         status,
         stdout,
         stderr,
+        stdout.len() as u64,
+        stderr.len() as u64,
         &redactions,
     );
     let exit_description = status
@@ -2673,7 +2805,7 @@ pub(super) fn provider_command_env(
     env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
     env.extend(
         resolve_secret_env_with_fallbacks(
-            &request.executor.secret_env,
+            &secret_env_plan.secret_env_names(),
             &provider_secret_sources(provider, Some(request)),
         )
         .map_err(ProviderCommandEnvError::Secret)?,

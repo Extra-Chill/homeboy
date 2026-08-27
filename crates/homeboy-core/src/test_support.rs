@@ -11,8 +11,82 @@ use std::{
 };
 
 use tempfile::TempDir;
+use uuid::Uuid;
 
-use crate::api_jobs::{Job, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult};
+use crate::api_jobs::{
+    ControllerJobState, ControllerJobSubmissionOutcome, Job, JobEvent, JobEventKind, JobStore,
+    RemoteRunnerJobRequest, RemoteRunnerJobResult,
+};
+use crate::daemon::controller_job_driver::{ControllerJobDriver, ControllerJobHandle};
+use crate::error::{Error, Result};
+
+/// A real in-memory controller job boundary for domain-driver tests.
+///
+/// The harness keeps construction internals out of the production API while
+/// letting feature crates execute drivers against durable checkpoint,
+/// progress, and cancellation behavior.
+pub struct ControllerJobHarness {
+    store: JobStore,
+    job_id: Uuid,
+    driver: Arc<dyn ControllerJobDriver>,
+}
+
+impl ControllerJobHarness {
+    pub fn new(driver: Arc<dyn ControllerJobDriver>, request: serde_json::Value) -> Result<Self> {
+        driver.validate_secret_references(&request)?;
+        let public_request = driver.public_request(&request)?;
+        let request_digest = crate::daemon::hex_digest(&request)?;
+        let store = JobStore::default();
+        let outcome = store.admit_controller_job(
+            format!("controller.{}", driver.job_type()),
+            format!("test-controller-job:{}", Uuid::new_v4()),
+            ControllerJobState {
+                job_type: driver.job_type().to_string(),
+                version: driver.version(),
+                request,
+                public_request,
+                request_digest,
+                checkpoint: None,
+                cancellation_requested: false,
+                cancellation_reason: None,
+                execution_claim_id: None,
+                recovery_attempted: false,
+            },
+        )?;
+        let ControllerJobSubmissionOutcome::Submitted(job_id) = outcome else {
+            return Err(Error::internal_unexpected(
+                "unique controller test job was unexpectedly replayed",
+            ));
+        };
+        store.claim_controller_execution(job_id, false)?;
+        Ok(Self {
+            store,
+            job_id,
+            driver,
+        })
+    }
+
+    pub fn handle(&self) -> ControllerJobHandle {
+        ControllerJobHandle::new(self.store.handle(self.job_id), Arc::clone(&self.driver))
+    }
+
+    pub fn job(&self) -> Result<Job> {
+        self.store.get(self.job_id)
+    }
+
+    pub fn events(&self) -> Result<Vec<JobEvent>> {
+        self.store.events(self.job_id)
+    }
+
+    pub fn checkpoint(&self) -> Result<Option<serde_json::Value>> {
+        Ok(self.store.controller_job_state(self.job_id)?.checkpoint)
+    }
+
+    pub fn request_cancellation(&self, reason: impl Into<String>) -> Result<Job> {
+        self.store
+            .request_controller_cancellation(self.job_id, reason.into())
+    }
+}
 
 const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
 /// Test-only contract between the hermetic context and the Cargo test runner.
@@ -20,8 +94,6 @@ const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
 /// cancelled, so a daemon must not create a detached session that escapes it.
 pub const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
 
-static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
-static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
 #[cfg(unix)]
 static SHARED_CONTROLLER_RUNTIME_VERSION_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
@@ -1395,57 +1467,25 @@ pub fn write_source_extension(home: &std::path::Path, id: &str, file_extension: 
 }
 
 pub fn shared_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
-    shared_git_repo_fixture_from_template(name, shared_empty_git_repo_template())
+    git_repo_fixture(name, false)
 }
 
 pub fn shared_committed_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
-    shared_git_repo_fixture_from_template(name, shared_committed_git_repo_template())
+    git_repo_fixture(name, true)
 }
 
-fn shared_git_repo_fixture_from_template(name: &str, template: &Path) -> (TempDir, PathBuf) {
+fn git_repo_fixture(name: &str, committed: bool) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("git fixture tempdir");
     let repo = temp.path().join(name);
-    copy_dir_all(template, &repo).expect("copy git fixture template");
-    (temp, repo)
-}
-
-fn shared_empty_git_repo_template() -> &'static Path {
-    SHARED_EMPTY_GIT_REPO_TEMPLATE
-        .get_or_init(|| {
-            let temp = TempDir::new().expect("git template tempdir");
-            run_git_template_command(temp.path(), &["init", "-q"]);
-            temp
-        })
-        .path()
-}
-
-fn shared_committed_git_repo_template() -> &'static Path {
-    SHARED_COMMITTED_GIT_REPO_TEMPLATE
-        .get_or_init(|| {
-            let temp = TempDir::new().expect("committed git template tempdir");
-            run_git_template_command(temp.path(), &["init", "-q"]);
-            std::fs::write(temp.path().join("README.md"), "# homeboy test fixture\n")
-                .expect("git template readme");
-            run_git_template_command(temp.path(), &["add", "README.md"]);
-            run_git_template_command(temp.path(), &["commit", "-q", "-m", "test fixture"]);
-            temp
-        })
-        .path()
-}
-
-fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let target = to.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_all(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target)?;
-        }
+    std::fs::create_dir_all(&repo).expect("git fixture repo");
+    run_git_template_command(&repo, &["init", "-q", "-b", "main"]);
+    if committed {
+        std::fs::write(repo.join("README.md"), "# homeboy test fixture\n")
+            .expect("git fixture readme");
+        run_git_template_command(&repo, &["add", "README.md"]);
+        run_git_template_command(&repo, &["commit", "-q", "-m", "test fixture"]);
     }
-    Ok(())
+    (temp, repo)
 }
 
 pub fn run_git_fixture_command(repo: &Path, args: &[&str]) {

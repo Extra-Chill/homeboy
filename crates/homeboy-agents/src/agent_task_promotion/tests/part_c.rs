@@ -142,11 +142,15 @@ fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
 fn configured_command_provider_is_resolved_lazily_with_provenance() {
     let workspace = tempfile::tempdir().expect("workspace");
     git(workspace.path(), &["init", "-b", "cook-target"]);
+    let lookup_log = tempfile::NamedTempFile::new()
+        .expect("lookup log")
+        .into_temp_path();
     let provider = tempfile::NamedTempFile::new().expect("provider command");
     std::fs::write(
         provider.path(),
         format!(
-            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\nprintf 'resolve\\n' >> '{}'\nprintf '%s\\n' '{}'\n",
+            lookup_log.display(),
             serde_json::json!({
                 "worktrees": [{
                     "handle": "fixture@cook-target",
@@ -198,6 +202,13 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
         },
     );
 
+    preflight_configured_workspace_provider_with_config("fixture@cook-target", &config)
+        .expect("Cook promotion preflight admits configured target");
+    assert_eq!(
+        std::fs::read_to_string(&lookup_log).expect("preflight lookup log"),
+        "resolve\n"
+    );
+
     let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
         &promotion_options("fixture@cook-target"),
         &config,
@@ -240,6 +251,11 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
     assert_eq!(
         error.details["worktree_provider"]["path"],
         workspace.path().display().to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lookup_log).expect("revalidation lookup log"),
+        "resolve\nresolve\n",
+        "Cook must re-resolve provider ownership immediately before promotion"
     );
 }
 
@@ -433,6 +449,119 @@ fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination
             .last(),
         Some(&repo.display().to_string())
     );
+}
+
+#[test]
+fn committed_candidate_pre_apply_resolution_trusts_only_its_exact_unpushed_destination() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (temp, repo, base, candidate) = adopted_commit_repo();
+        let provider = temp.path().join("configured-provider.sh");
+        let response = serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-apply-response/v1",
+            "workspace_path": repo,
+            "command_evidence": []
+        });
+        let invocation = CommandInvocation {
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("cat >/dev/null; printf '%s' '{response}'"),
+            ],
+            ..Default::default()
+        };
+        let configure_provider = |script: &str| {
+            std::fs::write(&provider, script).expect("write configured provider");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&provider)
+                    .expect("provider metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+            }
+            let mut config = HomeboyConfig::default();
+            config.worktree_providers.insert(
+                "fixture".to_string(),
+                WorktreeProviderConfig {
+                    enabled: true,
+                    kind: WorktreeProviderKind::Command,
+                    apply_enabled: true,
+                    lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: WorktreeProviderCommands {
+                        resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                        ..Default::default()
+                    },
+                    list_result_mapping: Some(WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    }),
+                },
+            );
+            homeboy_core::defaults::save_config(&config).expect("save provider config");
+        };
+        let inventory = |before_output: &str| {
+            format!(
+                "#!/bin/sh\n{before_output}printf '%s\\n' '{}'\n",
+                serde_json::json!({
+                    "worktrees": [{
+                        "handle": "fixture@candidate",
+                        "path": repo,
+                        "branch": "main",
+                        "safety": { "dirty": false, "unpushed": true, "primary": false }
+                    }]
+                })
+            )
+        };
+        configure_provider(&inventory(""));
+        let mut options = adopted_commit_options(
+            &temp,
+            &repo,
+            base.clone(),
+            candidate.clone(),
+            VerifyGateOptions::default(),
+        );
+        options.to_worktree = "fixture@candidate".to_string();
+        options.provider_invocation = Some(invocation.clone());
+        promote(options.clone()).expect("exact clean unpushed candidate is admitted before apply");
+
+        let alternate = temp.path().join("alternate");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                alternate.to_str().expect("alternate path"),
+                &candidate,
+            ],
+        );
+        let mut mismatched_path = options.clone();
+        mismatched_path.source_worktree_path = Some(alternate);
+        let error = promote(mismatched_path).expect_err("different source path is rejected");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.untrusted_unpushed"
+        );
+
+        configure_provider(&inventory(&format!(
+            "git -C {} commit --allow-empty -m advanced >/dev/null\n",
+            repo.display()
+        )));
+        let error = promote(options).expect_err("advanced destination HEAD is rejected");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.untrusted_unpushed"
+        );
+    });
 }
 
 #[test]
@@ -798,10 +927,9 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
     // verify gate that touches autoloaded deps fatals on missing deps
     // instead of reporting a real pass/fail. Promotion must run the
     // component's dependency install step against the worktree before the
-    // verify gate executes. This uses a runtime-agnostic component `deps`
-    // script (no composer/npm binary required) to prove the install ran.
+    // verify gate executes. This uses a runtime-agnostic dependency provider
+    // manifest (no composer/npm binary required) to prove the install ran.
     homeboy_core::test_support::with_isolated_home(|_| {
-        homeboy_extension::component_script::register_component_script_runner();
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
 
@@ -809,11 +937,13 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
         std::fs::create_dir_all(&worktree_path).expect("worktree dir");
         let deps_marker = worktree_path.join("deps-installed.txt");
         std::fs::write(
-            worktree_path.join("homeboy.json"),
+            worktree_path.join("homeboy-deps.json"),
             serde_json::json!({
-                "id": "deps-worktree",
-                "scripts": {
-                    "deps": ["sh -c 'printf installed > deps-installed.txt'"]
+                "provider": "fixture-provider",
+                "commands": {
+                    "install": {
+                        "argv": ["sh", "-c", "printf installed > deps-installed.txt"]
+                    }
                 }
             })
             .to_string(),
@@ -842,6 +972,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                     verify: vec!["true".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                    hydrate_dependencies: true,
                     ..Default::default()
                 },
                 provider_command: None,
