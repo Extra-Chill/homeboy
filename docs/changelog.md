@@ -4,6 +4,33 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.363.0] - 2026-08-27
+
+### Added
+- decide repair convergence as a pure function
+- bump stale workflow pins instead of only reporting them
+
+### Changed
+- apply rustfmt
+- rustfmt command_runner.rs workspace liveness check
+- agent-task: treat workspace file activity as provider liveness evidence
+
+### Fixed
+- disclose legacy secrets file migration on auth mutations
+- skip provider rotation entries known to be over their usage cap
+- contain deterministic gate process trees
+- surface live cook phase/attempt/gate status while running
+- recover default backend from live provider readiness
+- seed per-worktree cargo targets instead of sharing one
+- diff against merge-base instead of a moving branch tip
+- keep the staged convergence decision warning-clean
+- pin commit identity to the target remote's host policy on create
+- skip entity matching for nested unrecognized subcommands
+- pin differential baseline to merge-base, not moving tip
+- elide large install scripts in unscoped config show
+- surface admission readiness, not just connectivity
+- distinguish presence-only readiness from live verification
+
 ## [0.362.0] - 2026-08-27
 
 ### Added
