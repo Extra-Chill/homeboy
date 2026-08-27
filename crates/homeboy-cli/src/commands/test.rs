@@ -1731,8 +1731,7 @@ mod tests {
 
         // The candidate branches from the divergence point.
         differential_git(path, &["checkout", "-q", "-b", "candidate"]);
-        fs::write(path.join("candidate.txt"), "candidate work\n")
-            .expect("write candidate file");
+        fs::write(path.join("candidate.txt"), "candidate work\n").expect("write candidate file");
         differential_git(path, &["add", "."]);
         differential_git(path, &["commit", "-q", "-m", "candidate change"]);
 
@@ -1749,8 +1748,8 @@ mod tests {
         // Back on the candidate: HEAD is the candidate's commit.
         differential_git(path, &["checkout", "-q", "candidate"]);
 
-        let resolved = resolve_differential_revision(path, "main")
-            .expect("merge base should resolve");
+        let resolved =
+            resolve_differential_revision(path, "main").expect("merge base should resolve");
 
         assert_eq!(
             resolved, divergence_point,
