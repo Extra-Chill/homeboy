@@ -58,6 +58,7 @@ mod runtime_types;
 mod secret_types;
 mod secrets;
 mod types;
+mod usage_cap;
 mod workspace_types;
 
 #[cfg(test)]
@@ -117,6 +118,10 @@ pub use secrets::{
 pub(crate) use types::wildcard_match;
 pub use types::*;
 use types::{default_metadata, is_empty_metadata};
+pub use usage_cap::{
+    detect_usage_cap, provider_usage_cap_key, reset_at_from_outcome, ProviderUsageCapRegistry,
+    AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS,
+};
 pub use workspace_types::*;
 
 // AgentTaskProviderRunnerSource lives in the below-core contract (core reads its

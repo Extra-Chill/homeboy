@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use crate::agent_task_service::DerivedCookBaselineCapability;
 
+use super::scheduling::UsageCapSkip;
 use super::*;
 
 /// Authoritative execution adapter consumed by the agent-task scheduler.
@@ -265,6 +266,11 @@ impl AgentTaskScheduler {
             .collect();
         let mut running: Vec<RunningTask> = Vec::new();
         let mut quarantined: Vec<QuarantinedTask> = Vec::new();
+        // Providers this run has already learned are over their usage cap,
+        // plus the reset time each carried. Shared across every task in this
+        // plan so a fanout sibling skips a known-capped rotation entry
+        // instead of spending its own execution rediscovering it (#13644).
+        let mut usage_caps = crate::agent_task_provider::ProviderUsageCapRegistry::default();
         let mut outcomes = recovered_outcomes;
         let mut completed_by_task: HashMap<String, AgentTaskOutcome> = outcomes
             .iter()
@@ -487,7 +493,42 @@ impl AgentTaskScheduler {
                     });
                     break;
                 };
-                let scheduled = queued.remove(next_index).expect("queued task");
+                let mut scheduled = queued.remove(next_index).expect("queued task");
+                let rotation_policy_for_skip =
+                    AgentTaskScheduleSupport::rotation_policy_for_request(
+                        &scheduled.request,
+                        plan_rotation.as_ref(),
+                    );
+                let usage_cap_skips = AgentTaskScheduleSupport::skip_capped_rotation_entries(
+                    &mut scheduled,
+                    rotation_policy_for_skip.as_ref(),
+                    &usage_caps,
+                    chrono::Utc::now(),
+                );
+                for skip in &usage_cap_skips {
+                    events.push(event(
+                        &scheduled.request.task_id,
+                        AgentTaskState::Queued,
+                        scheduled.attempt,
+                        Some(format!(
+                            "provider usage cap active: backend={} (selector={}) resets at {}; skipping without spending an attempt",
+                            skip.backend,
+                            skip.selector.as_deref().unwrap_or("<default>"),
+                            skip.reset_at.to_rfc3339(),
+                        )),
+                    ));
+                }
+                if usage_cap_skips.last().is_some_and(|skip| skip.exhausted) {
+                    let outcome = usage_cap_exhausted_outcome(&scheduled, &usage_cap_skips);
+                    events.push(event(
+                        &scheduled.request.task_id,
+                        AgentTaskState::Failed,
+                        scheduled.attempt,
+                        outcome.summary.clone(),
+                    ));
+                    record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                    continue;
+                }
                 let mut request = scheduled.request;
                 if let Some(services) = services.as_ref() {
                     services.bind_into(&mut request.inputs, &mut request.metadata);
@@ -950,6 +991,20 @@ impl AgentTaskScheduler {
                     // late artifacts to this exact execution before selecting a
                     // recoverable candidate for promotion.
                     finalize_candidate_artifacts(&mut outcome, &running_task);
+                    // Learn a usage cap this attempt surfaced so a later task
+                    // in this same plan skips the same capped route instead of
+                    // spending its own execution rediscovering it (#13644).
+                    if let Some(reset_at) =
+                        crate::agent_task_provider::reset_at_from_outcome(&outcome)
+                    {
+                        usage_caps.record(
+                            crate::agent_task_provider::provider_usage_cap_key(
+                                &running_task.request.executor.backend,
+                                running_task.request.executor.selector.as_deref(),
+                            ),
+                            reset_at,
+                        );
+                    }
                     // A fingerprinted, non-empty patch is a durable candidate.
                     // Let Cook admit and gate it before spending another full
                     // implementation-provider budget. Independent candidate
@@ -1933,6 +1988,48 @@ fn scratch_allocation_failure(task_id: String, error: String) -> AgentTaskOutcom
             class: "agent_task.controller_scratch_allocation_failed".to_string(),
             message: error,
             data: serde_json::Value::Null,
+        }],
+        ..Default::default()
+    }
+}
+
+/// Terminal outcome for a task whose entire reachable rotation chain is
+/// presently over its usage cap. Built without ever dispatching a provider,
+/// so no attempt is spent chasing a provider Homeboy already knows will
+/// refuse the request (#13644). The diagnostic names every skipped entry and
+/// the earliest reset time so the reason for the failure is legible without
+/// spelunking provider output.
+fn usage_cap_exhausted_outcome(
+    scheduled: &ScheduledTask,
+    skipped: &[UsageCapSkip],
+) -> AgentTaskOutcome {
+    let earliest_reset_at = skipped
+        .iter()
+        .map(|skip| skip.reset_at)
+        .min()
+        .unwrap_or_else(chrono::Utc::now);
+    AgentTaskOutcome {
+        task_id: scheduled.request.task_id.clone(),
+        status: AgentTaskOutcomeStatus::Failed,
+        summary: Some(format!(
+            "every configured provider rotation entry is presently over its usage cap; earliest reset at {}",
+            earliest_reset_at.to_rfc3339()
+        )),
+        failure_classification: Some(AgentTaskFailureClassification::RateLimited),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.provider_usage_cap_exhausted".to_string(),
+            message: format!(
+                "no rotation entry is dispatchable; earliest usage-cap reset at {}",
+                earliest_reset_at.to_rfc3339()
+            ),
+            data: serde_json::json!({
+                "earliest_reset_at": earliest_reset_at.to_rfc3339(),
+                "skipped": skipped.iter().map(|skip| serde_json::json!({
+                    "backend": skip.backend,
+                    "selector": skip.selector,
+                    "reset_at": skip.reset_at.to_rfc3339(),
+                })).collect::<Vec<_>>(),
+            }),
         }],
         ..Default::default()
     }
