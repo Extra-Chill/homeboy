@@ -16,9 +16,9 @@ use super::persistence::read_durable_store;
 use super::persistence::reconcile_stale_jobs;
 use super::persistence::{
     apply_event_retention, compact_terminal_jobs, job_not_found, lookup_tombstone,
-    prepare_tombstone_store, timestamp_ms, tombstone_store_report, validate_transition,
-    write_durable_store_with_tombstones, JobStoreCompactionEvidence, ReplayTombstoneKind,
-    DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
+    prepare_tombstone_store, recovered_terminal_from_result, timestamp_ms, tombstone_store_report,
+    validate_transition, write_durable_store_with_tombstones, JobStoreCompactionEvidence,
+    ReplayTombstoneKind, DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
     DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
 use super::remote_runner;
@@ -126,6 +126,13 @@ pub(crate) struct ControllerJobState {
     /// Driver-owned safe projection exposed in the queued event and API logs.
     pub(crate) public_request: Value,
     pub(crate) request_digest: String,
+    /// The controller-minted durable run this job executes for, declared by
+    /// the driver from its typed request and persisted at admission — before
+    /// any driver work can escape the daemon lifecycle. Recovery reconciles
+    /// this job from the linked run's terminal state without parsing the
+    /// opaque request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) linked_durable_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) checkpoint: Option<Value>,
     #[serde(default)]
@@ -2999,8 +3006,8 @@ impl RecoveredTerminalJob {
 }
 
 /// The controller-minted `durable_run_id` a stored job was enqueued for, from
-/// whichever runner-lifecycle carries it (remote-runner request or local-runner
-/// direct-daemon offload).
+/// whichever runner-lifecycle carries it (remote-runner request, local-runner
+/// direct-daemon offload, or a driver-declared controller-job linkage).
 fn stored_job_durable_run_id(stored: &StoredJob) -> Option<String> {
     stored
         .remote_runner
@@ -3013,30 +3020,66 @@ fn stored_job_durable_run_id(stored: &StoredJob) -> Option<String> {
                 .and_then(|local| local.lifecycle.as_ref())
         })
         .and_then(|lifecycle| lifecycle.durable_run_id.clone())
+        .or_else(|| {
+            stored
+                .controller_job
+                .as_ref()
+                .and_then(|controller| controller.linked_durable_run_id.as_deref())
+                .map(str::trim)
+                .map(str::to_string)
+        })
         .filter(|run_id| !run_id.trim().is_empty())
 }
 
 /// A remote runner workload records its agent-task run ID in a typed execution
-/// envelope. That durable run is authoritative after the runner child exits.
+/// envelope, and a controller job declares its linked durable run at
+/// admission. That durable run is authoritative once the owning execution
+/// cannot be observed in process.
 fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredTerminalJob> {
-    // Extract the durable agent-task run id from the (opaque) workload; the
-    // agent-task terminal-recovery hook resolves it into a recovered job so the
-    // job store does not depend on the agent-task subsystem.
+    // Extract the durable agent-task run id from the (opaque) workload or the
+    // driver-declared controller linkage; the agent-task terminal-recovery
+    // hook resolves it into a recovered job so the job store does not depend
+    // on the agent-task subsystem.
     let run_id = stored
         .remote_runner
-        .as_ref()?
-        .request
-        .lab_runner_workload
-        .as_ref()?
-        .agent_task
-        .as_ref()?
-        .run_id
-        .trim()
-        .to_string();
-    if run_id.is_empty() {
-        return None;
-    }
+        .as_ref()
+        .and_then(|remote| remote.request.lab_runner_workload.as_ref())
+        .and_then(|workload| workload.agent_task.as_ref())
+        .map(|agent_task| agent_task.run_id.trim().to_string())
+        .or_else(|| {
+            stored
+                .controller_job
+                .as_ref()
+                .and_then(|controller| controller.linked_durable_run_id.as_deref())
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .filter(|run_id| !run_id.is_empty())?;
     super::agent_task_terminal_recovery::recovered_terminal_agent_task_job(&run_id)
+}
+
+/// Durable terminal evidence for one active job: either its own event log
+/// already recorded a terminal result, or its linked durable run terminalized.
+/// Both prove no workload remains without inspecting or altering live
+/// children, so replacement gates may reconcile on them without an operator
+/// attestation.
+fn recovered_terminal_agent_task_evidence(stored: &StoredJob) -> Option<RecoveredTerminalJob> {
+    if let Some((status, exit_code)) = recovered_terminal_from_result(&stored.events) {
+        let terminal_result = stored
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.kind == JobEventKind::Result)
+            .and_then(|event| event.data.clone())
+            .unwrap_or_else(|| serde_json::json!({ "status": status, "exit_code": exit_code }));
+        return Some(RecoveredTerminalJob::new(
+            status,
+            terminal_result,
+            stored_job_durable_run_id(stored).unwrap_or_else(|| stored.job.id.to_string()),
+            Vec::new(),
+        ));
+    }
+    recovered_terminal_agent_task_result(stored)
 }
 
 impl JobHandle {

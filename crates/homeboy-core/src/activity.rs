@@ -128,8 +128,14 @@ pub fn activity_report_filtered(
     let mut collector = ActivityCollector::default();
     // Items and record health come from one pass over the durable agent-task
     // records. Reading them separately walked the corpus twice (#10308).
+    // The detail level follows the scope so the compact view cannot leak
+    // per-record health samples for items its own truncation omits (#13617).
     let (agent_task_items, agent_task_record_health) =
-        agent_task_provider::agent_task_activity_filtered(limit, filter)?;
+        agent_task_provider::agent_task_activity_filtered(
+            limit,
+            filter,
+            ActivityDetail::for_scope(scope),
+        )?;
     for item in agent_task_items {
         collector.insert(item);
     }
@@ -168,6 +174,10 @@ pub fn activity_report_filtered(
     report.agent_task_record_health = agent_task_record_health;
     report.partial = federation.partial;
     report.runner_federation = federation;
+    // A partial report cannot prove zero executing work: a connected runner
+    // that did not answer may be holding executing work this report cannot
+    // see, so the maintenance precondition must fall back to `false`.
+    report.sync_zero_executing_work();
     Ok(report)
 }
 
@@ -273,6 +283,7 @@ pub fn show_activity_with(id: &str, options: ActivityOptions) -> Result<Activity
     // an incomplete corpus, and the caller is entitled to know that.
     report.partial = federation.partial;
     report.runner_federation = federation;
+    report.sync_zero_executing_work();
     Ok(report)
 }
 
@@ -348,13 +359,21 @@ fn report_from_items(
     // provider implementations that cannot express the selector natively.
     items.retain(|item| filter.matches(item));
     let counts = counts_for_items(&items);
+    // Truncation accounting spans both work classes: a stale record the
+    // default view omits is omitted whether it is executing work or a
+    // degraded resource, so the pre-view stale population is counted from the
+    // items directly rather than reusing the executing-scoped `counts.stale`.
+    let collected_stale = items
+        .iter()
+        .filter(|item| item.state == ActivityState::Stale)
+        .count();
     items.sort_by_key(|item| std::cmp::Reverse(activity_sort_key(item)));
     let collected_items = items.len();
     if scope == ActivityScope::ActiveRecent {
         items.retain(|item| is_active(item.state) || item.finished_at.is_some());
     }
     items.truncate(limit.max(1));
-    let stale_items_omitted = counts.stale.saturating_sub(
+    let stale_items_omitted = collected_stale.saturating_sub(
         items
             .iter()
             .filter(|item| item.state == ActivityState::Stale)
@@ -380,12 +399,24 @@ fn report_from_items(
         .take(next_action_limit)
         .cloned()
         .collect();
+    // Compact only after the rollup above read every retained record's full
+    // action set: the report-level follow-ups must cover all retained work,
+    // not just the two actions each item keeps for the human table.
+    if ActivityDetail::for_scope(scope) == ActivityDetail::Compact {
+        for item in &mut items {
+            item.compact_for_default_view();
+        }
+    }
     let displayed_items = items.len();
-    ActivityReport {
+    let mut report = ActivityReport {
         schema: ACTIVITY_REPORT_SCHEMA,
         command,
         counts,
         items,
+        // With no source degraded at this stage, the maintenance precondition
+        // is answered by the executing counts alone; callers that later mark
+        // the report `partial` must re-sync it.
+        zero_executing_work: false,
         // Activity never reconciles. This is a constant rather than a parameter
         // because there is no activity path that writes; if one is ever added
         // it must set this, not silently inherit `false` (#W3-15).
@@ -399,7 +430,9 @@ fn report_from_items(
             next_actions_omitted: all_next_actions.len().saturating_sub(next_actions.len()),
         },
         next_actions,
-    }
+    };
+    report.sync_zero_executing_work();
+    report
 }
 
 fn activity_sort_key(item: &ActivityItem) -> (bool, Option<chrono::DateTime<chrono::Utc>>, String) {
@@ -419,6 +452,20 @@ fn counts_for_items(items: &[ActivityItem]) -> ActivityCounts {
         ..Default::default()
     };
     for item in items {
+        // Resources are inventory, not executing work. An open worktree
+        // projects `running` because it is held, so counting it here would
+        // inflate execution liveness with records no daemon-maintenance
+        // precondition cares about (#13620). Held inventory — open or
+        // degraded — is counted in its own dimension instead.
+        if item.is_open_resource() {
+            if matches!(
+                item.state,
+                ActivityState::Running | ActivityState::Queued | ActivityState::Stale
+            ) {
+                counts.open_resources += 1;
+            }
+            continue;
+        }
         if is_active(item.state) {
             counts.active += 1;
         }
@@ -446,6 +493,7 @@ mod tests {
     use crate::observation::{NewRunRecord, ObservationStore, RunStatus};
     use crate::paths;
     use crate::test_support::with_isolated_home;
+    use crate::worktree;
 
     fn item(id: &str, state: ActivityState) -> ActivityItem {
         ActivityItem {
@@ -470,6 +518,30 @@ mod tests {
             source_projections: Vec::new(),
             state_conflicts: Vec::new(),
             next_actions: vec![action("show", format!("homeboy runs show {id}"))],
+        }
+    }
+
+    /// One standalone worktree-provider record, exactly as the source adapter
+    /// projects it: an open resource held for work (#13620).
+    fn worktree_item(handle: &str) -> ActivityItem {
+        ActivityItem {
+            id: format!("worktree:native:{handle}"),
+            kind: "worktree".to_string(),
+            source_store: WORKTREE_RESOURCE_SOURCE_STORE.to_string(),
+            state: ActivityState::Running,
+            created_at: "2026-07-04T00:00:00Z".to_string(),
+            updated_at: None,
+            finished_at: None,
+            command: None,
+            cwd: Some(format!("/workspace/{handle}")),
+            runner: ActivityRunnerRefs::default(),
+            refs: ActivityCrossRefs::default(),
+            context: ActivityContext::default(),
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+            source_projections: Vec::new(),
+            state_conflicts: Vec::new(),
+            next_actions: Vec::new(),
         }
     }
 
@@ -787,6 +859,111 @@ mod tests {
         assert_eq!(all.truncation.next_actions_omitted, 0);
     }
 
+    /// #13617: the default view is bounded end to end. Retained records keep
+    /// their identity, state, timestamps, refs, and a couple of follow-ups;
+    /// the duplicated diagnostic rosters (artifact/evidence refs, per-store
+    /// projections, conflicts, identity enumerations, the raw command line)
+    /// are `--all`-only, and the report-level follow-up rollup is still taken
+    /// from every retained record's *full* action set.
+    #[test]
+    fn default_view_compacts_retained_items_while_all_keeps_full_detail() {
+        let mut heavy = item("run-heavy", ActivityState::Running);
+        heavy.command = Some("homeboy cook --issue 13617 --deep".to_string());
+        heavy.cwd = Some("/worktree/homeboy@fix-13617".to_string());
+        heavy.context = ActivityContext {
+            task_url: Some("https://example.test/issues/13617".to_string()),
+            repository: Some("Extra-Chill/homeboy".to_string()),
+            worktree: Some("homeboy@fix-13617".to_string()),
+            identities: vec![ActivityTaskIdentity {
+                task_url: Some("https://example.test/issues/13617".to_string()),
+                repository: Some("Extra-Chill/homeboy".to_string()),
+                worktree: Some("homeboy@fix-13617".to_string()),
+            }],
+        };
+        heavy.artifacts = vec![ActivityEvidenceRef {
+            id: "artifact-1".to_string(),
+            kind: "trace-results".to_string(),
+            uri: "homeboy://runs/run-heavy/artifacts/artifact-1".to_string(),
+        }];
+        heavy.evidence = vec![ActivityEvidenceRef {
+            id: "evidence-1".to_string(),
+            kind: "executor".to_string(),
+            uri: "homeboy://runs/run-heavy/evidence/evidence-1".to_string(),
+        }];
+        heavy.source_projections = vec![ActivitySourceProjection {
+            source_store: "observation.sqlite".to_string(),
+            id: "run-heavy".to_string(),
+            state: ActivityState::Running,
+            updated_at: None,
+            finished_at: None,
+        }];
+        heavy.state_conflicts = vec![ActivityStateConflict {
+            source_store: "daemon.jobs-json".to_string(),
+            id: "job-9".to_string(),
+            state: ActivityState::Succeeded,
+        }];
+        heavy.next_actions = (0..5)
+            .map(|index| action("next", format!("homeboy action run-heavy-{index}")))
+            .collect();
+
+        let compact = report_from_items(
+            vec![heavy.clone()],
+            ActivityScope::ActiveRecent,
+            5,
+            "activity",
+            &ActivityFilter::default(),
+        );
+        let compacted = &compact.items[0];
+        assert_eq!(compacted.id, "run-heavy");
+        assert_eq!(compacted.kind, "bench");
+        assert_eq!(compacted.state, ActivityState::Running);
+        assert_eq!(compacted.created_at, "2026-07-04T00:00:00Z");
+        assert_eq!(compacted.refs.run_id.as_deref(), Some("run-heavy"));
+        assert_eq!(
+            compacted.context.task_url.as_deref(),
+            Some("https://example.test/issues/13617"),
+            "the legacy single identity stays"
+        );
+        assert!(compacted.context.identities.is_empty());
+        assert!(compacted.command.is_none());
+        assert!(compacted.cwd.is_none());
+        assert!(compacted.artifacts.is_empty());
+        assert!(compacted.evidence.is_empty());
+        assert!(compacted.source_projections.is_empty());
+        assert!(compacted.state_conflicts.is_empty());
+        assert_eq!(
+            compacted.next_actions.len(),
+            COMPACT_NEXT_ACTIONS_PER_ITEM,
+            "the human-table action budget is the per-item cap"
+        );
+        assert_eq!(
+            compact.next_actions.len(),
+            5,
+            "the report rollup still covers the full action set"
+        );
+        assert_eq!(compact.truncation.next_actions_omitted, 0);
+
+        let all = report_from_items(
+            vec![heavy],
+            ActivityScope::All,
+            5,
+            "activity",
+            &ActivityFilter::default(),
+        );
+        let full = &all.items[0];
+        assert_eq!(
+            full.command.as_deref(),
+            Some("homeboy cook --issue 13617 --deep")
+        );
+        assert_eq!(full.cwd.as_deref(), Some("/worktree/homeboy@fix-13617"));
+        assert_eq!(full.context.identities.len(), 1);
+        assert_eq!(full.artifacts.len(), 1);
+        assert_eq!(full.evidence.len(), 1);
+        assert_eq!(full.source_projections.len(), 1);
+        assert_eq!(full.state_conflicts.len(), 1);
+        assert_eq!(full.next_actions.len(), 5);
+    }
+
     #[test]
     fn counts_normalize_states() {
         let items = vec![
@@ -800,6 +977,192 @@ mod tests {
         assert_eq!(counts.queued, 1);
         assert_eq!(counts.running, 1);
         assert_eq!(counts.stale, 1);
+    }
+
+    /// #13620: three open worktree records plus one executing job must read
+    /// as exactly one unit of executing work and three open resources — never
+    /// `active=4 running=4`.
+    #[test]
+    fn open_worktrees_do_not_inflate_execution_liveness_counts() {
+        let items = vec![
+            worktree_item("repo@fix-one"),
+            worktree_item("repo@fix-two"),
+            worktree_item("repo@fix-three"),
+            item("daemon-job-1", ActivityState::Running),
+        ];
+
+        let report = report_from_items(
+            items,
+            ActivityScope::ActiveRecent,
+            20,
+            "activity",
+            &ActivityFilter::default(),
+        );
+
+        assert_eq!(report.counts.total, 4);
+        assert_eq!(report.counts.active, 1);
+        assert_eq!(report.counts.running, 1);
+        assert_eq!(report.counts.queued, 0);
+        assert_eq!(report.counts.open_resources, 3);
+        // Worktree discovery stays available: the records are classified, not
+        // deleted.
+        assert_eq!(
+            report
+                .items
+                .iter()
+                .filter(|item| item.is_open_resource())
+                .count(),
+            3
+        );
+    }
+
+    /// The maintenance precondition is a machine-readable assertion: open
+    /// resources alone never make it false, and one executing job always does.
+    #[test]
+    fn zero_executing_work_assertion_separates_resources_from_execution() {
+        let resources_only = report_from_items(
+            vec![worktree_item("repo@fix-one"), worktree_item("repo@fix-two")],
+            ActivityScope::ActiveRecent,
+            20,
+            "activity",
+            &ActivityFilter::default(),
+        );
+        assert_eq!(resources_only.counts.open_resources, 2);
+        assert_eq!(resources_only.counts.active, 0);
+        assert!(resources_only.zero_executing_work);
+
+        let with_executing = report_from_items(
+            vec![
+                worktree_item("repo@fix-one"),
+                item("daemon-job-1", ActivityState::Running),
+            ],
+            ActivityScope::ActiveRecent,
+            20,
+            "activity",
+            &ActivityFilter::default(),
+        );
+        assert!(!with_executing.zero_executing_work);
+
+        let queued_only = report_from_items(
+            vec![item("daemon-job-1", ActivityState::Queued)],
+            ActivityScope::ActiveRecent,
+            20,
+            "activity",
+            &ActivityFilter::default(),
+        );
+        assert!(!queued_only.zero_executing_work);
+    }
+
+    /// A partial report cannot *prove* zero executing work: a connected
+    /// runner that did not answer may be holding executing work the counts
+    /// cannot see, so the assertion must fall even when the local counts read
+    /// zero.
+    #[test]
+    fn a_partial_report_cannot_assert_zero_executing_work() {
+        let mut report = report_from_items(
+            vec![worktree_item("repo@fix-one")],
+            ActivityScope::ActiveRecent,
+            20,
+            "activity",
+            &ActivityFilter::default(),
+        );
+        assert!(report.zero_executing_work);
+        report.partial = true;
+        report.sync_zero_executing_work();
+        assert!(!report.zero_executing_work);
+    }
+
+    /// End-to-end over the real sources: adopted native worktrees (the open
+    /// worktree records from the report that motivated #13620) plus one
+    /// executing daemon job.
+    #[test]
+    fn activity_counts_separate_open_worktree_inventory_from_executing_daemon_jobs() {
+        with_isolated_home(|home| {
+            ObservationStore::open_initialized().expect("store");
+            for handle in ["repo@fix-one", "repo@fix-two", "repo@fix-three"] {
+                let path = home
+                    .path()
+                    .join(format!("worktree-{}", handle.replace('@', "-")));
+                std::fs::create_dir_all(&path).expect("worktree dir");
+                worktree::adopt(worktree::WorktreeAdoptOptions {
+                    handle: handle.to_string(),
+                    path: path.display().to_string(),
+                    kind: None,
+                    provenance: None,
+                })
+                .expect("adopt workspace");
+            }
+            let job_store_path = paths::daemon_jobs_file().expect("jobs path");
+            let job_store =
+                api_jobs::JobStore::open_without_reconciliation(&job_store_path).expect("jobs");
+            let job = job_store.create("runner.exec");
+            job_store.start(job.id).expect("start job");
+
+            let report = activity_report_with(
+                ActivityScope::All,
+                50,
+                ActivityOptions {
+                    federate_runners: false,
+                },
+            )
+            .expect("activity report");
+
+            assert_eq!(report.counts.total, 4);
+            assert_eq!(report.counts.active, 1);
+            assert_eq!(report.counts.running, 1);
+            assert_eq!(report.counts.open_resources, 3);
+            assert!(!report.zero_executing_work);
+            assert_eq!(
+                report
+                    .items
+                    .iter()
+                    .filter(|item| item.is_open_resource())
+                    .count(),
+                3
+            );
+            assert!(report
+                .items
+                .iter()
+                .any(|item| item.is_executing_work() && item.state == ActivityState::Running));
+        });
+    }
+
+    /// Runner federation changes which sources answer, never what an
+    /// executing count means: with no runner layer registered, federation on
+    /// and off must produce identical count semantics over the same
+    /// controller-local fixture (#13620).
+    #[test]
+    fn runner_federation_does_not_change_execution_count_meaning() {
+        with_isolated_home(|home| {
+            ObservationStore::open_initialized().expect("store");
+            let path = home.path().join("worktree-repo-at-fix-one");
+            std::fs::create_dir_all(&path).expect("worktree dir");
+            worktree::adopt(worktree::WorktreeAdoptOptions {
+                handle: "repo@fix-one".to_string(),
+                path: path.display().to_string(),
+                kind: None,
+                provenance: None,
+            })
+            .expect("adopt workspace");
+            let job_store_path = paths::daemon_jobs_file().expect("jobs path");
+            let job_store =
+                api_jobs::JobStore::open_without_reconciliation(&job_store_path).expect("jobs");
+            let job = job_store.create("runner.exec");
+            job_store.start(job.id).expect("start job");
+
+            let report_for = |federate_runners: bool| {
+                activity_report_with(ActivityScope::All, 50, ActivityOptions { federate_runners })
+                    .expect("activity report")
+            };
+            let federated = report_for(true);
+            let local = report_for(false);
+
+            assert_eq!(federated.counts, local.counts);
+            assert_eq!(federated.counts.running, 1);
+            assert_eq!(federated.counts.open_resources, 1);
+            assert_eq!(federated.zero_executing_work, local.zero_executing_work);
+            assert!(!federated.zero_executing_work);
+        });
     }
 
     #[test]

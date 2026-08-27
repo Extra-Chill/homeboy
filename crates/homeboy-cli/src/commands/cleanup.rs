@@ -1528,10 +1528,22 @@ pub struct CleanupInventoryOutput {
     pub command: &'static str,
     /// `partial_failure` means independent categories completed, but at least
     /// one category failed and can be retried through its specialist command.
+    ///
+    /// `partial` is the distinct, expected state where every category that ran
+    /// succeeded and at least one exhausted its bounded time budget instead.
+    /// That is a resumable continuation, not a fault, so it does not fail the
+    /// run. Collapsing the two is what recorded byte-reclaiming sweeps as
+    /// scheduler failures until `automatic-retention` auto-disabled (#12727).
     pub status: &'static str,
     pub mode: &'static str,
     pub category_count: usize,
     pub failed_category_count: usize,
+    /// Categories that exhausted their time budget and must be resumed through
+    /// their `continuation_command`. Counted in categories, never in resources.
+    pub continuation_category_count: usize,
+    /// Whether another bounded pass is required to finish the sweep. Schedulers
+    /// read this to distinguish "more work remains" from "something broke".
+    pub continuation_required: bool,
     /// Resources selected for removal, summed across categories.
     ///
     /// `candidate_count`, `applied_count` and `skipped_count` all count
@@ -1843,11 +1855,16 @@ fn automatic_retention() -> CmdResult<Value> {
         }
     };
     let cleanup_exit_code = cleanup.exit_code;
+    // A category that ran out of budget leaves the aggregate resumable, not
+    // broken. Reporting that as `partial` keeps the run out of the scheduler's
+    // failure count while still telling the operator another pass is owed
+    // (#12727).
+    let cleanup_continuation_required = cleanup.output["continuation_required"] == true;
     let status = if cleanup_exit_code == 0 {
         if runtime_tmp["status"] == "retained" {
             "partial_failure"
-        } else if runtime_tmp["continuation_required"] == true
-            && cargo_targets.status == "completed"
+        } else if cleanup_continuation_required
+            || (runtime_tmp["continuation_required"] == true && cargo_targets.status == "completed")
         {
             "partial"
         } else {
@@ -2551,21 +2568,29 @@ fn cleanup_inventory_with_deadline(
         .map(|category| category.reclaimed_bytes)
         .sum();
     let applied_category_count = applied_category_count(&categories);
+    let continuation_category_count = categories
+        .iter()
+        .filter(|category| is_bounded_continuation(category))
+        .count();
     let failed_category_count = categories
         .iter()
-        .filter(|category| category.failure.is_some())
+        .filter(|category| category.failure.is_some() && !is_bounded_continuation(category))
         .count();
     let actionable = cleanup_actionable(&categories, apply);
     let output = serde_json::to_value(CleanupInventoryOutput {
         command: "cleanup.inventory",
-        status: if failed_category_count == 0 {
-            "succeeded"
-        } else {
+        status: if failed_category_count > 0 {
             "partial_failure"
+        } else if continuation_category_count > 0 {
+            "partial"
+        } else {
+            "succeeded"
         },
         mode: if apply { "apply" } else { "dry_run" },
         category_count: categories.len(),
         failed_category_count,
+        continuation_category_count,
+        continuation_required: continuation_category_count > 0,
         candidate_count,
         applied_count,
         skipped_count,
@@ -2699,6 +2724,22 @@ fn isolate_cleanup_category_bounded(
     commands: CleanupCategoryCommandOverrides<'_>,
     action: impl FnOnce() -> homeboy::core::Result<Vec<CleanupInventoryCategory>>,
 ) {
+    // Checked before dispatch rather than inside each execution path. The
+    // in-process path had no budget check at all, so an exhausted deadline
+    // reached the worktree provider as a real invocation with a zero timeout —
+    // a guaranteed failure, reported as a provider fault instead of the
+    // continuation it actually was (#12727).
+    if let Some(remaining) = exhausted_category_budget(deadline) {
+        categories.push(cleanup_category_timeout_failure(
+            metadata,
+            apply,
+            remaining,
+            0,
+            Some("aggregate cleanup budget was exhausted before this category started".to_string()),
+        ));
+        return;
+    }
+
     let category_child =
         std::env::var(CLEANUP_CATEGORY_CHILD_ENV).ok().as_deref() == Some(metadata.category);
     if cfg!(test) || category_child {
@@ -2968,6 +3009,24 @@ fn append_cleanup_child_args(process: &mut Command, args: &CleanupArgs) {
     }
 }
 
+/// Smallest budget worth starting an in-process category with.
+///
+/// Below this the category cannot do useful work and would only report a
+/// timeout it was never given a chance to avoid.
+const CLEANUP_CATEGORY_MINIMUM_BUDGET: Duration = Duration::from_millis(250);
+
+/// `Some(remaining)` when `deadline` leaves too little budget to start a
+/// category, `None` when there is enough time to proceed.
+///
+/// An absent deadline means the sweep is unbounded, which is never exhausted.
+fn exhausted_category_budget(deadline: Option<SystemTime>) -> Option<Duration> {
+    let deadline = deadline?;
+    let remaining = deadline
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO);
+    (remaining < CLEANUP_CATEGORY_MINIMUM_BUDGET).then_some(remaining)
+}
+
 fn cleanup_category_timeout(deadline: Option<SystemTime>) -> Duration {
     let configured = test_cleanup_category_timeout().unwrap_or(CLEANUP_CATEGORY_TIMEOUT);
     deadline.map_or(configured, |deadline| {
@@ -3029,6 +3088,21 @@ fn run_cleanup_category_fixture(_category: &str) -> homeboy::core::Result<()> {
     Ok(())
 }
 
+/// Whether a category stopped because it ran out of bounded time rather than
+/// because it broke.
+///
+/// A category that exhausts its budget has done nothing wrong: it published a
+/// `continuation_command` and can be resumed. Treating that as a failure is
+/// what let one slow category poison the exit status of a sweep that had
+/// already reclaimed bytes, driving `consecutive_failures` up until the
+/// scheduler disabled automatic retention entirely (#12727).
+fn is_bounded_continuation(category: &CleanupInventoryCategory) -> bool {
+    category.outcome == CLEANUP_CATEGORY_OUTCOME_TIMED_OUT
+}
+
+/// Outcome marker for a category that exhausted its bounded time budget.
+const CLEANUP_CATEGORY_OUTCOME_TIMED_OUT: &str = "timed_out";
+
 fn cleanup_category_timeout_failure(
     metadata: CleanupInventoryCategoryMetadata,
     apply: bool,
@@ -3055,7 +3129,7 @@ fn cleanup_category_timeout_failure(
             ),
             retryable: Some(true),
         }),
-        outcome: "timed_out".to_string(),
+        outcome: CLEANUP_CATEGORY_OUTCOME_TIMED_OUT.to_string(),
         inventory_completeness: "partial".to_string(),
         elapsed_ms,
         timeout_ms: timeout.as_millis(),
@@ -5171,6 +5245,97 @@ mod tests {
             assert_eq!(categories[2]["category"], "controller_runtimes");
             assert!(categories[2]["failure"].is_null());
         });
+    }
+
+    /// A sweep whose budget is gone must report resumable work, not a fault.
+    ///
+    /// This is the regression that disabled scheduled retention in production:
+    /// a timed-out category set `failure`, the aggregate counted it as failed,
+    /// and a run that had already reclaimed bytes exited non-zero. The
+    /// scheduler counted those as `consecutive_failures` until it disabled
+    /// `automatic-retention` outright (#12727).
+    #[test]
+    fn exhausted_budget_reports_resumable_continuation_instead_of_failure() {
+        homeboy::test_support::with_isolated_home(|_root| {
+            let expired = SystemTime::now()
+                .checked_sub(Duration::from_secs(60))
+                .expect("expired deadline");
+
+            let result = cleanup_inventory_with_deadline(
+                CleanupArgs {
+                    apply: false,
+                    include: vec![
+                        CleanupCategoryArg::RuntimeTmp,
+                        CleanupCategoryArg::ControllerScratch,
+                    ],
+                    exclude: Vec::new(),
+                    include_untagged: false,
+                    older_than_days: None,
+                    runtime_tmp_managed_older_than_days: None,
+                    limit: None,
+                    full: false,
+                    cursor: None,
+                    command: None,
+                },
+                Some(expired),
+            )
+            .expect("aggregate result");
+
+            assert_eq!(
+                result.exit_code, 0,
+                "a resumable continuation must not fail the run"
+            );
+            assert_eq!(result.output["status"], "partial");
+            assert_eq!(result.output["failed_category_count"], 0);
+            assert_eq!(result.output["continuation_category_count"], 2);
+            assert_eq!(result.output["continuation_required"], true);
+
+            let categories = result.output["categories"].as_array().expect("categories");
+            assert_eq!(categories.len(), 2);
+            for category in categories {
+                assert_eq!(category["outcome"], "timed_out");
+                assert_eq!(category["failure"]["code"], "cleanup.category_timeout");
+                assert_eq!(
+                    category["failure"]["retryable"], true,
+                    "a starved category must advertise that it can be resumed"
+                );
+                assert!(
+                    category["continuation_command"]
+                        .as_str()
+                        .is_some_and(|command| !command.is_empty()),
+                    "a starved category must publish how to resume it"
+                );
+            }
+        });
+    }
+
+    /// The budget check runs before dispatch, so no category is ever started
+    /// with a zero timeout. Previously an exhausted deadline still reached the
+    /// worktree provider as a real invocation with `timeout_ms: 0` (#12727).
+    #[test]
+    fn exhausted_budget_is_detected_before_a_category_is_dispatched() {
+        let expired = SystemTime::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("expired deadline");
+        assert_eq!(
+            exhausted_category_budget(Some(expired)),
+            Some(Duration::ZERO),
+            "an expired deadline must be refused before dispatch"
+        );
+
+        let ample = SystemTime::now()
+            .checked_add(Duration::from_secs(60))
+            .expect("ample deadline");
+        assert_eq!(
+            exhausted_category_budget(Some(ample)),
+            None,
+            "an ample budget must proceed"
+        );
+        assert_eq!(
+            exhausted_category_budget(None),
+            None,
+            "an unbounded sweep is never exhausted"
+        );
     }
 
     #[test]

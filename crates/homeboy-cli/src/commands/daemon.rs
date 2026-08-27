@@ -592,11 +592,12 @@ where
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-        output.next_command = format!(
-            "{} --{}",
-            rendered_plan(&output.plan),
-            actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT
-        );
+        // The resolved step argv already carries every required confirmation
+        // flag exactly once, so the handoff renders the plan verbatim. The
+        // unmet attestations are stated in `blocked_on`; appending a flag here
+        // would duplicate the one in the step and make `next_command`
+        // disagree with `plan.steps[].command` (#13618).
+        output.next_command = rendered_plan(&output.plan);
         return Ok((DaemonOutput::Recover(output), 1));
     }
 
@@ -1237,6 +1238,30 @@ mod tests {
         }
     }
 
+    /// A durable job whose daemon died before persisting any child identity:
+    /// the evidence that routes `plan_recovery` to the dead-lease orphan step.
+    fn pidless_job_evidence(
+        job_id: Uuid,
+    ) -> homeboy::core::api_jobs::DaemonActiveJobRecoveryEvidence {
+        homeboy::core::api_jobs::DaemonActiveJobRecoveryEvidence {
+            job_id,
+            operation: "exec".to_string(),
+            status: homeboy::core::api_jobs::JobStatus::Running,
+            daemon_lease_id: Some("lease-test".to_string()),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            started_at_ms: None,
+            terminal_evidence: None,
+            child_pid: None,
+            child_started_at: None,
+            linked_durable_run_id: None,
+            linked_durable_run_state: None,
+            linked_durable_run_terminal_status: None,
+            disposition:
+                homeboy::core::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable,
+        }
+    }
+
     #[test]
     fn blocked_recovery_returns_structured_nonzero_outcome() {
         use daemon::recovery_actions as actions;
@@ -1524,6 +1549,155 @@ mod tests {
             "--confirm-workload-processes-absent",
         ])
         .is_ok());
+    }
+
+    /// #13618: the confirmation handoff is rendered from the resolved step
+    /// exactly once. The step argv already carries the attestation flag, so a
+    /// renderer that appended it again produced a `next_command` disagreeing
+    /// with `plan.steps[].command` at the exact point an operator must attest
+    /// workload absence — and pushed them to reconstruct the command by hand.
+    #[test]
+    fn the_workload_attestation_renders_once_in_the_handoff_and_the_step() {
+        use daemon::recovery_actions as actions;
+
+        let mut status = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::LeaseCorrupt),
+            Vec::new(),
+        );
+        status.active_job_recovery_evidence = vec![pidless_job_evidence(Uuid::nil())];
+
+        let (output, exit_code) = recover_from_status(
+            status,
+            true,
+            false,
+            |_, _, _| panic!("an unattested recovery must not execute"),
+            || panic!("a blocked recovery must not read a postcondition"),
+        )
+        .expect("the blocked recovery returns its typed report");
+
+        assert_eq!(exit_code, 1);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(!output.executed, "the handoff mutates nothing");
+        assert_eq!(output.plan.steps.len(), 1);
+        let step = &output.plan.steps[0];
+        assert_eq!(step.code, actions::DAEMON_RECONCILE_DEAD_LEASE_ORPHANS);
+
+        let flag = format!("--{}", actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT);
+        assert_eq!(
+            step.command.matches(&flag).count(),
+            1,
+            "the resolved step carries the attestation once: {}",
+            step.command
+        );
+        assert_eq!(
+            output.next_command.matches(&flag).count(),
+            1,
+            "next_command must not append the attestation a second time: {}",
+            output.next_command
+        );
+        assert_eq!(
+            output.next_command, step.command,
+            "next_command is the resolved step, verbatim"
+        );
+        assert!(output
+            .blocked_on
+            .as_deref()
+            .is_some_and(|reason| reason.contains(&flag)));
+        assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
+    }
+
+    /// A plan needing several distinct attestations renders each one exactly
+    /// once: every confirmation rides its owning step's argv, and the handoff
+    /// derives from those steps rather than appending the unmet flags again.
+    #[test]
+    fn distinct_required_confirmations_each_render_exactly_once() {
+        use daemon::recovery_actions as actions;
+        use homeboy::core::error::{ActionSafety, ExecutableAction};
+
+        const SECOND_CONFIRMATION: &str = "confirm-store-quiesced";
+        let status = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            vec![
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_RECONCILE_DEAD_LEASE_ORPHANS,
+                    actions::reconcile_dead_lease_orphans("lease-test", &[Uuid::nil()]),
+                ),
+                daemon::DaemonRepairStep::executable(
+                    "daemon_reconcile_quiesced_store",
+                    ExecutableAction::new(
+                        "daemon.reconcile_quiesced_store",
+                        "reconcile the quiesced durable store".to_string(),
+                        "homeboy",
+                        [
+                            "daemon".to_string(),
+                            "reconcile-quiesced-store".to_string(),
+                            format!("--{SECOND_CONFIRMATION}"),
+                        ],
+                        ActionSafety::Mutating,
+                    )
+                    .requiring_confirmation(SECOND_CONFIRMATION),
+                ),
+            ],
+        );
+
+        let (output, exit_code) = recover_from_status(
+            status,
+            true,
+            false,
+            |_, _, _| panic!("an unattested recovery must not execute"),
+            || panic!("a blocked recovery must not read a postcondition"),
+        )
+        .expect("the blocked recovery returns its typed report");
+
+        assert_eq!(exit_code, 1);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(!output.executed, "the handoff mutates nothing");
+        assert_eq!(output.plan.steps.len(), 2);
+
+        for confirmation in [
+            actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT,
+            SECOND_CONFIRMATION,
+        ] {
+            let flag = format!("--{confirmation}");
+            assert_eq!(
+                output.next_command.matches(&flag).count(),
+                1,
+                "{flag} must render exactly once: {}",
+                output.next_command
+            );
+            assert_eq!(
+                output
+                    .plan
+                    .steps
+                    .iter()
+                    .filter(|step| step.command.matches(&flag).count() == 1)
+                    .count(),
+                1,
+                "{flag} must ride exactly one resolved step"
+            );
+            assert!(output
+                .blocked_on
+                .as_deref()
+                .is_some_and(|reason| reason.contains(&flag)));
+        }
+        assert_eq!(
+            output.next_command,
+            output
+                .plan
+                .steps
+                .iter()
+                .map(|step| step.command.as_str())
+                .collect::<Vec<_>>()
+                .join(" && "),
+            "next_command is the resolved plan, verbatim"
+        );
+        assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
     }
 
     /// Every value the dispatcher fills comes from the report. A restart plan

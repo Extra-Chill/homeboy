@@ -1,4 +1,4 @@
-use clap::{ArgMatches, Command, CommandFactory};
+use clap::{ArgMatches, Command, CommandFactory, Parser};
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Write};
 use std::process::Command as ProcessCommand;
@@ -625,6 +625,9 @@ impl CliRuntime {
         }
 
         let normalized = args::normalize(args);
+        if let Some(exit) = run_config_read_fast_path(&normalized) {
+            return exit;
+        }
         let command_capability = classify_command_capability(&normalized);
         if let Some(message) = args::runner_exec_option_boundary_error(&normalized) {
             eprintln!("error: {message}");
@@ -1520,6 +1523,27 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info_metadata_only)
     }
+}
+
+/// Config inspection must not initialize daemon reconciliation, provider
+/// discovery, or deferred workers. Those are unrelated to a local JSON read.
+fn run_config_read_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
+    let cli = Cli::try_parse_from(args).ok()?;
+    let Commands::Config(config) = cli.command else {
+        return None;
+    };
+    if !crate::commands::config::is_read(&config) {
+        return None;
+    }
+
+    let (result, exit_code) = output::map_cmd_result_to_json(crate::commands::config::run(config));
+    output_runtime::emit_json_result_for_identity(
+        result,
+        cli.output.as_deref().and_then(std::path::Path::to_str),
+        exit_code,
+        &output::CommandIdentity::with_operation("config", "show"),
+    );
+    Some(std::process::ExitCode::from(exit_code_to_u8(exit_code)))
 }
 
 /// Durable Cook must not create a recipe under a runtime that the existing

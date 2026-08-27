@@ -41,6 +41,31 @@ pub fn load_config() -> HomeboyConfig {
     config
 }
 
+/// Load the ambient config under a shared, bounded lock for an interactive
+/// read. A stale lock file is harmless: `flock` releases its lease when the
+/// former holder exits, so the next reader safely reclaims access. Unlike a
+/// mutation, a read remains bounded even when its timeout override is `0`.
+pub fn load_config_for_read() -> crate::Result<HomeboyConfig> {
+    let config_root = paths::homeboy()?;
+    crate::config::with_config_read_lock_at(&config_root, || {
+        Ok(load_config_uncached_in_root(&config_root))
+    })
+}
+
+/// Load the effective config and one raw file-backed value under the same
+/// bounded shared lock, avoiding a provenance race with a concurrent writer.
+pub fn load_config_and_file_value_for_read(
+    pointer: &str,
+) -> crate::Result<(HomeboyConfig, Option<Value>)> {
+    let config_root = paths::homeboy()?;
+    crate::config::with_config_read_lock_at(&config_root, || {
+        Ok((
+            load_config_uncached_in_root(&config_root),
+            config_file_value_in_root(&config_root, pointer),
+        ))
+    })
+}
+
 /// [`load_config`] against an explicitly injected config root, without the
 /// process-global memoization.
 pub fn load_config_uncached_in_root(config_root: &Path) -> HomeboyConfig {

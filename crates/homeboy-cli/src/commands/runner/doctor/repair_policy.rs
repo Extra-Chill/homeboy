@@ -34,11 +34,19 @@ use super::types::{RunnerCheck, RunnerDoctorStatus, RunnerRepairAction};
 /// Small on purpose. Each attempt is a network round trip plus a full re-probe,
 /// and a runner needing more than a handful of distinct repairs is not a
 /// convergence problem -- it is a runner an operator should look at.
+#[allow(
+    dead_code,
+    reason = "the convergence decision lands ahead of the loop that executes it (#13551); the allowance comes off with that loop"
+)]
 pub(crate) const DEFAULT_MAX_ATTEMPTS: usize = 4;
 
 /// The driver's next move.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
+#[allow(
+    dead_code,
+    reason = "the convergence decision lands ahead of the loop that executes it (#13551); the allowance comes off with that loop"
+)]
 pub enum RepairStep {
     /// Run this action, then re-probe.
     Apply { action: RunnerRepairAction },
@@ -60,6 +68,10 @@ pub enum RepairStep {
 /// driver applies fixes in the order the probes found them; duplicates are
 /// dropped because two checks can legitimately want the same repair and running
 /// it twice in one pass would waste an attempt on the second.
+#[allow(
+    dead_code,
+    reason = "the convergence decision lands ahead of the loop that executes it (#13551); the allowance comes off with that loop"
+)]
 fn outstanding(checks: &[RunnerCheck]) -> Vec<RunnerRepairAction> {
     let mut seen: Vec<RunnerRepairAction> = Vec::new();
     for check in checks {
@@ -79,6 +91,10 @@ fn outstanding(checks: &[RunnerCheck]) -> Vec<RunnerRepairAction> {
 /// Decide the next step from the current report and the attempts already made.
 ///
 /// `history` is every action applied so far, in order.
+#[allow(
+    dead_code,
+    reason = "the convergence decision lands ahead of the loop that executes it (#13551); the allowance comes off with that loop"
+)]
 pub(crate) fn next_step(
     checks: &[RunnerCheck],
     history: &[RunnerRepairAction],

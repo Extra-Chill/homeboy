@@ -4,6 +4,35 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.0] - 2026-08-27
+
+### Added
+- separate executing work from open resources
+
+### Fixed
+- terminalize orphaned staging dispatch jobs
+
+## [0.363.3] - 2026-08-27
+
+### Fixed
+- treat an exhausted category budget as continuation, not failure
+- recover only an incomplete admission
+- bound the compact activity projection
+- render recovery attestation once
+- bind admission recovery to recipe
+
+## [0.363.2] - 2026-08-27
+
+### Changed
+- apply rustfmt
+- give the pin check one construction site and one owner per concern
+
+### Fixed
+- dedupe package coverage on declared artifact path
+- give registered primary fixtures a resolvable default branch
+- bound observable config reads
+- preserve continuation preflight identity
+
 ## [0.363.1] - 2026-08-27
 
 ### Fixed

@@ -86,12 +86,20 @@ fn runner_manifest_preflight_with_executor(
             "runner manifest preflight could not query installed extension inventory; recover with: {homeboy_path} extension list --skip-ready-check"
         ));
     }
-    let extension_ids = match runner_extension_inventory(&inventory_output.stdout) {
-        Ok(extension_ids) => extension_ids,
+    let inventory = match runner_extension_inventory(&inventory_output.stdout) {
+        Ok(inventory) => inventory,
         Err(detail) => return Some(detail),
     };
+    for extension_id in inventory.candidate_owned {
+        homeboy_core::log_status!(
+            "upgrade",
+            "  {} extension `{}` compatibility deferred to selected candidate",
+            runner.id,
+            extension_id
+        );
+    }
 
-    for extension_id in extension_ids {
+    for extension_id in inventory.readable {
         let options = runner_manifest_query_options(
             runner,
             vec![
@@ -142,7 +150,15 @@ fn runner_manifest_query_options(runner: &Runner, command: Vec<String>) -> Runne
     options
 }
 
-fn runner_extension_inventory(stdout: &str) -> std::result::Result<Vec<String>, String> {
+#[derive(Debug, PartialEq, Eq)]
+struct RunnerExtensionInventory {
+    readable: Vec<String>,
+    candidate_owned: Vec<String>,
+}
+
+fn runner_extension_inventory(
+    stdout: &str,
+) -> std::result::Result<RunnerExtensionInventory, String> {
     let value: serde_json::Value = serde_json::from_str(stdout.trim())
         .map_err(|error| format!("runner extension inventory was not valid JSON: {error}"))?;
     if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
@@ -153,32 +169,45 @@ fn runner_extension_inventory(stdout: &str) -> std::result::Result<Vec<String>, 
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "runner extension inventory did not contain data.extensions".to_string())?;
 
-    extensions
-        .iter()
-        .map(|extension| {
-            let id = extension
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| {
-                    "runner extension inventory contained an entry without an id".to_string()
-                })?;
-            if let Some(error) = extension.get("error") {
-                let error = error.as_str().ok_or_else(|| {
-                    format!("runner extension `{id}` inventory error was not a string")
-                })?;
-                let diagnostic = extension
-                    .get("diagnostic")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|diagnostic| format!(": {diagnostic}"))
-                    .unwrap_or_default();
-                return Err(format!(
-                    "runner extension `{id}` manifest is invalid ({error}){diagnostic}"
-                ));
+    let mut inventory = RunnerExtensionInventory {
+        readable: Vec::new(),
+        candidate_owned: Vec::new(),
+    };
+    for extension in extensions {
+        let id = extension
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                "runner extension inventory contained an entry without an id".to_string()
+            })?;
+        if let Some(error) = extension.get("error") {
+            let error = error.as_str().ok_or_else(|| {
+                format!("runner extension `{id}` inventory error was not a string")
+            })?;
+            // The selected runner upgrade executes with --skip-extensions and
+            // synchronizes extensions only after the new binary is active. A
+            // schema the legacy binary cannot deserialize therefore belongs to
+            // candidate validation; requiring the legacy reader here creates a
+            // permanent bootstrap cycle. Other invalid-manifest categories stay
+            // fail-closed because a new binary cannot make malformed or missing
+            // input trustworthy.
+            if error == "manifest_deserialize_incompatible" {
+                inventory.candidate_owned.push(id.to_string());
+                continue;
             }
-            Ok(id.to_string())
-        })
-        .collect()
+            let diagnostic = extension
+                .get("diagnostic")
+                .and_then(serde_json::Value::as_str)
+                .map(|diagnostic| format!(": {diagnostic}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "runner extension `{id}` manifest is invalid ({error}){diagnostic}"
+            ));
+        }
+        inventory.readable.push(id.to_string());
+    }
+    Ok(inventory)
 }
 
 fn runner_extension_requires_homeboy(
@@ -386,6 +415,42 @@ mod manifest_preflight_tests {
                 .expect("invalid installed manifest blocks promotion");
         assert!(rejection.contains("runner extension `broken` manifest is invalid"));
         assert!(rejection.contains("invalid requires.homeboy"));
+    }
+
+    #[test]
+    fn legacy_incompatible_manifest_is_deferred_to_the_selected_candidate() {
+        let runner = ssh_runner();
+        let mut call_count = 0;
+        let mut exec = |runner_id: &str, options: RunnerExecOptions| {
+            let stdout = match call_count {
+                0 => {
+                    assert_eq!(
+                        options.command,
+                        ["homeboy", "extension", "list", "--skip-ready-check"]
+                    );
+                    r#"{"success":true,"data":{"extensions":[{"id":"discord","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust"}]}}"#
+                }
+                1 => {
+                    assert_eq!(
+                        options.command,
+                        ["homeboy", "extension", "show", "rust", "--skip-ready-check"]
+                    );
+                    r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}}}"#
+                }
+                _ => {
+                    panic!("legacy-incompatible extension must not be queried by the legacy binary")
+                }
+            };
+            call_count += 1;
+            Ok(successful_output(runner_id, options.command, stdout))
+        };
+
+        assert!(
+            runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec)
+                .is_none(),
+            "the selected candidate owns compatibility for an unreadable legacy schema"
+        );
+        assert_eq!(call_count, 2);
     }
 
     #[test]

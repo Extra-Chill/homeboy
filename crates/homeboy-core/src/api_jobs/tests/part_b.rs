@@ -140,6 +140,170 @@ fn terminal_linked_reconciliation_preserves_live_jobs_and_is_idempotent() {
     );
 }
 
+/// Admit one `controller.lab.staging-dispatch` job, optionally linked to a
+/// durable agent-task run exactly as the Lab driver declares at admission.
+fn admitted_staging_dispatch(store: &JobStore, linked_durable_run_id: Option<&str>) -> Uuid {
+    let outcome = store
+        .admit_controller_job(
+            "controller.lab.staging-dispatch".to_string(),
+            format!("lab-staging-{}", Uuid::new_v4()),
+            ControllerJobState {
+                job_type: "lab.staging-dispatch".to_string(),
+                version: 1,
+                request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
+                public_request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
+                request_digest: format!("digest-{}", Uuid::new_v4()),
+                linked_durable_run_id: linked_durable_run_id.map(str::to_string),
+                checkpoint: None,
+                cancellation_requested: false,
+                cancellation_reason: None,
+                execution_claim_id: None,
+                recovery_attempted: false,
+            },
+        )
+        .expect("admit staging dispatch");
+    let ControllerJobSubmissionOutcome::Submitted(job_id) = outcome else {
+        panic!("unique staging dispatch submission was unexpectedly replayed");
+    };
+    job_id
+}
+
+/// #13619: a staging dispatch whose linked agent task cancelled at the same
+/// timestamp it was created — before any child identity, checkpoint, or
+/// lifecycle-metadata linkage was recorded — must be classified and
+/// reconciled from its admission-time durable linkage instead of staying a
+/// permanent `running` orphan that blocks daemon replacement behind operator
+/// attestation.
+#[test]
+fn staging_dispatch_cancelled_before_child_identity_is_reconciled_not_orphaned() {
+    let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+    let run_id = format!("run-13619-cancelled-{}", Uuid::new_v4());
+    fixtures.terminal_run(&run_id, JobStatus::Cancelled);
+    let store = JobStore::default().with_daemon_lease("lease-live".to_string());
+    let job_id = admitted_staging_dispatch(&store, Some(&run_id));
+    store
+        .start_controller_execution(job_id)
+        .expect("claim execution");
+
+    let evidence = store.active_daemon_job_recovery_evidence(None, |_| false);
+    let item = evidence
+        .iter()
+        .find(|evidence| evidence.job_id == job_id)
+        .expect("staging dispatch evidence");
+    assert_eq!(item.child_pid, None);
+    assert_eq!(
+        item.linked_durable_run_id.as_deref(),
+        Some(run_id.as_str()),
+        "the admission-time linkage is the durable identity"
+    );
+    assert_eq!(
+        item.linked_durable_run_state,
+        Some(DaemonLinkedDurableRunState::Terminal)
+    );
+    assert_eq!(
+        item.linked_durable_run_terminal_status,
+        Some(JobStatus::Cancelled)
+    );
+    assert_eq!(
+        item.disposition,
+        DaemonActiveJobRecoveryDisposition::TerminalEvidence
+    );
+
+    let reconciled = store
+        .reconcile_terminal_linked_daemon_jobs()
+        .expect("reconcile terminal evidence");
+    assert_eq!(reconciled, vec![job_id]);
+    let job = store.get(job_id).expect("staging dispatch");
+    assert_eq!(job.status, JobStatus::Cancelled);
+    assert!(
+        job.finished_at_ms.is_some(),
+        "the staging dispatch reached a terminal state"
+    );
+}
+
+/// A staging dispatch may already be `running` for a live attempt when that
+/// attempt terminalizes. The linked run's terminal state must deterministically
+/// reconcile the job; the live classification before that proves the fence
+/// held rather than the linkage suppressing protection.
+#[test]
+fn terminal_linked_agent_task_cannot_leave_running_staging_dispatch_job() {
+    let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+    let run_id = format!("run-13619-late-{}", Uuid::new_v4());
+    fixtures.active_run(&run_id);
+    let store = JobStore::default().with_daemon_lease("lease-live".to_string());
+    let job_id = admitted_staging_dispatch(&store, Some(&run_id));
+    store
+        .start_controller_execution(job_id)
+        .expect("claim execution");
+
+    let evidence = store.active_daemon_job_recovery_evidence(None, |_| false);
+    let item = evidence
+        .iter()
+        .find(|evidence| evidence.job_id == job_id)
+        .expect("staging dispatch evidence");
+    assert_eq!(
+        item.linked_durable_run_state,
+        Some(DaemonLinkedDurableRunState::Active)
+    );
+    assert_eq!(
+        item.disposition,
+        DaemonActiveJobRecoveryDisposition::BlockingAmbiguous,
+        "a live linked attempt keeps the live workload protected"
+    );
+    assert!(store
+        .reconcile_terminal_linked_daemon_jobs()
+        .expect("reconcile live store")
+        .is_empty());
+    assert_eq!(
+        store.get(job_id).expect("still running").status,
+        JobStatus::Running
+    );
+
+    fixtures.terminal_run(&run_id, JobStatus::Succeeded);
+    let reconciled = store
+        .reconcile_terminal_linked_daemon_jobs()
+        .expect("reconcile after terminalization");
+    assert_eq!(reconciled, vec![job_id]);
+    assert_eq!(
+        store.get(job_id).expect("reconciled").status,
+        JobStatus::Succeeded
+    );
+}
+
+/// The fail-closed fence: an unknown, unlinked live job keeps
+/// `blocking_ambiguous` classification, is never reconciled implicitly, and so
+/// still requires explicit operator attestation before replacement.
+#[test]
+fn unknown_unlinked_live_job_still_blocks_replacement() {
+    crate::test_support::AgentTaskTerminalRunFixtures::install();
+    let store = JobStore::default().with_daemon_lease("lease-live".to_string());
+    let job_id = admitted_staging_dispatch(&store, None);
+    store
+        .start_controller_execution(job_id)
+        .expect("claim execution");
+
+    let evidence = store.active_daemon_job_recovery_evidence(None, |_| false);
+    let item = evidence
+        .iter()
+        .find(|evidence| evidence.job_id == job_id)
+        .expect("staging dispatch evidence");
+    assert_eq!(item.linked_durable_run_id, None);
+    assert_eq!(item.terminal_evidence, None);
+    assert_eq!(
+        item.disposition,
+        DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+    );
+
+    assert!(store
+        .reconcile_terminal_linked_daemon_jobs()
+        .expect("reconcile unknown store")
+        .is_empty());
+    assert_eq!(
+        store.get(job_id).expect("still running").status,
+        JobStatus::Running
+    );
+}
+
 #[test]
 fn reused_pid_with_a_different_start_identity_is_terminalized() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());

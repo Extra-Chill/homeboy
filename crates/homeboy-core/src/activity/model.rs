@@ -13,6 +13,36 @@ pub enum ActivityScope {
     All,
 }
 
+/// How much per-record detail an activity report carries.
+///
+/// The default coordination view ([`ActivityScope::ActiveRecent`]) answers
+/// "what is happening and what can I do next", so each retained record is
+/// compacted to its identity, state, timestamps, cross-refs, and a couple of
+/// follow-up actions. The diagnostic surface that drops — full
+/// artifact/evidence ref rosters, per-store projections, state conflicts,
+/// task-identity enumerations, and the raw command line — stays available
+/// through [`ActivityScope::All`] (`activity list --all`, `activity show`,
+/// `activity watch`) and per-record artifact commands (#13617).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityDetail {
+    Compact,
+    Full,
+}
+
+impl ActivityDetail {
+    /// The detail level a report scope implies.
+    pub fn for_scope(scope: ActivityScope) -> Self {
+        match scope {
+            ActivityScope::ActiveRecent => Self::Compact,
+            ActivityScope::All => Self::Full,
+        }
+    }
+}
+
+/// Follow-up actions retained per record in the compact default view. Matches
+/// the two `next:` lines the human projection renders per row.
+pub const COMPACT_NEXT_ACTIONS_PER_ITEM: usize = 2;
+
 pub type ActivityState = RunLifecycleStatus;
 
 pub fn is_active(state: ActivityState) -> bool {
@@ -154,6 +184,63 @@ pub struct ActivityItem {
     pub next_actions: Vec<ActivityNextAction>,
 }
 
+/// The `source_store` of the worktree provider projection. Items from this
+/// source are open resources, not executing work (#13620).
+pub const WORKTREE_RESOURCE_SOURCE_STORE: &str = "worktree.provider";
+
+/// What one activity item *is*, independent of its state.
+///
+/// Executing work is a unit of work the system runs to completion: an
+/// observation run, an agent-task record, a daemon job, or a runner-resident
+/// job. An open resource is inventory that work uses — a worktree — whose
+/// presence says nothing about whether anything is executing in it. The two
+/// classes share the state vocabulary but not its liveness meaning: an open
+/// worktree projects `running` because it is held, not because a process is
+/// executing, so counts that answer "what is executing right now" must scope
+/// to [`ActivityWorkClass::Executing`] (#13620).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityWorkClass {
+    Executing,
+    OpenResource,
+}
+
+impl ActivityItem {
+    /// Compact this item for the default coordination view.
+    ///
+    /// Identity, state, timestamps, runner/cross refs, and
+    /// [`COMPACT_NEXT_ACTIONS_PER_ITEM`] follow-up actions survive; the
+    /// duplicated diagnostic rosters do not. The report-level `next_actions`
+    /// rollup is computed from the full action set *before* compaction, so
+    /// the compact view still advertises a follow-up for every retained
+    /// record even when that record's own roster was capped (#13617).
+    pub(crate) fn compact_for_default_view(&mut self) {
+        self.command = None;
+        self.cwd = None;
+        self.context.identities.clear();
+        self.artifacts.clear();
+        self.evidence.clear();
+        self.source_projections.clear();
+        self.state_conflicts.clear();
+        self.next_actions.truncate(COMPACT_NEXT_ACTIONS_PER_ITEM);
+    }
+
+    pub fn work_class(&self) -> ActivityWorkClass {
+        if self.source_store == WORKTREE_RESOURCE_SOURCE_STORE {
+            ActivityWorkClass::OpenResource
+        } else {
+            ActivityWorkClass::Executing
+        }
+    }
+
+    pub fn is_executing_work(&self) -> bool {
+        self.work_class() == ActivityWorkClass::Executing
+    }
+
+    pub fn is_open_resource(&self) -> bool {
+        self.work_class() == ActivityWorkClass::OpenResource
+    }
+}
+
 impl ActivityFilter {
     pub fn matches(&self, item: &ActivityItem) -> bool {
         self.is_empty()
@@ -190,10 +277,20 @@ impl ActivityFilter {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityCounts {
+    /// Every record in this report across both work classes: executing work
+    /// plus open resources.
     pub total: usize,
+    /// Executing work (jobs, controllers, agent tasks, providers) currently
+    /// queued or running. Open resources are excluded: an open worktree is
+    /// held inventory, not executing work, and must not inflate execution
+    /// liveness (#13620).
     pub active: usize,
+    /// Executing work waiting to start. Open resources are excluded.
     pub queued: usize,
+    /// Executing work currently running. Open resources are excluded.
     pub running: usize,
+    /// Executing work that succeeded. Terminal worktree dispositions are
+    /// resource history, not execution outcomes.
     pub succeeded: usize,
     /// Stopped with a promotable candidate. Counted separately from
     /// `partial_failure` since #6761 — before that both, plus
@@ -206,8 +303,15 @@ pub struct ActivityCounts {
     pub failed: usize,
     pub cancelled: usize,
     pub timed_out: usize,
+    /// Executing work whose claimed progress is no longer verifiable. A
+    /// missing worktree is a degraded *resource* and counts under
+    /// `open_resources`, not here.
     pub stale: usize,
     pub unknown: usize,
+    /// Open resource inventory held for work: worktrees without a terminal
+    /// disposition, including degraded-but-held ones. Presence of inventory
+    /// never implies execution (#13620).
+    pub open_resources: usize,
 }
 
 /// Records deliberately omitted from the default coordination view.
@@ -267,6 +371,15 @@ pub struct ActivityReport {
     pub command: &'static str,
     pub counts: ActivityCounts,
     pub items: Vec<ActivityItem>,
+    /// Machine-readable maintenance precondition: `true` only when this
+    /// report shows no queued or running executing work **and** is not
+    /// `partial` (a connected runner that did not answer could be holding
+    /// executing work this report cannot see). Open resources do not affect
+    /// it: an operator may hold worktrees open while zero work executes.
+    /// Assert on a `list` report — a `show` report's counts describe only the
+    /// resolved item (#13620).
+    #[serde(default)]
+    pub zero_executing_work: bool,
     /// Whether this surface reconciled while reading.
     ///
     /// `activity` is a deliberately **non**-reconciling read model, so this is
@@ -298,4 +411,14 @@ pub struct ActivityReport {
     pub truncation: ActivityTruncation,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
+}
+
+impl ActivityReport {
+    /// Recompute [`ActivityReport::zero_executing_work`] from the current
+    /// counts and partiality. Report assembly calls this once the final
+    /// `partial` value is known, because a partial report cannot prove the
+    /// absence of runner-resident executing work.
+    pub(crate) fn sync_zero_executing_work(&mut self) {
+        self.zero_executing_work = self.counts.active == 0 && !self.partial;
+    }
 }

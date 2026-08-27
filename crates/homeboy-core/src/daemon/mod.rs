@@ -1114,9 +1114,17 @@ pub fn read_status() -> Result<DaemonStatus> {
             .flatten(),
         pid_is_running,
     );
-    let active_jobs = active_job_recovery_evidence.len();
+    // Durable terminal evidence proves no workload remains, so those jobs are
+    // reported as evidence but do not protect the daemon from replacement.
+    let blocking_active_jobs = active_job_recovery_evidence
+        .iter()
+        .filter(|evidence| {
+            evidence.disposition
+                != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+        })
+        .count();
     let process_candidates = control::daemon_process_candidates(&jobs_path)?;
-    let mut freshness = freshness_report_from_validation(&validation, active_jobs);
+    let mut freshness = freshness_report_from_validation(&validation, blocking_active_jobs);
     // A dead lease proves only its recorded PID is gone. It cannot authorize a
     // replacement while another foreground candidate might still own this store.
     // In particular, offering adoption here would lead it to the same candidate
@@ -1288,7 +1296,8 @@ where
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
-    let orchestration_reconciler = spawn_orchestration_reconciler(orchestration_shutdown_rx);
+    let orchestration_reconciler =
+        spawn_orchestration_reconciler(job_store.clone(), orchestration_shutdown_rx);
     let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
 
     let mut accepted = 0;
@@ -1450,7 +1459,10 @@ fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::ti
 /// `reconcile_stale_active_runs` had exactly two callers — `cleanup` and
 /// `agent-task active --reconcile --apply` — so a detached cook whose owner
 /// died stayed `running` forever. Loop Work jobs own controller waits.
-fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+fn spawn_orchestration_reconciler(
+    job_store: JobStore,
+    shutdown: mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let Some(interval) = orchestration_tick_interval() else {
             // Disabled: still consume the shutdown signal so the join at
@@ -1458,7 +1470,7 @@ fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::
             let _ = shutdown.recv();
             return;
         };
-        orchestration_tick_loop(interval, shutdown)
+        orchestration_tick_loop(job_store, interval, shutdown)
     })
 }
 
@@ -1469,13 +1481,23 @@ fn spawn_orchestration_reconciler(shutdown: mpsc::Receiver<()>) -> std::thread::
 /// Overlap is impossible by construction — the sleep happens after all
 /// passes return, exactly as the schedule ticker does it — and across
 /// processes the daemon owner lock already guarantees a single ticker.
-fn orchestration_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
+fn orchestration_tick_loop(
+    job_store: JobStore,
+    interval: std::time::Duration,
+    shutdown: mpsc::Receiver<()>,
+) {
     loop {
         isolated_tick(|| {
             let _ = orchestration::reconcile_stale_active_runs();
         });
         isolated_tick(|| {
             let _ = orchestration::reconcile_unmaterialized_cook_admissions();
+        });
+        // Terminalization of a linked durable run must deterministically
+        // terminalize its own daemon jobs, even when the job's in-process
+        // supervisor died without persisting anything.
+        isolated_tick(|| {
+            let _ = job_store.reconcile_terminal_linked_daemon_jobs();
         });
         if shutdown.recv_timeout(interval).is_ok() {
             return;
@@ -1873,7 +1895,7 @@ where
                     json!({
                         "reconciled_job_ids": reconciled,
                         "reconciled_count": reconciled.len(),
-                        "policy": "linked durable runs already terminalized; live and unresolved jobs are preserved",
+                        "policy": "jobs with durable terminal evidence (terminal linked durable run or recorded terminal result) are reconciled; live and unresolved jobs are preserved",
                     }),
                 ),
                 Err(err) => error_response(400, err),
@@ -2910,12 +2932,20 @@ fn validate_lifecycle_stop_request(request: &LifecycleStopRequest) -> Result<()>
 fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport> {
     let path = state_path()?;
     let validation = validate_lease_file(&path)?;
-    let active_jobs = job_store
-        .list()
+    // Durable terminal evidence proves no workload remains, so those jobs do
+    // not protect this daemon from replacement either.
+    let blocking_active_jobs = job_store
+        .active_daemon_job_recovery_evidence(None, pid_is_running)
         .into_iter()
-        .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+        .filter(|evidence| {
+            evidence.disposition
+                != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+        })
         .count();
-    Ok(freshness_report_from_validation(&validation, active_jobs))
+    Ok(freshness_report_from_validation(
+        &validation,
+        blocking_active_jobs,
+    ))
 }
 
 /// JSON pointer to an endpoint payload inside a fully written daemon response.
@@ -3534,12 +3564,22 @@ fn enqueue_controller_job(
     driver.validate_secret_references(&request.request)?;
     let public_request = driver.public_request(&request.request)?;
     let request_digest = hex_digest(&request.request)?;
+    // The driver-declared durable-run linkage is durable before any driver
+    // work can escape the daemon lifecycle, so later reconciliation never has
+    // to infer ownership from the opaque request.
+    let linked_durable_run_id = driver
+        .linked_durable_run_id(&request.request)
+        .as_deref()
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .map(str::to_string);
     let controller_job = ControllerJobState {
         job_type: request.job_type.clone(),
         version: request.version,
         request: request.request.clone(),
         public_request,
         request_digest,
+        linked_durable_run_id,
         checkpoint: None,
         cancellation_requested: false,
         cancellation_reason: None,
@@ -4161,8 +4201,9 @@ mod tests {
     fn orchestration_tick_loop_exits_promptly_on_shutdown() {
         crate::test_support::with_isolated_home(|_| {
             let (tx, rx) = std::sync::mpsc::channel();
+            let job_store = JobStore::default();
             let handle = std::thread::spawn(move || {
-                super::orchestration_tick_loop(Duration::from_secs(300), rx);
+                super::orchestration_tick_loop(job_store, Duration::from_secs(300), rx);
             });
 
             std::thread::sleep(Duration::from_millis(50));
@@ -4175,6 +4216,91 @@ mod tests {
                 "shutdown must not wait out the poll interval, took {:?}",
                 start.elapsed()
             );
+        });
+    }
+
+    /// Admit one `controller.lab.staging-dispatch` job in the isolated home's
+    /// durable daemon store, linked to `run_id` as the Lab driver declares at
+    /// admission, and leave it claimed `running` with no child identity — the
+    /// #13619 incident shape.
+    fn admitted_running_staging_dispatch(run_id: Option<&str>) -> uuid::Uuid {
+        let store =
+            JobStore::open_without_reconciliation(paths::daemon_jobs_file().expect("jobs path"))
+                .expect("durable store");
+        let outcome = store
+            .admit_controller_job(
+                "controller.lab.staging-dispatch".to_string(),
+                format!("lab-staging-{}", uuid::Uuid::new_v4()),
+                ControllerJobState {
+                    job_type: "lab.staging-dispatch".to_string(),
+                    version: 1,
+                    request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
+                    public_request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
+                    request_digest: format!("digest-{}", uuid::Uuid::new_v4()),
+                    linked_durable_run_id: run_id.map(str::to_string),
+                    checkpoint: None,
+                    cancellation_requested: false,
+                    cancellation_reason: None,
+                    execution_claim_id: None,
+                    recovery_attempted: false,
+                },
+            )
+            .expect("admit staging dispatch");
+        let crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) = outcome else {
+            panic!("unique staging dispatch submission was unexpectedly replayed");
+        };
+        store
+            .start_controller_execution(job_id)
+            .expect("claim execution");
+        job_id
+    }
+
+    /// #13619: a lease-bound stop is the replacement gate. It must first
+    /// reconcile every active job whose durable terminal evidence proves no
+    /// workload remains, so daemon replacement proceeds without the operator's
+    /// `--confirm-workload-processes-absent` attestation.
+    #[test]
+    fn stop_gate_reconciles_terminal_evidenced_jobs_before_refusing() {
+        crate::test_support::with_isolated_home(|_| {
+            let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+            let run_id = format!("run-13619-stop-gate-{}", uuid::Uuid::new_v4());
+            fixtures.terminal_run(&run_id, JobStatus::Cancelled);
+            let job_id = admitted_running_staging_dispatch(Some(&run_id));
+
+            let blocking = active_daemon_job_ids().expect("replacement gate");
+
+            assert!(
+                blocking.is_empty(),
+                "terminal evidence proves no workload remains: {blocking:?}"
+            );
+            let reconciled = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("durable store")
+            .get(job_id)
+            .expect("staging dispatch");
+            assert_eq!(reconciled.status, JobStatus::Cancelled);
+        });
+    }
+
+    /// The fence: an unknown unlinked live job survives the stop gate's
+    /// terminal-evidence reconciliation and still blocks replacement.
+    #[test]
+    fn stop_gate_still_blocks_on_unknown_unlinked_live_jobs() {
+        crate::test_support::with_isolated_home(|_| {
+            crate::test_support::AgentTaskTerminalRunFixtures::install();
+            let job_id = admitted_running_staging_dispatch(None);
+
+            let blocking = active_daemon_job_ids().expect("replacement gate");
+
+            assert_eq!(blocking, vec![job_id]);
+            let untouched = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("jobs path"),
+            )
+            .expect("durable store")
+            .get(job_id)
+            .expect("staging dispatch");
+            assert_eq!(untouched.status, JobStatus::Running);
         });
     }
 
