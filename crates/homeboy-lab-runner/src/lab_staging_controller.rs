@@ -946,7 +946,13 @@ fn ensure_current_controller_daemon() -> Result<homeboy_core::daemon::DaemonStar
             if state.build_identity.display == expected {
                 return Ok(daemon);
             }
-            if !status.active_job_recovery_evidence.is_empty() {
+            // Durable terminal evidence proves an active job's workload is
+            // finished, so it is reconciled during the lease-bound stop below
+            // and does not block this admission.
+            if status.active_job_recovery_evidence.iter().any(|evidence| {
+                evidence.disposition
+                    != homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+            }) {
                 return Err(Error::validation_invalid_argument(
                     "controller_daemon",
                     "controller daemon build does not match the submitting Homeboy binary while durable jobs are active",
@@ -4188,6 +4194,31 @@ impl Drop for CancellationGuard {
 
 pub struct LabStagingDispatchDriver;
 
+/// No staging work may begin for an attempt that already terminalized. Its
+/// controller lifecycle is closed, so the dispatch job must terminalize with
+/// it instead of admitting new work that could escape the controller.
+fn ensure_linked_attempt_not_terminal(run_id: &str) -> Result<()> {
+    let Ok(record) = homeboy_agents::agent_task_lifecycle::status(run_id) else {
+        // The durable recipe and plan attachments remain the staging
+        // authority; a missing run record is handled by their validation.
+        return Ok(());
+    };
+    if record.state.is_terminal() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "Lab staging dispatch cannot start for agent-task run `{}` that already terminalized as {:?}",
+                run_id, record.state
+            ),
+            Some(run_id.to_string()),
+            Some(vec![
+                "The linked agent-task attempt is terminal; its staging dispatch job is reconciled from that terminal state.".to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
 impl LabStagingDispatchDriver {
     fn envelope(value: &Value) -> Result<LabStagingDispatchEnvelope> {
         let envelope: LabStagingDispatchEnvelope =
@@ -4227,6 +4258,18 @@ impl LabStagingDispatchDriver {
         let lab_lifecycle_store =
             homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
         checkpoint.validate()?;
+        // A terminalized linked attempt closes the staging lifecycle before any
+        // pre-dispatch work can begin. Once a runner job was admitted the
+        // checkpoint's runner identity is the durable child evidence, and the
+        // linked run's terminal state reconciles this job instead.
+        if matches!(
+            checkpoint.phase,
+            LabStagingPhase::AcceptedMaterializeWorkspace
+                | LabStagingPhase::MaterializeRuntime
+                | LabStagingPhase::HydrateDependencies
+        ) {
+            ensure_linked_attempt_not_terminal(&checkpoint.run_id)?;
+        }
         let adapter = require_production_adapter()?;
         let request = match &checkpoint.input {
             LabStagingInputRef::AgentTaskAttempt { recipe, .. } => {
@@ -4307,6 +4350,9 @@ impl ControllerJobDriver for LabStagingDispatchDriver {
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
         Self::envelope(request).map(|_| ())
     }
+    fn linked_durable_run_id(&self, request: &Value) -> Option<String> {
+        Self::envelope(request).ok().map(|envelope| envelope.run_id)
+    }
     fn prepare(&self, request: Value) -> Result<Value> {
         let envelope = Self::envelope(&request)?;
         // Cancellation ownership is durable before prepare can race with a
@@ -4316,6 +4362,9 @@ impl ControllerJobDriver for LabStagingDispatchDriver {
             .expect("Lab staging cancellation lock")
             .entry(envelope.run_id.clone())
             .or_default();
+        // A cancelled or otherwise terminal attempt must not admit staging
+        // work: its lifecycle is closed, so this job terminalizes with it.
+        ensure_linked_attempt_not_terminal(&envelope.run_id)?;
         // Resolve only durable, owner-controlled input before the daemon can
         // accept the job. Stage execution remains intentionally uninstalled.
         let recipe = match &envelope.input {
@@ -4931,6 +4980,111 @@ mod tests {
             artifacts: Vec::new(),
             runner_job_projection: None,
         }
+    }
+
+    fn envelope_for_run(run_id: &str) -> LabStagingDispatchEnvelope {
+        LabStagingDispatchEnvelope::new(
+            run_id,
+            "lab-1",
+            LabStagingInputRef::AgentTaskAttempt {
+                run_id: run_id.to_string(),
+                recipe: recipe_ref(),
+            },
+        )
+    }
+
+    /// Terminalize one durable attempt record directly, the way a cancellation
+    /// landing between controller-job creation and lifecycle-metadata recording
+    /// leaves it: terminal with no `lab_staging_controller_job_id` linkage.
+    fn terminalize_attempt_record(run_id: &str) {
+        let lifecycle =
+            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+        let mut record = lifecycle.read_record(run_id).expect("attempt record");
+        record.state = homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled;
+        lifecycle
+            .write_record(&record)
+            .expect("terminalize attempt");
+    }
+
+    /// #13619: the driver declares its durable-run linkage so the daemon
+    /// persists it at admission — before any staging work can escape the
+    /// controller lifecycle — and the durable admission keeps it.
+    #[test]
+    fn staging_dispatch_declares_and_persists_its_linked_durable_run_id() {
+        let run_id = format!("run-13619-linkage-{}", uuid::Uuid::new_v4());
+        let envelope = envelope_for_run(&run_id);
+        let request = serde_json::to_value(&envelope).expect("serialize envelope");
+
+        assert_eq!(
+            LabStagingDispatchDriver
+                .linked_durable_run_id(&request)
+                .as_deref(),
+            Some(run_id.as_str())
+        );
+
+        let harness = ControllerJobHarness::new(Arc::new(LabStagingDispatchDriver), request)
+            .expect("admit through the durable boundary");
+        assert_eq!(
+            harness
+                .linked_durable_run_id()
+                .expect("controller state")
+                .as_deref(),
+            Some(run_id.as_str()),
+            "admission persists the driver-declared linkage"
+        );
+    }
+
+    /// #13619: a staging dispatch whose linked attempt cancelled before any
+    /// child identity was recorded must not admit staging work — the job
+    /// terminalizes with its attempt instead of orphaning `running`.
+    #[test]
+    fn staging_prepare_fails_fast_when_linked_attempt_already_terminal() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = format!("run-13619-prepare-{}", uuid::Uuid::new_v4());
+            submit_recipe_run(&run_id);
+            terminalize_attempt_record(&run_id);
+            let request =
+                serde_json::to_value(envelope_for_run(&run_id)).expect("serialize envelope");
+
+            let error = LabStagingDispatchDriver
+                .prepare(request)
+                .expect_err("a terminal attempt closes the staging lifecycle");
+
+            assert!(
+                error.message.contains("already terminalized"),
+                "{}",
+                error.message
+            );
+        });
+    }
+
+    /// The same fence guards claimed execution: pre-dispatch phases refuse to
+    /// begin work for a terminal attempt even when the job already reached
+    /// `running`, so no workspace or runner admission escapes the controller
+    /// lifecycle after its attempt terminalized.
+    #[test]
+    fn staging_execute_refuses_pre_dispatch_work_for_terminal_attempt() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = format!("run-13619-execute-{}", uuid::Uuid::new_v4());
+            submit_recipe_run(&run_id);
+            let request =
+                serde_json::to_value(envelope_for_run(&run_id)).expect("serialize envelope");
+            let harness = ControllerJobHarness::new(Arc::new(LabStagingDispatchDriver), request)
+                .expect("admit and claim");
+            terminalize_attempt_record(&run_id);
+            let checkpoint = LabStagingCheckpoint::initial(&envelope_for_run(&run_id));
+
+            let error = LabStagingDispatchDriver
+                .execute_checkpoint(checkpoint, harness.handle(), false)
+                .expect_err("pre-dispatch work refuses a terminal attempt");
+
+            assert!(
+                error.message.contains("already terminalized"),
+                "{}",
+                error.message
+            );
+        });
     }
 
     #[test]

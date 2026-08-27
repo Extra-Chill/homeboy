@@ -33,6 +33,15 @@ pub trait ControllerJobDriver: Send + Sync {
     /// values. Domain drivers define their own reference vocabulary.
     fn validate_secret_references(&self, request: &Value) -> Result<()>;
 
+    /// The controller-minted durable run this job executes for, extracted from
+    /// the driver's typed request. The daemon persists the linkage at
+    /// admission — before any driver work can escape the daemon lifecycle — so
+    /// recovery can reconcile this job from its linked run's terminal state
+    /// without parsing the opaque request.
+    fn linked_durable_run_id(&self, _request: &Value) -> Option<String> {
+        None
+    }
+
     /// Prepare the persisted request inside the daemon worker. Drivers may
     /// override this to resolve controller-local inputs after durable admission.
     fn prepare(&self, request: Value) -> Result<Value> {

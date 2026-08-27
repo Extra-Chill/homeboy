@@ -9,7 +9,9 @@ use homeboy_core::api_jobs::agent_task_terminal_recovery::{
     recovered_terminal_job, register_agent_task_terminal_recovery_provider,
     AgentTaskTerminalRecoveryProvider,
 };
-use homeboy_core::api_jobs::{JobArtifactMetadata, JobStatus, RecoveredTerminalJob};
+use homeboy_core::api_jobs::{
+    DaemonLinkedDurableRunState, JobArtifactMetadata, JobStatus, RecoveredTerminalJob,
+};
 
 use crate::agent_task_scheduler::AgentTaskAggregateStatus;
 use crate::agent_task_service;
@@ -60,6 +62,15 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
             run_id,
             artifacts,
         ))
+    }
+
+    fn linked_durable_run_state(&self, run_id: &str) -> Option<DaemonLinkedDurableRunState> {
+        let record = crate::agent_task_lifecycle::status(run_id).ok()?;
+        if record.state.is_terminal() {
+            Some(DaemonLinkedDurableRunState::Terminal)
+        } else {
+            Some(DaemonLinkedDurableRunState::Active)
+        }
     }
 }
 

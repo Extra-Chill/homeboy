@@ -43,6 +43,12 @@ impl ControllerJobHarness {
             ControllerJobState {
                 job_type: driver.job_type().to_string(),
                 version: driver.version(),
+                linked_durable_run_id: driver
+                    .linked_durable_run_id(&request)
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|run_id| !run_id.is_empty())
+                    .map(str::to_string),
                 request,
                 public_request,
                 request_digest,
@@ -82,9 +88,127 @@ impl ControllerJobHarness {
         Ok(self.store.controller_job_state(self.job_id)?.checkpoint)
     }
 
+    /// The driver-declared durable-run linkage persisted at admission.
+    pub fn linked_durable_run_id(&self) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .controller_job_state(self.job_id)?
+            .linked_durable_run_id)
+    }
+
     pub fn request_cancellation(&self, reason: impl Into<String>) -> Result<Job> {
         self.store
             .request_controller_cancellation(self.job_id, reason.into())
+    }
+}
+
+/// The durable-run fixture one test programs for a linked agent-task run.
+#[derive(Clone)]
+pub enum AgentTaskTerminalRunFixture {
+    Terminal(crate::api_jobs::JobStatus),
+    Active,
+}
+
+/// A deterministic agent-task terminal-recovery provider shared by every test
+/// in the process.
+///
+/// The provider registry is process-global, so one shared fixture store is
+/// registered exactly once; each test programs only its own unique run ids and
+/// parallel tests cannot observe each other's resolutions.
+pub struct AgentTaskTerminalRunFixtures {
+    runs: Mutex<std::collections::HashMap<String, AgentTaskTerminalRunFixture>>,
+}
+
+impl AgentTaskTerminalRunFixtures {
+    /// Install the shared provider and return its fixture store.
+    pub fn install() -> &'static Self {
+        static FIXTURES: OnceLock<AgentTaskTerminalRunFixtures> = OnceLock::new();
+        FIXTURES.get_or_init(|| {
+            crate::api_jobs::agent_task_terminal_recovery::register_agent_task_terminal_recovery_provider(
+                Box::new(SharedProvider),
+            );
+            AgentTaskTerminalRunFixtures {
+                runs: Mutex::new(std::collections::HashMap::new()),
+            }
+        })
+    }
+
+    /// Program `run_id` as a terminal agent-task run recovering `status`.
+    pub fn terminal_run(&self, run_id: &str, status: crate::api_jobs::JobStatus) {
+        self.runs
+            .lock()
+            .expect("terminal-run fixtures lock")
+            .insert(
+                run_id.to_string(),
+                AgentTaskTerminalRunFixture::Terminal(status),
+            );
+    }
+
+    /// Program `run_id` as a live (non-terminal) agent-task run.
+    pub fn active_run(&self, run_id: &str) {
+        self.runs
+            .lock()
+            .expect("terminal-run fixtures lock")
+            .insert(run_id.to_string(), AgentTaskTerminalRunFixture::Active);
+    }
+
+    /// Remove one programmed run.
+    pub fn remove(&self, run_id: &str) {
+        self.runs
+            .lock()
+            .expect("terminal-run fixtures lock")
+            .remove(run_id);
+    }
+
+    fn get(&self, run_id: &str) -> Option<AgentTaskTerminalRunFixture> {
+        self.runs
+            .lock()
+            .expect("terminal-run fixtures lock")
+            .get(run_id)
+            .cloned()
+    }
+}
+
+struct SharedProvider;
+
+impl crate::api_jobs::agent_task_terminal_recovery::AgentTaskTerminalRecoveryProvider
+    for SharedProvider
+{
+    fn recovered_terminal_agent_task_job(
+        &self,
+        run_id: &str,
+    ) -> Option<crate::api_jobs::RecoveredTerminalJob> {
+        let AgentTaskTerminalRunFixture::Terminal(status) =
+            AgentTaskTerminalRunFixtures::install().get(run_id)?
+        else {
+            return None;
+        };
+        Some(
+            crate::api_jobs::agent_task_terminal_recovery::recovered_terminal_job(
+                status,
+                serde_json::json!({
+                    "kind": "test_agent_task_aggregate",
+                    "run_id": run_id,
+                    "status": status,
+                }),
+                run_id.to_string(),
+                Vec::new(),
+            ),
+        )
+    }
+
+    fn linked_durable_run_state(
+        &self,
+        run_id: &str,
+    ) -> Option<crate::api_jobs::DaemonLinkedDurableRunState> {
+        match AgentTaskTerminalRunFixtures::install().get(run_id)? {
+            AgentTaskTerminalRunFixture::Terminal(_) => {
+                Some(crate::api_jobs::DaemonLinkedDurableRunState::Terminal)
+            }
+            AgentTaskTerminalRunFixture::Active => {
+                Some(crate::api_jobs::DaemonLinkedDurableRunState::Active)
+            }
+        }
     }
 }
 
