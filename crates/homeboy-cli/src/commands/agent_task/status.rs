@@ -9157,10 +9157,7 @@ mod tests {
             let summary = compact_status_summary(&record, run_id);
 
             assert_eq!(summary["cook"]["provider"]["backend"], "opencode");
-            assert_eq!(
-                summary["cook"]["provider"]["model"],
-                "openai/gpt-5.6-sol"
-            );
+            assert_eq!(summary["cook"]["provider"]["model"], "openai/gpt-5.6-sol");
         });
     }
 
