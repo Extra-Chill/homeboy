@@ -128,7 +128,7 @@ fn component_config_env_is_available_to_component_scripts_and_extra_env_wins() {
 }
 
 #[test]
-fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() {
+fn homeboy_manifest_seeds_an_isolated_warm_cargo_target_per_checkout() {
     with_isolated_home(|_| {
         let manifest = homeboy_manifest();
         assert!(manifest.managed_execution.shared_cargo_target);
@@ -165,8 +165,18 @@ fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() 
             .expect("commit divergent fixture");
         assert!(output.status.success());
 
+        // The primary checkout "compiles" first, writing a build artifact
+        // into its managed Cargo target. The worktree's own script never
+        // writes that artifact itself, so if it shows up in the worktree's
+        // resolved target, it can only have arrived by seeding from the
+        // primary's store rather than by the worktree recompiling it.
+        let scripts = [
+            "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\" > cargo-target; \
+             printf 'compiled output' > \"$CARGO_TARGET_DIR/build-artifact\"",
+            "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\" > cargo-target",
+        ];
         let mut resolved_targets = Vec::new();
-        for checkout in [primary.path(), worktree.as_path()] {
+        for (checkout, script) in [primary.path(), worktree.as_path()].into_iter().zip(scripts) {
             let mut component = manifest.clone();
             component.local_path = checkout.to_string_lossy().to_string();
             component.extensions = None;
@@ -176,10 +186,7 @@ fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() 
                 .env
                 .insert("CARGO_TARGET_DIR".to_string(), String::new());
             component.scripts = Some(ComponentScriptsConfig {
-                test: vec![
-                    "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\" > cargo-target"
-                        .to_string(),
-                ],
+                test: vec![script.to_string()],
                 ..Default::default()
             });
 
@@ -196,8 +203,33 @@ fn homeboy_manifest_preserves_shared_cargo_target_resolution_across_checkouts() 
                 .push(fs::read_to_string(checkout.join("cargo-target")).expect("resolved target"));
         }
 
-        assert_eq!(resolved_targets[0], resolved_targets[1]);
         assert!(resolved_targets[0].starts_with("shared:"));
+        assert!(resolved_targets[1].starts_with("shared:"));
+        let primary_target = resolved_targets[0]
+            .strip_prefix("shared:")
+            .expect("primary target path");
+        let worktree_target = resolved_targets[1]
+            .strip_prefix("shared:")
+            .expect("worktree target path");
+
+        // A divergent worktree must not receive the literal same physical
+        // Cargo target directory as the primary checkout: two worktrees
+        // compiling concurrently into one directory serialize behind
+        // Cargo's own build lock instead of running in parallel.
+        assert_ne!(
+            primary_target, worktree_target,
+            "each checkout must get its own physical Cargo target directory"
+        );
+
+        // The worktree's target was seeded from the primary's before its own
+        // script ran, so it already carries the primary's build output
+        // without having compiled anything itself: a freshly provisioned
+        // worktree starts warm, not cold.
+        let seeded_artifact = Path::new(worktree_target).join("build-artifact");
+        assert_eq!(
+            fs::read_to_string(&seeded_artifact).expect("worktree target seeded from base"),
+            "compiled output",
+        );
     });
 }
 
