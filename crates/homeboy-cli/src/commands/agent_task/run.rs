@@ -4019,8 +4019,16 @@ fn resolve_cook_preview_destination(
             // An explicit destination reaches planning too: previewing a missing
             // one is the point of #13515, so a not-found provider is planned
             // whether or not the destination was derived from an issue.
-            Err(error) if error.details["worktree_provider_lookup"] == "not_found" => {
-                let intent = cook_workspace_create_intent(&args)?;
+            Err(lookup_error) if lookup_error.details["worktree_provider_lookup"] == "not_found" => {
+                // Planning a creation needs an intent to plan. An explicit
+                // handle that cannot describe one — no --repo to create it
+                // under — is simply an absent destination, which the lookup
+                // failure already reports precisely.
+                let intent = match cook_workspace_create_intent(&args) {
+                    Ok(intent) => intent,
+                    Err(error) if issue_derived => return Err(error),
+                    Err(_) => return Err(lookup_error),
+                };
                 let lifecycle = WorktreeProviderLifecycleIntent {
                     purpose: "agent_task_cook".to_string(),
                     owner_run_ref: args
@@ -4036,7 +4044,17 @@ fn resolve_cook_preview_destination(
                     Err(error) if issue_derived => {
                         return Ok((args, unresolved_provider_preview(&handle, error, &config)));
                     }
-                    Err(error) => return Err(error),
+                    // A provider that can ensure but cannot plan is a real
+                    // answer about this destination, so it is reported. Any
+                    // other planning failure means no provider owns the handle
+                    // at all, which the original lookup already says better.
+                    Err(error) => {
+                        return Err(if error.details["worktree_provider_planning"] == "unsupported" {
+                            error
+                        } else {
+                            lookup_error
+                        })
+                    }
                 };
                 let WorktreeProvisionPlan::Planned(destination) = plan else {
                     return Err(homeboy::core::Error::internal_unexpected(
