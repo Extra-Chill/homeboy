@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.363.3] - 2026-08-27
+
+### Fixed
+- treat an exhausted category budget as continuation, not failure
+- recover only an incomplete admission
+- bound the compact activity projection
+- render recovery attestation once
+- bind admission recovery to recipe
+
 ## [0.363.2] - 2026-08-27
 
 ### Changed
