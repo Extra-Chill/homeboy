@@ -1698,6 +1698,18 @@ where
     })
 }
 
+/// Size every file the provider owns under its artifacts directory.
+///
+/// `artifacts_path` is handed to the provider as its private output directory,
+/// so a file growing there is the provider doing work — whatever it is named.
+///
+/// This deliberately does not filter on the file name. It used to require the
+/// name to contain `progress`, which made liveness depend on a runtime's naming
+/// convention rather than on observable activity (#13623). A runtime that
+/// streams its telemetry into, say, `<task>-<backend>-runtime-stdout.log` was
+/// invisible: the watchdog read zero progress while that file grew to 94KB, and
+/// killed a healthy provider as stalled. Nothing else writes here, so counting
+/// every file cannot manufacture liveness the provider did not earn.
 fn runtime_progress_snapshot(root: &Path) -> BTreeMap<PathBuf, u64> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return BTreeMap::new();
@@ -1705,10 +1717,6 @@ fn runtime_progress_snapshot(root: &Path) -> BTreeMap<PathBuf, u64> {
     entries
         .flatten()
         .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-            if !name.contains("progress") {
-                return None;
-            }
             let path = entry.path();
             let metadata = path.metadata().ok()?;
             metadata.is_file().then_some((path, metadata.len()))
