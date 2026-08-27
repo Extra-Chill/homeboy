@@ -2672,6 +2672,7 @@ pub(crate) fn cook_finalization_options_with_stores(
             source_relationship: AgentTaskPrSourceRelationship::default(),
             verification: AgentTaskPrVerification {
                 targeted_checks_run,
+                dependency_hydration: Vec::new(),
                 targeted_checks_unavailable: None,
                 ci_expected: vec!["Homeboy CI after push".to_string()],
                 manual_reviewer_check: None,
@@ -2691,6 +2692,7 @@ pub(crate) fn cook_finalization_options_with_stores(
         manual_finalization: false,
         expected_candidate_sha: None,
         verified_candidate_sha: None,
+        inherited_gate_evidence: None,
         protected_branches: options.protected_branches.clone(),
         draft_pr: options.draft_pr,
     })
@@ -3890,6 +3892,7 @@ fn manual_finalization_options(
         manual_finalization: true,
         expected_candidate_sha,
         verified_candidate_sha: None,
+        inherited_gate_evidence: report.inherited_gate_evidence,
         protected_branches: vec![
             "main".to_string(),
             "master".to_string(),
