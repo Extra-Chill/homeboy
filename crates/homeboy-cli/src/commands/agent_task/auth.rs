@@ -141,10 +141,8 @@ fn auth_status(status_args: AgentTaskAuthStatusArgs) -> Value {
     // Explicit operator-supplied names win; otherwise report every secret the
     // selected backend declares. Shared with `agent-task providers
     // --secret-env` so the two commands agree about the same secrets (#13629).
-    let secret_env = agent_task_secrets::secret_env_status_for_scope(
-        &status_args.secret_env,
-        &fallback_sources,
-    );
+    let secret_env =
+        agent_task_secrets::secret_env_status_for_scope(&status_args.secret_env, &fallback_sources);
 
     serde_json::json!({
         "schema": "homeboy/agent-task-auth-status/v1",
