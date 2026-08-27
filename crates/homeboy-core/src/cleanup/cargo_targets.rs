@@ -316,7 +316,11 @@ fn acquire_managed_cargo_target_for_compatibility(
     // Touch the base store's liveness so it isn't reclaimed as unused while
     // it exists only to seed worktree-private stores, then release it
     // immediately: nothing compiles directly into it any more.
-    drop(acquire_shared_cargo_target_in(&root, &base_owner, SystemTime::now())?);
+    drop(acquire_shared_cargo_target_in(
+        &root,
+        &base_owner,
+        SystemTime::now(),
+    )?);
 
     let canonical_source =
         fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
@@ -354,7 +358,10 @@ fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<Sys
 }
 
 fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
-    root.join(format!("homeboy-{}", content_hash::sha256_hex(owner.as_bytes())))
+    root.join(format!(
+        "homeboy-{}",
+        content_hash::sha256_hex(owner.as_bytes())
+    ))
 }
 
 fn read_marker_time(path: &Path) -> Option<SystemTime> {

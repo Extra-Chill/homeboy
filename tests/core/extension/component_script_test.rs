@@ -176,7 +176,10 @@ fn homeboy_manifest_seeds_an_isolated_warm_cargo_target_per_checkout() {
             "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\" > cargo-target",
         ];
         let mut resolved_targets = Vec::new();
-        for (checkout, script) in [primary.path(), worktree.as_path()].into_iter().zip(scripts) {
+        for (checkout, script) in [primary.path(), worktree.as_path()]
+            .into_iter()
+            .zip(scripts)
+        {
             let mut component = manifest.clone();
             component.local_path = checkout.to_string_lossy().to_string();
             component.extensions = None;
