@@ -1,4 +1,4 @@
-# Weekly workflow action-pin staleness sweep.
+# Weekly workflow action-pin staleness sweep, with an opt-in bump.
 #
 # A commit-pinned reusable workflow or action freezes another repository at a
 # point in time, and nothing expires that freeze. The failure mode is silent: a
@@ -12,11 +12,14 @@
 # back a released fix the gate depended on. Nothing in the repository could see
 # either one (#13437).
 #
-# Advisory, like audit-debt.yml, and for the same reason: this repository
-# already has one required gate that nothing can pass, and adding a second
-# always-red check teaches the same lesson as no check at all. Enforcement is
-# one flag away -- `--max-commits-behind N` exits non-zero -- once a threshold
-# has been agreed.
+# The scheduled run is advisory, like audit-debt.yml, and for the same reason:
+# this repository already has one required gate that nothing can pass, and a
+# second always-red check teaches the same lesson as no check at all.
+#
+# Bumping is opt-in and never happens on the schedule. `workflow_dispatch` with
+# `apply: true` rewrites the pins and opens a pull request, so the change is
+# reviewed and CI-verified like any other -- a pin bump changes which code runs
+# every subsequent build, which is not something to land unattended.
 #
 # Deliberately does NOT run through .homeboy-action. The pins this checks
 # include the action itself, so routing the check through them would let a
@@ -29,6 +32,11 @@ on:
     - cron: '0 8 * * 1'
   workflow_dispatch:
     inputs:
+      apply:
+        description: 'Rewrite behind pins and open a pull request.'
+        type: boolean
+        required: false
+        default: false
       max-commits-behind:
         description: 'Exit non-zero when any pin is at least this many commits behind. Empty = advisory.'
         required: false
@@ -38,8 +46,13 @@ concurrency:
   group: pin-staleness
   cancel-in-progress: true
 
+# Read-only by default. The bump path is manual-dispatch-only and needs to push
+# a branch and open a pull request, and GitHub has no conditional permissions,
+# so the job carries write. It never writes on the schedule: every mutating step
+# is gated on `inputs.apply`.
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 jobs:
   pins:
@@ -50,13 +63,26 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.95.0
 
+      - name: Generate GitHub App token
+        id: app-token
+        if: ${{ github.event.inputs.apply == 'true' }}
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
       - name: Report pin staleness
         env:
           GH_TOKEN: ${{ github.token }}
+          APPLY: ${{ github.event.inputs.apply || 'false' }}
           MAX_BEHIND: ${{ github.event.inputs.max-commits-behind || '' }}
         run: |
           set -euo pipefail
           args=(review ci pins --path .)
+          if [ "${APPLY}" = "true" ]; then
+            args+=(--apply)
+          fi
           if [ -n "${MAX_BEHIND}" ]; then
             args+=(--max-commits-behind "${MAX_BEHIND}")
           fi
@@ -67,7 +93,8 @@ jobs:
           report = json.loads(pathlib.Path("pins.json").read_text())
           data = report.get("data", report)
           pins = data.get("pins", [])
-          print("## Workflow pin staleness\n")
+          bumps = data.get("bumps", [])
+          print(f"## Workflow pin staleness ({data.get('mutation_mode', 'plan')})\n")
           print(
               f"{data.get('scanned_files', 0)} workflow file(s) · "
               f"**{data.get('behind', 0)} behind** · "
@@ -86,8 +113,73 @@ jobs:
                       f"| `{pin.get('repository', '—')}` "
                       f"| {pin['detail']} |"
                   )
-          print(
-              "\n> Advisory. Run `homeboy review ci pins --max-commits-behind N` "
-              "to enforce a threshold."
+          if bumps:
+              print(f"\n### {len(bumps)} bump(s) available\n")
+              for bump in bumps:
+                  print(
+                      f"- `{bump['file']}:{bump['line']}` "
+                      f"`{bump['from'][:10]}` → `{bump['to'][:10]}` ({bump['release']})"
+                  )
+              print(
+                  "\nRe-run this workflow with **apply: true** to rewrite them "
+                  "and open a pull request."
+              )
+          PY
+
+      - name: Open the bump pull request
+        if: ${{ github.event.inputs.apply == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .github/workflows; then
+            echo "No pin rewrites to publish."
+            exit 0
+          fi
+
+          # Message and body are rendered to files by Python rather than built
+          # in shell. A heredoc carrying command substitution around JSON is the
+          # kind of quoting that breaks silently and commits the wrong text.
+          python3 - <<'PY'
+          import json, pathlib
+
+          data = json.loads(pathlib.Path("pins.json").read_text())
+          data = data.get("data", data)
+          applied = data.get("applied", [])
+
+          lines = [f"{b['file']}:{b['line']}  {b['from'][:10]} -> {b['to'][:10]}  ({b['release']})" for b in applied]
+          pathlib.Path("/tmp/pin-bump-message.txt").write_text(
+              "chore(ci): bump stale workflow action pins\n\n"
+              + "\n".join(lines)
+              + "\n\nOpened by the Pin Staleness workflow.\n\nRefs #13437\n"
+          )
+
+          rows = "\n".join(
+              f"| `{b['file']}:{b['line']}` | `{b['from'][:10]}` | `{b['to'][:10]}` | `{b['release']}` |"
+              for b in applied
+          )
+          pathlib.Path("/tmp/pin-bump-body.md").write_text(
+              "Automated pin bump from the Pin Staleness workflow.\n\n"
+              "| location | from | to | release |\n|---|---|---|---|\n"
+              + rows
+              + "\n\n> **Review the comment block above each bumped pin.** The rewrite "
+                "changes the SHA only, so a comment naming the previous release is now "
+                "stale and has to be updated by hand.\n\n"
+                "> A pin bump changes which code runs on every subsequent build, so it "
+                "lands through review and CI like any other change.\n\n"
+                "Refs #13437\n"
           )
           PY
+
+          branch="chore/pin-bump-$(date -u +%Y%m%d-%H%M%S)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git add -- .github/workflows
+          git commit -q -F /tmp/pin-bump-message.txt
+          git push -u origin "${branch}"
+          gh pr create \
+            --base "${GITHUB_REF_NAME}" \
+            --head "${branch}" \
+            --title "chore(ci): bump stale workflow action pins" \
+            --body-file /tmp/pin-bump-body.md

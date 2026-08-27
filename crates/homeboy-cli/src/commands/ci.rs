@@ -132,6 +132,13 @@ pub struct CiPinsArgs {
     #[arg(long)]
     pub fail_on_unresolved: bool,
 
+    /// Rewrite behind pins to their upstream release commit.
+    ///
+    /// Plan-only without it: the report already names every edit it would make,
+    /// so the default run is safe to put anywhere.
+    #[command(flatten)]
+    pub mutation: super::utils::args::MutationArgs,
+
     /// Include tag and branch pins in the report. They cannot go stale, so by
     /// default only commit pins are listed and floating ones are counted.
     #[arg(long)]
@@ -459,6 +466,31 @@ fn run_pins(args: CiPinsArgs) -> CmdResult<CiOutput> {
         .max()
         .unwrap_or(0);
 
+    let bumps = pins::plan_bumps(&resolved);
+    let mut applied: Vec<pins::PinBump> = Vec::new();
+    if args.mutation.is_apply() && !bumps.is_empty() {
+        let mut by_file: BTreeMap<String, Vec<pins::PinBump>> = BTreeMap::new();
+        for bump in &bumps {
+            by_file
+                .entry(bump.file.clone())
+                .or_default()
+                .push(bump.clone());
+        }
+        for (file, file_bumps) in by_file {
+            let path = args.path.join(&file);
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let (rewritten, done) = pins::apply_bumps_to_text(&contents, &file_bumps);
+            if done.is_empty() {
+                continue;
+            }
+            if std::fs::write(&path, rewritten).is_ok() {
+                applied.extend(done);
+            }
+        }
+    }
+
     let mut remediation = Vec::new();
     for pin in resolved
         .iter()
@@ -485,6 +517,9 @@ fn run_pins(args: CiPinsArgs) -> CmdResult<CiOutput> {
                 behind,
                 unresolved,
                 max_commits_behind,
+                mutation_mode: args.mutation.mode(),
+                bumps,
+                applied,
                 remediation,
             },
         }),
