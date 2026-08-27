@@ -343,6 +343,22 @@ pub fn changes_at(
         None
     };
 
+    // The baseline reference is frequently a branch rather than an
+    // immutable tag (e.g. an explicit `--since origin/main`). If it has
+    // advanced past its merge-base with HEAD since this checkout diverged,
+    // say so explicitly rather than letting the operator discover it only
+    // by noticing an unexpectedly large diff.
+    let advance_warning = baseline
+        .reference
+        .as_deref()
+        .and_then(|r| base_advance_warning(&path, r));
+    let warning = match (baseline.warning, advance_warning) {
+        (Some(existing), Some(advance)) => Some(format!("{existing} {advance}")),
+        (Some(existing), None) => Some(existing),
+        (None, Some(advance)) => Some(advance),
+        (None, None) => None,
+    };
+
     Ok(ChangesOutput {
         component_id: id,
         path,
@@ -354,7 +370,7 @@ pub fn changes_at(
         uncommitted,
         uncommitted_diff,
         diff,
-        warning: baseline.warning,
+        warning,
         error: None,
         changelog: changelog_info,
     })
