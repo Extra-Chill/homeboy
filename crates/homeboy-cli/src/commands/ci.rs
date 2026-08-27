@@ -404,123 +404,30 @@ fn run_pins(args: CiPinsArgs) -> CmdResult<CiOutput> {
     // editing the repository.
     mapping.extend(args.input_repositories.iter().cloned());
 
-    let workflows = args.path.join(&args.workflows);
-    let mut files: Vec<(String, String)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&workflows) {
-        let mut paths: Vec<_> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                matches!(
-                    path.extension().and_then(|ext| ext.to_str()),
-                    Some("yml") | Some("yaml")
-                )
-            })
-            .collect();
-        // Deterministic order so the report is diffable run to run.
-        paths.sort();
-        for path in paths {
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                let label = path
-                    .strip_prefix(&args.path)
-                    .unwrap_or(&path)
-                    .display()
-                    .to_string();
-                files.push((label, contents));
-            }
-        }
-    }
-
-    let discovered: Vec<_> = files
+    let files = pins::read_workflow_files(&args.path, &args.path.join(&args.workflows));
+    let resolved: Vec<_> = files
         .iter()
         .flat_map(|(label, contents)| pins::discover_in_file(label, contents, &mapping))
+        .map(pins::resolve_pin)
         .collect();
-    let all_resolved: Vec<_> = discovered.into_iter().map(pins::resolve_pin).collect();
-    let floating = all_resolved
-        .iter()
-        .filter(|pin| pin.status == pins::PinStatus::Floating)
-        .count();
-    // Floating pins are the large majority of this repository's `uses:` lines
-    // and none of them can be stale, so listing them by default buries the
-    // finding this command exists to surface.
-    let resolved: Vec<_> = if args.all {
-        all_resolved
-    } else {
-        all_resolved
-            .into_iter()
-            .filter(|pin| pin.status != pins::PinStatus::Floating)
-            .collect()
-    };
-
-    let behind = resolved
-        .iter()
-        .filter(|pin| pin.status == pins::PinStatus::Behind)
-        .count();
-    let unresolved = resolved
-        .iter()
-        .filter(|pin| pin.status == pins::PinStatus::Unresolved)
-        .count();
-    let max_commits_behind = resolved
-        .iter()
-        .filter_map(|pin| pin.commits_behind)
-        .max()
-        .unwrap_or(0);
 
     let bumps = pins::plan_bumps(&resolved);
-    let mut applied: Vec<pins::PinBump> = Vec::new();
-    if args.mutation.is_apply() && !bumps.is_empty() {
-        let mut by_file: BTreeMap<String, Vec<pins::PinBump>> = BTreeMap::new();
-        for bump in &bumps {
-            by_file
-                .entry(bump.file.clone())
-                .or_default()
-                .push(bump.clone());
-        }
-        for (file, file_bumps) in by_file {
-            let path = args.path.join(&file);
-            let Ok(contents) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let (rewritten, done) = pins::apply_bumps_to_text(&contents, &file_bumps);
-            if done.is_empty() {
-                continue;
-            }
-            if std::fs::write(&path, rewritten).is_ok() {
-                applied.extend(done);
-            }
-        }
-    }
+    let applied = if args.mutation.is_apply() {
+        pins::apply_bumps_to_files(&args.path, &bumps)
+    } else {
+        Vec::new()
+    };
 
-    let mut remediation = Vec::new();
-    for pin in resolved
-        .iter()
-        .filter(|pin| pin.status == pins::PinStatus::Behind)
-    {
-        remediation.push(format!(
-            "{}:{} — {}",
-            pin.pin.file, pin.pin.line, pin.detail
-        ));
-    }
-
-    let over_threshold = args
-        .max_commits_behind
-        .is_some_and(|limit| max_commits_behind >= limit && max_commits_behind > 0);
-    let exit_code = i32::from(over_threshold || (args.fail_on_unresolved && unresolved > 0));
+    let report = pins::PinsReport::new(files.len(), resolved, bumps, applied, args.mutation.mode());
+    let exit_code = i32::from(report.exceeds(args.max_commits_behind, args.fail_on_unresolved));
 
     Ok((
         CiOutput::Pins(CiPinsCommandOutput {
             command: "ci.pins",
-            report: pins::PinsReport {
-                scanned_files: files.len(),
-                floating,
-                pins: resolved,
-                behind,
-                unresolved,
-                max_commits_behind,
-                mutation_mode: args.mutation.mode(),
-                bumps,
-                applied,
-                remediation,
+            report: if args.all {
+                report
+            } else {
+                report.without_floating()
             },
         }),
         exit_code,
