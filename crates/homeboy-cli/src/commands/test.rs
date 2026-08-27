@@ -541,15 +541,22 @@ fn apply_differential_verdict(
     )
 }
 
+/// Resolve the differential baseline to the merge base of `reference` and
+/// `HEAD`, not `reference`'s current tip.
+///
+/// `reference` (typically `origin/main`) keeps moving while a candidate is in
+/// flight: other PRs land on it after the candidate branched. Running the
+/// baseline suite at the moving tip tests commits the candidate never built
+/// on, so a fresh break on `main` reads as "inherited" for a candidate that
+/// never saw it, and a fix on `main` can mask a real candidate regression.
+/// The merge base is the actual commit the candidate diverged from, so it is
+/// the only fixed point that answers "is this red because of my change" —
+/// and it stays fixed across every re-run for a given candidate, unlike the
+/// tip.
 fn resolve_differential_revision(source_root: &Path, reference: &str) -> Option<String> {
-    let commit_ref = format!("{reference}^{{commit}}");
-    git::run_git(
-        source_root,
-        &["rev-parse", "--verify", &commit_ref],
-        "resolve differential test baseline",
-    )
-    .ok()
-    .map(|revision| revision.trim().to_string())
+    git::resolve_merge_base(&source_root.to_string_lossy(), reference)
+        .ok()
+        .map(|revision| revision.trim().to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1687,6 +1694,73 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("--coverage/--coverage-min"));
         assert!(message.contains("--changed-since"));
+    }
+
+    fn differential_git(path: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap_or_else(|err| panic!("git {:?} failed to start: {}", args, err));
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// The reported bug: `origin/main` moves while a candidate is in flight,
+    /// so resolving the differential baseline to its current tip tests
+    /// commits the candidate never diverged from. Pinning to the merge base
+    /// instead means a re-run gives the same, correct answer regardless of
+    /// what has landed on `main` since the candidate branched.
+    #[test]
+    fn differential_baseline_resolves_to_merge_base_not_moving_tip() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path();
+        differential_git(path, &["init", "-q", "-b", "main"]);
+        differential_git(path, &["config", "user.email", "test@example.com"]);
+        differential_git(path, &["config", "user.name", "Homeboy Test"]);
+        fs::write(path.join("README.md"), "base\n").expect("write base file");
+        differential_git(path, &["add", "."]);
+        differential_git(path, &["commit", "-q", "-m", "base"]);
+        let divergence_point = differential_git(path, &["rev-parse", "HEAD"]);
+
+        // The candidate branches from the divergence point.
+        differential_git(path, &["checkout", "-q", "-b", "candidate"]);
+        fs::write(path.join("candidate.txt"), "candidate work\n")
+            .expect("write candidate file");
+        differential_git(path, &["add", "."]);
+        differential_git(path, &["commit", "-q", "-m", "candidate change"]);
+
+        // `main` moves forward after the candidate branched — this is the
+        // moving-origin/main scenario the issue describes.
+        differential_git(path, &["checkout", "-q", "main"]);
+        fs::write(path.join("main-only.txt"), "unrelated main work\n")
+            .expect("write main-only file");
+        differential_git(path, &["add", "."]);
+        differential_git(path, &["commit", "-q", "-m", "main moved on"]);
+        let moved_main_tip = differential_git(path, &["rev-parse", "HEAD"]);
+        assert_ne!(moved_main_tip, divergence_point);
+
+        // Back on the candidate: HEAD is the candidate's commit.
+        differential_git(path, &["checkout", "-q", "candidate"]);
+
+        let resolved = resolve_differential_revision(path, "main")
+            .expect("merge base should resolve");
+
+        assert_eq!(
+            resolved, divergence_point,
+            "differential baseline must pin to the merge base the candidate diverged from, \
+             not main's current tip"
+        );
+        assert_ne!(
+            resolved, moved_main_tip,
+            "differential baseline must not follow main after the candidate branched"
+        );
     }
 
     #[test]
