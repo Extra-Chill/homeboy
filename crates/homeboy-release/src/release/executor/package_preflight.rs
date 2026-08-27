@@ -38,15 +38,23 @@ pub(crate) fn validate_package_completeness(
     artifacts: &[ReleaseArtifact],
 ) -> Result<()> {
     component.release.validate_package_coverage()?;
+    // One archive can be referenced more than once, for example when a component
+    // declares it as its build artifact and the release package manifest reports
+    // the same path. Those references resolve to a single file on disk, so count
+    // each resolved path once and let coverage selectors stay `exact`.
+    let mut counted_paths: BTreeSet<PathBuf> = BTreeSet::new();
     let zip_artifacts: Vec<(&ReleaseArtifact, BTreeSet<String>)> = artifacts
         .iter()
         .filter_map(|artifact| {
             let artifact_path = resolve_artifact_path(component_path, artifact);
-            artifact_path
+            let is_zip = artifact_path
                 .extension()
                 .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
-                .then(|| read_zip_entries(&artifact_path).map(|entries| (artifact, entries)))
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"));
+            if !is_zip || !counted_paths.insert(artifact_path.clone()) {
+                return None;
+            }
+            Some(read_zip_entries(&artifact_path).map(|entries| (artifact, entries)))
         })
         .collect::<Result<_>>()?;
 
@@ -479,6 +487,34 @@ mod tests {
         }];
         validate_package_completeness(&component, repo.path(), &artifacts)
             .expect("excluded runtime file should not fail");
+    }
+
+    #[test]
+    fn package_completeness_counts_one_archive_referenced_twice_once() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("source/runtime")).expect("runtime dir");
+        std::fs::write(repo.path().join("source/runtime/main.php"), "<?php\n").expect("main");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "source/runtime/main.php"]);
+        let artifact_path = repo.path().join("build/runtime.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("bundle/main.php", "<?php\n")]);
+        let mut component = test_component(repo.path());
+        component.release.package_coverage = vec![PackageCoverageConfig {
+            artifact: "build/runtime.zip".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec!["source/runtime".to_string()],
+            archive_root: "bundle".to_string(),
+        }];
+
+        // A component may declare an archive as its build artifact while the
+        // release package manifest reports the same path. Both references
+        // resolve to one file, so an exact selector still covers exactly one.
+        let mut artifacts = zip_artifacts("build/runtime.zip");
+        artifacts.extend(zip_artifacts("build/runtime.zip"));
+
+        validate_package_completeness(&component, repo.path(), &artifacts)
+            .expect("one archive referenced twice must count once");
     }
 
     #[test]
