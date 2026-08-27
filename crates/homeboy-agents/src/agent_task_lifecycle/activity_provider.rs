@@ -12,8 +12,9 @@ use homeboy_core::activity::agent_task_provider::{
     register_activity_agent_task_provider, ActivityAgentTaskProvider,
 };
 use homeboy_core::activity::{
-    is_active, is_failure, ActivityContext, ActivityCrossRefs, ActivityEvidenceRef, ActivityFilter,
-    ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState, ActivityTaskIdentity,
+    is_active, is_failure, ActivityContext, ActivityCrossRefs, ActivityDetail, ActivityEvidenceRef,
+    ActivityFilter, ActivityItem, ActivityNextAction, ActivityRunnerRefs, ActivityState,
+    ActivityTaskIdentity,
 };
 
 use super::{load_controller_plan, plan_has_retry_materialization_identity, resolve_run_id};
@@ -41,8 +42,19 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
     /// One bounded pass over the durable records yields both the projected
     /// items and health summary. Activity is an observational surface, so it
     /// must not reconcile runs, acquire lifecycle locks, or contact runners.
-    fn agent_task_activity(&self, limit: usize) -> Result<(Vec<ActivityItem>, Value)> {
-        let (records, health) = agent_task_lifecycle::read_records_with_health_bounded(limit)?;
+    ///
+    /// A compact report drops the health samples: they name individual
+    /// records, and the compact view's own item truncation claims those
+    /// records were omitted (#13617). The counts stay.
+    fn agent_task_activity(
+        &self,
+        limit: usize,
+        detail: ActivityDetail,
+    ) -> Result<(Vec<ActivityItem>, Value)> {
+        let (records, health) = compact_health_samples(
+            agent_task_lifecycle::read_records_with_health_bounded(limit)?,
+            detail,
+        );
         let items = records.into_iter().map(item_from_agent_task).collect();
         let health = serde_json::to_value(health).map_err(|error| {
             homeboy_core::Error::internal_json(
@@ -57,14 +69,18 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
         &self,
         limit: usize,
         filter: &ActivityFilter,
+        detail: ActivityDetail,
     ) -> Result<(Vec<ActivityItem>, Value)> {
         if filter.is_empty() {
-            return self.agent_task_activity(limit);
+            return self.agent_task_activity(limit, detail);
         }
         // An identity lookup must search before its display cap. The durable
         // registry is controller-local, so this complete read is the explicit
         // exhaustive path rather than a bounded page that could claim absence.
-        let (records, health) = agent_task_lifecycle::read_all_records_with_health()?;
+        let (records, health) = compact_health_samples(
+            agent_task_lifecycle::read_all_records_with_health()?,
+            detail,
+        );
         let items = records
             .into_iter()
             .map(item_from_agent_task)
@@ -78,6 +94,23 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
         })?;
         Ok((items, health))
     }
+}
+
+/// Drop per-record health samples for compact reports, keeping the counts.
+fn compact_health_samples(
+    (records, mut health): (
+        Vec<AgentTaskRunRecord>,
+        agent_task_lifecycle::AgentTaskRecordHealthSummary,
+    ),
+    detail: ActivityDetail,
+) -> (
+    Vec<AgentTaskRunRecord>,
+    agent_task_lifecycle::AgentTaskRecordHealthSummary,
+) {
+    if detail == ActivityDetail::Compact {
+        health.samples.clear();
+    }
+    (records, health)
 }
 
 /// Resolve an id the way every operator-facing action already claims to.

@@ -460,16 +460,21 @@ fn actionable_for_activity_report(report: &ActivityReport) -> CommandActionableM
     metadata.next_actions = report
         .next_actions
         .iter()
-        .filter_map(|command| {
+        .map(|command| {
+            // Compact reports cap each item's action roster after the
+            // report-level rollup, so a lifted command can outlive the item
+            // action that carried its label. Keep the command either way —
+            // it is the actionable part — with a neutral fallback label.
             report
                 .items
                 .iter()
                 .flat_map(|item| item.next_actions.iter())
                 .find(|action| action.command == *command)
-        })
-        .map(|action| {
-            CommandNextAction::new(action.label.clone(), action.command.clone())
-                .with_kind(action_kind_from_label(&action.label))
+                .map(|action| {
+                    CommandNextAction::new(action.label.clone(), action.command.clone())
+                        .with_kind(action_kind_from_label(&action.label))
+                })
+                .unwrap_or_else(|| CommandNextAction::new("next", command.clone()))
         })
         .collect();
     metadata
@@ -1022,5 +1027,219 @@ mod tests {
         let event = activity_notify_event(&activity_item(ActivityState::Running), true, None);
         assert_eq!(event.kind, NotifyEventKind::NeedsAttention);
         assert_eq!(event.status, "timed_out");
+    }
+
+    /// Byte budget for the compact `activity list` stdout envelope. The
+    /// release command established the same order (16 KiB) as the
+    /// terminal/agent budget for a bounded operator surface; the compact
+    /// activity projection must live within this fixed budget no matter how
+    /// much history the home carries (a 150-record backlog measures ~16 KiB;
+    /// the unbounded pre-#13617 shape scaled with the whole corpus).
+    const MAX_COMPACT_ACTIVITY_STDOUT_BYTES: usize = 24 * 1024;
+
+    /// Seed the high-cardinality fixture for #13617: one active observation
+    /// run carrying a real artifact (the job an operator is inspecting) plus a
+    /// long terminal daemon-job backlog. Returns the active run id, its
+    /// artifact uri, and every seeded job id.
+    fn seed_high_cardinality_activity(backlog: usize) -> (String, String, Vec<String>) {
+        let store = ObservationStore::open_initialized().expect("observation store");
+        let active = store
+            .start_run(NewRunRecord::builder("bench").build())
+            .expect("active run");
+        let artifacts_dir = tempfile::tempdir().expect("artifact sources");
+        let artifact_path = artifacts_dir.path().join("trace-results.json");
+        std::fs::write(&artifact_path, br#"{"status":"pass"}"#).expect("artifact source");
+        let artifact = store
+            .record_artifact(&active.id, "trace-results", &artifact_path)
+            .expect("active run artifact");
+        let artifact_uri = artifact
+            .public_url
+            .or(artifact.url)
+            .unwrap_or(artifact.path)
+            .clone();
+
+        let jobs_path = homeboy::core::paths::daemon_jobs_file().expect("daemon jobs path");
+        let jobs = homeboy::core::api_jobs::JobStore::open_without_reconciliation(&jobs_path)
+            .expect("durable daemon job store");
+        let job_ids = (0..backlog)
+            .map(|index| {
+                let job = jobs.create("runner.exec");
+                jobs.cancel(job.id, format!("backlog fixture {index}"))
+                    .expect("terminal backlog job");
+                job.id.to_string()
+            })
+            .collect();
+        (active.id, artifact_uri, job_ids)
+    }
+
+    fn activity_list_run(limit: usize, all: bool) -> crate::commands::output_runtime::CommandRun {
+        crate::commands::json_output::run_command_output(
+            crate::cli_surface::Commands::Activity(ActivityArgs {
+                command: Some(ActivityCommand::List(ActivityListArgs {
+                    limit,
+                    all,
+                    no_runners: true,
+                })),
+            }),
+            crate::command_contract::registered_command("activity").expect("activity spec"),
+            None,
+            &crate::cli_surface::CommandArgumentProvenance::default(),
+            crate::cli_surface::Placement::Auto,
+        )
+    }
+
+    /// #13617: `activity list --limit 10` over a high-cardinality home must be
+    /// bounded end to end. The serialized stdout envelope stays within a fixed
+    /// byte budget, records the truncation claims were omitted surface
+    /// nowhere (items, refs, next actions, artifacts, evidence, presentation),
+    /// and the one active job under inspection stays visible with identity,
+    /// state, timestamps, counts, and actionable follow-ups.
+    #[test]
+    fn compact_activity_list_is_bounded_end_to_end_for_a_high_cardinality_home() {
+        with_isolated_home(|_| {
+            let (active_id, artifact_uri, job_ids) = seed_high_cardinality_activity(150);
+
+            let run = activity_list_run(10, false);
+            assert_eq!(run.exit_code, 0);
+            let serialized = run
+                .stdout_envelope()
+                .stdout_json()
+                .expect("stdout envelope");
+            assert!(
+                serialized.len() <= MAX_COMPACT_ACTIVITY_STDOUT_BYTES,
+                "compact activity stdout was {} bytes",
+                serialized.len()
+            );
+            let envelope: serde_json::Value =
+                serde_json::from_str(&serialized).expect("valid envelope json");
+
+            let data = &envelope["data"];
+            let items = data["items"].as_array().expect("items");
+            assert_eq!(items.len(), 10, "the display bound is the item bound");
+            assert_eq!(items[0]["id"], active_id.as_str());
+            assert_eq!(items[0]["state"], "running");
+            assert_eq!(items[0]["kind"], "bench");
+            assert_eq!(data["truncation"]["items_omitted"], 100);
+            assert_eq!(data["counts"]["total"], 110);
+            assert_eq!(data["counts"]["running"], 1);
+
+            // The retained records are compact: identity without the
+            // duplicated diagnostic rosters.
+            for item in items {
+                assert!(item.get("artifacts").is_none());
+                assert!(item.get("evidence").is_none());
+                assert!(item.get("source_projections").is_none());
+                assert!(item.get("state_conflicts").is_none());
+                assert!(item.get("command").is_none());
+                assert!(item["next_actions"].as_array().unwrap().len() <= 2);
+            }
+
+            // Omitted record ids surface nowhere — not through items, lifted
+            // refs, next actions, artifacts, evidence, or presentation.
+            let displayed: Vec<&str> = items
+                .iter()
+                .map(|item| item["id"].as_str().expect("item id"))
+                .collect();
+            for job_id in &job_ids {
+                if !displayed.contains(&job_id.as_str()) {
+                    assert!(
+                        !serialized.contains(job_id.as_str()),
+                        "omitted job {job_id} leaked into the compact response"
+                    );
+                }
+            }
+            assert!(
+                !serialized.contains(&artifact_uri),
+                "kept-record artifact detail belongs to --all and artifact commands"
+            );
+
+            // Lifted envelope collections respect the same bound.
+            let refs = &envelope["refs"];
+            let lifted_refs = refs["runs"].as_array().map(Vec::len).unwrap_or(0)
+                + refs["jobs"].as_array().map(Vec::len).unwrap_or(0)
+                + refs["agent_tasks"].as_array().map(Vec::len).unwrap_or(0);
+            assert_eq!(lifted_refs, 10, "refs cover exactly the retained records");
+            assert_eq!(
+                envelope["artifacts"].as_array().map(Vec::len).unwrap_or(0),
+                0,
+                "no artifact rosters are lifted into the compact envelope"
+            );
+            let lifted_actions = envelope["next_actions"].as_array().unwrap();
+            let report_actions = data["next_actions"].as_array().unwrap();
+            assert!(!lifted_actions.is_empty());
+            assert_eq!(lifted_actions.len(), report_actions.len());
+            assert!(lifted_actions.len() <= 20);
+
+            // The human projection is a compact table, not a second copy of a
+            // full payload, and it still names the active job and the omitted
+            // count.
+            let stdout = envelope["presentation"]["stdout"].as_str().expect("table");
+            assert!(stdout.contains("activity: total=110"));
+            assert!(stdout.contains("truncated: omitted 100 records"));
+            assert!(stdout.contains("homeboy activity list --all"));
+        })
+    }
+
+    /// #13617: `--all` keeps full diagnostic access over the same
+    /// high-cardinality home — every collected record, artifact/evidence
+    /// rosters, and uncapped per-record actions.
+    #[test]
+    fn activity_list_all_keeps_full_diagnostic_access() {
+        with_isolated_home(|_| {
+            let (active_id, artifact_uri, job_ids) = seed_high_cardinality_activity(150);
+
+            let compact = {
+                let run = activity_list_run(10, false);
+                run.stdout_envelope()
+                    .stdout_json()
+                    .expect("compact stdout envelope")
+            };
+            let run = activity_list_run(200, true);
+            assert_eq!(run.exit_code, 0);
+            let serialized = run
+                .stdout_envelope()
+                .stdout_json()
+                .expect("stdout envelope");
+            let envelope: serde_json::Value =
+                serde_json::from_str(&serialized).expect("valid envelope json");
+
+            let data = &envelope["data"];
+            let items = data["items"].as_array().expect("items");
+            assert_eq!(items.len(), 151, "every collected record is retained");
+            assert_eq!(data["truncation"]["items_omitted"], 0);
+            assert_eq!(data["counts"]["total"], 151);
+            for job_id in &job_ids {
+                assert!(
+                    serialized.contains(job_id.as_str()),
+                    "--all retains job {job_id}"
+                );
+            }
+
+            let active = items
+                .iter()
+                .find(|item| item["id"] == active_id.as_str())
+                .expect("active run retained");
+            assert_eq!(
+                active["artifacts"][0]["uri"], artifact_uri,
+                "artifact rosters are --all detail"
+            );
+            assert_eq!(
+                active["next_actions"].as_array().unwrap().len(),
+                3,
+                "per-record actions are uncapped for --all"
+            );
+            assert!(
+                envelope["artifacts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|artifact| artifact["uri"] == artifact_uri),
+                "full detail is lifted for orchestrators"
+            );
+            assert!(
+                serialized.len() > compact.len(),
+                "--all carries strictly more detail than the compact projection"
+            );
+        });
     }
 }

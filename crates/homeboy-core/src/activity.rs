@@ -128,8 +128,14 @@ pub fn activity_report_filtered(
     let mut collector = ActivityCollector::default();
     // Items and record health come from one pass over the durable agent-task
     // records. Reading them separately walked the corpus twice (#10308).
+    // The detail level follows the scope so the compact view cannot leak
+    // per-record health samples for items its own truncation omits (#13617).
     let (agent_task_items, agent_task_record_health) =
-        agent_task_provider::agent_task_activity_filtered(limit, filter)?;
+        agent_task_provider::agent_task_activity_filtered(
+            limit,
+            filter,
+            ActivityDetail::for_scope(scope),
+        )?;
     for item in agent_task_items {
         collector.insert(item);
     }
@@ -380,6 +386,14 @@ fn report_from_items(
         .take(next_action_limit)
         .cloned()
         .collect();
+    // Compact only after the rollup above read every retained record's full
+    // action set: the report-level follow-ups must cover all retained work,
+    // not just the two actions each item keeps for the human table.
+    if ActivityDetail::for_scope(scope) == ActivityDetail::Compact {
+        for item in &mut items {
+            item.compact_for_default_view();
+        }
+    }
     let displayed_items = items.len();
     ActivityReport {
         schema: ACTIVITY_REPORT_SCHEMA,
@@ -785,6 +799,111 @@ mod tests {
         assert_eq!(all.truncation.stale_items_omitted, 0);
         assert_eq!(all.next_actions.len(), 124);
         assert_eq!(all.truncation.next_actions_omitted, 0);
+    }
+
+    /// #13617: the default view is bounded end to end. Retained records keep
+    /// their identity, state, timestamps, refs, and a couple of follow-ups;
+    /// the duplicated diagnostic rosters (artifact/evidence refs, per-store
+    /// projections, conflicts, identity enumerations, the raw command line)
+    /// are `--all`-only, and the report-level follow-up rollup is still taken
+    /// from every retained record's *full* action set.
+    #[test]
+    fn default_view_compacts_retained_items_while_all_keeps_full_detail() {
+        let mut heavy = item("run-heavy", ActivityState::Running);
+        heavy.command = Some("homeboy cook --issue 13617 --deep".to_string());
+        heavy.cwd = Some("/worktree/homeboy@fix-13617".to_string());
+        heavy.context = ActivityContext {
+            task_url: Some("https://example.test/issues/13617".to_string()),
+            repository: Some("Extra-Chill/homeboy".to_string()),
+            worktree: Some("homeboy@fix-13617".to_string()),
+            identities: vec![ActivityTaskIdentity {
+                task_url: Some("https://example.test/issues/13617".to_string()),
+                repository: Some("Extra-Chill/homeboy".to_string()),
+                worktree: Some("homeboy@fix-13617".to_string()),
+            }],
+        };
+        heavy.artifacts = vec![ActivityEvidenceRef {
+            id: "artifact-1".to_string(),
+            kind: "trace-results".to_string(),
+            uri: "homeboy://runs/run-heavy/artifacts/artifact-1".to_string(),
+        }];
+        heavy.evidence = vec![ActivityEvidenceRef {
+            id: "evidence-1".to_string(),
+            kind: "executor".to_string(),
+            uri: "homeboy://runs/run-heavy/evidence/evidence-1".to_string(),
+        }];
+        heavy.source_projections = vec![ActivitySourceProjection {
+            source_store: "observation.sqlite".to_string(),
+            id: "run-heavy".to_string(),
+            state: ActivityState::Running,
+            updated_at: None,
+            finished_at: None,
+        }];
+        heavy.state_conflicts = vec![ActivityStateConflict {
+            source_store: "daemon.jobs-json".to_string(),
+            id: "job-9".to_string(),
+            state: ActivityState::Succeeded,
+        }];
+        heavy.next_actions = (0..5)
+            .map(|index| action("next", format!("homeboy action run-heavy-{index}")))
+            .collect();
+
+        let compact = report_from_items(
+            vec![heavy.clone()],
+            ActivityScope::ActiveRecent,
+            5,
+            "activity",
+            &ActivityFilter::default(),
+        );
+        let compacted = &compact.items[0];
+        assert_eq!(compacted.id, "run-heavy");
+        assert_eq!(compacted.kind, "bench");
+        assert_eq!(compacted.state, ActivityState::Running);
+        assert_eq!(compacted.created_at, "2026-07-04T00:00:00Z");
+        assert_eq!(compacted.refs.run_id.as_deref(), Some("run-heavy"));
+        assert_eq!(
+            compacted.context.task_url.as_deref(),
+            Some("https://example.test/issues/13617"),
+            "the legacy single identity stays"
+        );
+        assert!(compacted.context.identities.is_empty());
+        assert!(compacted.command.is_none());
+        assert!(compacted.cwd.is_none());
+        assert!(compacted.artifacts.is_empty());
+        assert!(compacted.evidence.is_empty());
+        assert!(compacted.source_projections.is_empty());
+        assert!(compacted.state_conflicts.is_empty());
+        assert_eq!(
+            compacted.next_actions.len(),
+            COMPACT_NEXT_ACTIONS_PER_ITEM,
+            "the human-table action budget is the per-item cap"
+        );
+        assert_eq!(
+            compact.next_actions.len(),
+            5,
+            "the report rollup still covers the full action set"
+        );
+        assert_eq!(compact.truncation.next_actions_omitted, 0);
+
+        let all = report_from_items(
+            vec![heavy],
+            ActivityScope::All,
+            5,
+            "activity",
+            &ActivityFilter::default(),
+        );
+        let full = &all.items[0];
+        assert_eq!(
+            full.command.as_deref(),
+            Some("homeboy cook --issue 13617 --deep")
+        );
+        assert_eq!(full.cwd.as_deref(), Some("/worktree/homeboy@fix-13617"));
+        assert_eq!(full.context.identities.len(), 1);
+        assert_eq!(full.artifacts.len(), 1);
+        assert_eq!(full.evidence.len(), 1);
+        assert_eq!(full.source_projections.len(), 1);
+        assert_eq!(full.state_conflicts.len(), 1);
+        assert_eq!(full.next_actions.len(), 5);
     }
 
     #[test]
