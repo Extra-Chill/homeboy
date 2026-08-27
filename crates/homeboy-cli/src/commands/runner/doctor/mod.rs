@@ -25,11 +25,6 @@ mod local;
 mod probes;
 mod remote;
 mod repair;
-// The convergence decision lands ahead of the loop that executes it, so that the
-// half which is testable without a runner can be reviewed on its own (#13551).
-// `next_step` therefore has no production caller yet and the warning-clean gate
-// would otherwise reject it. The allowance comes off with the executing loop.
-#[allow(dead_code)]
 mod repair_policy;
 mod target;
 mod types;
