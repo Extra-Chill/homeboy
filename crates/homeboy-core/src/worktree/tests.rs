@@ -429,10 +429,18 @@ fn create_pins_worktree_identity_to_the_target_remotes_host_policy() {
 
         // Simulate the ambient identity a shared provisioning environment can
         // inherit from an unrelated organization's global gitconfig (#13647).
-        run_git(home.path(), &["config", "--global", "user.name", "Chris Huber"]);
         run_git(
             home.path(),
-            &["config", "--global", "user.email", "chris.huber@automattic.com"],
+            &["config", "--global", "user.name", "Chris Huber"],
+        );
+        run_git(
+            home.path(),
+            &[
+                "config",
+                "--global",
+                "user.email",
+                "chris.huber@automattic.com",
+            ],
         );
 
         let created = create(options).expect("create task worktree");
@@ -456,8 +464,12 @@ fn create_pins_worktree_identity_to_the_target_remotes_host_policy() {
         fs::write(path.join("task.txt"), "task\n").unwrap();
         run_git(&path, &["add", "."]);
         run_git(&path, &["commit", "-q", "-m", "task work"]);
-        let author = git::run_git(&path, &["log", "-1", "--format=%an <%ae>"], "git log author")
-            .unwrap();
+        let author = git::run_git(
+            &path,
+            &["log", "-1", "--format=%an <%ae>"],
+            "git log author",
+        )
+        .unwrap();
         assert_eq!(
             author.trim(),
             "Extra Chill Author <author@extrachill.example.test>"
