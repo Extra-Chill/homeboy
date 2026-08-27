@@ -1712,7 +1712,7 @@ mod tests {
     use crate::agent_task::{
         AgentTaskArtifact, AgentTaskExecutor, AgentTaskOutcome, AgentTaskOutcomeStatus,
         AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,
-        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+        AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -2208,11 +2208,9 @@ mod tests {
                 ..Default::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "a".to_string(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("runner produced a patch".to_string()),
-                failure_classification: None,
                 artifacts: vec![AgentTaskArtifact {
                     schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                     id: "candidate.patch".to_string(),
@@ -2231,13 +2229,7 @@ mod tests {
                         "source_provenance": { "runner_id": "homeboy-lab" },
                     }),
                 }],
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),

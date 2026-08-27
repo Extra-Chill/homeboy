@@ -840,6 +840,11 @@ const GIT_PR_WRITE_PATHS: &[&str] = &[
 
 const GIT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
+        &["patch preserve", "patch restore"],
+        mutating_safety(),
+        "captures and cleans or restores exact worktree changes using operation-owned evidence",
+    ),
+    paths_safety(
         GIT_ISSUE_WRITE_PATHS,
         with_risk_exemption(
             operator_safety(None, &[]),
@@ -1105,6 +1110,10 @@ pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
     },
     CommandDocSpec {
         slug: "cargo",
+        kind: CommandDocKind::RuntimeExtensionCommand,
+    },
+    CommandDocSpec {
+        slug: "triage",
         kind: CommandDocKind::RuntimeExtensionCommand,
     },
     CommandDocSpec {

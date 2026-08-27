@@ -1428,15 +1428,6 @@ mod tests {
                                 schema: homeboy_agents::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                                 task_id: "cook".to_string(),
                                 status: homeboy_agents::agent_task::AgentTaskOutcomeStatus::Succeeded,
-                                summary: None,
-                                failure_classification: None,
-                                artifacts: Vec::new(),
-                                typed_artifacts: Vec::new(),
-                                evidence_refs: Vec::new(),
-                                diagnostics: Vec::new(),
-                                outputs: Value::Null,
-                                workflow: None,
-                                follow_up: None,
                                 metadata: serde_json::json!({
                                     "provider_handle": {
                                         "task_id": "cook",
@@ -1445,6 +1436,7 @@ mod tests {
                                         "metadata": {"provider_owned": true}
                                     }
                                 }),
+                                ..Default::default()
                             }],
                             events: Vec::new(),
                             artifact_lineage: Vec::new(),

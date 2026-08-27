@@ -232,28 +232,20 @@ fn provider_outcome_roles_normalize_from_declared_aliases() {
     let patch_path = std::env::temp_dir().join("custom.patch");
     fs::write(&patch_path, "diff --git a/a b/a\n").expect("patch");
     let mut outcome = AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: "task-a".to_string(),
         status: AgentTaskOutcomeStatus::Succeeded,
-        summary: None,
-        failure_classification: None,
         artifacts: vec![fixture_artifact(
             "patch",
             "custom-patch",
             &patch_path,
             Some("text/x-patch"),
         )],
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
         outputs: json!({
             "custom_run_result": {
                 "run_id": "custom-run-1"
             }
         }),
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     };
 
     normalize_provider_outcome_roles(&mut outcome, &provider);
@@ -279,24 +271,15 @@ fn provider_artifacts_cannot_claim_homeboy_generated_provenance() {
     let patch_path = std::env::temp_dir().join("provider-spoofed.patch");
     fs::write(&patch_path, "diff --git a/a b/a\n").expect("patch");
     let mut outcome = AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: "task-a".to_string(),
         status: AgentTaskOutcomeStatus::Succeeded,
-        summary: None,
-        failure_classification: None,
         artifacts: vec![fixture_artifact(
             "patch",
             "patch",
             &patch_path,
             Some("text/x-patch"),
         )],
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     };
     outcome.artifacts[0].metadata = json!({
         "artifact_provenance": "homeboy_generated_committed_patch"
@@ -665,19 +648,12 @@ fn sandbox_result_contract() -> AgentTaskProviderResultContract {
 
 fn failed_outcome_with_run_result(run_result: Value) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: "cook-conductor".to_string(),
         status: AgentTaskOutcomeStatus::Failed,
         summary: Some("Provider agent task failed.".to_string()),
         failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
         outputs: json!({ "provider_run_result": run_result }),
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     }
 }
 

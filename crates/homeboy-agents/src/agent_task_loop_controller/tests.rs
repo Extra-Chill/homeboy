@@ -1,7 +1,5 @@
 use super::*;
-use crate::agent_task::{
-    AgentTaskDiagnostic, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
-};
+use crate::agent_task::{AgentTaskDiagnostic, AgentTaskOutcome, AgentTaskOutcomeStatus};
 use crate::agent_task_lifecycle;
 use crate::agent_task_schedule::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
@@ -311,23 +309,14 @@ fn status_diagnostics_surface_failed_child_run_root_cause() {
                 ..AgentTaskAggregateTotals::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "child-task".to_string(),
                 status: AgentTaskOutcomeStatus::Failed,
-                summary: None,
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
                 diagnostics: vec![AgentTaskDiagnostic {
                     class: "runtime.provider_import_failed".to_string(),
                     message: "Provider runtime import failed: module not found".to_string(),
                     data: Value::Null,
                 }],
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),

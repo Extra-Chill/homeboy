@@ -52,10 +52,15 @@ pub(crate) struct MirrorEvidenceRequest<'a> {
     pub(crate) events: &'a [JobEvent],
     pub(crate) result: &'a Value,
     pub(crate) run_id: Option<&'a str>,
-    /// An explicit ad hoc runner-exec ID is created in the controller before
-    /// dispatch. It is not a runner `/runs/<id>` record to mirror.
-    pub(crate) generic_runner_exec_run: bool,
+    pub(crate) run_ownership: MirrorRunOwnership,
     pub(crate) notification_route: Option<&'a NotificationRoute>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MirrorRunOwnership {
+    Inferred,
+    AgentTask,
+    GenericRunnerExec,
 }
 
 impl<'a> MirrorEvidenceRequest<'a> {
@@ -81,13 +86,18 @@ impl<'a> MirrorEvidenceRequest<'a> {
             events,
             result,
             run_id,
-            generic_runner_exec_run: false,
+            run_ownership: MirrorRunOwnership::Inferred,
             notification_route,
         }
     }
 
+    pub(crate) fn with_agent_task_run(mut self) -> Self {
+        self.run_ownership = MirrorRunOwnership::AgentTask;
+        self
+    }
+
     pub(crate) fn with_generic_runner_exec_run(mut self) -> Self {
-        self.generic_runner_exec_run = true;
+        self.run_ownership = MirrorRunOwnership::GenericRunnerExec;
         self
     }
 }
@@ -585,28 +595,49 @@ pub fn mirror_daemon_job_progress(
     events: &[JobEvent],
     run_id: Option<&str>,
 ) -> Result<RunRecord> {
-    let store = ObservationStore::open_initialized()?;
-    mirror_job_run_request(
-        &store,
-        MirrorEvidenceRequest::new(runner, cwd, command, job, events, &json!({}), run_id, None),
+    mirror_daemon_job_progress_with_ownership(
+        runner,
+        cwd,
+        command,
+        job,
+        events,
+        run_id,
+        MirrorRunOwnership::Inferred,
     )
-    .map(|run| run.run)
 }
 
-pub fn mirror_reverse_broker_job_progress(
+pub(crate) fn mirror_daemon_job_progress_with_ownership(
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    events: &[JobEvent],
+    run_id: Option<&str>,
+    run_ownership: MirrorRunOwnership,
+) -> Result<RunRecord> {
+    let store = ObservationStore::open_initialized()?;
+    let result = json!({});
+    let mut request =
+        MirrorEvidenceRequest::new(runner, cwd, command, job, events, &result, run_id, None);
+    request.run_ownership = run_ownership;
+    mirror_job_run_request(&store, request).map(|run| run.run)
+}
+
+pub(crate) fn mirror_reverse_broker_job_progress_with_ownership(
     runner: &Runner,
     broker_url: &str,
     cwd: &str,
     command: &[String],
     job: &Job,
     run_id: Option<&str>,
+    run_ownership: MirrorRunOwnership,
 ) -> Result<RunRecord> {
     let store = ObservationStore::open_initialized()?;
-    let run = mirror_job_run_request(
-        &store,
-        MirrorEvidenceRequest::new(runner, cwd, command, job, &[], &json!({}), run_id, None),
-    )?
-    .run;
+    let result = json!({});
+    let mut request =
+        MirrorEvidenceRequest::new(runner, cwd, command, job, &[], &result, run_id, None);
+    request.run_ownership = run_ownership;
+    let run = mirror_job_run_request(&store, request)?.run;
     record_reverse_broker_metadata(
         run,
         ReverseBrokerMetadataContext {
@@ -972,7 +1003,7 @@ pub(super) fn mirrored_patch_result(
     Ok(Some(patched))
 }
 
-fn mirror_job_run_request(
+pub(super) fn mirror_job_run_request(
     store: &ObservationStore,
     request: MirrorEvidenceRequest<'_>,
 ) -> Result<MirroredJobRun> {
@@ -984,7 +1015,7 @@ fn mirror_job_run_request(
         events,
         result,
         run_id,
-        generic_runner_exec_run,
+        run_ownership,
         notification_route,
         ..
     } = request;
@@ -1037,7 +1068,16 @@ fn mirror_job_run_request(
         lab["synthetic_publication_token"] = Value::String(synthetic_token.clone());
     }
     if let Some(run_id) = run_id {
-        if generic_runner_exec_run {
+        let run_ownership = if run_ownership == MirrorRunOwnership::Inferred
+            && store
+                .get_run(run_id)?
+                .is_some_and(|run| run.metadata_json.get("agent_task_run").is_some())
+        {
+            MirrorRunOwnership::AgentTask
+        } else {
+            run_ownership
+        };
+        if run_ownership == MirrorRunOwnership::GenericRunnerExec {
             let mut metadata_json = store
                 .get_run(run_id)?
                 .ok_or_else(|| {
@@ -1057,10 +1097,17 @@ fn mirror_job_run_request(
                     synthetic_ownership: None,
                 });
         }
-        if store
-            .get_run(run_id)?
-            .is_some_and(|existing| existing.metadata_json.get("agent_task_run").is_some())
-        {
+        if run_ownership == MirrorRunOwnership::AgentTask {
+            let existing = store.get_run(run_id)?.ok_or_else(|| {
+                Error::internal_unexpected(format!(
+                    "controller-owned agent-task run {run_id} disappeared while mirroring Lab evidence"
+                ))
+            })?;
+            if existing.metadata_json.get("agent_task_run").is_none() {
+                return Err(Error::internal_unexpected(format!(
+                    "controller-owned agent-task run {run_id} lost agent_task_run metadata before Lab evidence mirroring"
+                )));
+            }
             let lifecycle_store = match store.roots() {
                 Some(roots) => homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(
                     roots.clone(),

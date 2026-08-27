@@ -17,6 +17,7 @@ const LOCK_FILE: &str = ".homeboy-lock";
 const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
 const LAST_USED_FILE: &str = ".homeboy-last-used-ms";
+const SEED_MARKER_FILE: &str = ".homeboy-seeded-at-ms";
 const LEGACY_LIFECYCLE_INFERRED: &str = "legacy lifecycle metadata inferred";
 static ISOLATED_TARGET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -98,6 +99,12 @@ pub struct ManagedCargoTarget {
     target_dir: PathBuf,
     resolution: &'static str,
     owner: String,
+    /// A worktree-private store (see `acquire_managed_cargo_target_for_compatibility`)
+    /// promotes artifacts it produced back to this base store on release, so
+    /// the next worktree provisioned for the same repository identity seeds
+    /// warmer. The `SystemTime` is when this store was seeded from base:
+    /// only files touched since then are new output worth promoting.
+    promote_to: Option<(PathBuf, SystemTime)>,
     _lease: Option<SharedCargoTargetLease>,
 }
 
@@ -134,6 +141,17 @@ impl ManagedCargoTarget {
 
     pub fn size_bytes(&self) -> Result<u64> {
         path_size(&self.target_dir)
+    }
+}
+
+impl Drop for ManagedCargoTarget {
+    fn drop(&mut self) {
+        // Best-effort warmth hand-off: promoting is never a build
+        // correctness requirement, only an optimization for the next
+        // worktree that seeds from this repository identity's base store.
+        if let Some((base_dir, seeded_at)) = self.promote_to.take() {
+            hardlink_tree_since(&self.target_dir, &base_dir, Some(seeded_at));
+        }
     }
 }
 
@@ -216,6 +234,7 @@ pub fn acquire_isolated_cargo_target(
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "isolated",
         owner: owner.to_string(),
+        promote_to: None,
         _lease: Some(lease),
     })
 }
@@ -262,6 +281,24 @@ pub fn acquire_managed_cargo_target_for_environment(
     )
 }
 
+/// Acquire a worktree-private Cargo target seeded from the shared,
+/// repository-identity-keyed base store.
+///
+/// Every worktree compatible with a given repository identity used to
+/// receive the *same* physical target directory: correct for warmth, but
+/// concurrent worktrees compiling into one directory serialize behind
+/// Cargo's own build lock (Cargo issue #6412), so N agents verifying in
+/// parallel cost roughly one build's wall time each, one at a time, rather
+/// than running concurrently.
+///
+/// Instead, each worktree gets its own physical store, keyed by the
+/// repository identity plus its own canonical checkout path, so concurrent
+/// worktrees never contend for the same Cargo lock. A freshly created
+/// worktree store is seeded once from the base store via hard links (an
+/// inode-table update, not a data copy, so it costs no meaningful time or
+/// disk regardless of target size); releasing a worktree store promotes the
+/// artifacts it produced back to base, so the next worktree provisioned
+/// against the same identity seeds warm too.
 fn acquire_managed_cargo_target_for_compatibility(
     owner: &str,
     source_path: &Path,
@@ -272,13 +309,128 @@ fn acquire_managed_cargo_target_for_compatibility(
         return Ok(local_managed_cargo_target(owner, source_path, target));
     }
 
-    let lease = acquire_shared_cargo_target(&format!("{owner}:{}", compatibility.identity()))?;
+    let root = shared_cargo_target_root()?;
+    admit_shared_cargo_target(&root)?;
+    let base_owner = format!("{owner}:{}", compatibility.identity());
+    let base_dir = shared_store_dir(&root, &base_owner);
+    // Touch the base store's liveness so it isn't reclaimed as unused while
+    // it exists only to seed worktree-private stores, then release it
+    // immediately: nothing compiles directly into it any more.
+    drop(acquire_shared_cargo_target_in(
+        &root,
+        &base_owner,
+        SystemTime::now(),
+    )?);
+
+    let canonical_source =
+        fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+    let worktree_owner = format!(
+        "{base_owner}:worktree:{}",
+        canonical_source.to_string_lossy()
+    );
+    let lease = acquire_shared_cargo_target_in(&root, &worktree_owner, SystemTime::now())?;
+    let seeded_at = seed_worktree_cargo_target(&base_dir, lease.target_dir())?;
+
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "shared",
         owner: owner.to_string(),
+        promote_to: Some((base_dir, seeded_at)),
         _lease: Some(lease),
     })
+}
+
+/// Seed a freshly created worktree-private Cargo target from the shared base
+/// store once, recorded by a marker so later acquisitions of the same
+/// worktree store (repeat gate/provider runs in one worktree) skip the walk
+/// and simply keep using the store as Cargo left it.
+fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<SystemTime> {
+    let marker = private_dir.join(SEED_MARKER_FILE);
+    if let Some(seeded_at) = read_marker_time(&marker) {
+        return Ok(seeded_at);
+    }
+    let seeded_at = SystemTime::now();
+    if base_dir.exists() {
+        hardlink_tree_since(base_dir, private_dir, None);
+    }
+    write_marker_time(&marker, seeded_at)?;
+    Ok(seeded_at)
+}
+
+fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
+    root.join(format!(
+        "homeboy-{}",
+        content_hash::sha256_hex(owner.as_bytes())
+    ))
+}
+
+fn read_marker_time(path: &Path) -> Option<SystemTime> {
+    let millis: u64 = fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    Some(UNIX_EPOCH + Duration::from_millis(millis))
+}
+
+fn write_marker_time(path: &Path, time: SystemTime) -> Result<()> {
+    fs::write(
+        path,
+        time.duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .to_string(),
+    )
+    .map_err(|error| io_error(error, "write Cargo target seed marker"))
+}
+
+/// Homeboy's own store-lifecycle sidecars. These describe the store, not
+/// Cargo's output, and must never be seeded or promoted between stores.
+fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
+    name == LOCK_FILE
+        || name == LEASE_FILE
+        || name == OWNER_FILE
+        || name == LAST_USED_FILE
+        || name == SEED_MARKER_FILE
+}
+
+/// Hard-link every regular file under `from` into `to`, mirroring the
+/// relative directory structure. A destination file that already exists is
+/// left in place (first writer wins), and per-entry errors are tolerated:
+/// seeding and promotion are a warmth optimization, never a build
+/// correctness requirement, and Cargo's own fingerprinting inside the
+/// destination store recompiles anything genuinely missing or stale.
+///
+/// `since`, when set, skips files last modified before that time: seeding
+/// copies an entire base store, but promotion only wants artifacts this
+/// worktree actually produced since it was seeded.
+fn hardlink_tree_since(from: &Path, to: &Path, since: Option<SystemTime>) {
+    let Ok(entries) = fs::read_dir(from) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if is_lifecycle_sidecar(&name) {
+            continue;
+        }
+        let source = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&source) else {
+            continue;
+        };
+        let dest = to.join(&name);
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            if fs::create_dir_all(&dest).is_ok() {
+                hardlink_tree_since(&source, &dest, since);
+            }
+            continue;
+        }
+        if let Some(since) = since {
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            if modified < since {
+                continue;
+            }
+        }
+        if dest.exists() {
+            continue;
+        }
+        let _ = fs::hard_link(&source, &dest);
+    }
 }
 
 fn local_managed_cargo_target(owner: &str, source_path: &Path, target: &str) -> ManagedCargoTarget {
@@ -292,6 +444,7 @@ fn local_managed_cargo_target(owner: &str, source_path: &Path, target: &str) -> 
         target_dir,
         resolution: "local",
         owner: owner.to_string(),
+        promote_to: None,
         _lease: None,
     }
 }
@@ -427,10 +580,7 @@ pub(crate) fn acquire_shared_cargo_target_in(
     owner: &str,
     now: SystemTime,
 ) -> Result<SharedCargoTargetLease> {
-    let target_dir = root.join(format!(
-        "homeboy-{}",
-        content_hash::sha256_hex(owner.as_bytes())
-    ));
+    let target_dir = shared_store_dir(root, owner);
     fs::create_dir_all(&target_dir)
         .map_err(|error| io_error(error, "create shared Cargo target"))?;
     let lock = OpenOptions::new()
@@ -449,7 +599,23 @@ pub(crate) fn acquire_shared_cargo_target_in(
 pub fn cleanup_shared_cargo_targets(
     options: CargoTargetCleanupOptions,
 ) -> Result<CargoTargetCleanupOutput> {
+    cleanup_shared_cargo_targets_with_reserve_deficit(options, None)
+}
+
+fn cleanup_shared_cargo_targets_with_reserve_deficit(
+    options: CargoTargetCleanupOptions,
+    reserve_deficit_bytes: Option<u64>,
+) -> Result<CargoTargetCleanupOutput> {
     let root = options.root.unwrap_or(shared_cargo_target_root()?);
+    let mut reserve_deficit_bytes = match reserve_deficit_bytes {
+        Some(deficit) => deficit,
+        None => {
+            let reserve = crate::capacity::CapacityReserve::configured_for_path(&root);
+            reserve
+                .bytes
+                .saturating_sub(filesystem_capacity(&root)?.available_bytes)
+        }
+    };
     let mut stores = inventory(&root, options.now, options.older_than, options.lease_ttl)?;
     let inventory_bytes: u64 = stores.iter().map(|store| store.size_bytes).sum();
     stores.sort_by(order_stores);
@@ -517,8 +683,10 @@ pub fn cleanup_shared_cargo_targets(
                 }
             }
         }
+        let capacity_eligible = reserve_deficit_bytes > 0;
         let eligible = store.reasons.iter().any(|reason| reason == "age_expired")
-            || remaining > options.max_bytes;
+            || remaining > options.max_bytes
+            || capacity_eligible;
         if !eligible {
             *retained_by_reason
                 .entry(if legacy {
@@ -530,7 +698,12 @@ pub fn cleanup_shared_cargo_targets(
             continue;
         }
         remaining = remaining.saturating_sub(store.size_bytes);
-        candidates.push(store.clone());
+        reserve_deficit_bytes = reserve_deficit_bytes.saturating_sub(store.size_bytes);
+        let mut candidate = store.clone();
+        if capacity_eligible {
+            candidate.reasons.push("capacity_reserve".to_string());
+        }
+        candidates.push(candidate);
     }
 
     let mut applied_count = 0;
@@ -1133,9 +1306,10 @@ fn path_size(path: &Path) -> Result<u64> {
         let path = entry
             .map_err(|error| io_error(error, "read shared Cargo target entry"))?
             .path();
-        if path.file_name().is_some_and(|name| {
-            name == LOCK_FILE || name == LEASE_FILE || name == OWNER_FILE || name == LAST_USED_FILE
-        }) {
+        if path
+            .file_name()
+            .is_some_and(|name| is_lifecycle_sidecar(name))
+        {
             continue;
         }
         let metadata = fs::symlink_metadata(&path)
@@ -1156,6 +1330,11 @@ fn io_error(error: std::io::Error, operation: &str) -> Error {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    fn cleanup_shared_cargo_targets(
+        options: CargoTargetCleanupOptions,
+    ) -> Result<CargoTargetCleanupOutput> {
+        super::cleanup_shared_cargo_targets_with_reserve_deficit(options, Some(0))
+    }
     fn options(root: &Path, apply: bool, now: SystemTime) -> CargoTargetCleanupOptions {
         CargoTargetCleanupOptions {
             root: Some(root.to_path_buf()),
@@ -1525,6 +1704,28 @@ mod tests {
         );
         assert!(!stale.exists());
         assert_eq!(cleanup_shared_cargo_targets(opts).unwrap().applied_count, 0);
+    }
+    #[test]
+    fn reserve_pressure_reclaims_only_enough_fresh_unleased_stores() {
+        let root = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let larger = store(root.path(), "larger", 7, Duration::from_secs(1), now);
+        let smaller = store(root.path(), "smaller", 5, Duration::ZERO, now);
+        let mut opts = options(root.path(), false, now);
+        opts.max_bytes = 100;
+
+        let output =
+            super::cleanup_shared_cargo_targets_with_reserve_deficit(opts, Some(6)).unwrap();
+
+        assert_eq!(output.candidate_count, 1);
+        assert_eq!(output.applied_count, 0);
+        assert_eq!(output.candidates[0].size_bytes, 7);
+        assert_eq!(
+            output.candidates[0].reasons.last().unwrap(),
+            "capacity_reserve"
+        );
+        assert!(larger.exists());
+        assert!(smaller.exists());
     }
     #[test]
     fn lease_acquired_between_plan_and_apply_is_protected() {

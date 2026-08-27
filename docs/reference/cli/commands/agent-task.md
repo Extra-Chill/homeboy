@@ -100,7 +100,7 @@ WAIT POLICY: Cook always persists a durable run id before materialization, so a 
 
 By default Cook observes until the lifecycle is terminal and returns the terminal Cook report.
 
-`--detach-after-handoff` returns once the run is durably accepted. Its result describes a submission, not an outcome. It is honored on every placement: with `--placement local` the Cook is re-executed in its own session, so it survives a client that is interrupted or times out.
+`--detach-after-handoff` returns once the controller durably owns the run. Its submission result reports `accepted` after executable-attempt materialization or `pending` while a live supervised child is still preparing. It is honored on every placement: with `--placement local` the Cook is re-executed in its own session, so it survives a client that is interrupted or times out.
 
 Do not infer the wait policy from client interactivity. An orchestration client that needs the detached contract should pass `--detach-after-handoff` rather than rely on the default, and read the terminal outcome from `agent-task status <run-id>` in either case.
 
@@ -132,13 +132,15 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--preview` | flag | Resolve the Cook plan and validate static inputs without creating a run or provisioning a worktree. Includes a replayable command |
 | `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
 | `--provider-evidence` | `<JSON>` | JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular-file path): `--provider-evidence '{"id":"evidence","source":"/absolute/path"}'`. Each source is limited to 64 MiB. |
-| `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. Creating a missing one is not a built-in capability: it requires an enabled worktree provider with a `commands.ensure` argv template, and without one you must create the destination first with `homeboy worktree create`. When omitted, an explicit --cwd is the canonical destination. Otherwise, --repo plus --task-url derives an issue-owned destination through that same configured provider. An explicit --workspace or --cwd Git checkout can infer --repo when its remote maps to exactly one configured component; an explicit --repo must match that checkout. When paired with --cwd, this must name the same existing local or active registered linked task worktree; --cwd remains the Cook workspace authority |
+| `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. A missing destination is created after durable Cook admission through an enabled worktree provider with `commands.ensure`, or through Homeboy's built-in local provider when no configured provider declares creation capability. When omitted, an explicit --cwd is the canonical destination. Otherwise, --repo plus --task-url derives an issue-owned destination through the same provider boundary. An explicit --workspace or --cwd Git checkout can infer --repo when its remote maps to exactly one configured component; an explicit --repo must match that checkout. When paired with --cwd, this must name the same existing local or active registered linked task worktree; --cwd remains the Cook workspace authority |
+| `--worktree-provider-self-repair` | `<PROVIDER_ID>` | Temporarily use the explicit clean --cwd as workspace authority while repairing the configured provider that owns this repository. The provider must declare its repository under settings.worktree_provider_self_repair; normal Cook gates, review, PR finalization, and durable provenance remain active |
 | `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
 | `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-verify-file` | `<PATH>` | Read one private verification shell program from a file. The controller snapshots its bytes before submission; durable provenance records its digest and redaction policy, not its file path. Relative paths use the controller's invocation directory |
+| `--gate-input-source` | `<JSON>` | Durable source metadata emitted by Homeboy-generated promotion commands. This preserves the immutable provenance of a previously snapshotted gate; private entries retain no source path |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
@@ -162,7 +164,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--draft-pr` | flag | Complete normal verified finalization but create a draft pull request. Existing pull requests retain their current draft or ready state |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
 | `--no-progress` | flag | Suppress intermediate Cook progress lines after the durable run identity. The final result still contains status and evidence commands for orchestration |
-| `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against. When omitted, Cook resolves repository evidence before falling back to `main` |
+| `--base` | `<BRANCH>` | Base branch the finalized pull request targets and the branch changes are diffed against. When omitted, Cook resolves configured repository or remote default-branch evidence before retaining its deferred `main` compatibility default when the provider has not materialized a checkout |
 | `--head` | `<BRANCH>` | Head branch to push and open the PR from. Defaults to the branch the destination worktree is already on |
 | `--title` | `<TEXT>` | Title for the finalized pull request. Defaults to a title derived from the goal / commit |
 | `--commit-message` | `<TEXT>` | Commit message for the cook's committed change. Defaults to a message derived from the goal |
@@ -190,6 +192,7 @@ Continue a detached Cook from its durable Cook ID or provider attempt ID. The pe
 | `--preflight` | flag | Validate continuation admission without dispatching a provider or mutating lifecycle state |
 | `--rearm` | flag | Explicitly rearm one failed terminal continuation before consuming it |
 | `--artifact-id` | `<ID>` | Select the patch artifact to promote when the durable attempt produced more than one patch candidate. This resumes controller-side promotion without dispatching another provider execution |
+| `--timeout-ms` | `<MS>` | Explicitly increase the provider timeout for a new retry attempt. The override and its operator authority are retained in the Cook recipe |
 | `--full` | flag | Include the complete Cook report rather than the compact lifecycle view |
 
 ## `homeboy agent-task loop`
@@ -760,8 +763,8 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | Option | Value | Description |
 | --- | --- | --- |
 | `--repo` | `<REPO_SLUG_OR_PRIMARY_PATH>` | Registered repository slug or exact registered primary checkout path |
-| `--from` | `<REF>` | _no help text_ |
-| `--base` | `<BRANCH>` | _no help text_ |
+| `--from` | `<REF>` | Source ref used to create every child worktree. When omitted, this is inferred from the repository default branch. An explicit value wins and must resolve to the same commit as --base |
+| `--base` | `<BRANCH>` | Pull-request base branch. When omitted, Homeboy resolves the registered repository's remote default branch before any worktree mutation |
 | `--branch-prefix` | `<PREFIX>` | _no help text_ |
 | `--fanout-id` | `<ID>` | _no help text_ |
 | `--worktree` | `<ISSUE_URL=HANDLE>` | Bind one issue URL to an existing provider-managed worktree handle. Repeat as `--worktree ISSUE_URL=HANDLE`. Every supplied issue must have exactly one binding; Homeboy validates and adopts the exact destination instead of requesting provider creation |
@@ -778,6 +781,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-verify-file` | `<PATH>` | Read one private verification shell program from a file. The controller snapshots its bytes before submission; durable provenance records its digest and redaction policy, not its file path. Relative paths use the controller's invocation directory |
+| `--gate-input-source` | `<JSON>` | Durable source metadata emitted by Homeboy-generated promotion commands. This preserves the immutable provenance of a previously snapshotted gate; private entries retain no source path |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
@@ -954,10 +958,12 @@ Promote a completed generic patch artifact into a managed worktree
 | `--artifact-id` | `<ARTIFACT_ID>` | _no help text_ |
 | `--dry-run` | flag | _no help text_ |
 | `--full` | flag | Include complete promotion and gate evidence |
+| `--gates-from-cook-recipe` | flag | Replay the exact gate policy from the source run's durable Cook recipe. Homeboy-generated review commands use this reference so private gate programs remain outside reviewer-facing command output |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-verify-file` | `<PATH>` | Read one private verification shell program from a file. The controller snapshots its bytes before submission; durable provenance records its digest and redaction policy, not its file path. Relative paths use the controller's invocation directory |
+| `--gate-input-source` | `<JSON>` | Durable source metadata emitted by Homeboy-generated promotion commands. This preserves the immutable provenance of a previously snapshotted gate; private entries retain no source path |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
@@ -1044,7 +1050,7 @@ This is the core-owned publication boundary for external runtimes.
 | `--external-usage-limitations` | `<TEXT>` | Limitations of the external usage evidence or manual review |
 | `--external-usage-url` | `<URL>` | Reviewer-resolvable HTTPS URL for external usage evidence |
 | `--gate-result` | `<NAME=STATUS[:DETAIL]>` | _no help text_ |
-| `--verify` | `<COMMAND>` | Execute one deterministic verification command against the committed manual candidate |
+| `--verify` | `<COMMAND>` | Execute a deterministic verification command against the committed manual candidate. Repeat for multiple gates |
 | `--changed-file` | `<PATH>` | _no help text_ |
 | `--protected-branch` | `<BRANCH>` | _no help text_ |
 | `--ai-used-for` | `<TEXT>` | _no help text_ |
@@ -1074,6 +1080,7 @@ Attach authorized candidate-bound replacement gate proof after an infrastructure
 | --- | --- | --- |
 | `--promotion` | `<JSON|@FILE|->` | Complete typed promotion report from the replacement gate executor: inline JSON, `@FILE`, or `-` |
 | `--authorize-external-proof` | `<TEXT>` | Explicit operator authorization for externally produced proof |
+| `--accept-inherited-failures` | flag | Accept candidate failures proven identical against the immutable base |
 
 ## `homeboy agent-task verify-replacement`
 
@@ -1094,6 +1101,7 @@ Run corrected gates against an already-applied failed candidate and record repla
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-verify-file` | `<PATH>` | Read one private verification shell program from a file. The controller snapshots its bytes before submission; durable provenance records its digest and redaction policy, not its file path. Relative paths use the controller's invocation directory |
+| `--gate-input-source` | `<JSON>` | Durable source metadata emitted by Homeboy-generated promotion commands. This preserves the immutable provenance of a previously snapshotted gate; private entries retain no source path |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |

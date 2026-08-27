@@ -15,13 +15,26 @@ use crate::agent_task_executor_evidence::link_latest_executor_evidence;
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment,
 };
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
+/// Floor and ceiling for how often the liveness watchdog re-samples the
+/// provider's execution workspace for file activity. A CLI agent that edits
+/// files without ever writing to stdout/stderr until its final JSON result is
+/// still doing verifiable work, and only the workspace on disk can prove that
+/// (#13626). Each sample forks `git`, so the interval is derived from the
+/// configured liveness deadline (a quarter of it) rather than fixed: a short
+/// deadline still gets several samples inside its own window, and a long one
+/// never turns into its own load source by sampling a large repository every
+/// tick of the poll loop.
+const WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS: u64 = 200;
+const WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS: u64 = 5_000;
 pub const PROVIDER_READINESS_RESULT_SCHEMA: &str =
     "homeboy/agent-task-provider-readiness-result/v1";
 const PROVIDER_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -103,8 +116,7 @@ impl ProviderOutputCapture {
 pub(super) fn run_materialized_provider_command(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
-    run_id: Option<&str>,
-    execution_attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
     let mut retry_attempt = 1;
     // This state belongs to one invocation's retry sequence. It cannot couple
@@ -112,8 +124,7 @@ pub(super) fn run_materialized_provider_command(
     let mut prior_immediate_failure = None;
     loop {
         let started = Instant::now();
-        let mut outcome =
-            run_materialized_provider_command_once(request, provider, run_id, execution_attempt);
+        let mut outcome = run_materialized_provider_command_once(request, provider, execution);
         classify_provider_policy_denial(request, &mut outcome);
         classify_transient_provider_outcome(&mut outcome);
 
@@ -142,7 +153,7 @@ pub(super) fn run_materialized_provider_command(
                     }),
                 });
                 attach_runtime_tool_provenance(request, &mut outcome);
-                link_latest_executor_evidence(request, &mut outcome, run_id);
+                link_latest_executor_evidence(request, &mut outcome, execution.run_id.as_deref());
                 return outcome;
             }
             prior_immediate_failure = Some(failure.signature);
@@ -160,7 +171,7 @@ pub(super) fn run_materialized_provider_command(
             attach_runtime_tool_provenance(request, &mut outcome);
             // Preserve and link the latest raw executor input/result as
             // first-class run evidence before returning the final outcome.
-            link_latest_executor_evidence(request, &mut outcome, run_id);
+            link_latest_executor_evidence(request, &mut outcome, execution.run_id.as_deref());
             return outcome;
         }
 
@@ -418,6 +429,7 @@ fn classify_provider_policy_denial(
 fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
     if outcome_text_is_rate_limited(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
+        annotate_usage_cap(outcome);
         return;
     }
     let already_transient =
@@ -440,6 +452,38 @@ fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
     if outcome_text_is_transient(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::Transient);
     }
+}
+
+/// Attach a [`super::usage_cap::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS`]
+/// diagnostic naming the reset time when the outcome text carries a usage-cap
+/// signature the scheduler's rotation-skip logic can act on (#13644). A
+/// generic rate-limit failure without a recognizable usage-cap reset stays a
+/// plain `RateLimited` classification, unchanged.
+fn annotate_usage_cap(outcome: &mut AgentTaskOutcome) {
+    let now = chrono::Utc::now();
+    let reset_at = outcome
+        .summary
+        .as_deref()
+        .and_then(|text| super::usage_cap::detect_usage_cap(text, now))
+        .or_else(|| {
+            outcome.diagnostics.iter().find_map(|diagnostic| {
+                super::usage_cap::detect_usage_cap(&diagnostic.message, now).or_else(|| {
+                    super::usage_cap::detect_usage_cap(&diagnostic.data.to_string(), now)
+                })
+            })
+        });
+    let Some(reset_at) = reset_at else {
+        return;
+    };
+    push_unique_diagnostic(
+        &mut outcome.diagnostics,
+        super::usage_cap::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS.to_string(),
+        format!(
+            "provider usage cap reached; resets at {}",
+            reset_at.to_rfc3339()
+        ),
+        json!({ "reset_at": reset_at.to_rfc3339() }),
+    );
 }
 
 fn outcome_text_is_rate_limited(outcome: &AgentTaskOutcome) -> bool {
@@ -519,6 +563,8 @@ pub(super) fn is_rate_limited_provider_error(text: &str) -> bool {
         "provider quota",
         "quota exceeded",
         "exceeded your quota",
+        "usage limit",
+        "usage cap",
     ]
     .iter()
     .any(|pattern| lowered.contains(pattern))
@@ -611,16 +657,14 @@ impl ProviderContainmentReport {
 pub(super) fn run_materialized_provider_command_once(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
-    run_id: Option<&str>,
-    attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
     let mut containment_report = ProviderContainmentReport::default();
     let mut outcome = run_materialized_provider_command_once_contained(
         request,
         provider,
         &mut containment_report,
-        run_id,
-        attempt,
+        execution,
     );
     containment_report.annotate(&mut outcome);
     if let Err(error) = retain_failed_workspace_artifacts(&mut outcome, request) {
@@ -639,9 +683,10 @@ fn run_materialized_provider_command_once_contained(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
     containment_report: &mut ProviderContainmentReport,
-    run_id: Option<&str>,
-    attempt: u32,
+    execution: &AgentTaskExecutionContext,
 ) -> AgentTaskOutcome {
+    let run_id = execution.run_id.as_deref();
+    let attempt = execution.attempt;
     let command = render_provider_command_display(provider);
     let deadline_remaining_ms = crate::agent_task_timeout::remaining_execution_deadline_ms(
         request.limits.execution_deadline_unix_ms,
@@ -811,7 +856,54 @@ fn run_materialized_provider_command_once_contained(
         ));
     }
 
+    let launch_context = match AgentTaskProviderLaunchContext::materialize(
+        &request.request,
+        provider,
+        execution,
+        cwd.as_deref(),
+        &env,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.provider_launch_context_invalid",
+                error.to_string(),
+                json!({ "provider": provider.id }),
+            )
+        }
+    };
+    if let (Some(store), Some(run_id)) = (execution.lifecycle_store(), run_id) {
+        if let Err(error) = store.record_provider_launch_context(
+            run_id,
+            &request.request.task_id,
+            attempt,
+            &launch_context,
+        ) {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::Provider,
+                "agent_task.provider_launch_context_persistence_failed",
+                error.to_string(),
+                json!({ "provider": provider.id, "run_id": run_id }),
+            );
+        }
+    }
+
     let mut command_builder = Command::new(&program);
+    if let Err(error) = launch_context.apply_declared_environment(&mut command_builder) {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::ProviderError,
+            AgentTaskFailureClassification::InvalidInput,
+            "agent_task.provider_launch_environment_invalid",
+            error.to_string(),
+            json!({ "provider": provider.id }),
+        );
+    }
     command_builder.args(&args).envs(
         env.iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
@@ -916,12 +1008,22 @@ fn run_materialized_provider_command_once_contained(
     if let Some(run_id) = run_id {
         // Failure to record this diagnostic identity must not interrupt provider
         // execution. The reservation remains the execution authority.
-        let _ = crate::agent_task_lifecycle::record_provider_execution_process(
-            run_id,
-            &request.request.task_id,
-            attempt,
-            child.id(),
-        );
+        if let Some(store) = execution.lifecycle_store() {
+            let _ = crate::agent_task_lifecycle::record_provider_execution_process_in_store(
+                store,
+                run_id,
+                &request.request.task_id,
+                attempt,
+                child.id(),
+            );
+        } else {
+            let _ = crate::agent_task_lifecycle::record_provider_execution_process(
+                run_id,
+                &request.request.task_id,
+                attempt,
+                child.id(),
+            );
+        }
     }
 
     if let Err(error) = containment.attach(&child) {
@@ -949,6 +1051,17 @@ fn run_materialized_provider_command_once_contained(
     // Progress and the wall timeout must share a monotonic clock. A system-clock
     // adjustment must never turn a stale provider into a live one.
     let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let mut runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
+    let mut runtime_progress_events = 0_u64;
+    // Only sampled when the workspace root is known; a provider running
+    // without a declared workspace (e.g. a preflight or repo-less task) keeps
+    // relying on process output and artifacts-path progress alone.
+    let mut workspace_progress = attestation_root
+        .as_deref()
+        .map(workspace_progress_snapshot)
+        .unwrap_or_default();
+    let mut workspace_progress_events = 0_u64;
+    let mut next_workspace_progress_check_ms = 0_u64;
 
     let (stdout_runtime_capture, stderr_runtime_capture) =
         runtime_output_captures(request, run_id, attempt);
@@ -990,27 +1103,69 @@ fn run_materialized_provider_command_once_contained(
         let _ = Write::write_all(&mut stdin, &input);
     }
 
-    let liveness_timeout = request
-        .limits
-        .liveness_timeout_ms
-        .map(Duration::from_millis);
+    let liveness_timeout_ms = crate::agent_task_timeout::effective_provider_liveness_timeout_ms(
+        request.limits.liveness_timeout_ms,
+    );
+    // The provider receives `requested_timeout_ms` and gets the process grace
+    // specifically to serialize its timeout outcome. A liveness deadline that
+    // is equal to or later than that provider deadline must not consume the
+    // grace first and misclassify the attempt as stalled.
+    let liveness_timeout = (liveness_timeout_ms < requested_timeout_ms)
+        .then_some(Duration::from_millis(liveness_timeout_ms));
+    // A quarter of the liveness deadline guarantees several workspace samples
+    // land inside any single liveness window, however short, while the floor
+    // and ceiling keep a very short test deadline or a very long production
+    // one from turning into an excessive or pointless `git` fork cadence.
+    let workspace_progress_check_interval_ms = (liveness_timeout_ms / 4).clamp(
+        WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS,
+        WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS,
+    );
     let (status, killed_for_liveness, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (Some(status), false, false),
             Ok(None) => {
                 let elapsed = started.elapsed();
+                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                let mut progressed = false;
+                let current_runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
+                if runtime_progress_advanced(&runtime_progress, &current_runtime_progress) {
+                    progressed = true;
+                    runtime_progress_events = runtime_progress_events.saturating_add(1);
+                }
+                runtime_progress = current_runtime_progress;
+                // Liveness is the only consumer of the workspace signal, so it
+                // is only worth the `git` fork when a liveness deadline is
+                // actually in force and due for a fresh sample.
+                if liveness_timeout.is_some() && elapsed_ms >= next_workspace_progress_check_ms {
+                    next_workspace_progress_check_ms =
+                        elapsed_ms.saturating_add(workspace_progress_check_interval_ms);
+                    if let Some(root) = attestation_root.as_deref() {
+                        let current_workspace_progress = workspace_progress_snapshot(root);
+                        if workspace_progress_advanced(
+                            &workspace_progress,
+                            &current_workspace_progress,
+                        ) {
+                            progressed = true;
+                            workspace_progress_events = workspace_progress_events.saturating_add(1);
+                        }
+                        workspace_progress = current_workspace_progress;
+                    }
+                }
+                if progressed {
+                    last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+                }
                 if elapsed >= process_timeout {
                     break (None, false, true);
                 }
-                if let Some(liveness) = liveness_timeout {
+                if let Some(liveness_timeout) = liveness_timeout {
                     let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
                         last_progress_ms.load(Ordering::SeqCst),
                     ));
-                    if progress_age >= liveness {
+                    if progress_age >= liveness_timeout {
                         break (None, true, false);
                     }
                     // Wake up at the earlier of process timeout and liveness deadline.
-                    let remaining_liveness = liveness.saturating_sub(progress_age);
+                    let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
                     let sleep_for = remaining_liveness
                         .min(process_timeout - elapsed)
                         .min(Duration::from_millis(50));
@@ -1060,7 +1215,7 @@ fn run_materialized_provider_command_once_contained(
             &stderr,
             &provider.id,
             liveness_timeout
-                .expect("liveness kill requires a configured liveness deadline")
+                .expect("liveness kill requires an earlier liveness deadline")
                 .as_millis(),
         );
         return failure_outcome(
@@ -1075,9 +1230,11 @@ fn run_materialized_provider_command_once_contained(
                 "deadline": "liveness",
                 "timeout_ms": requested_timeout_ms,
                 "process_timeout_ms": process_timeout.as_millis(),
-                "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+                "liveness_timeout_ms": liveness_timeout_ms,
                 "stdout_bytes": stdout_capture.total_bytes,
                 "stderr_bytes": stderr_capture.total_bytes,
+                "runtime_progress_events": runtime_progress_events,
+                "workspace_progress_events": workspace_progress_events,
             }),
         );
     }
@@ -1106,6 +1263,7 @@ fn run_materialized_provider_command_once_contained(
                 run_id,
                 requested_timeout_ms,
                 process_timeout.as_millis(),
+                liveness_timeout_ms,
                 cancellation_acknowledged,
                 &stdout_capture,
                 &stderr_capture,
@@ -1143,7 +1301,7 @@ fn run_materialized_provider_command_once_contained(
                     elapsed_ms: started.elapsed().as_millis(),
                     requested_timeout_ms,
                     process_timeout_ms: process_timeout.as_millis(),
-                    liveness_timeout_ms: request.limits.liveness_timeout_ms,
+                    liveness_timeout_ms: Some(liveness_timeout_ms),
                     execution_deadline_unix_ms: request.limits.execution_deadline_unix_ms,
                 },
             );
@@ -1163,6 +1321,8 @@ fn run_materialized_provider_command_once_contained(
                 &status,
                 &stdout,
                 &stderr,
+                stdout_capture.total_bytes,
+                stderr_capture.total_bytes,
                 &provider_output_redactions(request, provider),
             ),
         );
@@ -1227,6 +1387,8 @@ fn run_materialized_provider_command_once_contained(
                 &status,
                 &stdout,
                 &stderr,
+                stdout_capture.total_bytes,
+                stderr_capture.total_bytes,
                 &provider_output_redactions(request, provider),
             ),
         ),
@@ -1239,10 +1401,11 @@ fn provider_cargo_target(
     environment: &[(String, String)],
 ) -> homeboy_core::Result<Option<homeboy_core::ManagedCargoTarget>> {
     let Some(cwd) = cwd else { return Ok(None) };
-    let enabled =
-        homeboy_core::component::resolve_effective(None, Some(&cwd.to_string_lossy()), None)
-            .map(|component| component.managed_execution.shared_cargo_target)
-            .unwrap_or(false);
+    // Attempt worktrees execute from their own portable checkout state. Ambient
+    // registry resolution can scan unrelated registered repositories and cannot
+    // authoritatively configure this runner-local snapshot.
+    let enabled = homeboy_core::component::try_discover_from_portable(cwd)?
+        .is_some_and(|component| component.managed_execution.shared_cargo_target);
     if !enabled {
         return Ok(None);
     }
@@ -1503,7 +1666,8 @@ pub(super) fn run_provider_command(
     run_id: Option<&str>,
 ) -> AgentTaskOutcome {
     let materialized = test_executor_request(request);
-    run_materialized_provider_command(&materialized, provider, run_id, 1)
+    let context = test_execution_context(run_id);
+    run_materialized_provider_command(&materialized, provider, &context)
 }
 
 #[cfg(test)]
@@ -1512,7 +1676,19 @@ pub(super) fn run_provider_command_once(
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let materialized = test_executor_request(request);
-    run_materialized_provider_command_once(&materialized, provider, None, 1)
+    let context = test_execution_context(None);
+    run_materialized_provider_command_once(&materialized, provider, &context)
+}
+
+#[cfg(test)]
+fn test_execution_context(run_id: Option<&str>) -> AgentTaskExecutionContext {
+    AgentTaskExecutionContext {
+        plan_id: "provider-unit-test".to_string(),
+        run_id: run_id.map(str::to_string),
+        attempt: 1,
+        cancellation: crate::agent_task_scheduler::AgentTaskCancellationToken::default(),
+        lifecycle_store: None,
+    }
 }
 
 #[cfg(test)]
@@ -1608,6 +1784,85 @@ where
     })
 }
 
+/// Size every file the provider owns under its artifacts directory.
+///
+/// `artifacts_path` is handed to the provider as its private output directory,
+/// so a file growing there is the provider doing work — whatever it is named.
+///
+/// This deliberately does not filter on the file name. It used to require the
+/// name to contain `progress`, which made liveness depend on a runtime's naming
+/// convention rather than on observable activity (#13623). A runtime that
+/// streams its telemetry into, say, `<task>-<backend>-runtime-stdout.log` was
+/// invisible: the watchdog read zero progress while that file grew to 94KB, and
+/// killed a healthy provider as stalled. Nothing else writes here, so counting
+/// every file cannot manufacture liveness the provider did not earn.
+fn runtime_progress_snapshot(root: &Path) -> BTreeMap<PathBuf, u64> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return BTreeMap::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = path.metadata().ok()?;
+            metadata.is_file().then_some((path, metadata.len()))
+        })
+        .collect()
+}
+
+fn runtime_progress_advanced(
+    previous: &BTreeMap<PathBuf, u64>,
+    current: &BTreeMap<PathBuf, u64>,
+) -> bool {
+    current
+        .iter()
+        .any(|(path, size)| *size > previous.get(path).copied().unwrap_or_default())
+}
+
+/// Liveness evidence sampled from the provider's execution workspace rather
+/// than from process output. A provider that streams nothing to stdout/stderr
+/// until it serializes its final outcome still leaves a trail on disk: files
+/// it edits become uncommitted worktree changes, and files it commits move
+/// HEAD. Either is proof of live, ongoing work (#13626).
+#[derive(Default, Clone, PartialEq, Eq)]
+struct WorkspaceProgressSnapshot {
+    files_changed: Option<usize>,
+    head_sha: Option<String>,
+}
+
+fn workspace_progress_snapshot(root: &Path) -> WorkspaceProgressSnapshot {
+    WorkspaceProgressSnapshot {
+        files_changed: crate::agent_task_service::worktree_files_changed(root),
+        head_sha: homeboy_core::git::head_sha(root),
+    }
+}
+
+/// True when two workspace samples both produced a reading and those readings
+/// differ. A sample that failed to read (`None`, e.g. a transient `git`
+/// failure or a non-repository root) must never be compared against a
+/// present reading — that would either manufacture false progress or mask a
+/// real stall depending on which side went missing.
+fn workspace_progress_advanced(
+    previous: &WorkspaceProgressSnapshot,
+    current: &WorkspaceProgressSnapshot,
+) -> bool {
+    if let (Some(previous_files), Some(current_files)) =
+        (previous.files_changed, current.files_changed)
+    {
+        if previous_files != current_files {
+            return true;
+        }
+    }
+    if let (Some(previous_head), Some(current_head)) =
+        (previous.head_sha.as_deref(), current.head_sha.as_deref())
+    {
+        if previous_head != current_head {
+            return true;
+        }
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 fn provider_timeout_diagnostic_data(
     request: &AgentTaskExecutorRequest,
@@ -1616,6 +1871,7 @@ fn provider_timeout_diagnostic_data(
     run_id: Option<&str>,
     timeout_ms: u64,
     process_timeout_ms: u128,
+    liveness_timeout_ms: u64,
     cancellation_acknowledged: bool,
     stdout: &ProviderOutputCapture,
     stderr: &ProviderOutputCapture,
@@ -1652,7 +1908,7 @@ fn provider_timeout_diagnostic_data(
         "deadline": "wall_clock",
         "timeout_ms": timeout_ms,
         "process_timeout_ms": process_timeout_ms,
-        "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+        "liveness_timeout_ms": liveness_timeout_ms,
         "output_event_count": stdout.events.saturating_add(stderr.events),
         "stdout_bytes": stdout.total_bytes,
         "stderr_bytes": stderr.total_bytes,
@@ -1718,7 +1974,7 @@ fn classify_stall_or_rate_limit(
         AgentTaskOutcomeStatus::ProviderError,
         AgentTaskFailureClassification::Stalled,
         format!(
-            "provider '{provider_id}' produced no stdout/stderr progress before liveness_timeout_ms={liveness_timeout_ms}"
+            "provider '{provider_id}' produced no process output, structured runtime progress, or workspace file activity before liveness_timeout_ms={liveness_timeout_ms}"
         ),
     )
 }
@@ -1730,6 +1986,8 @@ fn executor_process_diagnostic_data(
     status: &std::process::ExitStatus,
     stdout: &str,
     stderr: &str,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
     redactions: &[String],
 ) -> Value {
     let command = redact_sensitive_text(command, redactions);
@@ -1742,11 +2000,11 @@ fn executor_process_diagnostic_data(
         "exit_code": status.code(),
         "signal": exit_signal(status),
         "stdout": bounded_executor_output(&stdout),
-        "stdout_bytes": stdout.len(),
-        "stdout_truncated": stdout.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stdout_bytes": stdout_bytes,
+        "stdout_truncated": stdout_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
         "stderr": bounded_executor_output(&stderr),
-        "stderr_bytes": stderr.len(),
-        "stderr_truncated": stderr.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stderr_bytes": stderr_bytes,
+        "stderr_truncated": stderr_bytes > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES as u64,
         "remediation_hints": provider_process_remediation_hints(&stdout, &stderr),
     })
 }
@@ -1853,6 +2111,8 @@ fn signal_termination_outcome(
         status,
         stdout,
         stderr,
+        stdout.len() as u64,
+        stderr.len() as u64,
         &provider_output_redactions(request, provider),
     );
     if let Some(object) = data.as_object_mut() {
@@ -1953,6 +2213,8 @@ fn surface_provider_process_failure(
         status,
         stdout,
         stderr,
+        stdout.len() as u64,
+        stderr.len() as u64,
         &redactions,
     );
     let exit_description = status
@@ -2673,7 +2935,7 @@ pub(super) fn provider_command_env(
     env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
     env.extend(
         resolve_secret_env_with_fallbacks(
-            &request.executor.secret_env,
+            &secret_env_plan.secret_env_names(),
             &provider_secret_sources(provider, Some(request)),
         )
         .map_err(ProviderCommandEnvError::Secret)?,
@@ -2730,13 +2992,10 @@ pub(super) fn failure_outcome(
     data: Value,
 ) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: request.task_id.clone(),
         status,
         summary: Some(message.clone()),
         failure_classification: Some(classification),
-        artifacts: Vec::new(),
-        typed_artifacts: Vec::new(),
         evidence_refs: vec![AgentTaskEvidenceRef {
             kind: "agent-task-provider".to_string(),
             uri: format!("homeboy://agent-task/{}", diagnostic_class),
@@ -2747,10 +3006,7 @@ pub(super) fn failure_outcome(
             message,
             data,
         }],
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     }
 }
 

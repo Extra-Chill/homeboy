@@ -201,6 +201,11 @@ enum GitCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+    /// Preserve or restore an operation-owned worktree patch without refs/stash.
+    Patch {
+        #[command(subcommand)]
+        command: PatchCommand,
+    },
     /// Pull remote changes
     Pull {
         /// JSON input spec for bulk operations.
@@ -242,6 +247,22 @@ enum GitCommand {
     Issue(IssueArgs),
     /// Manage GitHub pull requests for a component
     Pr(PrArgs),
+}
+
+#[derive(Subcommand)]
+enum PatchCommand {
+    /// Capture staged, unstaged, and untracked changes, then leave the worktree clean.
+    Preserve {
+        operation_id: String,
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Restore a previously captured patch by its operation identity.
+    Restore {
+        operation_id: String,
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
 }
 
 pub fn run(args: GitArgs) -> CmdResult<GitCommandOutput> {
@@ -467,6 +488,23 @@ pub fn run(args: GitArgs) -> CmdResult<GitCommandOutput> {
             )?;
             let exit_code = output.exit_code;
             Ok((GitCommandOutput::Single(output), exit_code))
+        }
+        GitCommand::Patch { command } => {
+            let (operation_id, path, restore) = match command {
+                PatchCommand::Preserve { operation_id, path } => (operation_id, path, false),
+                PatchCommand::Restore { operation_id, path } => (operation_id, path, true),
+            };
+            let path = path
+                .map(std::path::PathBuf::from)
+                .map(Ok)
+                .unwrap_or_else(std::env::current_dir)
+                .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+            let evidence = if restore {
+                git::restore_worktree_patch(&path, &operation_id)?
+            } else {
+                git::preserve_worktree_patch(&path, &operation_id)?
+            };
+            Ok((GitCommandOutput::Patch(evidence), 0))
         }
         GitCommand::Issue(args) => issue::run_issue(args),
         GitCommand::Pr(args) => pr::run_pr(args),

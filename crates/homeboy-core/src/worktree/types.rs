@@ -1,6 +1,7 @@
 use crate::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
 use crate::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Canonical, portable identity for a managed task worktree. The registry
 /// handle and registered component identify the physical allocation; paths and
@@ -72,6 +73,8 @@ pub struct TaskWorktreeRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     pub cleanup_policy: CleanupPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_disposition: Option<String>,
     #[serde(default)]
     pub branch_cleanup_intent: BranchCleanupIntent,
     pub created_at: String,
@@ -620,7 +623,7 @@ pub struct WorktreeQueueCreateRequest {
     pub task_url: Option<String>,
     pub task_ref: Option<String>,
     pub run_id: Option<String>,
-    pub provider_lifecycle: Option<crate::worktree_providers::WorktreeProviderLifecycleIntent>,
+    pub provider_lifecycle: Option<crate::worktree_provider::WorktreeProvisionLifecycle>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -646,6 +649,20 @@ pub struct WorktreeQueueCreateRow {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WorktreeQueueCreateFailure>,
+}
+
+/// Lossless structured cause for a queue row that failed before creation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeQueueCreateFailure {
+    pub code: String,
+    pub classification: String,
+    pub phase: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    pub details: Value,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

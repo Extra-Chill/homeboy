@@ -2470,18 +2470,11 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
                 ..AgentTaskAggregateTotals::default()
             },
             outcomes: vec![AgentTaskOutcome {
-                schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: "cook-conductor".to_string(),
                 status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
                 summary: Some("Remote provider agent task failed.".to_string()),
                 failure_classification: Some(AgentTaskFailureClassification::Provider),
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
                 outputs: serde_json::json!({}),
-                workflow: None,
-                follow_up: None,
                 metadata: serde_json::json!({
                     "provider": "fixture.agent-task-executor",
                     "provider_run_result": {
@@ -2490,6 +2483,7 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
                         "failure_classification": "runtime"
                     }
                 }),
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -2836,10 +2830,14 @@ fn cancel_run_signals_live_running_record() {
         .expect("read descendant pid");
     let descendant_pid: u32 = descendant_pid.trim().parse().expect("descendant pid");
     let owner_pid = child.id();
+    let owner_identity = homeboy_core::process::process_start_identity(owner_pid)
+        .expect("probe owner process identity")
+        .expect("live owner exposes a process identity");
     let mut running = lifecycle_store
         .read_record("run-cancel-live")
         .expect("running record");
     running.metadata["runner_pid"] = json!(owner_pid);
+    running.metadata["runner_process_start_identity"] = json!(owner_identity);
     lifecycle_store
         .write_record(&running)
         .expect("persist owned process identity");

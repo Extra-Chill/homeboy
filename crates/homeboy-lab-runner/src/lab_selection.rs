@@ -384,6 +384,7 @@ fn placement_readiness_with_transport(
             .expect("validated invocation has one source path"),
     );
     let observation = observe(request, source_path)?;
+    let runner = load(&request.runner_id)?;
     let provider_admission =
         provider_admission_for_request(request, observation.provider_catalog.as_deref());
     let routed = build_routed_lab_admission_command(
@@ -434,7 +435,7 @@ fn placement_readiness_with_transport(
             super::LabRunnerGateMode::Explicit,
         ),
         None => super::evaluate_lab_runner_capabilities_for_runner(
-            &load(&request.runner_id)?,
+            &runner,
             &plan.capability,
             super::LabRunnerGateMode::Explicit,
         )?,
@@ -446,6 +447,7 @@ fn placement_readiness_with_transport(
         observation.mode,
         capability,
         observation.provider_catalog.as_deref(),
+        super::lab::offload::metadata::require_exact_runner_version(&runner.settings),
     ))
 }
 
@@ -456,13 +458,19 @@ fn placement_readiness_from_status_with_catalog(
     mode: RunnerTunnelMode,
     capability: super::LabRunnerGateDecision,
     provider_catalog: Option<&[homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider]>,
+    require_exact_runner_version: bool,
 ) -> PlacementReadiness {
     let (workload_family, command, provider, source_path_inputs) = admission_identity(request);
     let provider_admission = provider_admission_for_request(request, provider_catalog);
+    let blocking_status_drift =
+        super::lab::offload::metadata::lab_runner_homeboy_has_blocking_status_drift(
+            status,
+            require_exact_runner_version,
+        );
     let availability = RunnerAvailability::from_status_parts(
         request.runner_id.clone(),
         status.connected,
-        status.admission_blocking_stale_daemon().is_some(),
+        blocking_status_drift,
         status.active_jobs.len(),
         &status.active_job_state,
         capacity,
@@ -540,7 +548,7 @@ fn placement_readiness_from_status_with_catalog(
             },
             PlacementReadinessPredicate {
                 id: "daemon_fresh".to_string(),
-                satisfied: status.admission_blocking_stale_daemon().is_none(),
+                satisfied: !blocking_status_drift,
             },
             PlacementReadinessPredicate {
                 id: "active_jobs_authoritative".to_string(),
@@ -1843,7 +1851,7 @@ mod placement_readiness_tests {
         capability: super::super::LabRunnerGateDecision,
     ) -> PlacementReadiness {
         placement_readiness_from_status_with_catalog(
-            request, status, capacity, mode, capability, None,
+            request, status, capacity, mode, capability, None, false,
         )
     }
 

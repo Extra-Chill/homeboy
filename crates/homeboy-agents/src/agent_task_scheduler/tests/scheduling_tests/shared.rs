@@ -49,12 +49,9 @@ impl AgentTaskExecutorAdapter for ConceptPacketExecutor {
             .push(request.clone());
 
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("ok".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
             typed_artifacts: if self.emit_concept_packet {
                 vec![AgentTaskTypedArtifact {
                     name: "concept_packet".to_string(),
@@ -67,12 +64,7 @@ impl AgentTaskExecutorAdapter for ConceptPacketExecutor {
             } else {
                 Vec::new()
             },
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -86,11 +78,9 @@ impl AgentTaskExecutorAdapter for GenericChildRunExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id.clone(),
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("generic fuzz case completed".to_string()),
-            failure_classification: None,
             artifacts: vec![AgentTaskArtifact {
                 schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                 id: format!("artifact-{}", request.task_id),
@@ -106,16 +96,12 @@ impl AgentTaskExecutorAdapter for GenericChildRunExecutor {
                 sha256: Some(format!("sha256:{}", request.task_id)),
                 metadata: json!({ "case_id": request.task_id }),
             }],
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
             outputs: json!({ "case_id": request.task_id }),
-            workflow: None,
-            follow_up: None,
             metadata: json!({
                 "provider": "generic-fuzz",
                 "child_run_id": format!("child-{}", request.task_id)
             }),
+            ..Default::default()
         }
     }
 }

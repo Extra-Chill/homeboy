@@ -18,6 +18,15 @@
 //! `aggregate_projections` facts that language extensions already emit, and
 //! never parses source.
 //!
+//! # A finding is a question, not a verdict
+//!
+//! Shape is what a detector can see; it is not what decides whether two
+//! declarations are one thing written twice. Four candidates investigated under
+//! #6761 were all wrong in the same direction — each looked like a mechanical
+//! collapse and was not one. `docs/audit/twin-candidate-triage.md` records the
+//! four discriminators that separate a real twin from a coincidence, and the
+//! two shapes that are worth acting on.
+//!
 //! # Why a shape must be fully resolved
 //!
 //! Grouping on field *names* alone reports parse boundaries as twins. A type
@@ -118,7 +127,7 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                 "Every conversion between them copies all declared fields, so the compiler currently rejects a field added to one side and not the other."
                     .to_string(),
                 format!(
-                    "The copy is compiler-enforced today and is not a correctness hazard. Collapse it only if the {} fields have no reason to be declared twice — a layering boundary or a differing serialized shape can be reason enough.",
+                    "The copy is compiler-enforced today and is not a correctness hazard. Collapse it only if the {} fields have no reason to be declared twice — a layering boundary or a differing serialized shape can be reason enough. Triage first: docs/audit/twin-candidate-triage.md.",
                     shape.len()
                 ),
             )
@@ -127,7 +136,7 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
                 Severity::Warning,
                 "No conversion between them copies every declared field, so a field added to one side can compile clean and never reach the other."
                     .to_string(),
-                "Collapse them onto one declaration, or make the conversion total so the compiler enforces the copy."
+                "Collapse them onto one declaration, or make the conversion total so the compiler enforces the copy. Shape similarity is not semantic identity — triage first: docs/audit/twin-candidate-triage.md."
                     .to_string(),
             )
         };

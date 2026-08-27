@@ -21,6 +21,7 @@ use homeboy_core::{defaults, Error, Result};
 /// exists to prevent.
 pub(super) fn resolve_dispatch_command_policy(
     request: &AgentTaskDispatchRequest,
+    managed_worktree: bool,
 ) -> Result<AgentCommandPolicy> {
     let mut policy = match defaults::load_config().agent_task.command_policy {
         Some(raw) => serde_json::from_value::<AgentCommandPolicy>(raw).map_err(|error| {
@@ -59,6 +60,12 @@ homeboy/agent-command-policy/v1 document: {error}"
     }
     if let Some(reason) = &request.core.command_policy_reason {
         policy.reason = Some(reason.clone());
+    }
+    if managed_worktree {
+        policy.deny.push(AgentCommandRule::with_reason(
+            "git stash*",
+            "Git's stash stack is repository-global and unsafe for parallel managed worktrees; preserve changes with an operation-owned patch artifact",
+        ));
     }
 
     Ok(policy)

@@ -39,7 +39,7 @@
 //! A provider that declares nothing required stays `available`. Silence is not
 //! evidence of a missing credential, so this never invents a requirement.
 
-use super::secrets::{provider_config_secret_sources, provider_secret_sources};
+use super::secrets::provider_declared_secret_sources;
 use super::*;
 
 pub const AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA: &str =
@@ -249,19 +249,6 @@ fn sole_provider_default_required_secret_env(provider: &AgentTaskExecutorProvide
     Vec::new()
 }
 
-/// Secret sources this provider declares for its own credentials, so a
-/// credential backed by a provider-declared source (a runtime auth JSON file,
-/// for example) resolves instead of being reported missing.
-fn provider_fallback_sources(
-    provider: &AgentTaskExecutorProvider,
-) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    let mut sources = provider_secret_sources(provider, None);
-    for provider_default in provider.provider_defaults.values() {
-        sources.extend(provider_config_secret_sources(provider_default));
-    }
-    sources
-}
-
 /// Resolve a provider's declared credentials against the observed scope.
 pub fn provider_credential_readiness(
     provider: &AgentTaskExecutorProvider,
@@ -283,7 +270,8 @@ pub fn provider_credential_readiness(
         .iter()
         .map(|entry| entry.env.clone())
         .collect::<Vec<_>>();
-    let status = secret_env_status_with_fallbacks(&names, &provider_fallback_sources(provider));
+    let status =
+        secret_env_status_with_fallbacks(&names, &provider_declared_secret_sources(provider));
 
     let requirements = declared
         .into_iter()

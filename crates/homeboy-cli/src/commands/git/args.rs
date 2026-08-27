@@ -76,6 +76,10 @@ pub(super) enum IssueCommand {
         #[arg(short, long)]
         title: Option<String>,
 
+        /// GitHub issue search query
+        #[arg(long)]
+        search: Option<String>,
+
         /// Required label (repeatable — all labels must be present)
         #[arg(short, long)]
         label: Vec<String>,

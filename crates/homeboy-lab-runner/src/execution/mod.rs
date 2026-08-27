@@ -1352,8 +1352,17 @@ fn refuses_nonfresh_daemon_execution(
     options: &RunnerExecOptions,
     status: &RunnerStatusReport,
 ) -> bool {
+    let admission_fresh = crate::load(&status.runner_id).map_or_else(
+        |_| status.daemon_fresh_for_admission(),
+        |runner| {
+            crate::lab::offload::metadata::lab_runner_daemon_fresh_for_admission(
+                status,
+                crate::lab::offload::metadata::require_exact_runner_version(&runner.settings),
+            )
+        },
+    );
     status.connected
-        && !status.daemon_fresh_for_admission()
+        && !admission_fresh
         && !allows_idle_stale_daemon_refresh(options, status)
         // A read-only retrieval routes to the generation that retains the run or
         // artifact and never rotates the shared tunnel, so admission-daemon

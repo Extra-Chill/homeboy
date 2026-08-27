@@ -49,14 +49,6 @@ pub struct ArtifactFetchOutcome {
     pub artifact_ref: Option<RunnerArtifactRef>,
 }
 
-/// Outcome of `get_artifact_bytes` describing where the bytes were written.
-pub enum ArtifactGetSource {
-    /// Bytes copied from a locally-recorded file artifact.
-    Local,
-    /// Bytes fetched from a remote runner cache.
-    Remote,
-}
-
 #[derive(Debug, Clone)]
 pub struct PersistedArtifactCleanupOptions {
     pub apply: bool,

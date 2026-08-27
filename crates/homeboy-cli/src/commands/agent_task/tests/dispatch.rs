@@ -70,6 +70,62 @@ fn register_component_with_aliases(
     .expect("register component");
 }
 
+#[test]
+fn explicit_repo_identity_resolution_does_not_hydrate_unrelated_components() {
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("checkout");
+        init_runtime_component_checkout(checkout.path());
+        add_remote(
+            checkout.path(),
+            "origin",
+            "https://github.com/example/fixture.git",
+        );
+        register_component(
+            "fixture",
+            checkout.path(),
+            "https://github.com/example/fixture.git",
+        );
+
+        let unrelated = tempfile::tempdir().expect("unrelated checkout");
+        register_component(
+            "unrelated",
+            unrelated.path(),
+            "https://github.com/example/fixture.git",
+        );
+
+        let identities = super::super::run::cook_repository_identities_for_workspace(
+            "--cwd",
+            checkout.path().to_str().expect("UTF-8 checkout path"),
+            Some("fixture"),
+        )
+        .expect("resolve explicit repository identity");
+
+        assert_eq!(identities.len(), 1);
+    });
+}
+
+#[test]
+fn explicit_unregistered_repo_is_proven_by_the_workspace_remote() {
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("checkout");
+        init_runtime_component_checkout(checkout.path());
+        add_remote(
+            checkout.path(),
+            "origin",
+            "https://github.com/example/fixture.git",
+        );
+
+        let identities = super::super::run::cook_repository_identities_for_workspace(
+            "--cwd",
+            checkout.path().to_str().expect("UTF-8 checkout path"),
+            Some("fixture"),
+        )
+        .expect("resolve explicit repository identity from its remote");
+
+        assert_eq!(identities.len(), 1);
+    });
+}
+
 fn write_component_without_collision_validation(component: homeboy::core::component::Component) {
     let directory = homeboy::core::paths::components().expect("component config directory");
     std::fs::create_dir_all(&directory).expect("create component config directory");
@@ -239,6 +295,228 @@ fn cook_reuses_a_task_candidate_without_overriding_explicit_head() {
 
 #[cfg(unix)]
 #[test]
+fn self_repair_bootstrap_uses_explicit_checkout_and_preserves_normal_cook_contract() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("provider repository");
+        init_runtime_component_checkout(primary.path());
+        add_remote(
+            primary.path(),
+            "origin",
+            "https://github.com/example/workspace-service.git",
+        );
+        register_component(
+            "workspace-service-component",
+            primary.path(),
+            "https://github.com/example/workspace-service.git",
+        );
+        let root = tempfile::tempdir().expect("worktree root");
+        let checkout = root.path().join("workspace-service-self-repair");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/provider-self-repair",
+                checkout.to_str().expect("checkout path"),
+                "HEAD",
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create self-repair checkout")
+            .success());
+        let invoked = root.path().join("provider-invoked");
+        let provider = root.path().join("failed-provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf 'invoked\\n' >> '{}'\nexit 9\n",
+                invoked.display()
+            ),
+        )
+        .expect("write failed provider");
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "workspace-service".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve_task: Some(vec![provider.display().to_string()]),
+                    ensure: Some(vec![provider.display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: Some("$.task_url".to_string()),
+                    },
+                ),
+            },
+        );
+        config.settings.insert(
+            homeboy::core::worktree_providers::WORKTREE_PROVIDER_SELF_REPAIR_SETTINGS_KEY
+                .to_string(),
+            json!({
+                "workspace-service": {
+                    "repository": "workspace-service-component"
+                }
+            }),
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider ownership");
+
+        let nonfinalizing_failure =
+            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "repair without publication".to_string(),
+                "--repo".to_string(),
+                "workspace-service-component".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/workspace-service/issues/13410".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect_err("non-finalizing provider failure is not a self-repair route");
+        assert!(nonfinalizing_failure
+            .details
+            .get("worktree_provider_self_repair")
+            .is_none());
+
+        let failure = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "repair the workspace service".to_string(),
+            "--repo".to_string(),
+            "workspace-service-component".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/example/workspace-service/issues/13410".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--verify".to_string(),
+            "cargo test --workspace".to_string(),
+            "--private-verify".to_string(),
+            "PRIVATE_GATE_SECRET=do-not-persist".to_string(),
+        ]))
+        .expect_err("normal provider-owned lookup fails before bootstrap");
+        assert_eq!(
+            failure.details["worktree_provider_self_repair"]["failed_operation"],
+            "resolve_task"
+        );
+        let route = &failure.details["worktree_provider_self_repair"];
+        assert_eq!(
+            route["schema"],
+            "homeboy/worktree-provider-self-repair-route/v1"
+        );
+        assert_eq!(route["provider_id"], "workspace-service");
+        assert_eq!(
+            route["provider_lifecycle_reconciliation"]["status"],
+            "required_after_repair_ships"
+        );
+        let replay = route["replay_argv"].as_array().expect("typed replay argv");
+        assert!(replay.iter().any(|value| value == "--cwd"));
+        assert!(replay
+            .iter()
+            .any(|value| value == "<clean-existing-linked-worktree>"));
+        assert!(replay
+            .iter()
+            .any(|value| value == "--worktree-provider-self-repair"));
+        assert!(replay.iter().any(|value| value == "cargo test --workspace"));
+        assert!(replay
+            .iter()
+            .any(|value| value == "<redacted:--private-verify>"));
+        assert!(!route.to_string().contains("PRIVATE_GATE_SECRET"));
+        assert!(route["replay_requires"]
+            .as_array()
+            .expect("replay requirements")
+            .iter()
+            .any(|requirement| requirement
+                .as_str()
+                .is_some_and(|requirement| requirement.contains("private gate"))));
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "repair the workspace service".to_string(),
+            "--repo".to_string(),
+            "workspace-service-component".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/example/workspace-service/issues/13410".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--cwd".to_string(),
+            checkout.display().to_string(),
+            "--worktree-provider-self-repair".to_string(),
+            "workspace-service".to_string(),
+            "--verify".to_string(),
+            "cargo test --workspace".to_string(),
+        ]))
+        .expect("admit explicit provider self-repair route");
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("provision from explicit checkout without provider");
+        let plan = super::super::run::compile_cook_plan(&args, provision.clone())
+            .expect("compile normal reviewed Cook plan");
+
+        assert_eq!(
+            std::fs::read_to_string(&invoked)
+                .expect("provider invocation record")
+                .lines()
+                .count(),
+            2,
+            "bootstrap must not invoke the failed provider again"
+        );
+        assert!(!args.no_finalize, "self-repair retains normal finalization");
+        assert_eq!(args.head.as_deref(), Some("fix/provider-self-repair"));
+        assert_eq!(
+            provision["self_repair_bootstrap"]["workspace_authority"],
+            "explicit_clean_existing_checkout"
+        );
+        assert_eq!(
+            provision["self_repair_bootstrap"]["review_and_finalization"],
+            "normal"
+        );
+        assert_eq!(
+            provision["self_repair_bootstrap"]["provider_lifecycle_reconciliation"]["status"],
+            "pending"
+        );
+        assert_eq!(
+            plan.metadata["cook_provision"]["self_repair_bootstrap"]["task_url"],
+            "https://github.com/example/workspace-service/issues/13410"
+        );
+        assert_eq!(
+            plan.tasks[0].workspace.root.as_deref(),
+            std::fs::canonicalize(&checkout)
+                .expect("canonical checkout")
+                .to_str()
+        );
+        assert_eq!(args.gates.verify, vec!["cargo test --workspace"]);
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -260,10 +538,21 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
 
         let bin = tempfile::tempdir().expect("fake git bin");
         let git = bin.path().join("git");
-        std::fs::write(&git, "#!/bin/sh\nsleep 30\n").expect("write fake git");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
+        )
+        .expect("write fake git");
         let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+        let _stale_checkout = homeboy::core::test_support::EnvVarGuard::set(
+            "HOMEBOY_STALE_CHECKOUT",
+            std::fs::canonicalize(stale.path())
+                .expect("canonical stale checkout")
+                .display()
+                .to_string(),
+        );
         let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
             format!(
@@ -1991,6 +2280,105 @@ fn cook_cwd_matching_external_handle_never_invokes_a_sleeping_resolver() {
 
 #[cfg(unix)]
 #[test]
+fn cook_cwd_adopts_clean_unpushed_provider_candidate_before_provisioning() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        let worktree_root = tempfile::tempdir().expect("worktree root");
+        let cwd = worktree_root.path().join("provider-owned-checkout");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/13421",
+                cwd.to_str().expect("worktree path"),
+                "HEAD",
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
+        let provider_dir = tempfile::tempdir().expect("provider directory");
+        let provider = provider_dir.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({ "worktrees": [{
+                    "handle": "homeboy@fix-13421",
+                    "path": cwd,
+                    "branch": "fix/13421",
+                    "safety": { "dirty": false, "unpushed": true, "primary": false }
+                }] })
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).unwrap();
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "dmc".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve_path: Some(vec![provider.display().to_string(), "{path}".to_string()]),
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "retain the candidate".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+            "--no-finalize".to_string(),
+        ]);
+
+        let args = super::super::run::resolve_cook_destination(args)
+            .expect("map provider path to canonical handle");
+        assert_eq!(args.to_worktree.as_deref(), Some("homeboy@fix-13421"));
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("provision the same canonical identity");
+        assert_eq!(provision["handle"], "homeboy@fix-13421");
+        assert_eq!(
+            provision["workspace_identity"]["handle"],
+            "homeboy@fix-13421"
+        );
+        assert_eq!(provision["workspace_safety"]["fresh"], true);
+        assert_eq!(provision["workspace_safety"]["unpushed"], true);
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn cook_cwd_rejects_a_mismatched_external_provider_handle_before_dispatch() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -3068,6 +3456,23 @@ fn list_latest_selects_the_newest_complete_filtered_match_or_an_empty_result() {
 
 #[test]
 fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
+    let cook_continue = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "cook-continue",
+        "cook-123",
+        "--timeout-ms",
+        "2400000",
+    ])
+    .expect("cook-continue timeout parses");
+    let Commands::AgentTask(agent_task) = cook_continue.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::CookContinue(args) = agent_task.command else {
+        panic!("expected cook-continue command");
+    };
+    assert_eq!(args.timeout_ms, Some(2_400_000));
+
     let cook = Cli::try_parse_from([
         "homeboy",
         "agent-task",

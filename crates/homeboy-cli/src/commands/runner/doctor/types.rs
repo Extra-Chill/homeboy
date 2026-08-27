@@ -176,8 +176,64 @@ pub struct RunnerCheck {
     pub id: String,
     pub status: RunnerDoctorStatus,
     pub message: String,
+    /// The fix, written for an operator to read.
+    ///
+    /// Kept alongside [`RunnerCheck::remediation_action`] rather than replaced
+    /// by it. These are two vocabularies, not two formats of one value: a
+    /// person reading a failed check needs the sentence and its fallbacks, and
+    /// a repair driver needs the arguments. Deriving one from the other is how
+    /// the current defect arose -- the action was computed, formatted into
+    /// prose, and then only a human could execute it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
+    /// The same fix, in a form something other than a person can run.
+    ///
+    /// `None` means no automatic repair is known for this check, which is not
+    /// the same as no remediation: plenty of checks are fixed by a human
+    /// decision that homeboy should not make.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation_action: Option<RunnerRepairAction>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub details: BTreeMap<String, String>,
+}
+
+impl RunnerCheck {
+    /// Attach the machine-runnable form of this check's remediation.
+    ///
+    /// A builder rather than a sixth constructor parameter: the four `checks::`
+    /// constructors are called from dozens of sites that have no action to
+    /// give, and widening their signatures would edit all of them to pass
+    /// `None`.
+    pub(crate) fn with_action(mut self, action: RunnerRepairAction) -> Self {
+        self.remediation_action = Some(action);
+        self
+    }
+}
+
+/// A repair a driver may perform on a runner without asking.
+///
+/// Closed on purpose. Each variant corresponds to an executor that already
+/// exists in `super::repair`, so this type is the missing link between a check
+/// and a capability rather than a new capability of its own. Keeping it closed
+/// means the set of things an unattended repair loop may do is reviewable, and
+/// cannot grow by someone formatting a new command into a string.
+///
+/// Adding a variant is therefore a deliberate decision about what homeboy is
+/// allowed to do to a runner on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum RunnerRepairAction {
+    /// Materialize the controller's Homeboy build onto the runner and
+    /// reconnect. Executor: `repair::refresh_outcome`.
+    RefreshHomeboy {
+        /// The git ref to materialize. `None` lets the executor choose.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
+        allow_downgrade: bool,
+    },
+    /// Re-establish the runner session. Executor: `repair::connect_outcome`.
+    Reconnect,
+    /// Re-materialize provider-declared managed source checkouts.
+    /// Executor: `repair::repair_managed_sources`.
+    RefreshManagedSources,
 }

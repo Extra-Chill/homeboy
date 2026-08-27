@@ -254,10 +254,8 @@ mod tests {
     use homeboy::agents::agent_tasks::scheduler::{
         AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
-    use homeboy::agents::agent_tasks::{
-        AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
-    };
-    use serde_json::Value;
+    use homeboy::agents::agent_tasks::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+
     use std::sync::Arc;
 
     #[test]
@@ -452,19 +450,10 @@ mod tests {
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
             AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("ok".to_string()),
-                failure_classification: None,
-                artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }
         }
     }

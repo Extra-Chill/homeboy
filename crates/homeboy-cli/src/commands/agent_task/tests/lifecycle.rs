@@ -120,11 +120,144 @@ fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
         }));
     });
 }
+
+#[test]
+fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() {
+    with_temp_home(|| {
+        let run_id = "run-cli-lab-preacceptance-io";
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit plan");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+        })
+        .expect("persist selected runner");
+        let io_error = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "Authorization: Bearer status-fixture-secret",
+        );
+        let source = Error::internal_io(
+            io_error.to_string(),
+            Some("submit selected Lab runner job".to_string()),
+        )
+        .with_source(io_error)
+        .with_retryable(true);
+        let error = preacceptance_transport_error(
+            run_id,
+            "homeboy-lab",
+            LabTransportOperation::DispatchCookAttempt,
+            LabJobAcceptanceDisposition::NoJobAccepted,
+            source,
+        );
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "lab_handoff_preacceptance",
+            &error,
+        )
+        .expect("persist Lab transport failure");
+
+        let record = agent_task_lifecycle::status(run_id).expect("durable failed record");
+        let aggregate = test_lifecycle_store()
+            .read_aggregate(run_id)
+            .expect("durable aggregate");
+        assert!(record.lab_handoff.is_none());
+        assert!(record.runner_job_id().is_none());
+        assert_eq!(record.runner_id(), Some("homeboy-lab"));
+        assert!(record.provider_handles.is_empty());
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["lab_transport_attempt_receipt"]
+                ["acceptance"],
+            "no_job_accepted"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["details"]["lab_transport_attempt_receipt"]
+                ["error"]["kind"],
+            "broken_pipe"
+        );
+
+        let status_args = |full| StatusArgs {
+            run_id: run_id.to_string(),
+            full,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+            ..Default::default()
+        };
+        let (compact_status, _) = status(status_args(false)).expect("compact status");
+        let (full_status, _) = status(status_args(true)).expect("full status");
+        let (compact_diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("compact diagnosis");
+        let (full_diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("full diagnosis");
+
+        for receipt in [
+            &compact_status["lab_transport_failure"]["receipt"],
+            &full_status["outcome"]["lab_transport_failure"]["receipt"],
+            &compact_diagnosis["lab_transport_failure"]["receipt"],
+            &full_diagnosis["lab_transport_failure"]["receipt"],
+        ] {
+            assert_eq!(receipt["operation"], "dispatch_cook_attempt");
+            assert_eq!(receipt["selected_runner"], "homeboy-lab");
+            assert_eq!(receipt["acceptance"], "no_job_accepted");
+            assert_eq!(receipt["error"]["kind"], "broken_pipe");
+            assert_eq!(receipt["retryable"], true);
+            assert!(receipt["error"]["causes"]
+                .as_array()
+                .is_some_and(|causes| causes.len() <= 4));
+        }
+        assert_eq!(
+            compact_diagnosis["root_cause"]["class"],
+            "runner.lab_transport_failure"
+        );
+        for output in [&compact_status, &compact_diagnosis] {
+            let actions = output["_homeboy_actionable"]["next_actions"]
+                .as_array()
+                .expect("one actionable remediation");
+            assert_eq!(actions.len(), 1);
+            assert_eq!(
+                actions[0]["command"],
+                "homeboy runner doctor homeboy-lab --scope lab-offload --repair"
+            );
+        }
+        for action in [
+            &full_status["outcome"]["next_action"],
+            &full_diagnosis["next_action"],
+        ] {
+            assert_eq!(
+                action["command"],
+                "homeboy runner doctor homeboy-lab --scope lab-offload --repair"
+            );
+        }
+        for output in [
+            &compact_status,
+            &full_status,
+            &compact_diagnosis,
+            &full_diagnosis,
+        ] {
+            assert!(!serde_json::to_string(output)
+                .expect("serialize command output")
+                .contains("status-fixture-secret"));
+        }
+        assert!(!serde_json::to_string(&(record, aggregate))
+            .expect("serialize durable evidence")
+            .contains("status-fixture-secret"));
+    });
+}
+
 use clap::Parser;
 use homeboy::agents::agent_task_service::{
     AgentTaskCookAttemptDispatcher, DerivedCookBaselineCapability,
 };
 use homeboy::core::{Error, Result};
+use homeboy_lab_contract::lab::transport_failure::{
+    preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportOperation,
+};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -227,19 +360,11 @@ fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry()
             status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded,
             totals: Default::default(),
             outcomes: vec![AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                 task_id: task_id.clone(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("historical patch".to_string()),
-                failure_classification: None,
                 artifacts: vec![artifact.clone()],
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
+                ..Default::default()
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -570,19 +695,10 @@ impl AgentTaskExecutorAdapter for CountingCookExecutor {
     ) -> AgentTaskOutcome {
         self.executions.fetch_add(1, Ordering::SeqCst);
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("unexpected execution".to_string()),
-            failure_classification: None,
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: Vec::new(),
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -1093,6 +1209,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
                 preflight: false,
                 rearm: false,
                 artifact_id: None,
+                timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1167,19 +1284,10 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
                 status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "provider".to_string(),
                     status: AgentTaskOutcomeStatus::CandidateRecoverable,
                     summary: Some("legacy candidate".to_string()),
-                    failure_classification: None,
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
-                    metadata: Value::Null,
+                    ..Default::default()
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
@@ -1196,6 +1304,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             preflight: true,
             rearm: false,
             artifact_id: None,
+            timeout_ms: None,
             full: false,
         })
         .expect("preflight reports provenance rejection");
@@ -1221,6 +1330,253 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
         assert_eq!(
             filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
             before
+        );
+    });
+}
+
+#[test]
+fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution_attempt() {
+    with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let cook_id = "cook-pre-execution-null-model";
+        let run_id = "cook-pre-execution-null-model-attempt-1";
+        let plan = test_plan();
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: "fixture@pre-execution-null-model".to_string(),
+            source_worktree_path: Some(workspace.path().to_path_buf()),
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 2,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Pre-execution retry".to_string(),
+            commit_message: "Pre-execution retry".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: None,
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist recipe");
+        let recipe_path = homeboy::core::paths::homeboy_data()
+            .expect("data root")
+            .join("agent-task-cooks")
+            .join(cook_id)
+            .join("recipe.json");
+        let mut persisted_recipe: Value =
+            serde_json::from_slice(&std::fs::read(&recipe_path).expect("read persisted recipe"))
+                .expect("parse persisted recipe");
+        persisted_recipe["runtime_generation"] = "homeboy 0.1.0+historical".into();
+        persisted_recipe["promotion_transport"]["attempt_dispatch"] = json!({ "kind": "local" });
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec_pretty(&persisted_recipe).expect("encode historical recipe"),
+        )
+        .expect("persist historical local recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("bind attempt to Cook");
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "local_retry_supervisor",
+            &Error::internal_unexpected("launcher exited before provider execution"),
+        )
+        .expect("record legacy pre-execution failure without retryable metadata");
+        let persisted_record = test_lifecycle_store()
+            .read_record(run_id)
+            .expect("read persisted failure");
+        let loaded_recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
+            .expect("load historical recipe");
+        assert!(
+            homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+                &loaded_recipe,
+                &persisted_record,
+                false,
+            )
+        );
+
+        let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
+            cook_or_attempt_id: cook_id.to_string(),
+            preflight: true,
+            rearm: false,
+            artifact_id: None,
+            timeout_ms: None,
+            full: false,
+        })
+        .expect("preflight evaluates pre-execution retry");
+
+        assert_eq!(exit_code, 1, "{report:#}");
+        assert_eq!(report["admitted"], false);
+        assert_eq!(report["selected_attempt"]["run_id"], run_id);
+        let phases = report["phases"].as_array().expect("phases");
+        assert!(phases
+            .iter()
+            .all(|phase| phase["phase"] != "model_provenance"));
+        assert_eq!(
+            phases.last().expect("workspace boundary")["phase"],
+            "provider_workspace_baseline",
+            "{report:#}"
+        );
+    });
+}
+
+#[test]
+fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions() {
+    with_temp_home(|| {
+        let root = tempfile::tempdir().expect("workspace root");
+        let primary = root.path().join("primary");
+        let workspace = root.path().join("runtime-recovery");
+        std::fs::create_dir(&primary).expect("create primary checkout");
+        init_runtime_component_checkout(&primary);
+        let remote_status = std::process::Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary path"),
+                "remote",
+                "add",
+                "origin",
+                primary.to_str().expect("UTF-8 primary path"),
+            ])
+            .status()
+            .expect("git remote command runs");
+        assert!(remote_status.success(), "configure fixture origin");
+        let worktree_status = std::process::Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary path"),
+                "worktree",
+                "add",
+                "-b",
+                "fixture-runtime-recovery",
+                workspace.to_str().expect("UTF-8 worktree path"),
+            ])
+            .status()
+            .expect("git worktree command runs");
+        assert!(worktree_status.success(), "create linked worktree");
+        let cook_id = "cook-pre-execution-runtime-recovery";
+        let run_id = "cook-pre-execution-runtime-recovery-attempt-1";
+        let plan = AgentTaskPlan::new(
+            "cook-pre-execution-runtime-recovery-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture", "model": "fixture-model" },
+                "instructions": "recover with the current controller runtime",
+                "workspace": { "root": &workspace }
+            }))
+            .expect("provider task")],
+        );
+        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: "fixture@pre-execution-runtime-recovery".to_string(),
+            source_worktree_path: Some(workspace.clone()),
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 1,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Pre-execution runtime recovery".to_string(),
+            commit_message: "Pre-execution runtime recovery".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: Some("fixture-model".to_string()),
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("bind attempt to Cook");
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "local_retry_supervisor",
+            &Error::internal_unexpected("launcher exited before provider execution")
+                .with_retryable(true),
+        )
+        .expect("record retryable pre-execution failure");
+        let recipe_path = homeboy::core::paths::homeboy_data()
+            .expect("data root")
+            .join("agent-task-cooks")
+            .join(cook_id)
+            .join("recipe.json");
+        let mut persisted_recipe: Value =
+            serde_json::from_slice(&std::fs::read(&recipe_path).expect("read persisted recipe"))
+                .expect("parse persisted recipe");
+        persisted_recipe["runtime_generation"] = "homeboy 0.1.0+historical".into();
+        persisted_recipe["promotion_transport"]["attempt_dispatch"] = json!({ "kind": "local" });
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec_pretty(&persisted_recipe).expect("encode historical recipe"),
+        )
+        .expect("persist historical local recipe");
+
+        let executor = Arc::new(CountingCookExecutor::default());
+        let retried = retry_with(
+            RetryArgs {
+                run_id: run_id.to_string(),
+                new_run_id: None,
+                run: true,
+                force: false,
+            },
+            executor.clone(),
+            |_| Ok(None),
+        )
+        .expect("queued retry recovers under the current runtime");
+
+        assert_eq!(
+            executor.executions.load(Ordering::SeqCst),
+            1,
+            "{retried:#?}"
+        );
+        let recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
+            .expect("read recovered recipe");
+        let recovered = test_lifecycle_store()
+            .read_record(&recipe.attempts.last().expect("replacement attempt").run_id)
+            .expect("read recovered replacement");
+        assert_eq!(recovered.metadata["retry_of"], run_id);
+        assert_eq!(recovered.metadata["provider_executions_consumed"], 1);
+        assert_eq!(
+            recovered.metadata["controller_identity"],
+            homeboy::core::build_identity::current().display
+        );
+        assert!(
+            !homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+                &recipe, &recovered, false,
+            ),
+            "provider execution restores the strict historical runtime fence"
         );
     });
 }
@@ -1347,6 +1703,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 preflight: false,
                 rearm: false,
                 artifact_id: None,
+                timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1410,6 +1767,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 preflight: false,
                 rearm: false,
                 artifact_id: None,
+                timeout_ms: None,
                 full: false,
             },
             executor.clone(),
@@ -1439,6 +1797,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 preflight: false,
                 rearm: false,
                 artifact_id: None,
+                timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1462,6 +1821,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 preflight: false,
                 rearm: true,
                 artifact_id: None,
+                timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1721,6 +2081,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 preflight: false,
                 rearm: false,
                 artifact_id: None,
+                timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1738,6 +2099,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 preflight: false,
                 rearm: true,
                 artifact_id: Some("mime-shaped".to_string()),
+                timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1751,6 +2113,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 preflight: false,
                 rearm: true,
                 artifact_id: Some("selected".to_string()),
+                timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -2718,19 +3081,11 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
                 status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Failed,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: "task-a".to_string(),
                     status: AgentTaskOutcomeStatus::Timeout,
                     summary: Some("review form timed out".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Timeout),
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
-                    metadata: Value::Null,
+                    ..Default::default()
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
@@ -3638,19 +3993,11 @@ fn fixture_execution_outcome(
     outputs: Value,
 ) -> AgentTaskOutcome {
     AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-        task_id: String::new(),
         status,
-        summary: None,
         failure_classification,
         artifacts,
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
         outputs,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
+        ..Default::default()
     }
 }
 
@@ -3826,13 +4173,10 @@ impl AgentTaskExecutorAdapter for EvidencePathFixtureExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Failed,
             summary: Some("failed with path evidence".to_string()),
             failure_classification: Some(AgentTaskFailureClassification::Provider),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![
                 AgentTaskEvidenceRef {
                     kind: "executor-result".to_string(),
@@ -3845,11 +4189,7 @@ impl AgentTaskExecutorAdapter for EvidencePathFixtureExecutor {
                     label: Some("Unsupported ref".to_string()),
                 },
             ],
-            diagnostics: Vec::new(),
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -3954,13 +4294,10 @@ impl AgentTaskExecutorAdapter for EvidenceFixtureExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: request.task_id.clone(),
             status: AgentTaskOutcomeStatus::Failed,
             summary: Some("failed with evidence".to_string()),
             failure_classification: Some(AgentTaskFailureClassification::Provider),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
             evidence_refs: vec![
                 AgentTaskEvidenceRef {
                     kind: "executor-result".to_string(),
@@ -3976,11 +4313,8 @@ impl AgentTaskExecutorAdapter for EvidenceFixtureExecutor {
                     label: Some("Normalized output".to_string()),
                 },
             ],
-            diagnostics: Vec::new(),
             outputs: json!({ "api_key": "super-secret", "result": "failed" }),
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
+            ..Default::default()
         }
     }
 }
@@ -4512,6 +4846,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                             preflight: false,
                             rearm: false,
                             artifact_id: None,
+                            timeout_ms: None,
                             full: false,
                         },
                         Arc::new(CountingCookExecutor::default()),
@@ -4570,6 +4905,7 @@ fn replacement_gate_proof_command_requires_typed_proof_and_operator_authorizatio
         "@replacement.json",
         "--authorize-external-proof",
         "Chris approved durable evidence",
+        "--accept-inherited-failures",
     ])
     .expect("replacement proof command parses");
     let Commands::AgentTask(args) = cli.command else {
@@ -4584,6 +4920,7 @@ fn replacement_gate_proof_command_requires_typed_proof_and_operator_authorizatio
         args.authorize_external_proof.as_deref(),
         Some("Chris approved durable evidence")
     );
+    assert!(args.accept_inherited_failures);
 }
 
 #[test]

@@ -2,10 +2,14 @@
 mod agent_task_provider_flag_diagnostic;
 #[path = "cli_binary/agent_tool_dispatch.rs"]
 mod agent_tool_dispatch;
+#[path = "cli_binary/cook_preview_lifecycle.rs"]
+mod cook_preview_lifecycle;
 #[path = "cli_binary/cook_prompt_stdin.rs"]
 mod cook_prompt_stdin;
 #[path = "cli_binary/fanout_supervisor_cli.rs"]
 mod fanout_supervisor_cli;
+#[path = "cli_binary/help_fast_path.rs"]
+mod help_fast_path;
 #[path = "cli_binary/output_dispatch.rs"]
 mod output_dispatch;
 #[path = "cli_binary/output_errors.rs"]

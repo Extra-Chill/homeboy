@@ -524,8 +524,7 @@ mod tests {
     use super::*;
     use crate::agent_task::{
         AgentTaskExecutor, AgentTaskFailureClassification, AgentTaskLimits, AgentTaskPolicy,
-        AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-        AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use serde_json::json;
 
@@ -686,11 +685,9 @@ mod tests {
             &plan,
             &[
                 AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: plan.cells[0].task.task_id.clone(),
                     status: AgentTaskOutcomeStatus::Succeeded,
                     summary: Some("ok".to_string()),
-                    failure_classification: None,
                     artifacts: vec![AgentTaskArtifact {
                         schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                         id: "metrics".to_string(),
@@ -706,32 +703,21 @@ mod tests {
                         sha256: None,
                         metadata: json!({ "metric": "p95_ms" }),
                     }],
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
                     metadata: json!({ "p95_ms": 1200 }),
+                    ..Default::default()
                 },
                 AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: plan.cells[1].task.task_id.clone(),
                     status: AgentTaskOutcomeStatus::Failed,
                     summary: Some("runner failed".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
                     diagnostics: vec![AgentTaskDiagnostic {
                         class: "runner".to_string(),
                         message: "exit 1".to_string(),
                         data: json!({}),
                     }],
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
                     metadata: json!({}),
+                    ..Default::default()
                 },
             ],
         );
@@ -779,36 +765,21 @@ mod tests {
             &plan,
             &[
                 AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: plan.cells[0].task.task_id.clone(),
                     status: AgentTaskOutcomeStatus::Succeeded,
                     summary: Some("clean".to_string()),
-                    failure_classification: None,
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    outputs: Value::Null,
-                    workflow: None,
-                    follow_up: None,
                     metadata: json!({}),
+                    ..Default::default()
                 },
                 AgentTaskOutcome {
-                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
                     task_id: plan.cells[1].task.task_id.clone(),
                     status: AgentTaskOutcomeStatus::Failed,
                     summary: Some("budget threshold exceeded".to_string()),
-                    failure_classification: None,
-                    artifacts: Vec::new(),
-                    typed_artifacts: Vec::new(),
-                    evidence_refs: Vec::new(),
-                    diagnostics: Vec::new(),
                     outputs: json!({
                         "budget_findings": [{"rule": "p95", "message": "too slow"}]
                     }),
-                    workflow: None,
-                    follow_up: None,
                     metadata: json!({}),
+                    ..Default::default()
                 },
             ],
         );

@@ -133,6 +133,7 @@ where
                 &flow.command,
                 &job,
                 flow.run_id.as_deref(),
+                flow.run_id_owns_generic_exec,
                 flow.handoff_endpoint,
             )
         })

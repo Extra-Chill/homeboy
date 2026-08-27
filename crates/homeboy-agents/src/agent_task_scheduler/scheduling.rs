@@ -30,6 +30,17 @@ use super::*;
 
 pub(crate) struct AgentTaskScheduleSupport;
 
+/// One rotation entry `skip_capped_rotation_entries` bypassed because Homeboy
+/// already knew its provider was over its usage cap. `exhausted` marks the
+/// final skip when no further rotation entry remains to try.
+#[derive(Debug, Clone)]
+pub(crate) struct UsageCapSkip {
+    pub(crate) backend: String,
+    pub(crate) selector: Option<String>,
+    pub(crate) reset_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) exhausted: bool,
+}
+
 fn deferred_timeout_outcome(task_id: &str, timeout_ms: u64, source: &str) -> AgentTaskOutcome {
     AgentTaskOutcome {
         task_id: task_id.to_string(),
@@ -687,22 +698,6 @@ impl AgentTaskScheduleSupport {
             }
 
             let mut task = running.remove(index);
-            if let Some(run_id) = task.run_id.as_deref() {
-                // The timeout terminal record belongs to the same exactly-once
-                // sequence as the reservation this task holds, so it is written
-                // only through the store the caller resolved. Falling back to the
-                // environment here could record the timeout in a different
-                // installation than the one holding the reservation, which is the
-                // divergence this record exists to close (#7505).
-                if let Some(store) = lifecycle_store {
-                    let _ = store.record_provider_execution_terminal(
-                        run_id,
-                        &task.task_id,
-                        task.attempt,
-                        "timed_out",
-                    );
-                }
-            }
             let mut outcome =
                 deferred_timeout_outcome(&task.task_id, timeout_ms, "scheduler_timeout");
             outcome.diagnostics.push(AgentTaskDiagnostic {
@@ -736,7 +731,8 @@ impl AgentTaskScheduleSupport {
             quarantined.push(QuarantinedTask {
                 workspace_key: task.workspace_key.clone(),
             });
-            if let (Some(join_handle), Some(action_path)) = (task.join_handle.take(), action_path) {
+            let lifecycle_store = lifecycle_store.cloned();
+            if let Some(join_handle) = task.join_handle.take() {
                 // Deferred cleanup outlives the scheduler thread, so it must
                 // carry the caller's route to keep recovery attributable.
                 let notification_route = homeboy_core::notification_route::capture();
@@ -775,10 +771,29 @@ impl AgentTaskScheduleSupport {
                                 .map(|workspace| workspace.cleanup())
                                 .unwrap_or(Ok(()))
                         });
-                        let receipt = super::complete_deferred_cleanup_recovery(
-                            &action_path,
-                            &recovered,
-                            cleanup,
+                        // Publish terminal execution ownership before making the
+                        // cleanup receipt observable. A terminal receipt must
+                        // never authorize a retry while the durable provider
+                        // ledger still says this owner is running.
+                        if let (Some(store), Some(run_id)) =
+                            (lifecycle_store.as_ref(), task.run_id.as_deref())
+                        {
+                            let _ = store.record_provider_execution_terminal(
+                                run_id,
+                                &task.task_id,
+                                task.attempt,
+                                "timed_out",
+                            );
+                        }
+                        let receipt = action_path.as_deref().map_or(
+                            Err("deferred cleanup descriptor was not persisted".to_string()),
+                            |action_path| {
+                                super::complete_deferred_cleanup_recovery(
+                                    action_path,
+                                    &recovered,
+                                    cleanup,
+                                )
+                            },
                         );
                         // Keep the scratch lease active until both checkout
                         // cleanup and its durable receipt have reached a
@@ -1362,6 +1377,60 @@ impl AgentTaskScheduleSupport {
         }
     }
 
+    /// Advance a scheduled task past any rotation entries whose provider
+    /// Homeboy already knows is over its usage cap this run, so a fanout
+    /// sibling (or a later task in this same plan) does not spend a provider
+    /// execution rediscovering a cap another task already paid to learn
+    /// (#13644).
+    ///
+    /// A task with no rotation policy is returned unchanged: there is nothing
+    /// configured to fail over to, so existing single-attempt behavior is
+    /// preserved exactly. When every rotation entry reachable from the
+    /// task's current position is presently capped, the last skip's
+    /// `exhausted` flag is set so the caller can fail the task without
+    /// dispatching a provider already known to refuse it.
+    pub(super) fn skip_capped_rotation_entries(
+        scheduled: &mut ScheduledTask,
+        policy: Option<&AgentTaskProviderRotationPolicy>,
+        usage_caps: &crate::agent_task_provider::ProviderUsageCapRegistry,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<UsageCapSkip> {
+        let mut skipped = Vec::new();
+        let Some(policy) = policy else {
+            return skipped;
+        };
+        loop {
+            let key = crate::agent_task_provider::provider_usage_cap_key(
+                &scheduled.request.executor.backend,
+                scheduled.request.executor.selector.as_deref(),
+            );
+            let Some(reset_at) = usage_caps.active(&key, now) else {
+                break;
+            };
+            let backend = scheduled.request.executor.backend.clone();
+            let selector = scheduled.request.executor.selector.clone();
+            if scheduled.rotation_index >= policy.entries.len() {
+                skipped.push(UsageCapSkip {
+                    backend,
+                    selector,
+                    reset_at,
+                    exhausted: true,
+                });
+                break;
+            }
+            skipped.push(UsageCapSkip {
+                backend,
+                selector,
+                reset_at,
+                exhausted: false,
+            });
+            let entry = &policy.entries[scheduled.rotation_index];
+            Self::apply_rotation_entry(&mut scheduled.request, entry, policy);
+            scheduled.rotation_index += 1;
+        }
+        skipped
+    }
+
     /// Evidence record for one dispatch attempt under a rotation policy.
     pub(super) fn rotation_attempt_record(
         request: &AgentTaskRequest,
@@ -1533,7 +1602,6 @@ impl AgentTaskScheduleSupport {
                 AgentTaskOutcomeStatus::Succeeded
                     | AgentTaskOutcomeStatus::NoOp
                     | AgentTaskOutcomeStatus::Cancelled
-                    | AgentTaskOutcomeStatus::Timeout
                     | AgentTaskOutcomeStatus::CandidateRecoverable
             )
     }

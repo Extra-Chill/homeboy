@@ -558,8 +558,8 @@ pub struct AgentTaskProviderRotationPolicy {
     pub max_attempts: Option<u32>,
     /// Per-attempt liveness deadline: if the provider process produces no
     /// stdout/stderr progress within this window, the attempt is killed and
-    /// treated as a rotation-eligible stall. When unset, attempts only obey
-    /// the wall-clock `timeout_ms` / `max_runtime_ms` limits.
+    /// treated as a rotation-eligible stall. Defaults to five minutes when
+    /// unset; an explicit value overrides that default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_timeout_ms: Option<u64>,
 }

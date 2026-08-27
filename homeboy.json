@@ -1,4 +1,9 @@
 {
+  "ci": {
+    "pin_repositories": {
+      "extension-ref": "Extra-Chill/homeboy-extensions"
+    }
+  },
   "audit": {
     "artifact_portability": {
       "non_portable_path_contains": [

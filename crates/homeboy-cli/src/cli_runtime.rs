@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::capability_registry::CommandCapabilityRegistry;
 use crate::cli_surface::{
     command_safety_manifest_from_dynamic, command_surface_from, Cli, CommandSafetyManifest,
-    Commands, DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
+    CommandSurfaceCommandProvenance, CommandSurfaceDoctorReport, CommandSurfaceRegistry, Commands,
+    DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
     ExtensionCommandHealth, ExtensionCommandManifest,
 };
 use crate::command_capability::{
@@ -252,6 +253,11 @@ struct ExtensionCliDiscovery {
     health: ExtensionCliHealth,
 }
 
+struct ComposedCommandRegistry {
+    command: Command,
+    provenance: Vec<CommandSurfaceCommandProvenance>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupFastPath {
     Help,
@@ -269,7 +275,10 @@ enum StartupFastPathOutput {
     Identity(serde_json::Value),
 }
 
-fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
+fn startup_fast_path_output(
+    runtime: &CliRuntime,
+    args: &[String],
+) -> Option<StartupFastPathOutput> {
     Some(match startup_fast_path(args)? {
         // Root help renders the augmented command because extension-provided
         // subcommands are part of the user-visible surface; the static derive
@@ -283,10 +292,7 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
             // parsed successfully aborted the process instead of running the
             // command (#11577). The fast path is an optimization; disagreeing
             // with clap must cost a slow path, never a panic.
-            let Err(error) = CliRuntime::new()
-                .build_augmented_command()
-                .try_get_matches_from(args)
-            else {
+            let Err(error) = runtime.build_augmented_command().try_get_matches_from(args) else {
                 return None;
             };
             if error.kind() != clap::error::ErrorKind::DisplayHelp {
@@ -304,7 +310,11 @@ fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
 }
 
 pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
-    match startup_fast_path_output(args)? {
+    CliRuntime::new().run_startup_fast_path(args)
+}
+
+fn emit_startup_fast_path_output(output: StartupFastPathOutput) -> std::process::ExitCode {
+    match output {
         StartupFastPathOutput::Help(help) => print!("{help}"),
         StartupFastPathOutput::Version(version) => println!("{version}"),
         StartupFastPathOutput::Identity(identity) => {
@@ -317,7 +327,7 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
         }
     }
 
-    Some(std::process::ExitCode::SUCCESS)
+    std::process::ExitCode::SUCCESS
 }
 
 pub(crate) fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
@@ -439,14 +449,16 @@ fn register_startup_providers_after_reconcile(
     crate::runner::register_lab_staging_controller_driver();
     crate::agents::agent_task_service::register_promotion_job_driver();
     // Register the agent-task orchestration driver so the daemon's
-    // orchestration tick can reconcile orphaned `running` records and resolve
-    // controller waits from durable state without core depending on the
-    // agent-task subsystem. Both mechanisms previously had no automatic
-    // caller: a detached cook whose owner died stayed `running` forever, and a
-    // controller parked in `Waiting` never left it.
+    // orchestration tick can reconcile orphaned `running` records without core
+    // depending on the agent-task subsystem. Loop waits are owned by their
+    // durable Work jobs below rather than this unrelated periodic sweep.
     crate::agents::agent_task_service::register_orchestration_driver();
     crate::commands::route::register_unmaterialized_cook_replay_driver();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
+    // New orchestration submissions share one versioned lifecycle driver. The
+    // domain registrations below also retain their v1 recovery adapters for
+    // persisted jobs admitted before the migration.
+    crate::agents::agent_task_service::register_work_job_driver();
     // A locally-placed detached Cook is a daemon-owned durable job: the daemon
     // owns its record, checkpointing, cancellation and HTTP inspection, while
     // the launcher-spawned child keeps the operator's execution environment.
@@ -455,6 +467,7 @@ fn register_startup_providers_after_reconcile(
     // the daemon supervises a coordinator it did not spawn, so no branch of its
     // lifecycle can re-run a child that already completed.
     crate::agents::agent_task_service::register_cook_batch_job_driver();
+    crate::agents::agent_task_service::register_loop_work_job_handler();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
     // conditional: `register_acceptance_verifier_from_config` is a no-op when
@@ -601,7 +614,16 @@ impl CliRuntime {
         })
     }
 
+    pub fn run_startup_fast_path(&self, args: &[String]) -> Option<std::process::ExitCode> {
+        startup_fast_path_output(self, args).map(emit_startup_fast_path_output)
+    }
+
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
+        #[cfg(feature = "test-support")]
+        if let Some(path) = std::env::var_os("HOMEBOY_TEST_RUNTIME_INITIALIZATION_SENTINEL") {
+            std::fs::write(path, b"initialized").expect("write runtime initialization sentinel");
+        }
+
         let normalized = args::normalize(args);
         if let Some(exit) = run_config_read_fast_path(&normalized) {
             return exit;
@@ -1337,21 +1359,33 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        let exit_code = crate::core::notification_route::with_current_resolution(
-            Some(notification_resolution.evidence),
+        let command_surface_doctor_report = matches!(
+            &cli.command,
+            Commands::SelfCmd(crate::commands::self_cmd::SelfArgs {
+                command: crate::commands::self_cmd::SelfCommand::Doctor(_),
+            })
+        )
+        .then(|| self.command_surface_doctor_report());
+        let exit_code = crate::cli_surface::with_command_surface_doctor_report(
+            command_surface_doctor_report,
             || {
-                crate::core::notification_route::with_current(notification_route, || {
-                    #[cfg(test)]
-                    record_marker_context_before_run_command();
-                    commands::output_runtime::run_command(
-                        cli.command,
-                        command_spec,
-                        output_file.as_deref(),
-                        &command_identity,
-                        command_provenance,
-                        cli.placement,
-                    )
-                })
+                crate::core::notification_route::with_current_resolution(
+                    Some(notification_resolution.evidence),
+                    || {
+                        crate::core::notification_route::with_current(notification_route, || {
+                            #[cfg(test)]
+                            record_marker_context_before_run_command();
+                            commands::output_runtime::run_command(
+                                cli.command,
+                                command_spec,
+                                output_file.as_deref(),
+                                &command_identity,
+                                command_provenance,
+                                cli.placement,
+                            )
+                        })
+                    },
+                )
             },
         );
         // The command's initial outcome is now durable and returned. Historical
@@ -1364,12 +1398,47 @@ impl CliRuntime {
     }
 
     fn build_augmented_command(&self) -> Command {
+        self.composed_command_registry().command
+    }
+
+    fn command_surface_doctor_report(&self) -> CommandSurfaceDoctorReport {
+        let registry = self.composed_command_registry();
+        crate::cli_surface::command_surface_doctor_report_from_composed(
+            registry.command,
+            registry.provenance,
+        )
+    }
+
+    fn composed_command_registry(&self) -> ComposedCommandRegistry {
         let discovery = self.extension_discovery();
         self.capabilities
             .validate_external_names(discovery.info.iter().map(|info| info.tool.as_str()))
             .expect("dynamic and typed capability command names must not conflict");
         let mut command = build_augmented_command(&discovery.info, &discovery.health);
+        let mut provenance = Cli::command_with_scoped_lab_args()
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| CommandSurfaceCommandProvenance {
+                command: subcommand.get_name().to_string(),
+                registry: CommandSurfaceRegistry::Core,
+            })
+            .collect::<Vec<_>>();
+        provenance.extend(
+            discovery
+                .info
+                .iter()
+                .map(|info| CommandSurfaceCommandProvenance {
+                    command: info.descriptor.name.clone(),
+                    registry: CommandSurfaceRegistry::Extension,
+                }),
+        );
         for entry in self.capabilities.entries() {
+            if !entry.command.is_hide_set() {
+                provenance.push(CommandSurfaceCommandProvenance {
+                    command: entry.capability.name().to_string(),
+                    registry: CommandSurfaceRegistry::Descriptor,
+                });
+            }
             command = command.subcommand(entry.command.clone());
         }
         let support = self
@@ -1378,7 +1447,10 @@ impl CliRuntime {
             .iter()
             .filter_map(|entry| entry.capability.lab_command_route_support())
             .collect::<Vec<_>>();
-        crate::command_contract::scope_composed_lab_cli_arguments(command, &support)
+        ComposedCommandRegistry {
+            command: crate::command_contract::scope_composed_lab_cli_arguments(command, &support),
+            provenance,
+        }
     }
 
     fn capability_matches<'a>(
@@ -2327,10 +2399,15 @@ fn extension_after_help(
 
     if !extension_health.broken_link_ids.is_empty() {
         lines.push(format!(
-            "Extension health warning: {} broken extension link(s): {}. Run `homeboy extension list` for details or `homeboy extension relink <id> <path>` to repair.",
+            "Extension health warning: {} broken extension link(s): {}. Run `homeboy extension list` for details.",
             extension_health.broken_link_ids.len(),
             extension_health.broken_link_ids.join(", ")
         ));
+        lines.extend(extension_health.broken_link_ids.iter().map(|id| {
+            format!(
+                "Repair `{id}`: `homeboy extension relink {id} <path>` or `homeboy extension uninstall {id}`."
+            )
+        }));
     }
 
     if lines.is_empty() {
@@ -2378,6 +2455,7 @@ struct LabInventoryAdmissionDiagnostic {
     terminal_reason: &'static str,
     refresh_error_code: Option<String>,
     refresh_error: Option<String>,
+    refresh_error_details: Option<serde_json::Value>,
 }
 
 /// Resolve the inventory used by a terminal resource-policy placement decision.
@@ -2411,6 +2489,7 @@ where
                 terminal_reason: "no_ready_capacity",
                 refresh_error_code: None,
                 refresh_error: None,
+                refresh_error_details: None,
             },
         );
     }
@@ -2437,14 +2516,25 @@ where
                     terminal_reason,
                     refresh_error_code: None,
                     refresh_error: None,
+                    refresh_error_details: None,
                 },
             )
         }
         Err(error) => {
             let timed_out = error.code == crate::core::ErrorCode::RemoteCommandTimeout;
             let refresh_error_code = error.code.as_str().to_string();
+            let mut resolved = observed;
+            resolved.reasons.insert(
+                0,
+                if timed_out {
+                    "bounded_admission_refresh_timeout"
+                } else {
+                    "bounded_admission_refresh_failed"
+                }
+                .to_string(),
+            );
             (
-                observed,
+                resolved,
                 LabInventoryAdmissionDiagnostic {
                     observed_state,
                     observed_at_ms,
@@ -2459,6 +2549,7 @@ where
                     },
                     refresh_error_code: Some(refresh_error_code),
                     refresh_error: Some(error.message),
+                    refresh_error_details: Some(error.details),
                 },
             )
         }
@@ -2750,27 +2841,15 @@ fn preflight_hot_command_with_input(
                     .as_ref()
                     .and_then(|readiness| readiness.selected_runner_id.as_deref()),
             );
-            let runner_admits_offload = if hot_command.allows_warm_runner_coordination {
-                resource_policy::admits_warm_runner_coordination(
-                    hot_command,
-                    &resources,
-                    selected_lab_runner
-                        .filter(|_| !matches!(cli.placement, crate::cli_surface::Placement::Local)),
-                    lab_readiness.as_ref(),
-                )
-            } else {
-                hot_command.lab_offload_supported
-                    && selected_lab_runner.is_some_and(|runner_id| {
-                        lab_readiness.as_ref().is_some_and(|readiness| {
-                            readiness.state
-                                == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-                                && readiness
-                                    .available_runner_ids
-                                    .iter()
-                                    .any(|available| available == runner_id)
-                        })
-                    })
-            };
+            let required_lab_placement = required_lab_placement(cli, hot_command);
+            let runner_admits_offload = resource_policy::runner_admits_lab_dispatch(
+                hot_command,
+                &resources,
+                selected_lab_runner
+                    .filter(|_| !matches!(cli.placement, crate::cli_surface::Placement::Local)),
+                lab_readiness.as_ref(),
+                required_lab_placement,
+            );
             let runner_admits_offload = runner_admits_offload
                 && selected_lab_runner.is_none_or(|runner_id| {
                     review_test_runner_requirements(cli).is_none_or(|requirements| {
@@ -2808,12 +2887,14 @@ fn preflight_hot_command_with_input(
                 lab_readiness.as_ref(),
                 cli.placement,
             );
-            let explicit_runner_placement = explicit_runner_placement(cli, hot_command);
-            // An explicit runner resolves workload placement before resource
-            // guidance. Controller pressure still matters for handoff overhead,
-            // but it must not be presented as a local workload warning.
-            let warning = explicit_runner_placement
-                .is_none()
+            let required_lab_runner = required_lab_placement
+                .then_some(selected_lab_runner)
+                .flatten();
+            // Required Lab placement resolves workload ownership before resource
+            // guidance, whether policy selected the runner or the operator pinned
+            // it. Controller pressure still matters for preparation and transport,
+            // but it must not be presented as local provider execution.
+            let warning = (!required_lab_placement)
                 .then(|| {
                     resource_policy::evaluate_with_runner_hint(
                         hot_command,
@@ -2823,8 +2904,8 @@ fn preflight_hot_command_with_input(
                 })
                 .flatten();
             let runner_hosted = resource_policy::is_runner_hosted_exec();
-            if let Some(runner_id) = explicit_runner_placement {
-                if let Some(notice) = resource_policy::explicit_runner_controller_notice(
+            if let Some(runner_id) = required_lab_runner {
+                if let Some(notice) = resource_policy::lab_routed_controller_notice_message(
                     hot_command,
                     &resources,
                     runner_id,
@@ -3146,11 +3227,9 @@ fn resource_policy_runner_hint<'a>(
     cli.runner.as_deref().or(default_runner)
 }
 
-fn explicit_runner_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> Option<&str> {
-    cli.runner.as_deref().filter(|_| {
-        hot_command.lab_offload_supported
-            && !matches!(cli.placement, crate::cli_surface::Placement::Local)
-    })
+fn required_lab_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> bool {
+    hot_command.lab_offload_supported
+        && (cli.runner.is_some() || cli.placement == crate::cli_surface::Placement::Lab)
 }
 
 fn run_startup_update_checks(command: &Commands) {
@@ -3355,12 +3434,30 @@ fn try_augment_clap_error(
     let unrecognized = extract_unrecognized_from_error(e)?;
     let parent_command = extract_parent_command_from_error(e)?;
 
+    // Entity matching (component/project/server/extension IDs) only makes
+    // sense for a bare top-level token: that's the one place a user might
+    // plausibly type an entity ID where a command was expected (`homeboy
+    // catlog` instead of `homeboy component catlog`). For an unrecognized
+    // subcommand nested under an already-known command (e.g. `agent-task
+    // loop list`), the valid alternatives are a small, closed set that clap
+    // itself already reports — there is no entity domain to consult. Running
+    // full component/project inventory (which resolves git remotes for every
+    // attached component) on every such error would turn a fail-fast parse
+    // error into a slow, disk- and subprocess-heavy scan (#13630).
     let mut hints = command_domain_hints(&unrecognized, &parent_command).unwrap_or_else(|| {
-        entity_suggest::find_entity_match(&unrecognized)
-            .map(|entity_match| {
-                entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized)
-            })
-            .unwrap_or_default()
+        if parent_command.is_empty() {
+            entity_suggest::find_entity_match(&unrecognized)
+                .map(|entity_match| {
+                    entity_suggest::generate_entity_hints(
+                        &entity_match,
+                        &parent_command,
+                        &unrecognized,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     });
 
     append_extension_health_hints(&mut hints, extension_health);
@@ -3447,10 +3544,11 @@ fn append_extension_health_hints(hints: &mut Vec<String>, extension_health: &Ext
     }
 
     if !extension_health.broken_link_ids.is_empty() {
-        hints.push(format!(
-            "broken extension link(s): {}; repair with `homeboy extension relink <id> <path>`",
-            extension_health.broken_link_ids.join(", ")
-        ));
+        hints.extend(extension_health.broken_link_ids.iter().map(|id| {
+            format!(
+                "broken extension link `{id}`; repair with `homeboy extension relink {id} <path>` or `homeboy extension uninstall {id}`"
+            )
+        }));
     }
 }
 
@@ -3546,6 +3644,45 @@ mod tests {
     static ADMISSION_FIXTURE_RUNS: AtomicUsize = AtomicUsize::new(0);
     static ADMISSION_FIXTURE_CAPABILITIES: [&'static dyn CliCapability; 1] =
         [&ADMISSION_FIXTURE_CAPABILITY];
+
+    struct ComposedDoctorCapability;
+    struct HiddenComposedDoctorCapability;
+
+    static COMPOSED_DOCTOR_CAPABILITY: ComposedDoctorCapability = ComposedDoctorCapability;
+    static HIDDEN_COMPOSED_DOCTOR_CAPABILITY: HiddenComposedDoctorCapability =
+        HiddenComposedDoctorCapability;
+    static COMPOSED_DOCTOR_CAPABILITIES: [&'static dyn CliCapability; 2] = [
+        &COMPOSED_DOCTOR_CAPABILITY,
+        &HIDDEN_COMPOSED_DOCTOR_CAPABILITY,
+    ];
+
+    impl CliCapability for ComposedDoctorCapability {
+        fn name(&self) -> &'static str {
+            "triage"
+        }
+
+        fn command(&self) -> Command {
+            Command::new(self.name()).about("composed doctor fixture")
+        }
+
+        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
+            unreachable!("the command-surface fixture is never dispatched")
+        }
+    }
+
+    impl CliCapability for HiddenComposedDoctorCapability {
+        fn name(&self) -> &'static str {
+            "hidden-doctor-fixture"
+        }
+
+        fn command(&self) -> Command {
+            Command::new(self.name()).hide(true)
+        }
+
+        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
+            unreachable!("the command-surface fixture is never dispatched")
+        }
+    }
 
     impl CliCapability for AdmissionFixtureCapability {
         fn name(&self) -> &'static str {
@@ -3690,6 +3827,40 @@ mod tests {
                 .unwrap_or_default(),
             reasons: Vec::new(),
             remediation_commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_lab_placement_resolves_only_a_ready_policy_runner() {
+        use crate::runner::runners::LabRunnerReadinessState;
+
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--placement",
+            "lab",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "route the provider attempt",
+            "--to-worktree",
+            "fixture@lab-placement",
+            "--verify",
+            "true",
+        ]);
+        let command = resource_policy::hot_command(&cli.command).expect("verified Cook is hot");
+        assert!(required_lab_placement(&cli, command));
+        assert_eq!(cli.runner, None);
+
+        for (state, expected) in [
+            (LabRunnerReadinessState::ConnectedReady, Some("lab-a")),
+            (LabRunnerReadinessState::Stale, None),
+            (LabRunnerReadinessState::Disconnected, None),
+            (LabRunnerReadinessState::CapacityBlocked, None),
+        ] {
+            let readiness = lab_readiness(state);
+            let selected =
+                resource_policy_runner_hint(&cli, readiness.selected_runner_id.as_deref());
+            assert_eq!(selected, expected, "{state:?}");
         }
     }
 
@@ -4140,14 +4311,14 @@ mod tests {
     #[test]
     fn fresh_empty_inventory_does_not_open_a_refresh_probe() {
         let (resolved, diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Absent),
             100,
             || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
         );
 
         assert_eq!(
             resolved.state,
-            crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
+            crate::runner::runners::LabRunnerReadinessState::Absent
         );
         assert!(!diagnostic.refresh_attempted);
         assert_eq!(diagnostic.observed_at_ms, 100);
@@ -4218,7 +4389,7 @@ mod tests {
             },
         );
         let (fresh_empty, fresh_diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
+            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Absent),
             300,
             || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
         );
@@ -4609,19 +4780,23 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    startup_fast_path_output(&argv(values)),
+                    startup_fast_path_output(&CliRuntime::new(), &argv(values)),
                     Some(StartupFastPathOutput::Help(_))
                 ),
                 "{values:?} should render before runtime initialization"
             );
         }
 
-        assert!(startup_fast_path_output(&argv(&["homeboy", "help", "status"])).is_none());
+        assert!(startup_fast_path_output(
+            &CliRuntime::new(),
+            &argv(&["homeboy", "help", "status"])
+        )
+        .is_none());
     }
 
     #[test]
     fn version_fast_path_reports_the_build_version_without_extension_discovery() {
-        match startup_fast_path_output(&argv(&["homeboy", "--version"])) {
+        match startup_fast_path_output(&CliRuntime::new(), &argv(&["homeboy", "--version"])) {
             Some(StartupFastPathOutput::Version(version)) => {
                 assert_eq!(version, upgrade::current_build_version());
             }
@@ -4661,7 +4836,7 @@ mod tests {
     /// (instead of calling `build_augmented_command` directly) is what makes
     /// these tests fail if root help ever regresses to the static command.
     fn root_help_for(argv_values: &[&str]) -> String {
-        match startup_fast_path_output(&argv(argv_values)) {
+        match startup_fast_path_output(&CliRuntime::new(), &argv(argv_values)) {
             Some(StartupFastPathOutput::Help(help)) => help,
             _ => panic!("{argv_values:?} should resolve to the root-help startup fast path"),
         }
@@ -4687,6 +4862,54 @@ mod tests {
         });
     }
 
+    #[test]
+    fn doctor_uses_the_same_composed_registry_as_root_help() {
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
+            let runtime = CliRuntime::with_capabilities(&COMPOSED_DOCTOR_CAPABILITIES);
+            let registry = runtime.composed_command_registry();
+
+            let help = registry
+                .command
+                .clone()
+                .try_get_matches_from(["homeboy", "--help"])
+                .expect_err("root help should terminate Clap parsing")
+                .to_string();
+            let report = crate::cli_surface::command_surface_doctor_report_from_composed(
+                registry.command,
+                registry.provenance,
+            );
+
+            assert!(report.agrees, "{:?}", report.drift_notes);
+            assert!(help.contains("triage"), "root help omitted triage: {help}");
+            assert!(
+                help.contains("sample-cli"),
+                "root help omitted extension command: {help}"
+            );
+            assert!(!help.contains("hidden-doctor-fixture"));
+            assert!(!report
+                .source_registry_commands
+                .contains(&"hidden-doctor-fixture".to_string()));
+            assert!(report.help_commands.contains(&"triage".to_string()));
+            assert!(report
+                .source_registry_commands
+                .contains(&"triage".to_string()));
+            for (command, registry) in [
+                ("status", CommandSurfaceRegistry::Core),
+                ("triage", CommandSurfaceRegistry::Descriptor),
+                ("sample-cli", CommandSurfaceRegistry::Extension),
+            ] {
+                assert!(
+                    report
+                        .command_provenance
+                        .iter()
+                        .any(|entry| { entry.command == command && entry.registry == registry }),
+                    "missing {registry:?} provenance for {command}"
+                );
+            }
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn root_help_warns_about_broken_extension_links_without_paths() {
@@ -4706,7 +4929,9 @@ mod tests {
                 "root help should warn about broken extension links: {help}"
             );
             assert!(help.contains("homeboy extension list"));
-            assert!(help.contains("homeboy extension relink <id> <path>"));
+            assert!(help.contains("homeboy extension relink stale-runtime <path>"));
+            assert!(help.contains("homeboy extension uninstall stale-runtime"));
+            assert!(!help.contains(extensions_dir.to_string_lossy().as_ref()));
             assert!(!help.contains("/missing-stale-runtime"));
         });
     }
@@ -4731,7 +4956,9 @@ mod tests {
         .expect("extension health hint");
 
         assert!(output.contains("extension-provided commands may be unavailable"));
-        assert!(output.contains("broken extension link(s): sample-runtime"));
+        assert!(output.contains("broken extension link `sample-runtime`"));
+        assert!(output.contains("homeboy extension relink sample-runtime <path>"));
+        assert!(output.contains("homeboy extension uninstall sample-runtime"));
         assert!(output.contains("homeboy extension list"));
     }
 
@@ -4813,6 +5040,48 @@ mod tests {
 
             assert!(output.contains("component 'catalog'"));
             assert!(output.contains("homeboy component catalog"));
+        });
+    }
+
+    #[test]
+    fn nested_unrecognized_subcommand_does_not_trigger_entity_matching() {
+        crate::test_support::with_isolated_home(|home| {
+            entity_suggest::reset_entity_suggestion_cache_for_test();
+            // A component whose id exactly matches the unrecognized token.
+            // If a nested unrecognized subcommand (e.g. `agent-task loop
+            // list`) ran the expensive entity-suggestion scan the way a
+            // bare top-level typo does, this registration would produce a
+            // "did you mean component 'list'" hint and force full
+            // component/project inventory resolution (including per-
+            // component git remote detection) just to reject a malformed
+            // command line (#13630).
+            homeboy::core::component::write_standalone_registration(
+                &homeboy::core::component::Component {
+                    id: "list".to_string(),
+                    local_path: home.path().display().to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("register component");
+
+            let err = Cli::command_with_scoped_lab_args()
+                .try_get_matches_from(["homeboy", "agent-task", "loop", "list"])
+                .expect_err("`list` is not a valid `agent-task loop` subcommand");
+
+            let output = try_augment_clap_error(
+                &err,
+                &argv(&["homeboy", "agent-task", "loop", "list"]),
+                &ExtensionCliHealth::default(),
+            );
+
+            // No augmentation for a nested unrecognized subcommand: the
+            // caller falls straight through to clap's own immediate usage
+            // error (`err.exit()`) instead of first waiting on a
+            // component/project inventory scan.
+            assert!(
+                output.is_none(),
+                "nested unrecognized subcommand must not trigger entity matching, got: {output:?}"
+            );
         });
     }
 
@@ -5166,9 +5435,8 @@ mod tests {
 
             assert!(hot_command.lab_offload_supported);
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-            assert_eq!(
-                explicit_runner_placement(&cli, hot_command),
-                Some("homeboy-lab"),
+            assert!(
+                required_lab_placement(&cli, hot_command),
                 "resource preflight resolves explicit runner placement before warning"
             );
         }

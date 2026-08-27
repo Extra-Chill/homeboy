@@ -1940,13 +1940,20 @@ impl JobStore {
             runner_job_projection: None,
         };
         let job_id = job.id;
+        let mut event_data = serde_json::json!({ "controller_job": controller_job.public_request });
+        if let Some(run_id) = event_data["controller_job"]["durable_run_id"]
+            .as_str()
+            .filter(|run_id| !run_id.trim().is_empty())
+        {
+            event_data["durable_run_id"] = serde_json::json!(run_id);
+        }
         let initial_event = JobEvent {
             sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
             job_id,
             kind: JobEventKind::Status,
             timestamp_ms: now,
             message: Some("job queued".to_string()),
-            data: Some(serde_json::json!({ "controller_job": controller_job.public_request })),
+            data: Some(event_data),
         };
         let mut stored = StoredJob {
             job,
