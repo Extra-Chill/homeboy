@@ -17,30 +17,20 @@ pub(super) fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
         AgentTaskAuthCommand::Status(status_args) => Ok((auth_status(status_args), 0)),
         AgentTaskAuthCommand::SetKeychain(set_args) => {
             let value = read_agent_task_secret_value(set_args.value, set_args.value_stdin)?;
+            let legacy_file = agent_task_secrets::legacy_secrets_file();
             let status = agent_task_secrets::set_keychain_secret(
                 &set_args.secret_env,
                 &value,
                 set_args.scope.as_deref(),
                 set_args.keychain_name.as_deref(),
             )?;
-            Ok((
-                serde_json::json!({
-                    "schema": "homeboy/agent-task-auth-configured/v1",
-                    "secret_env": status,
-                }),
-                0,
-            ))
+            Ok((configured_output(status, legacy_file), 0))
         }
         AgentTaskAuthCommand::SetConfig(set_args) => {
             let value = read_agent_task_secret_value(set_args.value, set_args.value_stdin)?;
+            let legacy_file = agent_task_secrets::legacy_secrets_file();
             let status = agent_task_secrets::set_config_secret(&set_args.secret_env, &value)?;
-            Ok((
-                serde_json::json!({
-                    "schema": "homeboy/agent-task-auth-configured/v1",
-                    "secret_env": status,
-                }),
-                0,
-            ))
+            Ok((configured_output(status, legacy_file), 0))
         }
         AgentTaskAuthCommand::SetKeychainBundle(set_args) => {
             let value = read_agent_task_secret_value(set_args.value, set_args.value_stdin)?;
@@ -61,19 +51,15 @@ pub(super) fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
             ))
         }
         AgentTaskAuthCommand::MapEnv(map_args) => {
+            let legacy_file = agent_task_secrets::legacy_secrets_file();
             let status = agent_task_secrets::map_secret_to_env(
                 &map_args.secret_env,
                 map_args.source_env.as_deref(),
             )?;
-            Ok((
-                serde_json::json!({
-                    "schema": "homeboy/agent-task-auth-configured/v1",
-                    "secret_env": status,
-                }),
-                0,
-            ))
+            Ok((configured_output(status, legacy_file), 0))
         }
         AgentTaskAuthCommand::MapKeychainBundle(map_args) => {
+            let legacy_file = agent_task_secrets::legacy_secrets_file();
             let status = agent_task_secrets::map_secret_to_keychain_bundle(
                 &map_args.secret_env,
                 &map_args.bundle,
@@ -81,28 +67,42 @@ pub(super) fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
                 map_args.scope.as_deref(),
                 map_args.keychain_name.as_deref(),
             )?;
-            Ok((
-                serde_json::json!({
-                    "schema": "homeboy/agent-task-auth-configured/v1",
-                    "secret_env": status,
-                }),
-                0,
-            ))
+            Ok((configured_output(status, legacy_file), 0))
         }
         AgentTaskAuthCommand::Remove(remove_args) => {
+            let legacy_file = agent_task_secrets::legacy_secrets_file();
             let status = agent_task_secrets::remove_secret_mapping(
                 &remove_args.secret_env,
                 remove_args.keychain,
             )?;
-            Ok((
-                serde_json::json!({
-                    "schema": "homeboy/agent-task-auth-configured/v1",
-                    "secret_env": status,
-                }),
-                0,
-            ))
+            Ok((configured_output(status, legacy_file), 0))
         }
     }
+}
+
+/// Build the `agent-task-auth-configured` output.
+///
+/// Secret mappings live in the global config at `/agent_task/secrets`. When a
+/// superseded standalone secrets file still existed at command start, the
+/// mutation just migrated any remaining mappings into the global config and
+/// removed that file — disclose both so exactly one storage location is
+/// authoritative and the user is not left trusting a stale file.
+fn configured_output(
+    status: agent_task_secrets::AgentTaskSecretEnvStatus,
+    legacy_file: Option<std::path::PathBuf>,
+) -> Value {
+    let mut output = serde_json::json!({
+        "schema": "homeboy/agent-task-auth-configured/v1",
+        "secret_env": status,
+    });
+    if let Some(legacy_file) = legacy_file {
+        output["secrets_storage"] = serde_json::json!({
+            "config_file": homeboy::core::defaults::config_path().ok(),
+            "config_pointer": "/agent_task/secrets",
+            "removed_legacy_file": legacy_file,
+        });
+    }
+    output
 }
 
 /// Report redacted secret-env readiness for the selected/default backend.
