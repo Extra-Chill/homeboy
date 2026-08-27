@@ -1106,8 +1106,10 @@ fn run_materialized_provider_command_once_contained(
                         elapsed_ms.saturating_add(workspace_progress_check_interval_ms);
                     if let Some(root) = attestation_root.as_deref() {
                         let current_workspace_progress = workspace_progress_snapshot(root);
-                        if workspace_progress_advanced(&workspace_progress, &current_workspace_progress)
-                        {
+                        if workspace_progress_advanced(
+                            &workspace_progress,
+                            &current_workspace_progress,
+                        ) {
                             progressed = true;
                             workspace_progress_events = workspace_progress_events.saturating_add(1);
                         }
