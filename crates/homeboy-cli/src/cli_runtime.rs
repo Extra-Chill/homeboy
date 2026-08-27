@@ -3410,12 +3410,30 @@ fn try_augment_clap_error(
     let unrecognized = extract_unrecognized_from_error(e)?;
     let parent_command = extract_parent_command_from_error(e)?;
 
+    // Entity matching (component/project/server/extension IDs) only makes
+    // sense for a bare top-level token: that's the one place a user might
+    // plausibly type an entity ID where a command was expected (`homeboy
+    // catlog` instead of `homeboy component catlog`). For an unrecognized
+    // subcommand nested under an already-known command (e.g. `agent-task
+    // loop list`), the valid alternatives are a small, closed set that clap
+    // itself already reports — there is no entity domain to consult. Running
+    // full component/project inventory (which resolves git remotes for every
+    // attached component) on every such error would turn a fail-fast parse
+    // error into a slow, disk- and subprocess-heavy scan (#13630).
     let mut hints = command_domain_hints(&unrecognized, &parent_command).unwrap_or_else(|| {
-        entity_suggest::find_entity_match(&unrecognized)
-            .map(|entity_match| {
-                entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized)
-            })
-            .unwrap_or_default()
+        if parent_command.is_empty() {
+            entity_suggest::find_entity_match(&unrecognized)
+                .map(|entity_match| {
+                    entity_suggest::generate_entity_hints(
+                        &entity_match,
+                        &parent_command,
+                        &unrecognized,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     });
 
     append_extension_health_hints(&mut hints, extension_health);
@@ -4998,6 +5016,48 @@ mod tests {
 
             assert!(output.contains("component 'catalog'"));
             assert!(output.contains("homeboy component catalog"));
+        });
+    }
+
+    #[test]
+    fn nested_unrecognized_subcommand_does_not_trigger_entity_matching() {
+        crate::test_support::with_isolated_home(|home| {
+            entity_suggest::reset_entity_suggestion_cache_for_test();
+            // A component whose id exactly matches the unrecognized token.
+            // If a nested unrecognized subcommand (e.g. `agent-task loop
+            // list`) ran the expensive entity-suggestion scan the way a
+            // bare top-level typo does, this registration would produce a
+            // "did you mean component 'list'" hint and force full
+            // component/project inventory resolution (including per-
+            // component git remote detection) just to reject a malformed
+            // command line (#13630).
+            homeboy::core::component::write_standalone_registration(
+                &homeboy::core::component::Component {
+                    id: "list".to_string(),
+                    local_path: home.path().display().to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("register component");
+
+            let err = Cli::command_with_scoped_lab_args()
+                .try_get_matches_from(["homeboy", "agent-task", "loop", "list"])
+                .expect_err("`list` is not a valid `agent-task loop` subcommand");
+
+            let output = try_augment_clap_error(
+                &err,
+                &argv(&["homeboy", "agent-task", "loop", "list"]),
+                &ExtensionCliHealth::default(),
+            );
+
+            // No augmentation for a nested unrecognized subcommand: the
+            // caller falls straight through to clap's own immediate usage
+            // error (`err.exit()`) instead of first waiting on a
+            // component/project inventory scan.
+            assert!(
+                output.is_none(),
+                "nested unrecognized subcommand must not trigger entity matching, got: {output:?}"
+            );
         });
     }
 
