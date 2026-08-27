@@ -645,7 +645,8 @@ pub(crate) fn runner_admits_lab_dispatch(
         return admits_warm_runner_coordination(command, resources, selected_runner, lab_readiness);
     }
     command.lab_offload_supported
-        && selected_runner.is_some_and(|runner_id| lab_readiness_admits_runner(runner_id, lab_readiness))
+        && selected_runner
+            .is_some_and(|runner_id| lab_readiness_admits_runner(runner_id, lab_readiness))
 }
 
 /// Permit automatic controller execution only when Lab is disconnected and the
