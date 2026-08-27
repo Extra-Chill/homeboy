@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.17] - 2026-08-27
+
+### Fixed
+- bind retry ownership at reservation
+
 ## [0.361.16] - 2026-08-27
 
 ### Fixed
