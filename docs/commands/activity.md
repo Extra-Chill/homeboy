@@ -31,7 +31,20 @@ The default (and `--limit`-bounded) view compacts every retained record to that 
 
 `reconciled` is always `false` here. It is emitted because `agent-task status <id> --bridge` is a reconciling read that *writes*, so the two surfaces can legitimately report different states for the same run at the same instant — and calling the reconciling one changes what this one returns next. The flag lets a consumer tell which kind of answer it received.
 
-Human output is a compact table followed by next-action command lines per item.
+## Counts: executing work vs open resources
+
+Activity items carry two work classes. **Executing work** is a unit of work the system runs to completion — an observation run, an agent-task record, a daemon job, or a runner-resident job. **Open resources** are inventory that work uses: worktree-provider records, whose presence says nothing about whether anything is executing in them (#13620).
+
+`counts` separates the classes:
+
+- `active`, `queued`, and `running` count executing work only. An open worktree projects state `running` because it is held, and is deliberately excluded from these counts so execution liveness is never inflated by inventory.
+- `open_resources` counts held resource inventory: worktrees without a terminal disposition, including degraded-but-held ones.
+- `total` counts every record in the report across both classes.
+- the remaining state buckets (`succeeded`, `failed`, `stale`, …) describe executing work; a worktree's terminal disposition is resource history, visible in `items`.
+
+`zero_executing_work` is the machine-readable maintenance precondition: `true` only when the report shows no queued or running executing work **and** is not `partial` (a connected runner that did not answer could be holding executing work this report cannot see). Open resources never affect it — an operator may hold worktrees open while zero work executes. Assert it on a `list` report; a `show` report's counts describe only the resolved item.
+
+Human output is a compact table preceded by a one-line summary presenting both dimensions, e.g. `activity: total=110 executing=1 (running=1 queued=0) open_resources=3 failed=9 stale=2`, followed by next-action command lines per item.
 
 The default view prioritizes active work, scans a bounded extra window for stale
 projections, and omits stale rows that would crowd out current records. Its
