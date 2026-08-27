@@ -1807,8 +1807,12 @@ fn promotion_hydrates_destination_package_execution_projections_before_gates() {
             "destination_gate_workspace"
         );
         assert_eq!(
-            report.provenance["destination_gate_setup"][0]["setup_capability"],
-            "dependency.install"
+            report.provenance["destination_gate_setup"][0]["provider_id"],
+            "fixture-provider"
+        );
+        assert_eq!(
+            report.provenance["destination_gate_setup"][0]["status"],
+            "succeeded"
         );
         assert!(
             workspace.join("node_modules/fixture/explicit.js").exists(),
@@ -1928,13 +1932,7 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
             error.details["cause"]["classification"],
             "destination_gate_setup"
         );
-        assert!(
-            error.details["cause"]["details"]
-                .as_str()
-                .expect("bounded setup details")
-                .len()
-                <= 20 * 1024
-        );
+        assert!(error.details["cause"]["outcome"].to_string().len() <= 20 * 1024);
         assert!(
             provider.verify_calls.is_empty(),
             "no gate/provider dispatch occurs"

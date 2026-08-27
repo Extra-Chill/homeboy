@@ -235,12 +235,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 &ready_tools,
             ));
 
-        run_materialized_provider_command(
-            &request,
-            &provider,
-            context.run_id.as_deref(),
-            context.attempt,
-        )
+        run_materialized_provider_command(&request, &provider, &context)
     }
 }
 
@@ -505,6 +500,7 @@ mod tests {
             run_id: Some("blocked-run".to_string()),
             attempt: 1,
             cancellation: Default::default(),
+            lifecycle_store: None,
         };
 
         let (_, path, error) = materialize_executor_request_at_root(

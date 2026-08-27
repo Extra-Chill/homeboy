@@ -19,7 +19,7 @@ members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
 
 [package]
 name = "homeboy"
-version = "0.361.0"
+version = "0.363.0"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
@@ -106,6 +106,38 @@ slow-tests = []
 # `cargo run --features test-support` is what makes the deterministic agent-task
 # smoke gate in docs/commands/agent-task.md runnable from a source checkout.
 test-support = ["homeboy-core/test-support", "homeboy-cli/test-support"]
+
+# Debug info is line tables only.
+#
+# The default `debug = true` emits full DWARF: every variable, type, and lexical
+# scope. Measured on this workspace it is roughly a third of what a build
+# occupies on disk and half the size of the artifact produced.
+#
+# `cargo test -p homeboy-cli --lib --no-run`, cold, same machine, `-j2`:
+#
+#                        wall     target/    test binary
+#   debug = true         335 s      7.1 G        934 MB
+#   line-tables-only     294 s      4.8 G        445 MB     -12% / -32% / -52%
+#   debug = false        270 s      4.0 G        289 MB     -19% / -44% / -69%
+#
+# That is one crate. The saving is entirely in the back end: `LLVM_passes` and
+# `codegen_to_LLVM_IR` roughly halve, while `type_check_crate` and
+# `MIR_borrow_checking` do not move at all.
+#
+# `false` is faster still and is deliberately not chosen. It emits no `.debug_*`
+# sections whatsoever, so a panic backtrace has no file or line for any frame.
+# `line-tables-only` keeps `.debug_line`, which is what a CI failure or an issue
+# report is actually read from, and gives up only debugger variable inspection.
+# Recover that for one session without editing this file:
+#
+#   RUSTFLAGS="-C debuginfo=2" cargo test -p <crate>
+#
+# This matters most in CI and on the VPS, where disk -- not RAM -- is the binding
+# constraint on how many builds can coexist.
+#
+# `[profile.test]` inherits from `[profile.dev]`, so this covers test builds too.
+[profile.dev]
+debug = "line-tables-only"
 
 # Hash and compression crates run at optimization even in dev/test builds.
 #

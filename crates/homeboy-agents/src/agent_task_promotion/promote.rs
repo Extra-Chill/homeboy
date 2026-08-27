@@ -102,6 +102,15 @@ pub(crate) fn emit_promotion_progress(
     });
 }
 
+pub(crate) fn promotion_cancellation() -> Arc<dyn Fn() -> bool + Send + Sync> {
+    GATE_SUPERVISION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|supervision| Arc::clone(&supervision.is_cancelled))
+            .unwrap_or_else(|| Arc::new(|| false))
+    })
+}
+
 pub(crate) fn with_gate_supervision<T>(
     supervision: crate::agent_task_gate::GateSupervision,
     operation: impl FnOnce() -> Result<T>,
@@ -200,6 +209,7 @@ pub fn resume_promoted_patch(
         &observation_store,
         false,
         None,
+        None,
     )
 }
 
@@ -216,17 +226,19 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
         observation_store,
         false,
         None,
+        None,
     )
 }
 
 /// Re-run corrected gates against an already-applied candidate while preserving
 /// all candidate, base, target, source, and artifact resume validation.
-pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
+pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
     options: AgentTaskPromotionOptions,
     target_path: &Path,
     previous: &Value,
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
+    before_gates: impl FnOnce() -> Result<()> + 'a,
 ) -> Result<AgentTaskPromotionReport> {
     resume_promoted_patch_internal(
         options,
@@ -235,16 +247,18 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
         observation_store,
         true,
         gate_workspace,
+        Some(Box::new(before_gates)),
     )
 }
 
-fn resume_promoted_patch_internal(
+fn resume_promoted_patch_internal<'a>(
     options: AgentTaskPromotionOptions,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
     replacement_gates: bool,
     gate_workspace: Option<&Path>,
+    before_gates: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
 ) -> Result<AgentTaskPromotionReport> {
     validate_resume_provenance(&options, target_path, previous)?;
     let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
@@ -318,6 +332,9 @@ fn resume_promoted_patch_internal(
                 None,
             )
         })?;
+    if let Some(before_gates) = before_gates {
+        before_gates()?;
+    }
     let gates = run_promotion_gates(
         &options,
         &mut provider,
@@ -902,11 +919,10 @@ fn promote_with_provider_and_checkpoint_internal(
     // no patch applied and no durable post-apply state recorded, so the same
     // artifact/target can be retried with a corrected base (#9400).
     let pre_apply_verified_base = if !options.dry_run {
-        match resolve_promotion_target_path(&options.to_worktree)? {
+        match resolve_promotion_target_path(&options.to_worktree, None)? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
-            // No pre-apply Homeboy-managed target path resolves (e.g. a
-            // provider-owned destination); fall back to validating against the
-            // applied worktree below, preserving prior behavior for that path.
+            // No provider-owned pre-apply target path resolves; fall back to
+            // validating against the applied worktree below.
             None => None,
         }
     } else {
@@ -975,8 +991,8 @@ fn promote_with_provider_and_checkpoint_internal(
         None
     };
     let verified_base = if let Some(worktree_path) = applied_worktree_path.as_deref() {
-        // Reuse the base verified before apply; only re-capture when a
-        // provider-owned destination had no resolvable pre-apply target path.
+        // Reuse the base verified before apply; only re-capture when the
+        // destination had no resolvable provider-owned pre-apply path.
         let verified_base = if base_verified_before_apply {
             pre_apply_verified_base
         } else {
@@ -1595,11 +1611,25 @@ fn promote_committed_changes(
     )?
     .unwrap_or_else(|| committed_patch.patch_path.clone());
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let trusted_unpushed_candidate_destination =
+        options
+            .candidate_ref
+            .as_ref()
+            .map(|_| TrustedUnpushedCandidateDestination {
+                path: options
+                    .source_worktree_path
+                    .clone()
+                    .expect("candidate has source workspace"),
+                head: committed_patch.candidate.clone(),
+            });
     // Keep committed-change promotion on the same atomic base-validation
     // boundary as artifact promotion: no apply or checkpoint may precede a
     // failed declared base lookup.
     let pre_apply_verified_base = if !options.dry_run {
-        match resolve_promotion_target_path(&options.to_worktree)? {
+        match resolve_promotion_target_path(
+            &options.to_worktree,
+            trusted_unpushed_candidate_destination.as_ref(),
+        )? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
             None => None,
         }
@@ -1628,15 +1658,7 @@ fn promote_committed_changes(
         changed_files: normalized_patch.changed_files.clone(),
         gate_feedback_baseline,
         dry_run: options.dry_run,
-        trusted_unpushed_candidate_destination: options.candidate_ref.as_ref().map(|_| {
-            TrustedUnpushedCandidateDestination {
-                path: options
-                    .source_worktree_path
-                    .clone()
-                    .expect("candidate has source workspace"),
-                head: committed_patch.candidate.clone(),
-            }
-        }),
+        trusted_unpushed_candidate_destination,
     })?;
     command_evidence.extend(target.command_evidence);
     let applied_worktree_path = (!options.dry_run).then_some(target.path);
@@ -1869,10 +1891,30 @@ fn run_promotion_gates(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| gate_workspace_path(options, worktree_path));
     let destination_gate_setup = if gate_workspace.is_dir() {
-        crate::agent_task_gate::hydrate_gate_dependency_roots(
+        let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
+            timeout: options.gates.gate_timeout(),
+            no_progress_timeout: options.gates.gate_no_progress_timeout(),
+            heartbeat_interval: options.gates.gate_heartbeat_interval(),
+            is_cancelled: promotion_cancellation(),
+            on_progress: Arc::new(|progress| {
+                emit_promotion_progress(
+                    "hydration",
+                    None,
+                    Some(format!(
+                        "provider={} phase={} elapsed={}ms last-progress={}ms",
+                        progress.provider_id,
+                        progress.phase,
+                        progress.elapsed_ms,
+                        progress.last_progress_ms_ago.unwrap_or(progress.elapsed_ms),
+                    )),
+                );
+            }),
+        };
+        let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_with_policy(
             &gate_workspace,
             options.gates.hydrate_dependencies,
             "destination_gate_workspace",
+            &hydration_policy,
         )
         .map_err(|error| {
             gate_setup_failure(
@@ -1880,7 +1922,14 @@ fn run_promotion_gates(
                 "destination_gate_workspace",
                 error,
             )
-        })?
+        })?;
+        if let Some(failed) = setup
+            .iter()
+            .find(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed)
+        {
+            return Err(gate_setup_outcome_failure("destination_gate_setup", failed));
+        }
+        setup
     } else {
         // An opaque provider destination cannot be hydrated locally. Its gate
         // provider remains the authority, and the report makes no local
@@ -1971,7 +2020,7 @@ fn run_promotion_gates(
         gate_results,
         dependencies_materialized: destination_gate_setup
             .iter()
-            .any(|setup| setup.status == "succeeded"),
+            .any(|setup| setup.status == homeboy_core::deps::DependencyHydrationStatus::Succeeded),
         candidate_setup,
         destination_gate_setup,
         candidate_checkout,
@@ -2010,8 +2059,27 @@ fn gate_setup_failure(classification: &str, component: &str, error: Error) -> Er
         Some(serde_json::json!({
             "classification": classification,
             "code": error.code.as_str(),
-            "message": bounded_setup_error_text(&error.message),
-            "details": bounded_setup_error_text(&error.details.to_string()),
+            "message": bounded_setup_error_text(&homeboy_core::redaction::redact_string(&error.message)),
+            "details": bounded_setup_error_text(&homeboy_core::redaction::redact_string(&error.details.to_string())),
+            "retry_action": "retry_dependency_hydration",
+        })),
+    )
+}
+
+fn gate_setup_outcome_failure(
+    classification: &str,
+    outcome: &homeboy_core::deps::DependencyHydrationOutcome,
+) -> Error {
+    Error::dependency_step_failed(
+        "promotion.gate_setup",
+        outcome.provider_id.clone(),
+        outcome.exit_code,
+        Vec::new(),
+        Vec::new(),
+        Some(outcome.command.join(" ")),
+        Some(serde_json::json!({
+            "classification": classification,
+            "outcome": outcome,
             "retry_action": "retry_dependency_hydration",
         })),
     )
@@ -2306,21 +2374,34 @@ fn promotion_source(
     }
 }
 
-/// Resolve the Homeboy-managed target worktree path before the patch is
-/// applied, so the declared base can be validated against it without mutating
-/// the working tree (#9400). Returns `None` for a non-Homeboy destination
-/// (provider-owned), where the pre-apply path is not known and validation falls
-/// back to the applied worktree.
-fn resolve_promotion_target_path(to_worktree: &str) -> Result<Option<PathBuf>> {
-    let Some(record) = homeboy_core::worktree::resolve_workspace_ref_if_present(to_worktree)?
-    else {
-        return Ok(None);
-    };
-    if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+/// Resolve a provider-owned target before the patch is applied, so the declared
+/// base can be validated against it without mutating the working tree (#9400).
+/// Genuinely unmanaged destinations retain the post-apply validation fallback.
+fn resolve_promotion_target_path(
+    to_worktree: &str,
+    trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
+) -> Result<Option<PathBuf>> {
+    if Path::new(to_worktree).is_dir() {
         return Ok(None);
     }
-    let path = PathBuf::from(record.path());
-    Ok(path.is_dir().then_some(path))
+    let trusted_unpushed_destination = trusted_unpushed_candidate_destination.map(|trusted| {
+        homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
+            path: trusted.path.clone(),
+            head: trusted.head.clone(),
+        }
+    });
+    match homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
+        to_worktree,
+        &homeboy_core::defaults::load_config(),
+        homeboy_core::worktree_provider::WorktreeMutationContext {
+            safety_baseline: None,
+            trusted_unpushed_destination: trusted_unpushed_destination.as_ref(),
+        },
+    ) {
+        Ok(target) => Ok(target.path.is_dir().then_some(target.path)),
+        Err(error) if error.details["worktree_provider_lookup"] == "not_found" => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn capture_declared_base(
@@ -2706,8 +2787,8 @@ fn post_apply_report(
         })),
         _ => None,
     };
-    // Managed targets pass their pre-apply snapshot. Provider-owned targets do
-    // not expose a path until apply, so retain the established best-effort read.
+    // Managed targets pass their pre-apply snapshot. Unmanaged targets may not
+    // expose a path until apply, so retain the established best-effort read.
     let verified_base = verified_base.or_else(|| {
         capture_declared_base(worktree_path, options.base_ref.as_deref())
             .ok()

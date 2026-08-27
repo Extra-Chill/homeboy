@@ -22,14 +22,14 @@ Manage component-backed task worktrees
 
 | Subcommand | Summary |
 | --- | --- |
-| `homeboy worktree create` | Create a task worktree from a registered component checkout |
+| `homeboy worktree create` | Create a task worktree through the configured or built-in provider |
 | `homeboy worktree adopt` | Adopt an existing local workspace path for @workspace:<handle> refs |
 | `homeboy worktree queue-create` | Create multiple task worktrees one-at-a-time with queue status JSON |
-| `homeboy worktree list` | List persisted task worktrees |
+| `homeboy worktree list` | List worktrees owned by configured and built-in providers |
 | `homeboy worktree inventory` | Report bounded local task-worktree inventory and reconcile only leased terminal snapshots |
-| `homeboy worktree status` | Inspect one task worktree and its safety gates |
+| `homeboy worktree status` | Inspect a provider-owned worktree and its safety state |
 | `homeboy worktree remove` | Remove one task worktree after safety checks |
-| `homeboy worktree cleanup` | Remove cleanup-eligible task worktrees after safety checks |
+| `homeboy worktree cleanup` | Clean up eligible configured and built-in provider worktrees |
 | `homeboy worktree quarantine` | Inspect or explicitly reconcile quarantined malformed task-worktree records |
 
 ## `homeboy worktree create`
@@ -38,11 +38,11 @@ Manage component-backed task worktrees
 homeboy worktree create [OPTIONS] <COMPONENT_ID>
 ```
 
-Create a task worktree from a registered component checkout
+Create a task worktree through the configured or built-in provider
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<COMPONENT_ID>` | yes | Component ID to use as the source checkout |
+| `<COMPONENT_ID>` | yes | Component or repository handle for provider creation |
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -97,7 +97,7 @@ Create multiple task worktrees one-at-a-time with queue status JSON
 homeboy worktree list
 ```
 
-List persisted task worktrees
+List worktrees owned by configured and built-in providers
 
 ## `homeboy worktree inventory`
 
@@ -120,7 +120,7 @@ Report bounded local task-worktree inventory and reconcile only leased terminal 
 homeboy worktree status <ID>
 ```
 
-Inspect one task worktree and its safety gates
+Inspect a provider-owned worktree and its safety state
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -150,7 +150,7 @@ Remove one task worktree after safety checks
 homeboy worktree cleanup [OPTIONS]
 ```
 
-Remove cleanup-eligible task worktrees after safety checks
+Clean up eligible configured and built-in provider worktrees
 
 | Option | Value | Description |
 | --- | --- | --- |

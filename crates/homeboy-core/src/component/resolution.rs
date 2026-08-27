@@ -795,7 +795,7 @@ fn resolve_path_override(config_root: Option<&Path>, path: &str) -> Result<Compo
 /// Whether `component_id` names a component registered in the standalone/project
 /// registry (as opposed to a synthetic ad-hoc target).
 fn component_is_registered(component_id: &str) -> bool {
-    crate::component::inventory()
+    crate::component::inventory::registered_base()
         .map(|components| components.iter().any(|c| c.id == component_id))
         .unwrap_or(false)
 }
@@ -819,7 +819,7 @@ fn registered_component_for_worktree_path(
         Some(id) => load_at(config_root, id)
             .map(|component| vec![component])
             .unwrap_or_default(),
-        None => inventory_at(config_root)?,
+        None => crate::component::inventory::registered_base_at(config_root)?,
     };
     for registered in registrations {
         let registered_path =
@@ -845,8 +845,10 @@ fn registered_component_for_worktree_path(
     match candidates.len() {
         0 => Ok(None),
         1 => {
-            let registered = candidates.pop().expect("one candidate");
-            let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
+            let base = candidates.pop().expect("one candidate");
+            let registered = load_at(config_root, &base.id).unwrap_or(base);
+            let registered_path =
+                PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
             let checkout_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root);
             portable_component_for_checkout(
                 config_root,
@@ -2208,6 +2210,42 @@ mod tests {
                     .get("REPO_RELATIVE_CACHE")
                     .map(String::as_str),
                 Some("cache")
+            );
+        });
+    }
+
+    #[test]
+    fn path_only_worktree_resolution_skips_unrelated_stale_sibling_discovery() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@task");
+            let unrelated = dir.path().join("unrelated");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            write_portable(&primary, "fixture");
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "initial manifest"]);
+            add_worktree(&primary, &worktree, "task");
+            write_portable(&unrelated, "unrelated");
+            write_standalone_registration(home.path(), "fixture", &primary);
+            write_standalone_registration(home.path(), "stale", &dir.path().join("missing"));
+
+            crate::component::portable::take_discovery_paths_for_test();
+            let component = resolve_effective(None, worktree.to_str(), None)
+                .expect("path-only worktree resolves");
+            let discovery_paths = crate::component::portable::take_discovery_paths_for_test();
+
+            assert_eq!(component.id, "fixture");
+            assert_eq!(
+                Path::new(&component.local_path),
+                worktree.canonicalize().expect("canonical worktree")
+            );
+            assert!(
+                !discovery_paths.contains(&unrelated),
+                "unrelated sibling was inspected: {discovery_paths:?}"
             );
         });
     }

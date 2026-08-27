@@ -89,6 +89,16 @@ fn rooted_exact_status(
     .record)
 }
 
+fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    record.state.is_terminal()
+        || record.has_fresh_controller_pre_provider_heartbeat()
+        || (record.has_planned_runner_execution() && record.has_fresh_update())
+        || agent_task_lifecycle::has_live_pending_runner_submission_intent(
+            record,
+            chrono::Utc::now(),
+        )
+}
+
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
     // One store for the whole sweep. Every run this classifies, expires, and
     // cancels is decided from a record read here; a decision taken against one
@@ -235,13 +245,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             let _lock =
                 agent_task_lifecycle::LabHandoffLock::lock_in_store(&lifecycle_store, &run.run_id)?;
             let fenced = lifecycle_store.read_record(&run.run_id)?;
-            if fenced.state.is_terminal()
-                || (fenced.has_planned_runner_execution() && fenced.has_fresh_update())
-                || agent_task_lifecycle::has_live_pending_runner_submission_intent(
-                    &fenced,
-                    chrono::Utc::now(),
-                )
-            {
+            if fenced_record_is_live(&fenced) {
                 continue;
             }
             agent_task_lifecycle::cancel_run_in_store(&lifecycle_store, &run.run_id, Some(&reason))
@@ -522,7 +526,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
 /// `reconcile_stale_active_runs` used to have exactly two callers — `cleanup`
 /// and `agent-task active --reconcile --apply` — both of which require a human
 /// to type them. A detached cook whose owner died therefore stayed `running`
-/// forever. Controller wait resolution had no automatic caller at all.
+/// forever. Loop Work jobs now own controller wait advancement.
 struct AgentTaskOrchestrationDriver;
 
 impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrchestrationDriver {
@@ -542,12 +546,6 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
                 run.stale_reason.as_deref(),
             );
         }
-        serde_json::to_value(&report)
-            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
-    }
-
-    fn reconcile_controller_waits(&self) -> Result<serde_json::Value> {
-        let report = crate::agent_task_controller_service::reconcile_waiting_controllers()?;
         serde_json::to_value(&report)
             .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
     }
@@ -1246,13 +1244,12 @@ mod tests {
     }
 
     #[test]
-    fn controller_heartbeat_keeps_slow_pre_provider_materialization_out_of_runner_pid_watchdog() {
+    fn controller_heartbeat_keeps_queued_pre_provider_materialization_out_of_runner_pid_watchdog() {
         with_isolated_home(|_| {
             register_orchestration_driver();
             let run_id = "reconcile-controller-pre-provider-heartbeat";
             let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
             agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
-            agent_task_lifecycle::mark_running(run_id).expect("running");
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
                 record
                     .metadata
@@ -1281,6 +1278,10 @@ mod tests {
             .expect("record slow provider evidence");
 
             let status = agent_task_lifecycle::status(run_id).expect("status while ensure runs");
+            assert!(
+                status.has_fresh_controller_pre_provider_heartbeat(),
+                "{status:?}"
+            );
             assert!(status.metadata.get("stale_running").is_none());
             assert_eq!(
                 status.metadata["cook_progress"]["phase"],
@@ -1297,9 +1298,45 @@ mod tests {
             let retained = agent_task_lifecycle::status(run_id).expect("retained run");
             assert_eq!(
                 retained.state,
-                agent_task_lifecycle::AgentTaskRunState::Running
+                agent_task_lifecycle::AgentTaskRunState::Queued
             );
             assert!(retained.metadata.get("cancel_reason").is_none());
+        });
+    }
+
+    #[test]
+    fn fenced_recheck_preserves_heartbeat_recorded_after_stale_discovery_snapshot() {
+        with_isolated_home(|_| {
+            let run_id = "reconcile-controller-heartbeat-after-snapshot";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+
+            let snapshot = discover_runs(AgentTaskDiscoveryFilter::Active)
+                .expect("ownerless queued run discovered");
+            let discovered = snapshot
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id)
+                .expect("stale snapshot contains run");
+            assert_eq!(discovered.liveness, Some(AgentTaskLiveness::Stale));
+
+            agent_task_lifecycle::record_cook_progress_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                "worktree_provider_lookup",
+                1,
+                Some("provider lookup started after discovery"),
+            )
+            .expect("controller heartbeat");
+
+            let fenced =
+                agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
+                    .expect("fenced record");
+            assert!(fenced_record_is_live(&fenced));
+            assert_eq!(
+                fenced.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
         });
     }
 
@@ -1599,10 +1636,7 @@ mod tests {
             register_orchestration_driver();
             let runs = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("run pass");
-            let waits = homeboy_core::daemon::orchestration::reconcile_controller_waits()
-                .expect("wait pass");
             assert_eq!(runs["reconciled"], 0, "{runs}");
-            assert_eq!(waits["changed"], 0, "{waits}");
         });
     }
 

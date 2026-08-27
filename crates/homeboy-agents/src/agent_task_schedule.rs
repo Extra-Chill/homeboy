@@ -749,6 +749,15 @@ mod cancellation {
         pub run_id: Option<String>,
         pub attempt: u32,
         pub cancellation: AgentTaskCancellationToken,
+        pub(crate) lifecycle_store: Option<crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+    }
+
+    impl AgentTaskExecutionContext {
+        pub(crate) fn lifecycle_store(
+            &self,
+        ) -> Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore> {
+            self.lifecycle_store.as_ref()
+        }
     }
 }
 

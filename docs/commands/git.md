@@ -115,6 +115,21 @@ homeboy git rebase --continue
 homeboy git rebase --abort
 ```
 
+### Preserve a worktree patch
+
+Use an operation-owned patch artifact instead of Git's repository-global stash
+stack when reconciling parallel worktrees:
+
+```bash
+homeboy git patch preserve <operation-id> [--path <path>]
+homeboy git patch restore <operation-id> [--path <path>]
+```
+
+The preserve command captures staged, unstaged, and untracked binary changes,
+records exact durable evidence beneath that worktree's Git directory, and then
+cleans the checkout. Restore verifies the recorded bytes and operation identity
+before applying only that worktree's patch.
+
 On conflict, Homeboy returns a failed result with git's stderr. Resolve conflicts manually, then re-run with `--continue` or `--abort`.
 
 ### Cherry-pick

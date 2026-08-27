@@ -11,6 +11,7 @@ mod operations_changes;
 mod operations_commit;
 mod operations_push;
 mod operations_tags;
+mod patch_preservation;
 mod pr_land;
 mod pr_policy;
 mod pr_refresh;
@@ -22,8 +23,9 @@ pub mod release_download;
 mod operation_tests;
 
 pub use changes::{
-    discard_worktree_changes, get_diff, get_dirty_files, get_files_changed_since, get_range_diff,
-    get_uncommitted_changes, resolve_merge_base, UncommittedChanges,
+    base_advance_warning, discard_worktree_changes, get_diff, get_dirty_files,
+    get_files_changed_since, get_range_diff, get_uncommitted_changes, resolve_merge_base,
+    UncommittedChanges,
 };
 pub use commits::extract_version_from_tag;
 pub use commits::{
@@ -73,6 +75,10 @@ pub use operations_tags::{
     delete_local_tag, delete_remote_tag, fetch_origin, fetch_tags, get_head_commit, get_tag_commit,
     is_ancestor, remote_branch_commit, remote_tag_commit, short_head_revision_at, tag, tag_at,
     tag_exists_locally, tag_exists_on_remote, tags_pointing_at_commit,
+};
+pub use patch_preservation::{
+    preserve_worktree_patch, restore_worktree_patch, PatchPreservationEvidence,
+    PatchPreservationState, PreservedPatchArtifact,
 };
 pub use pr_land::{land_prs, PrCheckWaiver, PrLandOptions, PrLandOutput, PrLandRefreshHelper};
 pub use pr_policy::{
@@ -380,6 +386,25 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
         )?;
     }
     Ok(())
+}
+
+/// Resolve the configured commit identity policy for a repository's origin
+/// remote host, if one is declared in `git_hosts` config.
+///
+/// Returns `Ok(None)` when the repository has no usable origin remote host
+/// or no policy is configured for that host — callers should treat this as
+/// "no opinion" rather than an error, matching [`validate_identities`]'s
+/// `*_unrestricted` behavior.
+pub fn resolve_host_identity_policy(path: &str) -> crate::error::Result<Option<GitIdentity>> {
+    let remote = git_config(path, &["config", "--get", "remote.origin.url"])?;
+    let Some(host) = remote_host(&remote) else {
+        return Ok(None);
+    };
+    let config = crate::defaults::load_config();
+    Ok(config.git_hosts.get(&host).map(|expected| GitIdentity {
+        name: expected.name.clone(),
+        email: expected.email.clone(),
+    }))
 }
 
 /// Resolve a (component_id, path) pair for a git operation.

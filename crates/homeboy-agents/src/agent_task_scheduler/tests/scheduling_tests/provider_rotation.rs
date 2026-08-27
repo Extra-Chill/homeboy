@@ -29,6 +29,48 @@ mod provider_rotation_tests {
         returns_patch: bool,
     }
 
+    /// Executor that reproduces the #13644 repro shape: the primary backend
+    /// ("test") is presently over its usage cap and reports that as a
+    /// `RateLimited` outcome carrying the usage-cap diagnostic Homeboy's
+    /// provider layer attaches (`annotate_usage_cap`); the rotation fallback
+    /// backend is healthy. Records every dispatched `(task_id, backend)` pair
+    /// so a test can prove a later task in the same plan skips the
+    /// already-known-capped backend entirely instead of spending an attempt
+    /// rediscovering it.
+    struct UsageCapAwareExecutor {
+        observed: Arc<Mutex<Vec<(String, String)>>>,
+        reset_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    impl AgentTaskExecutorAdapter for UsageCapAwareExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.observed
+                .lock()
+                .expect("observed requests")
+                .push((request.task_id.clone(), request.executor.backend.clone()));
+            if request.executor.backend == "test" {
+                let mut result = outcome(request.task_id, AgentTaskOutcomeStatus::ProviderError);
+                result.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
+                result.diagnostics.push(AgentTaskDiagnostic {
+                    class:
+                        crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
+                            .to_string(),
+                    message: format!(
+                        "provider usage cap reached; resets at {}",
+                        self.reset_at.to_rfc3339()
+                    ),
+                    data: json!({ "reset_at": self.reset_at.to_rfc3339() }),
+                });
+                return result;
+            }
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
     impl AgentTaskExecutorAdapter for ProviderReportedRotationExecutor {
         fn execute(
             &self,
@@ -1026,5 +1068,159 @@ mod provider_rotation_tests {
             .message
             .as_deref()
             .is_some_and(|message| { message.contains("provider rotation") })));
+    }
+
+    #[test]
+    fn a_later_task_skips_a_provider_usage_cap_learned_earlier_in_the_same_plan() {
+        // #13644: a flat-rate provider hitting its 5-hour usage cap is not
+        // unhealthy or misconfigured; it is temporarily out of quota until a
+        // known reset time. Once one task in a plan learns that, a fanout
+        // sibling must not spend its own attempt rediscovering the same cap —
+        // it should skip straight to the next rotation entry.
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let scheduler = AgentTaskScheduler::new(Arc::new(UsageCapAwareExecutor {
+            observed: Arc::clone(&observed),
+            reset_at,
+        }));
+        let mut plan = plan_with_tasks(2);
+        // Force sequential dispatch so task-2 starts only after task-1's
+        // rotation has taught the scheduler about the cap.
+        plan.options.max_concurrency = 1;
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 2);
+
+        let observed = observed.lock().expect("observed requests");
+        let backends_for = |task_id: &str| -> Vec<String> {
+            observed
+                .iter()
+                .filter(|(observed_task_id, _)| observed_task_id == task_id)
+                .map(|(_, backend)| backend.clone())
+                .collect()
+        };
+        assert_eq!(
+            backends_for("task-1"),
+            vec!["test".to_string(), "fallback-backend-a".to_string()],
+            "task-1 discovers the cap firsthand and rotates past it"
+        );
+        assert_eq!(
+            backends_for("task-2"),
+            vec!["fallback-backend-a".to_string()],
+            "task-2 must skip the already-known-capped primary backend entirely, \
+             spending no attempt rediscovering it"
+        );
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "task-2"
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("provider usage cap active"))
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("backend=test"))
+        }));
+    }
+
+    #[test]
+    fn a_task_fails_fast_when_every_reachable_rotation_entry_is_presently_capped() {
+        // #13644: when there is nowhere left to rotate to because every
+        // reachable entry is already known to be over its usage cap, Homeboy
+        // must fail the task without ever dispatching a provider already known
+        // to refuse the request.
+        struct AlwaysCappedExecutor {
+            calls: Arc<AtomicUsize>,
+            reset_at: chrono::DateTime<chrono::Utc>,
+            observed: Arc<Mutex<Vec<(String, String)>>>,
+        }
+
+        impl AgentTaskExecutorAdapter for AlwaysCappedExecutor {
+            fn execute(
+                &self,
+                request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.observed
+                    .lock()
+                    .expect("observed")
+                    .push((request.task_id.clone(), request.executor.backend.clone()));
+                let mut result = outcome(request.task_id, AgentTaskOutcomeStatus::ProviderError);
+                result.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
+                result.diagnostics.push(AgentTaskDiagnostic {
+                    class:
+                        crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
+                            .to_string(),
+                    message: format!(
+                        "provider usage cap reached; resets at {}",
+                        self.reset_at.to_rfc3339()
+                    ),
+                    data: json!({ "reset_at": self.reset_at.to_rfc3339() }),
+                });
+                result
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let scheduler = AgentTaskScheduler::new(Arc::new(AlwaysCappedExecutor {
+            calls: Arc::clone(&calls),
+            reset_at,
+            observed: Arc::clone(&observed),
+        }));
+        // Three sequential tasks: between them, the first two genuinely
+        // dispatch to (and thereby cap) both the primary backend and the
+        // single rotation entry, in whichever order the scheduler's rotation
+        // requeueing happens to interleave with. By the third task, both
+        // routes are known-capped no matter that interleaving, so its
+        // dispatch is unambiguous: it must skip both and never call the
+        // executor at all.
+        let mut plan = plan_with_tasks(3);
+        plan.options.max_concurrency = 1;
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        // task-1 and task-2 between them pay to learn both the primary and
+        // the fallback are capped; task-3 then has nowhere left to rotate to
+        // and must not dispatch at all.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let observed_for = |task_id: &str| -> usize {
+            observed
+                .lock()
+                .expect("observed requests")
+                .iter()
+                .filter(|(observed_task_id, _)| observed_task_id == task_id)
+                .count()
+        };
+        assert_eq!(
+            observed_for("task-3"),
+            0,
+            "task-3 must not spend an attempt on a route both prior tasks already learned is capped"
+        );
+        let task_3_outcome = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == "task-3")
+            .expect("task-3 outcome");
+        assert!(task_3_outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.class == "agent_task.provider_usage_cap_exhausted" }));
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "task-3"
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("provider usage cap active"))
+        }));
     }
 }

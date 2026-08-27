@@ -1301,7 +1301,11 @@ mod tests {
         ] {
             assert!(help.contains(flag), "bench must advertise {flag}");
         }
-        assert!(help.contains("without pinning a runner"));
+        // Both halves of the placement/runner choice stay documented in compact
+        // help: `--placement` selects where work executes, and `--runner` pins it.
+        // `c05305b09` reworded the placement help without updating this assertion,
+        // so it named prose the tree no longer contained.
+        assert!(help.contains("Select where eligible work executes"));
         assert!(help.contains("This implies Lab placement"));
     }
 

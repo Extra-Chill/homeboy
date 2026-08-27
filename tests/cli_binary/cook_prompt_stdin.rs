@@ -39,8 +39,36 @@ fn cook_rejects_empty_whitespace_padded_prompt_stdin_before_destination_or_provi
 #[test]
 fn cook_snapshots_multiline_whitespace_padded_stdin_once_in_the_durable_recipe() {
     let home = tempfile::tempdir().expect("home");
+    let config_dir = home.path().join(".config/homeboy");
+    std::fs::create_dir_all(&config_dir).expect("create fixture config directory");
+    std::fs::write(
+        config_dir.join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
+    let extension_dir = config_dir.join("extensions/fixture");
+    std::fs::create_dir_all(&extension_dir).expect("create fixture extension directory");
+    std::fs::write(
+        extension_dir.join("fixture.json"),
+        r#"{
+  "name": "Fixture provider",
+  "version": "1.0.0",
+  "agent_runtimes": [{
+    "id": "fixture/v1",
+    "agent_task_executors": [{
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "fixture.default",
+      "backend": "fixture",
+      "invocation": {"argv": ["sh", "-c", "exit 1"]},
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1"
+    }]
+  }]
+}"#,
+    )
+    .expect("write fixture executor manifest");
     let source = tempfile::tempdir().expect("source checkout");
-    git(source.path(), &["init"]);
+    git(source.path(), &["init", "-b", "main"]);
     git(
         source.path(),
         &["config", "user.email", "test@example.invalid"],
@@ -96,10 +124,9 @@ fn cook_snapshots_multiline_whitespace_padded_stdin_once_in_the_durable_recipe()
         .write_all(prompt.as_bytes())
         .expect("write prompt");
     let output = child.wait_with_output().expect("wait for homeboy");
-    // The fixture provider executes successfully, then promotion refuses this
-    // unmanaged worktree. That terminal promotion result still proves the
-    // provider attempt consumed the durable plan we inspect below.
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    // The fixture provider fails after durable recipe creation. This test owns
+    // the prompt bytes persisted before provider execution, not promotion.
+    assert!(!output.status.success(), "{output:?}");
 
     let recipe = home
         .path()
