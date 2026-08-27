@@ -2060,7 +2060,10 @@ fn providers_with_catalog(
                 declared_backends,
             ),
             "diagnostics": shown_diagnostics,
-            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
+            // Explicit `--secret-env` names win; otherwise report every secret
+            // the shown providers declare, so this agrees with `agent-task
+            // auth status` about the same secrets by construction (#13629).
+            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_for_scope(&args.secret_env, &fallback_sources),
         }),
         0,
     ))
@@ -3718,6 +3721,64 @@ mod tests {
                 Some(
                     "Agent task providers\nStatus: credentials_missing\nProviders shown: 1\nNext: homeboy agent-task providers --backend claude-code --selector claude-code.agent-task-executor --validate-readiness".to_string()
                 )
+            );
+        });
+    }
+
+    /// #13629: `agent-task providers --secret-env` used to return an empty
+    /// list whenever the operator passed no explicit `--secret-env` names,
+    /// even though `agent-task auth status` defaults to reporting every
+    /// secret the scope declares. The two commands answer the same question
+    /// about the same backend and must agree.
+    #[test]
+    fn providers_secret_env_defaults_to_every_declared_secret_like_auth_status() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+                "id": "claude-code.agent-task-executor",
+                "backend": "claude-code",
+                "capabilities": ["cli_runtime", "provider_owned_auth"],
+                "provider_defaults": {
+                    "claude-code": {
+                        "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                        "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                        "secret_env_sources": {
+                            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
+                                "source": "env",
+                                "env_var": "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("provider fixture");
+            let mut args = providers_args();
+            args.backend = Some("claude-code".to_string());
+            let output = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect("provider report")
+                .0;
+
+            let secret_env = output["secret_env"]
+                .as_array()
+                .expect("secret_env is an array");
+            assert!(
+                !secret_env.is_empty(),
+                "no explicit --secret-env was passed, so the shown backend's declared secret \
+                 must still be reported by default, not silently omitted"
+            );
+            assert!(
+                secret_env
+                    .iter()
+                    .any(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"),
+                "the declared credential must be named: {secret_env:?}"
+            );
+            assert_eq!(
+                secret_env
+                    .iter()
+                    .find(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
+                    .expect("declared credential entry")["configured"],
+                false,
+                "unconfigured in this hermetic test environment, matching auth status"
             );
         });
     }
