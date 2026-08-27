@@ -294,6 +294,8 @@ mod options {
     pub struct IssueFindOptions {
         /// Exact title match (case-sensitive).
         pub title: Option<String>,
+        /// GitHub issue search query passed through to `gh issue list --search`.
+        pub search: Option<String>,
         /// All labels must be present.
         pub labels: Vec<String>,
         /// `open` (default), `closed`, or `all`.

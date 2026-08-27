@@ -4387,7 +4387,9 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::api_jobs::JobEventKind;
     use homeboy_core::lab_contract::LabCommandContract;
+    use homeboy_core::test_support::ControllerJobHarness;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -6662,6 +6664,134 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    struct HarnessAdapter {
+        executes: Arc<AtomicUsize>,
+        resumes: Arc<AtomicUsize>,
+    }
+
+    impl HarnessAdapter {
+        fn complete(
+            mut checkpoint: LabStagingCheckpoint,
+            job: ControllerJobHandle,
+        ) -> Result<LabStagingCheckpoint> {
+            checkpoint.phase = LabStagingPhase::Completed;
+            checkpoint.source_snapshot_id = Some("snapshot-harness".to_string());
+            checkpoint.workspace_id = Some("workspace-harness".to_string());
+            checkpoint.runtime_id = Some("runtime-harness".to_string());
+            checkpoint.hydration_id = Some("hydration-harness".to_string());
+            checkpoint.final_runner_job_id = Some("runner-job-harness".to_string());
+            job.progress(serde_json::to_value(&checkpoint).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize harness progress".to_string()),
+                )
+            })?)?;
+            Ok(checkpoint)
+        }
+    }
+
+    impl LabStagingExecutionAdapter for HarnessAdapter {
+        fn execute(
+            &self,
+            _request: &LabStagingExecutionRequest,
+            checkpoint: LabStagingCheckpoint,
+            _cancellation: LabStagingCancellationToken,
+            job: ControllerJobHandle,
+        ) -> Result<LabStagingCheckpoint> {
+            self.executes.fetch_add(1, Ordering::SeqCst);
+            Self::complete(checkpoint, job)
+        }
+
+        fn resume(
+            &self,
+            _request: &LabStagingExecutionRequest,
+            checkpoint: LabStagingCheckpoint,
+            _cancellation: LabStagingCancellationToken,
+            job: ControllerJobHandle,
+        ) -> Result<LabStagingCheckpoint> {
+            self.resumes.fetch_add(1, Ordering::SeqCst);
+            Self::complete(checkpoint, job)
+        }
+
+        fn cancel(
+            &self,
+            _request: &LabStagingExecutionRequest,
+            _checkpoint: &LabStagingCheckpoint,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn execute_and_resume_use_the_controller_job_handle_boundary() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            clear_installed_adapter();
+            let run_id = "lab-controller-harness";
+            submit_recipe_run(run_id);
+            let args = vec!["agent-task".to_string(), "run-plan".to_string()];
+            persist_lab_staging_recipe(
+                run_id,
+                "lab-1",
+                &recipe_request(Some(recipe_command()), &args, HashMap::new()),
+            )
+            .expect("persist recipe");
+            let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
+                LabStagingRecipe,
+            >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)
+            .expect("recipe attachment");
+            let plan = homeboy_agents::agent_task_lifecycle::load_controller_plan(run_id)
+                .expect("durable plan");
+            let envelope = LabStagingDispatchEnvelope::new(
+                run_id,
+                "lab-1",
+                LabStagingInputRef::AgentTaskAttempt {
+                    run_id: run_id.to_string(),
+                    recipe: LabStagingRecipeRef::from_authority(attachment.payload_digest, &plan)
+                        .expect("recipe reference"),
+                },
+            );
+            let request = serde_json::to_value(envelope).expect("serialize envelope");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(LabStagingDispatchDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+            let prepared = driver.prepare(request).expect("prepare Lab staging");
+            let executes = Arc::new(AtomicUsize::new(0));
+            let resumes = Arc::new(AtomicUsize::new(0));
+            install_production_execution_adapter(Arc::new(HarnessAdapter {
+                executes: Arc::clone(&executes),
+                resumes: Arc::clone(&resumes),
+            }));
+
+            let result = driver
+                .execute(prepared, harness.handle())
+                .expect("execute Lab staging through harness");
+            assert_eq!(result["phase"], "completed");
+            assert_eq!(executes.load(Ordering::SeqCst), 1);
+            let checkpoint = harness
+                .checkpoint()
+                .expect("read checkpoint")
+                .expect("completed checkpoint");
+            assert_eq!(checkpoint["final_runner_job_id"], "runner-job-harness");
+            let progress = harness
+                .events()
+                .expect("read controller events")
+                .into_iter()
+                .find(|event| event.kind == JobEventKind::Progress)
+                .and_then(|event| event.data)
+                .expect("projected staging progress");
+            assert_eq!(progress["phase"], "completed");
+            assert!(progress.get("input").is_none());
+
+            let resumed = driver
+                .resume(result, harness.handle())
+                .expect("resume Lab staging through harness");
+            assert_eq!(resumed["phase"], "completed");
+            assert_eq!(resumes.load(Ordering::SeqCst), 1);
+            clear_installed_adapter();
+        });
     }
 
     #[test]

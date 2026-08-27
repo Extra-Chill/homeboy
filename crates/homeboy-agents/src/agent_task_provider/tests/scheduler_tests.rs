@@ -800,7 +800,7 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
             backend: Some("fallback".to_string()),
             ..AgentTaskProviderRotationEntry::default()
         }],
-        liveness_timeout_ms: Some(50),
+        liveness_timeout_ms: Some(5_000),
         ..AgentTaskProviderRotationPolicy::default()
     });
 
@@ -857,6 +857,59 @@ fn silent_provider_hits_liveness_deadline_before_wall_timeout() {
 }
 
 #[test]
+fn silent_provider_uses_default_liveness_deadline_before_wall_timeout() {
+    let command = format!("node {}", script("setInterval(() => {}, 1_000);"));
+    let (mut request, provider) = request("task-liveness-default", command);
+    request.limits.timeout_ms = Some(500);
+    request.limits.liveness_timeout_ms = None;
+
+    let outcome = crate::agent_task_timeout::with_default_provider_liveness_timeout_ms(50, || {
+        run_provider_command_once(&request, &provider)
+    });
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Stalled)
+    );
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.provider_liveness_timeout"
+    );
+    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("liveness"));
+    assert_eq!(
+        outcome.diagnostics[0].data["liveness_timeout_ms"],
+        json!(50)
+    );
+    assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
+}
+
+#[test]
+fn wall_timeout_precedes_an_equal_default_liveness_deadline() {
+    let command = format!("node {}", script("setInterval(() => {}, 1_000);"));
+    let (mut request, provider) = request("task-liveness-timeout-precedence", command);
+    request.limits.timeout_ms = Some(50);
+    request.limits.liveness_timeout_ms = None;
+
+    let outcome = crate::agent_task_timeout::with_default_provider_liveness_timeout_ms(50, || {
+        run_provider_command_once(&request, &provider)
+    });
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Timeout)
+    );
+    assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_timeout");
+    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("wall_clock"));
+    assert_eq!(
+        outcome.diagnostics[0].data["liveness_timeout_ms"],
+        json!(50)
+    );
+    assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(50));
+}
+
+#[test]
 fn parent_visible_progress_keeps_provider_alive_until_wall_deadline() {
     let command = format!(
         "node {}",
@@ -876,6 +929,131 @@ fn parent_visible_progress_keeps_provider_alive_until_wall_deadline() {
         json!(300)
     );
     assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
+}
+
+#[test]
+fn structured_runtime_progress_keeps_provider_alive_until_completion() {
+    let command = format!(
+        "node {}",
+        script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let progress=path.join(req.artifacts_path,'provider-progress.jsonl'); let timer=setInterval(()=>fs.appendFileSync(progress,'{}\\n'),10); setTimeout(()=>{clearInterval(timer); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed with structured progress'}));},900);")
+    );
+    let (mut request, provider) = request("task-liveness-runtime-progress", command);
+    request.limits.timeout_ms = Some(1_500);
+    request.limits.liveness_timeout_ms = Some(500);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(
+        outcome.summary.as_deref(),
+        Some("completed with structured progress")
+    );
+}
+
+/// A runtime that streams telemetry into an artifact whose name does not
+/// contain `progress` is still working, and must not be killed as stalled.
+///
+/// Regression for #13623: liveness filtered artifacts by file name, so an
+/// OpenCode Cook writing `cook-homeboy-opencode-runtime-stdout.log` was read as
+/// producing nothing. It was killed at the liveness deadline with
+/// `stdout_bytes: 0` and `runtime_progress_events: 0` while that file already
+/// held 94KB. The script below reproduces that shape: it writes only to a
+/// non-`progress` artifact and keeps its stdout silent until the end, so the
+/// parent pipes stay empty and the artifact is the only evidence of life.
+#[test]
+fn non_progress_named_runtime_artifact_keeps_provider_alive_until_completion() {
+    let command = format!(
+        "node {}",
+        script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let log=path.join(req.artifacts_path,'task-runtime-stdout.log'); let timer=setInterval(()=>fs.appendFileSync(log,'working\\n'),10); setTimeout(()=>{clearInterval(timer); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed while streaming a runtime log'}));},900);")
+    );
+    let (mut request, provider) = request("task-liveness-runtime-log", command);
+    request.limits.timeout_ms = Some(1_500);
+    request.limits.liveness_timeout_ms = Some(500);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(
+        outcome.summary.as_deref(),
+        Some("completed while streaming a runtime log")
+    );
+}
+
+/// Counting every artifact file must not blunt the watchdog: a provider that
+/// writes nothing anywhere is still stalled and still gets killed.
+#[test]
+fn provider_writing_no_artifacts_is_still_killed_for_liveness() {
+    let command = format!("node {}", script("setInterval(() => {}, 1000);"));
+    let (mut request, provider) = request("task-liveness-no-artifacts", command);
+    request.limits.timeout_ms = Some(5_000);
+    request.limits.liveness_timeout_ms = Some(300);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.provider_liveness_timeout"
+    );
+    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("liveness"));
+    assert_eq!(
+        outcome.diagnostics[0].data["runtime_progress_events"],
+        json!(0)
+    );
+}
+
+#[test]
+fn workspace_file_activity_keeps_silent_provider_alive_until_completion() {
+    // Reproduces #13626: a CLI agent that edits files without ever writing to
+    // stdout/stderr until its final JSON result is still doing real,
+    // verifiable work. Only the workspace on disk can prove that, so the
+    // liveness watchdog must treat file activity there as progress rather
+    // than killing (and mis-filing as `stalled`) a provider that is silently
+    // producing a valid patch. The provider here writes a new file every
+    // 100ms for 3 seconds straight — well past the 1.2s liveness deadline it
+    // would have tripped under process-chatter-only liveness — and prints
+    // nothing at all until it is done.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = linked_cook_source(&temp);
+    let command = format!(
+        "node {}",
+        script(
+            "let fs=require('fs'); \
+             let req=JSON.parse(fs.readFileSync(0,'utf8')); \
+             let i=0; \
+             let timer=setInterval(()=>{ i++; fs.writeFileSync('agent-edit-'+i+'.txt','edit '+i+'\\n'); }, 100); \
+             setTimeout(()=>{ \
+               clearInterval(timer); \
+               process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed silently after workspace edits'})); \
+             }, 3000);"
+        )
+    );
+    let (mut request, provider) = request("task-liveness-workspace-activity", command);
+    request.workspace.root = Some(workspace.display().to_string());
+    request.limits.timeout_ms = Some(10_000);
+    request.limits.liveness_timeout_ms = Some(1_200);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "a provider silently editing its workspace must not be killed as stalled: {outcome:?}"
+    );
+    assert_ne!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Stalled)
+    );
+    assert_eq!(
+        outcome.summary.as_deref(),
+        Some("completed silently after workspace edits")
+    );
+
+    let files_changed = crate::agent_task_service::worktree_files_changed(&workspace)
+        .expect("git status readable after the run");
+    assert!(
+        files_changed >= 10,
+        "provider must have kept editing the workspace throughout the run, saw {files_changed} changed file(s)"
+    );
 }
 
 #[test]
@@ -1050,6 +1228,35 @@ fn provider_command_receives_declared_secret_env() {
 
     assert_eq!(aggregate.totals.succeeded, 1);
     std::env::remove_var(secret_name);
+}
+
+#[test]
+fn provider_command_receives_only_the_declared_launch_environment() {
+    let secret_name = format!("HOMEBOY_TEST_DECLARED_LAUNCH_SECRET_{}", std::process::id());
+    let ambient_name = format!("HOMEBOY_TEST_UNDECLARED_LAUNCH_ENV_{}", std::process::id());
+    std::env::set_var(&secret_name, "declared-secret");
+    std::env::set_var(&ambient_name, "must-not-leak");
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let launch=JSON.parse(process.env.{});let secretOk=process.env.{secret_name}==='declared-secret';let ambientAbsent=process.env.{ambient_name}===undefined;let redacted=!JSON.stringify(launch).includes('declared-secret');let identity=launch.task_id===req.task_id&&launch.schema==='homeboy/agent-task-provider-launch-context/v1';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:secretOk&&ambientAbsent&&redacted&&identity?'succeeded':'failed',summary:'launch context checked'}}));",
+            crate::agent_task_provider::AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON_ENV
+        ))
+    );
+    let (mut request, provider) = request("task-declared-launch-env", command);
+    request.executor.secret_env = vec![secret_name.clone()];
+    let scheduler = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
+    ));
+
+    let aggregate = scheduler.run(AgentTaskPlan::new(
+        "plan-declared-launch-env",
+        vec![request],
+    ));
+
+    assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
+    std::env::remove_var(secret_name);
+    std::env::remove_var(ambient_name);
 }
 
 #[test]
@@ -1618,4 +1825,67 @@ fn plan_runtime_preflight_skips_provider_without_declared_checks() {
 
     enforce_runtime_preflight_checks_for_plan_with_providers(&plan, &[provider])
         .expect("provider without declared checks is a no-op");
+}
+
+#[test]
+fn a_flat_rate_usage_limit_is_classified_rate_limited_and_carries_its_reset_time() {
+    // #13644: "5-hour usage limit reached. Resets in 3hr 3min." (opencode-go)
+    // is not a generic rate-limit blip Homeboy should retry blindly — it is a
+    // known, temporary cap with a computable reset time rotation can act on.
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-usage-cap',status:'provider_error',summary:'5-hour usage limit reached. Resets in 3hr 3min.'}}));"
+        ))
+    );
+    let (request, provider) = request("task-usage-cap", command);
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::RateLimited)
+    );
+    let diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.class
+                == crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
+        })
+        .expect("usage-cap diagnostic naming the reset time");
+    let reset_at = diagnostic.data["reset_at"]
+        .as_str()
+        .expect("reset_at string")
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .expect("reset_at is a valid RFC3339 timestamp");
+    assert!(
+        reset_at > chrono::Utc::now(),
+        "the reported reset time must be in the future relative to when the cap was observed"
+    );
+}
+
+#[test]
+fn a_bare_rate_limit_without_a_recognizable_usage_cap_reset_stays_plain_rate_limited() {
+    // A generic 429 with no reset-time signature is still `RateLimited` for
+    // retry/rotation purposes, but there is no known reset time to skip
+    // rotation entries against, so no usage-cap diagnostic is attached.
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-bare-429',status:'provider_error',summary:'429 Too Many Requests'}}));"
+        ))
+    );
+    let (request, provider) = request("task-bare-429", command);
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::RateLimited)
+    );
+    assert!(!outcome.diagnostics.iter().any(|diagnostic| {
+        diagnostic.class
+            == crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
+    }));
 }

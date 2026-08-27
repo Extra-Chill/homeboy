@@ -12,7 +12,7 @@
 
 use serde_json::Value;
 
-use super::{ActivityFilter, ActivityItem};
+use super::{ActivityDetail, ActivityFilter, ActivityItem};
 use crate::Result;
 
 /// Supplies the agent-task contribution to the activity report.
@@ -34,7 +34,15 @@ pub trait ActivityAgentTaskProvider: Send + Sync {
     /// durable records. Asking for them separately made the activity report
     /// walk the corpus twice (#10308). The health summary is serialized as JSON
     /// so core does not depend on the agent-task health type.
-    fn agent_task_activity(&self, limit: usize) -> Result<(Vec<ActivityItem>, Value)>;
+    ///
+    /// `detail` is the report's detail level: a compact report keeps the
+    /// health counts but must not carry per-record health samples, which name
+    /// records the report's item truncation claims were omitted (#13617).
+    fn agent_task_activity(
+        &self,
+        limit: usize,
+        detail: ActivityDetail,
+    ) -> Result<(Vec<ActivityItem>, Value)>;
 
     /// Project records matching an exact task identity before the caller applies
     /// its display cap.
@@ -42,16 +50,21 @@ pub trait ActivityAgentTaskProvider: Send + Sync {
         &self,
         limit: usize,
         filter: &ActivityFilter,
+        detail: ActivityDetail,
     ) -> Result<(Vec<ActivityItem>, Value)> {
         let _ = filter;
-        self.agent_task_activity(limit)
+        self.agent_task_activity(limit, detail)
     }
 }
 
 struct NoopProvider;
 
 impl ActivityAgentTaskProvider for NoopProvider {
-    fn agent_task_activity(&self, _limit: usize) -> Result<(Vec<ActivityItem>, Value)> {
+    fn agent_task_activity(
+        &self,
+        _limit: usize,
+        _detail: ActivityDetail,
+    ) -> Result<(Vec<ActivityItem>, Value)> {
         Ok((Vec::new(), Value::Null))
     }
 }
@@ -76,6 +89,7 @@ pub(crate) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
 pub(crate) fn agent_task_activity_filtered(
     limit: usize,
     filter: &ActivityFilter,
+    detail: ActivityDetail,
 ) -> Result<(Vec<ActivityItem>, Value)> {
-    with_provider(|p| p.agent_task_activity_filtered(limit, filter))
+    with_provider(|p| p.agent_task_activity_filtered(limit, filter, detail))
 }

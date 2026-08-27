@@ -637,9 +637,9 @@ pub struct FinalizePrArgs {
     pub evidence: review::FinalizePrEvidenceArgs,
     #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
     pub gate_results: Vec<String>,
-    /// Execute one deterministic verification command against the committed manual candidate.
+    /// Execute a deterministic verification command against the committed manual candidate. Repeat for multiple gates.
     #[arg(long, value_name = "COMMAND")]
-    pub verify: Option<String>,
+    pub verify: Vec<String>,
     #[arg(long = "changed-file", value_name = "PATH")]
     pub changed_files: Vec<String>,
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
@@ -680,6 +680,9 @@ pub struct RecordReplacementGateProofArgs {
     /// Explicit operator authorization for externally produced proof.
     #[arg(long, value_name = "TEXT")]
     pub authorize_external_proof: Option<String>,
+    /// Accept candidate failures proven identical against the immutable base.
+    #[arg(long)]
+    pub accept_inherited_failures: bool,
 }
 #[derive(Args, Debug)]
 pub struct VerifyReplacementArgs {

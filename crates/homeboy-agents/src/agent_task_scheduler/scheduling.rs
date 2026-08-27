@@ -30,6 +30,17 @@ use super::*;
 
 pub(crate) struct AgentTaskScheduleSupport;
 
+/// One rotation entry `skip_capped_rotation_entries` bypassed because Homeboy
+/// already knew its provider was over its usage cap. `exhausted` marks the
+/// final skip when no further rotation entry remains to try.
+#[derive(Debug, Clone)]
+pub(crate) struct UsageCapSkip {
+    pub(crate) backend: String,
+    pub(crate) selector: Option<String>,
+    pub(crate) reset_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) exhausted: bool,
+}
+
 fn deferred_timeout_outcome(task_id: &str, timeout_ms: u64, source: &str) -> AgentTaskOutcome {
     AgentTaskOutcome {
         task_id: task_id.to_string(),
@@ -1364,6 +1375,60 @@ impl AgentTaskScheduleSupport {
         if request.limits.liveness_timeout_ms.is_none() {
             request.limits.liveness_timeout_ms = policy.liveness_timeout_ms;
         }
+    }
+
+    /// Advance a scheduled task past any rotation entries whose provider
+    /// Homeboy already knows is over its usage cap this run, so a fanout
+    /// sibling (or a later task in this same plan) does not spend a provider
+    /// execution rediscovering a cap another task already paid to learn
+    /// (#13644).
+    ///
+    /// A task with no rotation policy is returned unchanged: there is nothing
+    /// configured to fail over to, so existing single-attempt behavior is
+    /// preserved exactly. When every rotation entry reachable from the
+    /// task's current position is presently capped, the last skip's
+    /// `exhausted` flag is set so the caller can fail the task without
+    /// dispatching a provider already known to refuse it.
+    pub(super) fn skip_capped_rotation_entries(
+        scheduled: &mut ScheduledTask,
+        policy: Option<&AgentTaskProviderRotationPolicy>,
+        usage_caps: &crate::agent_task_provider::ProviderUsageCapRegistry,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<UsageCapSkip> {
+        let mut skipped = Vec::new();
+        let Some(policy) = policy else {
+            return skipped;
+        };
+        loop {
+            let key = crate::agent_task_provider::provider_usage_cap_key(
+                &scheduled.request.executor.backend,
+                scheduled.request.executor.selector.as_deref(),
+            );
+            let Some(reset_at) = usage_caps.active(&key, now) else {
+                break;
+            };
+            let backend = scheduled.request.executor.backend.clone();
+            let selector = scheduled.request.executor.selector.clone();
+            if scheduled.rotation_index >= policy.entries.len() {
+                skipped.push(UsageCapSkip {
+                    backend,
+                    selector,
+                    reset_at,
+                    exhausted: true,
+                });
+                break;
+            }
+            skipped.push(UsageCapSkip {
+                backend,
+                selector,
+                reset_at,
+                exhausted: false,
+            });
+            let entry = &policy.entries[scheduled.rotation_index];
+            Self::apply_rotation_entry(&mut scheduled.request, entry, policy);
+            scheduled.rotation_index += 1;
+        }
+        skipped
     }
 
     /// Evidence record for one dispatch attempt under a rotation policy.

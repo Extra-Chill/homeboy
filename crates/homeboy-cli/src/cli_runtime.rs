@@ -1,4 +1,4 @@
-use clap::{ArgMatches, Command, CommandFactory};
+use clap::{ArgMatches, Command, CommandFactory, Parser};
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Write};
 use std::process::Command as ProcessCommand;
@@ -449,14 +449,16 @@ fn register_startup_providers_after_reconcile(
     crate::runner::register_lab_staging_controller_driver();
     crate::agents::agent_task_service::register_promotion_job_driver();
     // Register the agent-task orchestration driver so the daemon's
-    // orchestration tick can reconcile orphaned `running` records and resolve
-    // controller waits from durable state without core depending on the
-    // agent-task subsystem. Both mechanisms previously had no automatic
-    // caller: a detached cook whose owner died stayed `running` forever, and a
-    // controller parked in `Waiting` never left it.
+    // orchestration tick can reconcile orphaned `running` records without core
+    // depending on the agent-task subsystem. Loop waits are owned by their
+    // durable Work jobs below rather than this unrelated periodic sweep.
     crate::agents::agent_task_service::register_orchestration_driver();
     crate::commands::route::register_unmaterialized_cook_replay_driver();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
+    // New orchestration submissions share one versioned lifecycle driver. The
+    // domain registrations below also retain their v1 recovery adapters for
+    // persisted jobs admitted before the migration.
+    crate::agents::agent_task_service::register_work_job_driver();
     // A locally-placed detached Cook is a daemon-owned durable job: the daemon
     // owns its record, checkpointing, cancellation and HTTP inspection, while
     // the launcher-spawned child keeps the operator's execution environment.
@@ -465,6 +467,7 @@ fn register_startup_providers_after_reconcile(
     // the daemon supervises a coordinator it did not spawn, so no branch of its
     // lifecycle can re-run a child that already completed.
     crate::agents::agent_task_service::register_cook_batch_job_driver();
+    crate::agents::agent_task_service::register_loop_work_job_handler();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
     // conditional: `register_acceptance_verifier_from_config` is a no-op when
@@ -622,6 +625,9 @@ impl CliRuntime {
         }
 
         let normalized = args::normalize(args);
+        if let Some(exit) = run_config_read_fast_path(&normalized) {
+            return exit;
+        }
         let command_capability = classify_command_capability(&normalized);
         if let Some(message) = args::runner_exec_option_boundary_error(&normalized) {
             eprintln!("error: {message}");
@@ -1517,6 +1523,27 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info_metadata_only)
     }
+}
+
+/// Config inspection must not initialize daemon reconciliation, provider
+/// discovery, or deferred workers. Those are unrelated to a local JSON read.
+fn run_config_read_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
+    let cli = Cli::try_parse_from(args).ok()?;
+    let Commands::Config(config) = cli.command else {
+        return None;
+    };
+    if !crate::commands::config::is_read(&config) {
+        return None;
+    }
+
+    let (result, exit_code) = output::map_cmd_result_to_json(crate::commands::config::run(config));
+    output_runtime::emit_json_result_for_identity(
+        result,
+        cli.output.as_deref().and_then(std::path::Path::to_str),
+        exit_code,
+        &output::CommandIdentity::with_operation("config", "show"),
+    );
+    Some(std::process::ExitCode::from(exit_code_to_u8(exit_code)))
 }
 
 /// Durable Cook must not create a recipe under a runtime that the existing
@@ -2814,27 +2841,15 @@ fn preflight_hot_command_with_input(
                     .as_ref()
                     .and_then(|readiness| readiness.selected_runner_id.as_deref()),
             );
-            let runner_admits_offload = if hot_command.allows_warm_runner_coordination {
-                resource_policy::admits_warm_runner_coordination(
-                    hot_command,
-                    &resources,
-                    selected_lab_runner
-                        .filter(|_| !matches!(cli.placement, crate::cli_surface::Placement::Local)),
-                    lab_readiness.as_ref(),
-                )
-            } else {
-                hot_command.lab_offload_supported
-                    && selected_lab_runner.is_some_and(|runner_id| {
-                        lab_readiness.as_ref().is_some_and(|readiness| {
-                            readiness.state
-                                == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-                                && readiness
-                                    .available_runner_ids
-                                    .iter()
-                                    .any(|available| available == runner_id)
-                        })
-                    })
-            };
+            let required_lab_placement = required_lab_placement(cli, hot_command);
+            let runner_admits_offload = resource_policy::runner_admits_lab_dispatch(
+                hot_command,
+                &resources,
+                selected_lab_runner
+                    .filter(|_| !matches!(cli.placement, crate::cli_surface::Placement::Local)),
+                lab_readiness.as_ref(),
+                required_lab_placement,
+            );
             let runner_admits_offload = runner_admits_offload
                 && selected_lab_runner.is_none_or(|runner_id| {
                     review_test_runner_requirements(cli).is_none_or(|requirements| {
@@ -2872,7 +2887,6 @@ fn preflight_hot_command_with_input(
                 lab_readiness.as_ref(),
                 cli.placement,
             );
-            let required_lab_placement = required_lab_placement(cli, hot_command);
             let required_lab_runner = required_lab_placement
                 .then_some(selected_lab_runner)
                 .flatten();
@@ -3420,12 +3434,30 @@ fn try_augment_clap_error(
     let unrecognized = extract_unrecognized_from_error(e)?;
     let parent_command = extract_parent_command_from_error(e)?;
 
+    // Entity matching (component/project/server/extension IDs) only makes
+    // sense for a bare top-level token: that's the one place a user might
+    // plausibly type an entity ID where a command was expected (`homeboy
+    // catlog` instead of `homeboy component catlog`). For an unrecognized
+    // subcommand nested under an already-known command (e.g. `agent-task
+    // loop list`), the valid alternatives are a small, closed set that clap
+    // itself already reports — there is no entity domain to consult. Running
+    // full component/project inventory (which resolves git remotes for every
+    // attached component) on every such error would turn a fail-fast parse
+    // error into a slow, disk- and subprocess-heavy scan (#13630).
     let mut hints = command_domain_hints(&unrecognized, &parent_command).unwrap_or_else(|| {
-        entity_suggest::find_entity_match(&unrecognized)
-            .map(|entity_match| {
-                entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized)
-            })
-            .unwrap_or_default()
+        if parent_command.is_empty() {
+            entity_suggest::find_entity_match(&unrecognized)
+                .map(|entity_match| {
+                    entity_suggest::generate_entity_hints(
+                        &entity_match,
+                        &parent_command,
+                        &unrecognized,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     });
 
     append_extension_health_hints(&mut hints, extension_health);
@@ -5008,6 +5040,48 @@ mod tests {
 
             assert!(output.contains("component 'catalog'"));
             assert!(output.contains("homeboy component catalog"));
+        });
+    }
+
+    #[test]
+    fn nested_unrecognized_subcommand_does_not_trigger_entity_matching() {
+        crate::test_support::with_isolated_home(|home| {
+            entity_suggest::reset_entity_suggestion_cache_for_test();
+            // A component whose id exactly matches the unrecognized token.
+            // If a nested unrecognized subcommand (e.g. `agent-task loop
+            // list`) ran the expensive entity-suggestion scan the way a
+            // bare top-level typo does, this registration would produce a
+            // "did you mean component 'list'" hint and force full
+            // component/project inventory resolution (including per-
+            // component git remote detection) just to reject a malformed
+            // command line (#13630).
+            homeboy::core::component::write_standalone_registration(
+                &homeboy::core::component::Component {
+                    id: "list".to_string(),
+                    local_path: home.path().display().to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("register component");
+
+            let err = Cli::command_with_scoped_lab_args()
+                .try_get_matches_from(["homeboy", "agent-task", "loop", "list"])
+                .expect_err("`list` is not a valid `agent-task loop` subcommand");
+
+            let output = try_augment_clap_error(
+                &err,
+                &argv(&["homeboy", "agent-task", "loop", "list"]),
+                &ExtensionCliHealth::default(),
+            );
+
+            // No augmentation for a nested unrecognized subcommand: the
+            // caller falls straight through to clap's own immediate usage
+            // error (`err.exit()`) instead of first waiting on a
+            // component/project inventory scan.
+            assert!(
+                output.is_none(),
+                "nested unrecognized subcommand must not trigger entity matching, got: {output:?}"
+            );
         });
     }
 

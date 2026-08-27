@@ -11,8 +11,82 @@ use std::{
 };
 
 use tempfile::TempDir;
+use uuid::Uuid;
 
-use crate::api_jobs::{Job, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult};
+use crate::api_jobs::{
+    ControllerJobState, ControllerJobSubmissionOutcome, Job, JobEvent, JobEventKind, JobStore,
+    RemoteRunnerJobRequest, RemoteRunnerJobResult,
+};
+use crate::daemon::controller_job_driver::{ControllerJobDriver, ControllerJobHandle};
+use crate::error::{Error, Result};
+
+/// A real in-memory controller job boundary for domain-driver tests.
+///
+/// The harness keeps construction internals out of the production API while
+/// letting feature crates execute drivers against durable checkpoint,
+/// progress, and cancellation behavior.
+pub struct ControllerJobHarness {
+    store: JobStore,
+    job_id: Uuid,
+    driver: Arc<dyn ControllerJobDriver>,
+}
+
+impl ControllerJobHarness {
+    pub fn new(driver: Arc<dyn ControllerJobDriver>, request: serde_json::Value) -> Result<Self> {
+        driver.validate_secret_references(&request)?;
+        let public_request = driver.public_request(&request)?;
+        let request_digest = crate::daemon::hex_digest(&request)?;
+        let store = JobStore::default();
+        let outcome = store.admit_controller_job(
+            format!("controller.{}", driver.job_type()),
+            format!("test-controller-job:{}", Uuid::new_v4()),
+            ControllerJobState {
+                job_type: driver.job_type().to_string(),
+                version: driver.version(),
+                request,
+                public_request,
+                request_digest,
+                checkpoint: None,
+                cancellation_requested: false,
+                cancellation_reason: None,
+                execution_claim_id: None,
+                recovery_attempted: false,
+            },
+        )?;
+        let ControllerJobSubmissionOutcome::Submitted(job_id) = outcome else {
+            return Err(Error::internal_unexpected(
+                "unique controller test job was unexpectedly replayed",
+            ));
+        };
+        store.claim_controller_execution(job_id, false)?;
+        Ok(Self {
+            store,
+            job_id,
+            driver,
+        })
+    }
+
+    pub fn handle(&self) -> ControllerJobHandle {
+        ControllerJobHandle::new(self.store.handle(self.job_id), Arc::clone(&self.driver))
+    }
+
+    pub fn job(&self) -> Result<Job> {
+        self.store.get(self.job_id)
+    }
+
+    pub fn events(&self) -> Result<Vec<JobEvent>> {
+        self.store.events(self.job_id)
+    }
+
+    pub fn checkpoint(&self) -> Result<Option<serde_json::Value>> {
+        Ok(self.store.controller_job_state(self.job_id)?.checkpoint)
+    }
+
+    pub fn request_cancellation(&self, reason: impl Into<String>) -> Result<Job> {
+        self.store
+            .request_controller_cancellation(self.job_id, reason.into())
+    }
+}
 
 const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
 /// Test-only contract between the hermetic context and the Cargo test runner.

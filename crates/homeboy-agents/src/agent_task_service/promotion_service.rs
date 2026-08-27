@@ -483,6 +483,8 @@ pub fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::api_jobs::JobEventKind;
+    use homeboy_core::test_support::ControllerJobHarness;
 
     fn request() -> AgentTaskPromotionRequest {
         AgentTaskPromotionRequest {
@@ -556,6 +558,61 @@ mod tests {
         let result = job.completed_result().expect("completed result");
         assert_eq!(result["phase"], "completed");
         assert_eq!(result["promotion"]["status"], "applied");
+    }
+
+    #[test]
+    fn execute_and_resume_use_the_controller_job_handle_boundary() {
+        let job = AgentTaskPromotionJob::new(request()).expect("valid durable job");
+        let request = serde_json::to_value(&job).expect("serialize job");
+        let driver: Arc<dyn ControllerJobDriver> = Arc::new(AgentTaskPromotionJobDriver);
+        let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+            .expect("construct controller job harness");
+        let prepared = driver.prepare(request).expect("prepare promotion");
+
+        driver
+            .execute(prepared, harness.handle())
+            .expect_err("fixture source cannot be promoted");
+
+        let checkpoint = harness
+            .checkpoint()
+            .expect("read checkpoint")
+            .expect("mutation checkpoint");
+        assert_eq!(checkpoint["phase"], "mutating_and_verifying");
+        let progress = harness
+            .events()
+            .expect("read controller events")
+            .into_iter()
+            .find(|event| event.kind == JobEventKind::Progress)
+            .and_then(|event| event.data)
+            .expect("projected mutation progress");
+        assert_eq!(
+            progress,
+            serde_json::json!({ "phase": "mutating_and_verifying" })
+        );
+
+        let mut completed = job;
+        completed.phase = AgentTaskPromotionJobPhase::Completed;
+        completed.report = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "applied",
+                "source": { "kind": "aggregate", "task_id": "task" },
+                "to_worktree": "homeboy@promotion",
+                "target": { "worktree": "homeboy@promotion" },
+                "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                "operator_notification": { "status": "completed", "message": "complete" }
+            }))
+            .expect("promotion report"),
+        );
+        let checkpoint = serde_json::to_value(completed).expect("completed checkpoint");
+        let first = driver
+            .resume(checkpoint.clone(), harness.handle())
+            .expect("first completed replay");
+        let second = driver
+            .resume(checkpoint, harness.handle())
+            .expect("second completed replay");
+        assert_eq!(first, second);
+        assert_eq!(first["phase"], "completed");
     }
 
     #[test]

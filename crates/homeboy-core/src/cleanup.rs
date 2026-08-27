@@ -13,9 +13,9 @@ use crate::defaults::HomeboyConfig;
 use crate::error::StorageExhaustedDetails;
 use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
-use crate::worktree_providers::{
-    cleanup_worktree_providers_from_config, WorktreeProviderCleanupEffects,
-    WorktreeProviderCleanupOptions, WorktreeProviderCleanupOutput,
+use crate::worktree_provider::{
+    cleanup_worktrees_from_config, ConfiguredWorktreeCleanupOutput, WorktreeCleanupEffects,
+    WorktreeCleanupRequest, WorktreeCleanupScope,
 };
 use crate::{git, Error, Result};
 
@@ -189,7 +189,19 @@ pub fn admit_reconstructable_artifact_work_in_root(
 
     // A busy owner is not treated as success: every caller still measures below
     // and deterministically admits or refuses from the current filesystem facts.
-    let _ = try_run_automatic_artifact_retention_with_config(data_root, &roots, &retention)?;
+    let repository_roots = existing_unique_roots(
+        roots
+            .iter()
+            .filter_map(|root| git_root(root).ok())
+            .collect(),
+    );
+    if !repository_roots.is_empty() {
+        let _ = try_run_automatic_artifact_retention_with_config(
+            data_root,
+            &repository_roots,
+            &retention,
+        )?;
+    }
 
     for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
@@ -386,7 +398,7 @@ pub enum ArtifactCleanupSort {
 pub struct ResourceCleanupOptions {
     pub intent: ResourceCleanupIntent,
     pub artifacts: Option<ArtifactCleanupOptions>,
-    pub worktree_providers: Option<WorktreeProviderCleanupOptions>,
+    pub worktree_providers: Option<WorktreeCleanupRequest>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -404,13 +416,13 @@ pub struct ResourceCleanupOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree_providers: Option<WorktreeProviderCleanupOutput>,
+    pub worktree_providers: Option<ConfiguredWorktreeCleanupOutput>,
     /// Normalized provider effects, projected from the untyped provider
     /// payloads and also summed into the counts above (#9825). `None` when no
     /// provider sweep ran; absent fields inside mean the provider did not
     /// report that effect — never that nothing happened.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree_provider_effects: Option<WorktreeProviderCleanupEffects>,
+    pub worktree_provider_effects: Option<WorktreeCleanupEffects>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1411,10 +1423,9 @@ pub fn cleanup_resources_from_config(
 
     if let Some(mut provider_options) = options.worktree_providers.take() {
         provider_options.apply = apply;
-        providers = Some(cleanup_worktree_providers_from_config(
-            provider_options,
-            config,
-        )?);
+        provider_options.scope = WorktreeCleanupScope::Configured;
+        let cleanup = cleanup_worktrees_from_config(&provider_options, &config)?;
+        providers = cleanup.configured;
     }
 
     let candidate_count = artifacts
@@ -1644,8 +1655,18 @@ fn apply_artifact_candidate(
     active: &ActiveWorktrees,
     run_ref: &str,
 ) -> ArtifactCleanupCandidateApplyOutcome {
-    // The enclosing registry read lease blocks Homeboy admission from changing
-    // liveness between this final check and deletion.
+    apply_artifact_candidate_with_before_remove(candidate, active, run_ref, || {})
+}
+
+fn apply_artifact_candidate_with_before_remove(
+    candidate: &ArtifactCleanupCandidate,
+    active: &ActiveWorktrees,
+    run_ref: &str,
+    before_remove: impl FnOnce(),
+) -> ArtifactCleanupCandidateApplyOutcome {
+    // The enclosing registry read lease blocks Homeboy admission changes. This
+    // early check avoids slow safety work for targets that are already active;
+    // Cargo lock liveness is checked again at the deletion boundary below.
     if candidate.kind == "rust_target" {
         match active.liveness(Path::new(&candidate.worktree)) {
             LIVENESS_IDLE => {}
@@ -1728,6 +1749,17 @@ fn apply_artifact_candidate(
         .pressure_eligible
         .then(|| filesystem_available_bytes(path.parent().unwrap_or(path)))
         .flatten();
+    before_remove();
+    // Git and controller probes above can take long enough for a Cargo build to
+    // start after the initial liveness check.
+    if candidate.kind == "rust_target"
+        && active.liveness(Path::new(&candidate.worktree)) == LIVENESS_ACTIVE_BUILD
+    {
+        return ArtifactCleanupCandidateApplyOutcome::Skipped(format!(
+            "active_build: a Cargo build holds the target lock in {} — deleting it now would be regenerated immediately",
+            candidate.worktree
+        ));
+    }
     match remove_artifact_path(path) {
         Ok(()) => ArtifactCleanupCandidateApplyOutcome::Applied(Box::new(applied_row(
             candidate,
@@ -2403,7 +2435,7 @@ mod tests {
         }
 
         /// Hold the lock the way Cargo does, for the life of the returned file.
-        fn hold(lock: &std::path::Path) -> std::fs::File {
+        pub(super) fn hold(lock: &std::path::Path) -> std::fs::File {
             let file = std::fs::File::open(lock).expect("open lock");
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             assert_eq!(rc, 0, "test must be able to take the lock");
@@ -3060,6 +3092,55 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn apply_rechecks_cargo_lock_immediately_before_removal() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let lock = repo.path().join("target/debug/.cargo-lock");
+            write_file(&repo.path().join("target/debug/app"), "artifact");
+            write_file(&lock, "");
+            let scan = collect_worktree_candidates(
+                &WorktreeInfo {
+                    path: repo.path().to_path_buf(),
+                },
+                &ArtifactCleanupOptions::default(),
+                &ActiveWorktrees::default(),
+                &ProtectedControllerExecutables::default(),
+                None,
+                None,
+                None,
+            )
+            .expect("candidate discovery");
+            let candidate = scan
+                .candidates
+                .into_iter()
+                .find(|candidate| candidate.relative_path == "target")
+                .expect("target candidate");
+            assert_eq!(
+                ActiveWorktrees::default().liveness(repo.path()),
+                LIVENESS_IDLE,
+                "the build must begin after initial eligibility"
+            );
+            let mut held = None;
+
+            let outcome = apply_artifact_candidate_with_before_remove(
+                &candidate,
+                &ActiveWorktrees::default(),
+                "test-run",
+                || held = Some(active_build_lock_tests::hold(&lock)),
+            );
+
+            assert!(matches!(
+                outcome,
+                ArtifactCleanupCandidateApplyOutcome::Skipped(reason)
+                    if reason.starts_with("active_build:")
+            ));
+            assert!(repo.path().join("target/debug/app").exists());
+            drop(held);
+        });
+    }
+
     #[test]
     fn apply_fails_closed_when_git_can_no_longer_be_inspected() {
         crate::test_support::with_isolated_home(|_| {
@@ -3167,6 +3248,27 @@ mod tests {
     }
 
     #[test]
+    fn pressure_admission_remeasures_non_repository_paths_without_worktree_retention() {
+        crate::test_support::with_isolated_home(|_| {
+            let build_root = tempfile::tempdir().expect("non-repository build root");
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                retention: crate::defaults::RetentionConfig {
+                    reconstructable_artifact_reserve_bytes: u64::MAX,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("save retention");
+
+            let error = admit_reconstructable_artifact_work(vec![build_root.path().to_path_buf()])
+                .expect_err("a measured reserve breach must still refuse non-repository work");
+
+            assert!(error.is_storage_exhausted());
+            assert_eq!(error.details["reserve_bytes"], u64::MAX);
+        });
+    }
+
+    #[test]
     fn pressured_artifact_admissions_share_one_retention_owner_in_process() {
         crate::test_support::with_isolated_home(|_| {
             let repo = git_repo();
@@ -3217,11 +3319,12 @@ mod tests {
                     min_age_days: None,
                     include_active_worktrees: false,
                 }),
-                worktree_providers: Some(WorktreeProviderCleanupOptions {
-                    provider: vec!["fixture".to_string()],
-                    all_providers: false,
+                worktree_providers: Some(WorktreeCleanupRequest {
+                    providers: vec!["fixture".to_string()],
+                    all_configured_providers: false,
                     apply: true,
                     timeout: None,
+                    ..WorktreeCleanupRequest::default()
                 }),
             },
             config_with_provider(WorktreeProviderConfig {
@@ -3280,11 +3383,12 @@ mod tests {
                     min_age_days: None,
                     include_active_worktrees: false,
                 }),
-                worktree_providers: Some(WorktreeProviderCleanupOptions {
-                    provider: vec!["fixture".to_string()],
-                    all_providers: false,
+                worktree_providers: Some(WorktreeCleanupRequest {
+                    providers: vec!["fixture".to_string()],
+                    all_configured_providers: false,
                     apply: false,
                     timeout: None,
+                    ..WorktreeCleanupRequest::default()
                 }),
             },
             config_with_provider(WorktreeProviderConfig {

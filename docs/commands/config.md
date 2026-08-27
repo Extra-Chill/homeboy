@@ -24,6 +24,13 @@ and its owning source. File-backed values include the `homeboy.json` path;
 values supplied by defaults report `"builtin"`. Pointer reads apply the same
 secret redaction as a full config read.
 
+An unscoped `config show` elides the large multi-line
+`defaults.install_methods.{source,binary}.upgrade_command` scripts so
+settings like `agent_task`, `notifications`, and `release_gate` aren't buried
+in install/upgrade shell programs. The elided entry names the exact pointer
+to read for the full script — e.g. `homeboy config show
+/defaults/install_methods/source/upgrade_command`.
+
 ### `homeboy config set`
 
 Set a configuration value at a JSON pointer path. Creates `homeboy.json` if it doesn't exist.

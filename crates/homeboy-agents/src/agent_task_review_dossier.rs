@@ -393,7 +393,7 @@ changed). Homeboy derives reviewer-visible verification from its durable candida
     }
 }
 
-fn verified_commands_from_promotion(
+pub(crate) fn verified_commands_from_promotion(
     promotion: &crate::agent_task_promotion::AgentTaskPromotionReport,
 ) -> Vec<AgentTaskReviewVerifiedCommand> {
     promotion

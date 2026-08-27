@@ -38,6 +38,10 @@ pub const CONFIG_LOCK_TIMEOUT_ENV: &str = "HOMEBOY_CONFIG_LOCK_TIMEOUT_SECS";
 /// deliberately rather than discovering it as a production hang.
 pub const CONFIG_LOCK_STRICT_ENV: &str = "HOMEBOY_CONFIG_LOCK_STRICT";
 
+/// Bound on config reads that wait behind a writer. Reads are intentionally
+/// shorter-lived than mutations so diagnostic commands remain responsive.
+pub const CONFIG_READ_LOCK_TIMEOUT_SECS: u64 = 5;
+
 /// Generous enough that no legitimate config operation can reach it (the lock
 /// guards small JSON writes and, at worst, a runtime-package refresh), while
 /// staying far below the CI test-phase budget so a wedged holder surfaces as a
@@ -104,6 +108,17 @@ fn config_lock_timeout() -> Option<std::time::Duration> {
     (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
 }
 
+#[cfg(unix)]
+fn config_read_lock_timeout() -> std::time::Duration {
+    let seconds = std::env::var(CONFIG_LOCK_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(CONFIG_READ_LOCK_TIMEOUT_SECS);
+
+    std::time::Duration::from_secs(seconds)
+}
+
 fn config_lock_strict() -> bool {
     std::env::var(CONFIG_LOCK_STRICT_ENV)
         .ok()
@@ -127,6 +142,42 @@ pub fn with_config_lock_at<T>(
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     with_config_lock_for_at(config_root, "config mutation", operation)
+}
+
+/// Run a config-file read while holding a shared lock under `config_root`.
+///
+/// The lock makes a read observe either side of an atomic config update, while
+/// the short deadline keeps inspection commands independent of a wedged writer.
+pub fn with_config_read_lock_at<T>(
+    config_root: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock_path = config_root.join("config.lock");
+    if config_lock_is_held(&lock_path) {
+        return operation();
+    }
+
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create config lock directory".to_string()),
+            )
+        })?;
+    }
+
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some("open config lock".to_string()))
+        })?;
+
+    let _guard = ConfigReadLockGuard::lock(lock_file, &lock_path)?;
+    let _depth = ConfigLockPathGuard::enter(&lock_path);
+    operation()
 }
 
 /// Run `operation` while holding the exclusive Homeboy config lock, identifying
@@ -206,15 +257,42 @@ pub fn with_config_lock_for_at<T>(
 /// that can nest need re-entry tracking as well; see [`with_config_lock`].
 #[cfg(unix)]
 pub fn lock_exclusive_bounded(file: &File, lock_path: &Path, context: &str) -> Result<()> {
+    lock_bounded(
+        file,
+        lock_path,
+        context,
+        libc::LOCK_EX,
+        config_lock_timeout(),
+    )
+}
+
+#[cfg(unix)]
+fn lock_shared_bounded(file: &File, lock_path: &Path, context: &str) -> Result<()> {
+    lock_bounded(
+        file,
+        lock_path,
+        context,
+        libc::LOCK_SH,
+        Some(config_read_lock_timeout()),
+    )
+}
+
+#[cfg(unix)]
+fn lock_bounded(
+    file: &File,
+    lock_path: &Path,
+    context: &str,
+    lock_mode: libc::c_int,
+    timeout: Option<std::time::Duration>,
+) -> Result<()> {
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
 
-    let timeout = config_lock_timeout();
     let started = Instant::now();
     let mut backoff = Duration::from_millis(1);
 
     loop {
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        if unsafe { libc::flock(file.as_raw_fd(), lock_mode | libc::LOCK_NB) } == 0 {
             return Ok(());
         }
 
@@ -237,9 +315,13 @@ pub fn lock_exclusive_bounded(file: &File, lock_path: &Path, context: &str) -> R
                 return Err(
                     config_lock_timeout_error(lock_path, context, timeout, waited, holder)
                         .with_hint(format!(
-                            "Set {} to change or disable the contention bound.",
+                            "Set {} to change the contention bound; config reads always retain a finite bound.",
                             CONFIG_LOCK_TIMEOUT_ENV
-                        )),
+                        ))
+                        .with_hint(
+                            "Retry after the named writer finishes. If it exited, its kernel \
+                             lock is released automatically; do not delete config.lock manually.",
+                        ),
                 );
             }
         }
@@ -254,8 +336,17 @@ pub fn lock_exclusive_bounded(_file: &File, _lock_path: &Path, _context: &str) -
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn lock_shared_bounded(_file: &File, _lock_path: &Path, _context: &str) -> Result<()> {
+    Ok(())
+}
+
 struct ConfigLockGuard {
     #[allow(dead_code)]
+    file: File,
+}
+
+struct ConfigReadLockGuard {
     file: File,
 }
 
@@ -332,7 +423,25 @@ impl ConfigLockGuard {
     }
 }
 
+impl ConfigReadLockGuard {
+    fn lock(file: File, lock_path: &Path) -> Result<Self> {
+        lock_shared_bounded(&file, lock_path, "config read")?;
+        Ok(Self { file })
+    }
+}
+
 impl Drop for ConfigLockGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+impl Drop for ConfigReadLockGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
@@ -1629,6 +1738,57 @@ mod tests {
         });
     }
 
+    #[test]
+    fn healthy_config_read_takes_a_shared_lock() {
+        let root = tempfile::tempdir().expect("config root");
+        let value =
+            with_config_read_lock_at(root.path(), || Ok("read")).expect("healthy config read");
+
+        assert_eq!(value, "read");
+        assert!(root.path().join("config.lock").exists());
+    }
+
+    #[test]
+    fn stale_config_lock_metadata_does_not_block_a_read() {
+        let root = tempfile::tempdir().expect("config root");
+        let lock_path = root.path().join("config.lock");
+        std::fs::write(
+            &lock_path,
+            r#"{"pid":999999,"operation":"interrupted write"}"#,
+        )
+        .expect("stale lock metadata");
+
+        let value = with_config_read_lock_at(root.path(), || Ok("recovered"))
+            .expect("stale flock lease is released with its dead holder");
+
+        assert_eq!(value, "recovered");
+    }
+
+    #[test]
+    fn config_read_ignores_an_unrelated_work_lock() {
+        let root = tempfile::tempdir().expect("config root");
+        let unrelated_path = root.path().join("daemon-inventory.lock");
+        let unrelated = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&unrelated_path)
+            .expect("unrelated lock handle");
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            assert_eq!(
+                unsafe { libc::flock(unrelated.as_raw_fd(), libc::LOCK_EX) },
+                0
+            );
+        }
+
+        let value = with_config_read_lock_at(root.path(), || Ok("responsive"))
+            .expect("unrelated work must not block config reads");
+
+        assert_eq!(value, "responsive");
+    }
+
     /// Unix-only: the bound is implemented with `flock(2)`, and on other
     /// platforms `lock_exclusive_bounded` is a no-op that cannot time out.
     #[cfg(unix)]
@@ -1671,6 +1831,43 @@ mod tests {
                 "timeout must respect the configured bound: {:?}",
                 error.details
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_read_contention_is_bounded_and_names_the_writer() {
+        crate::test_support::with_isolated_home(|_home| {
+            let lock_path = paths::homeboy().expect("config root").join("config.lock");
+            std::fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("config dir");
+            let holder = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("holder handle");
+            let _holder = ConfigLockGuard::lock(holder, &lock_path, "active config mutation")
+                .expect("holder acquires the lock");
+
+            let error = bounded("bounded config read", || {
+                std::env::set_var(CONFIG_LOCK_TIMEOUT_ENV, "1");
+                let root = paths::homeboy().expect("config root");
+                let result = with_config_read_lock_at(&root, || Ok(()));
+                std::env::remove_var(CONFIG_LOCK_TIMEOUT_ENV);
+                result
+            })
+            .expect("bounded read panicked")
+            .expect_err("a writer must not block config reads indefinitely");
+
+            assert_eq!(error.details["kind"], "config_lock_timeout");
+            assert_eq!(error.details["operation"], "config read");
+            assert_eq!(error.details["holder_pid"], std::process::id());
+            assert_eq!(error.details["holder_operation"], "active config mutation");
+            assert_eq!(error.details["timeout_ms"], 1_000);
+            assert!(error
+                .hints
+                .iter()
+                .any(|hint| { hint.message.contains("do not delete config.lock manually") }));
         });
     }
 }

@@ -13,6 +13,36 @@ pub enum ActivityScope {
     All,
 }
 
+/// How much per-record detail an activity report carries.
+///
+/// The default coordination view ([`ActivityScope::ActiveRecent`]) answers
+/// "what is happening and what can I do next", so each retained record is
+/// compacted to its identity, state, timestamps, cross-refs, and a couple of
+/// follow-up actions. The diagnostic surface that drops — full
+/// artifact/evidence ref rosters, per-store projections, state conflicts,
+/// task-identity enumerations, and the raw command line — stays available
+/// through [`ActivityScope::All`] (`activity list --all`, `activity show`,
+/// `activity watch`) and per-record artifact commands (#13617).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityDetail {
+    Compact,
+    Full,
+}
+
+impl ActivityDetail {
+    /// The detail level a report scope implies.
+    pub fn for_scope(scope: ActivityScope) -> Self {
+        match scope {
+            ActivityScope::ActiveRecent => Self::Compact,
+            ActivityScope::All => Self::Full,
+        }
+    }
+}
+
+/// Follow-up actions retained per record in the compact default view. Matches
+/// the two `next:` lines the human projection renders per row.
+pub const COMPACT_NEXT_ACTIONS_PER_ITEM: usize = 2;
+
 pub type ActivityState = RunLifecycleStatus;
 
 pub fn is_active(state: ActivityState) -> bool {
@@ -152,6 +182,27 @@ pub struct ActivityItem {
     pub state_conflicts: Vec<ActivityStateConflict>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<ActivityNextAction>,
+}
+
+impl ActivityItem {
+    /// Compact this item for the default coordination view.
+    ///
+    /// Identity, state, timestamps, runner/cross refs, and
+    /// [`COMPACT_NEXT_ACTIONS_PER_ITEM`] follow-up actions survive; the
+    /// duplicated diagnostic rosters do not. The report-level `next_actions`
+    /// rollup is computed from the full action set *before* compaction, so
+    /// the compact view still advertises a follow-up for every retained
+    /// record even when that record's own roster was capped (#13617).
+    pub(crate) fn compact_for_default_view(&mut self) {
+        self.command = None;
+        self.cwd = None;
+        self.context.identities.clear();
+        self.artifacts.clear();
+        self.evidence.clear();
+        self.source_projections.clear();
+        self.state_conflicts.clear();
+        self.next_actions.truncate(COMPACT_NEXT_ACTIONS_PER_ITEM);
+    }
 }
 
 impl ActivityFilter {

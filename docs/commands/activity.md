@@ -23,10 +23,11 @@ JSON output uses the standard command-result envelope with `data.schema = homebo
 - timestamps: `created_at`, `updated_at`, `finished_at`
 - runner refs: `runner_id`, `job_id`, `transport`
 - cross refs: `run_id`, `agent_task_run_id`, `runner_job_id`
-- artifact/evidence refs
 - structured `next_actions` with `label` and exact `command`
 
-`agent_task_record_health` is a full-corpus diagnostic attached by `list` only. `show` and `watch` resolve a single id and leave it null rather than scanning every durable agent-task record to fill it.
+The default (and `--limit`-bounded) view compacts every retained record to that identity surface plus at most two follow-up actions per record: artifact/evidence ref rosters, per-store `source_projections`, `state_conflicts`, task-identity enumerations, and the raw command line are omitted, and the report-level `next_actions` rollup still covers every retained record's full action set (capped at 20 commands). The whole serialized response — items, refs, lifted next actions, artifacts, evidence, and the human table — is bounded end to end by the display limit, and records the `truncation` object claims were omitted surface nowhere else in the payload (#13617). Full per-record detail is available through `activity list --all --limit <count>`, `activity show <id>`, and the artifact/evidence commands.
+
+`agent_task_record_health` is a full-corpus diagnostic attached by `list` only; the default view carries its counts without the per-record sample ids, which `--all` retains. `show` and `watch` resolve a single id and leave it null rather than scanning every durable agent-task record to fill it.
 
 `reconciled` is always `false` here. It is emitted because `agent-task status <id> --bridge` is a reconciling read that *writes*, so the two surfaces can legitimately report different states for the same run at the same instant — and calling the reconciling one changes what this one returns next. The flag lets a consumer tell which kind of answer it received.
 

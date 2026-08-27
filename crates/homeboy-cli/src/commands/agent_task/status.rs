@@ -112,6 +112,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
     let mut evidence_refs = stable_evidence_refs(&value);
     if evidence_refs.is_empty() {
         evidence_refs.push(json!({
+            "run_id": run_id,
             "ref": format!("homeboy://agent-task/run/{}/evidence", homeboy::core::execution_contract::encode_uri_component(run_id)),
             "command": evidence_command,
             "export_command": format!("{evidence_command} --output <path>"),
@@ -175,7 +176,15 @@ fn stable_evidence_refs(value: &Value) -> Vec<Value> {
                             reference.filter(|reference| reference.len() <= COMPACT_TEXT_LIMIT)
                         {
                             if seen.insert(reference.clone()) {
-                                refs.push(json!({ "ref": reference }));
+                                let run_id = item
+                                    .as_object()
+                                    .and_then(|item| item.get("run_id"))
+                                    .and_then(Value::as_str);
+                                let mut projected = json!({ "ref": reference });
+                                if let Some(run_id) = run_id {
+                                    projected["run_id"] = json!(run_id);
+                                }
+                                refs.push(projected);
                             }
                         }
                     }
@@ -1017,11 +1026,18 @@ fn project_owning_cook_terminal_status_from_progress(
     progress: Option<&Value>,
     source_run_id: Option<&str>,
 ) {
-    let Some(progress) = progress
-        .filter(|progress| progress.get("phase").and_then(Value::as_str) == Some("terminal"))
-    else {
+    let Some(progress) = progress else {
         return;
     };
+    if progress.get("phase").and_then(Value::as_str) != Some("terminal") {
+        // Before a Cook reaches a terminal outcome, `cook` was left entirely
+        // unset — the only durable phase/attempt/activity evidence the
+        // controller already records had no read path, so `status` answered
+        // nothing but `state: running` for the run's whole duration and an
+        // operator had to inspect the worktree directly (#13633).
+        project_cook_running_progress(value, progress, source_run_id);
+        return;
+    }
     let Some(detail) = progress
         .get("detail")
         .and_then(Value::as_str)
@@ -1057,6 +1073,69 @@ fn project_owning_cook_terminal_status_from_progress(
         cook["source_run_id"] = json!(source_run_id);
     }
     object.insert("cook".to_string(), cook);
+}
+
+/// Project the same controller-owned phase/attempt/activity evidence the
+/// terminal path uses onto `cook` while a Cook is still running.
+///
+/// `metadata.cook_progress` already carries the active phase, the attempt
+/// number, and — once a heartbeat has sampled it — provider activity
+/// (elapsed time, files changed, running command). None of it reached
+/// `status` before this: `cook` was only ever populated at the terminal
+/// event, so a fifty-minute run reported `state: running` and nothing else
+/// for its entire duration (#13633). `gate_state` is read the same way the
+/// terminal projection reads it, so "has the gate run yet?" answers the same
+/// way before and after the run ends.
+fn project_cook_running_progress(value: &mut Value, progress: &Value, source_run_id: Option<&str>) {
+    let Some(phase) = progress
+        .get("phase")
+        .and_then(Value::as_str)
+        .filter(|phase| !phase.trim().is_empty())
+    else {
+        return;
+    };
+    let updated_at = progress.get("updated_at").and_then(Value::as_str);
+    let promotion = value
+        .pointer("/metadata/latest_promotion/status")
+        .and_then(Value::as_str)
+        .unwrap_or("not_attempted");
+    let mut cook = json!({
+        "phase": phase,
+        "attempt": progress.get("attempt").cloned().unwrap_or(Value::Null),
+        "detail": progress.get("detail").cloned().unwrap_or(Value::Null),
+        "updated_at": updated_at,
+        "phase_elapsed_seconds": updated_at.and_then(seconds_since_rfc3339),
+        "gate_state": promotion_gate_state(value, promotion),
+    });
+    if let Some(activity_summary) = progress
+        .get("activity")
+        .filter(|activity| !activity.is_null())
+        .and_then(|activity| {
+            serde_json::from_value::<agent_task_service::CookProviderActivity>(activity.clone())
+                .ok()
+        })
+        .and_then(|activity| activity.summary_line())
+    {
+        cook["activity_summary"] = json!(activity_summary);
+    }
+    if let Some(source_run_id) = source_run_id {
+        cook["source_run_id"] = json!(source_run_id);
+    }
+    if let Value::Object(object) = value {
+        object.insert("cook".to_string(), cook);
+    }
+}
+
+/// Seconds elapsed since an RFC 3339 timestamp, floored at zero so clock skew
+/// between the controller write and this read never reports a negative
+/// duration.
+fn seconds_since_rfc3339(timestamp: &str) -> Option<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+    Some(
+        (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc))
+            .num_seconds()
+            .max(0),
+    )
 }
 
 /// The Cook result is a lifecycle decision, not the provider's exit status.
@@ -5754,7 +5833,7 @@ fn compact_status_summary_with_aggregate(
         "run_id": record.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
         "state": record.get("state").cloned().unwrap_or(Value::Null),
         "child_run_state": record.get("child_run_state").cloned().unwrap_or(Value::Null),
-        "cook": compact_cook_status(record.get("cook"), run_id),
+        "cook": compact_cook_status(record.get("cook"), run_id, plan.as_ref()),
         "timestamps": compact_fields(record, &["created_at", "updated_at", "started_at", "completed_at"]),
         "work_summary": work_summary,
         "canonical_candidate": canonical_candidate_projection(canonical_candidate),
@@ -5932,7 +6011,7 @@ pub(crate) fn compact_aggregate_summary(
     enforce_compact_status_budget(summary)
 }
 
-fn compact_cook_status(cook: Option<&Value>, run_id: &str) -> Value {
+fn compact_cook_status(cook: Option<&Value>, run_id: &str, plan: Option<&AgentTaskPlan>) -> Value {
     let Some(cook) = cook.filter(|cook| !cook.is_null()) else {
         return Value::Null;
     };
@@ -5946,6 +6025,11 @@ fn compact_cook_status(cook: Option<&Value>, run_id: &str) -> Value {
             "detail",
             "publication",
             "terminal_status",
+            "attempt",
+            "updated_at",
+            "phase_elapsed_seconds",
+            "gate_state",
+            "activity_summary",
         ],
     );
     if let Some(gates) = cook
@@ -5960,6 +6044,22 @@ fn compact_cook_status(cook: Option<&Value>, run_id: &str) -> Value {
             "homeboy agent-task status {} --full",
             quote_arg(run_id)
         ));
+    }
+    // The active provider/model is durable plan state rather than run-record
+    // state — it answers "what is running right now?" only while the run is
+    // still in flight; a terminal Cook's executor identity is already carried
+    // in its outcome evidence (#13633).
+    if cook.get("phase").and_then(Value::as_str) != Some("terminal") {
+        if let Some(executor) = plan
+            .and_then(|plan| plan.tasks.first())
+            .map(|task| &task.executor)
+        {
+            summary["provider"] = json!({
+                "backend": executor.backend,
+                "selector": executor.selector,
+                "model": executor.model,
+            });
+        }
     }
     summary
 }
@@ -6394,7 +6494,7 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             });
         }
         let provider_failure =
-            homeboy::core::worktree_providers::compact_provider_failure_details(details);
+            homeboy::core::worktree_provider::compact_worktree_provider_failure_details(details);
         return Some(CollectedDiagnostic {
             task_id: "controller".to_string(),
             class: failure
@@ -8630,6 +8730,7 @@ mod tests {
         let cook = compact_cook_status(
             Some(&json!({ "deterministic_gates": gates.clone() })),
             "run-gates",
+            None,
         );
         let promotion =
             compact_promotion_summary(&json!({ "deterministic_gates": gates }), "run-gates");
@@ -8953,6 +9054,120 @@ mod tests {
         let rendered = activity["summary"].as_str().expect("rendered summary");
         assert!(rendered.contains("no files written yet"));
         assert!(rendered.contains("6m12s in `cargo test -q -p homeboy-agents`"));
+    }
+
+    #[test]
+    fn running_cook_status_surfaces_phase_attempt_elapsed_and_gate_state_instead_of_null() {
+        // #13633: mid-cook, `status` answered nothing but `state: running` and
+        // a null `totals` — no phase, no attempt number, no elapsed time in the
+        // current phase, and no gate state. An operator had no basis for
+        // deciding wait-or-kill without inspecting the git worktree directly.
+        // `cook` is the terminal-result projection's field; it must carry the
+        // controller's own live evidence for the run's entire duration, not
+        // only its last event.
+        let updated_at = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
+        let mut record = json!({
+            "run_id": "agent-task-mid-cook",
+            "state": "running",
+            "tasks": [],
+            "metadata": {
+                "cook_progress": {
+                    "phase": "heartbeat",
+                    "attempt": 2,
+                    "detail": "provider execution is still running",
+                    "updated_at": updated_at,
+                    "activity": {
+                        "files_changed": 3,
+                        "command": "cargo build",
+                        "command_elapsed_seconds": 120,
+                        "elapsed_seconds": 300
+                    }
+                },
+                "latest_promotion": { "status": "gate_failed" }
+            }
+        });
+
+        // This is exactly what `status_once` calls before building the compact
+        // summary for a run that is not a Cook-alias historical read.
+        project_owning_cook_terminal_status(&mut record);
+        let summary = compact_status_summary(&record, "agent-task-mid-cook");
+
+        // The overall run state must not be swapped to a terminal projection
+        // while the run is genuinely still running.
+        assert_eq!(summary["state"], "running");
+        assert_eq!(summary["cook"]["phase"], "heartbeat");
+        assert_eq!(summary["cook"]["attempt"], 2);
+        assert_eq!(summary["cook"]["gate_state"], "failed");
+        let elapsed = summary["cook"]["phase_elapsed_seconds"]
+            .as_i64()
+            .expect("phase elapsed is reported for a running cook");
+        assert!(
+            elapsed >= 60,
+            "elapsed should reflect the recorded updated_at, got {elapsed}"
+        );
+        let activity_summary = summary["cook"]["activity_summary"]
+            .as_str()
+            .expect("activity summary is reported while running");
+        assert!(activity_summary.contains("3 file(s) changed"));
+    }
+
+    #[test]
+    fn running_cook_status_surfaces_the_active_provider_and_model() {
+        // The same gap left "which model is running?" answerable only by
+        // inspecting process state directly. The active executor is durable
+        // plan state and is readable the instant the attempt is dispatched.
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = "agent-task-active-provider";
+            let executor = homeboy::agents::agent_tasks::AgentTaskExecutor {
+                backend: "opencode".to_string(),
+                selector: Some("primary".to_string()),
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: Some("openai/gpt-5.6-sol".to_string()),
+                config: Value::Null,
+            };
+            let task = homeboy::agents::agent_tasks::AgentTaskRequest {
+                schema: "homeboy/agent-task-request/v1".to_string(),
+                task_id: "cook".to_string(),
+                group_key: None,
+                parent_plan_id: None,
+                executor,
+                instructions: "do the work".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: homeboy::agents::agent_tasks::AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: homeboy::agents::agent_tasks::AgentTaskPolicy::default(),
+                limits: homeboy::agents::agent_tasks::AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
+                metadata: Value::Null,
+            };
+            let plan = AgentTaskPlan::new(run_id.to_string(), vec![task]);
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist plan");
+
+            let mut record = json!({
+                "run_id": run_id,
+                "state": "running",
+                "tasks": [],
+                "metadata": {
+                    "cook_progress": {
+                        "phase": "provider_start",
+                        "attempt": 1,
+                        "updated_at": chrono::Utc::now().to_rfc3339(),
+                    }
+                }
+            });
+
+            project_owning_cook_terminal_status(&mut record);
+            let summary = compact_status_summary(&record, run_id);
+
+            assert_eq!(summary["cook"]["provider"]["backend"], "opencode");
+            assert_eq!(summary["cook"]["provider"]["model"], "openai/gpt-5.6-sol");
+        });
     }
 
     #[test]
