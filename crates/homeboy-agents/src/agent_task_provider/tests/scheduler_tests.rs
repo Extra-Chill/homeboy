@@ -951,6 +951,61 @@ fn structured_runtime_progress_keeps_provider_alive_until_completion() {
 }
 
 #[test]
+fn workspace_file_activity_keeps_silent_provider_alive_until_completion() {
+    // Reproduces #13626: a CLI agent that edits files without ever writing to
+    // stdout/stderr until its final JSON result is still doing real,
+    // verifiable work. Only the workspace on disk can prove that, so the
+    // liveness watchdog must treat file activity there as progress rather
+    // than killing (and mis-filing as `stalled`) a provider that is silently
+    // producing a valid patch. The provider here writes a new file every
+    // 100ms for 3 seconds straight — well past the 1.2s liveness deadline it
+    // would have tripped under process-chatter-only liveness — and prints
+    // nothing at all until it is done.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = linked_cook_source(&temp);
+    let command = format!(
+        "node {}",
+        script(
+            "let fs=require('fs'); \
+             let req=JSON.parse(fs.readFileSync(0,'utf8')); \
+             let i=0; \
+             let timer=setInterval(()=>{ i++; fs.writeFileSync('agent-edit-'+i+'.txt','edit '+i+'\\n'); }, 100); \
+             setTimeout(()=>{ \
+               clearInterval(timer); \
+               process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed silently after workspace edits'})); \
+             }, 3000);"
+        )
+    );
+    let (mut request, provider) = request("task-liveness-workspace-activity", command);
+    request.workspace.root = Some(workspace.display().to_string());
+    request.limits.timeout_ms = Some(10_000);
+    request.limits.liveness_timeout_ms = Some(1_200);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "a provider silently editing its workspace must not be killed as stalled: {outcome:?}"
+    );
+    assert_ne!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Stalled)
+    );
+    assert_eq!(
+        outcome.summary.as_deref(),
+        Some("completed silently after workspace edits")
+    );
+
+    let files_changed = crate::agent_task_service::worktree_files_changed(&workspace)
+        .expect("git status readable after the run");
+    assert!(
+        files_changed >= 10,
+        "provider must have kept editing the workspace throughout the run, saw {files_changed} changed file(s)"
+    );
+}
+
+#[test]
 fn stalled_provider_retains_declared_attempt_workspace_artifact() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = linked_cook_source(&temp);

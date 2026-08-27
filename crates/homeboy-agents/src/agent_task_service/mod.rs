@@ -37,7 +37,7 @@ mod status_support;
 mod work_job;
 
 pub use cook::*;
-pub use cook_activity::{CookActivityProbe, CookProviderActivity};
+pub use cook_activity::{worktree_files_changed, CookActivityProbe, CookProviderActivity};
 pub use cook_adoption::*;
 pub use cook_baseline::*;
 pub use cook_batch_job::*;
