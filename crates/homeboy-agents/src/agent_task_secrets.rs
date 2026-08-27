@@ -71,6 +71,28 @@ pub fn secret_env_plan_status(plan: &SecretEnvPlan) -> Vec<AgentTaskSecretEnvSta
     secret_env_status(&plan.secret_env_names())
 }
 
+/// Redacted secret-env status for a scope, defaulting to every secret that
+/// scope declares a source for when the caller names none explicitly.
+///
+/// `agent-task auth status` and `agent-task providers --secret-env` both
+/// answer "what is this scope's secret-env readiness" and must agree: a
+/// secret that reads as configured from one must read as configured from the
+/// other, since they are the same question about the same underlying state
+/// (#13629). Routing both through this one function, rather than each
+/// assembling its own default name list, makes that agreement structural
+/// instead of something each call site has to maintain by hand.
+pub fn secret_env_status_for_scope(
+    explicit_names: &[String],
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Vec<AgentTaskSecretEnvStatus> {
+    if !explicit_names.is_empty() {
+        return secret_env_status_with_fallbacks(explicit_names, fallback_sources);
+    }
+    let mut names: Vec<String> = fallback_sources.keys().cloned().collect();
+    names.sort();
+    secret_env_status_with_fallbacks(&names, fallback_sources)
+}
+
 pub fn map_secret_to_env(
     name: &str,
     env_var: Option<&str>,
@@ -594,6 +616,62 @@ mod tests {
         let serialized = serde_json::to_string(&status).expect("status json");
         assert!(!serialized.contains("secret-value"));
         std::env::remove_var(present);
+    }
+
+    #[test]
+    fn secret_env_status_for_scope_defaults_to_every_declared_secret_and_agrees_with_explicit_lookup(
+    ) {
+        let configured = unique_env("SCOPE_CONFIGURED");
+        let missing = unique_env("SCOPE_MISSING");
+        std::env::set_var(&configured, "configured-value");
+        std::env::remove_var(&missing);
+        let source = |env_var: &str| AgentTaskSecretSource {
+            source: "env".to_string(),
+            env_var: Some(env_var.to_string()),
+            path: None,
+            scope: None,
+            name: None,
+            field: None,
+            value: None,
+        };
+        let mut fallback_sources = HashMap::new();
+        fallback_sources.insert(configured.clone(), source(&configured));
+        fallback_sources.insert(missing.clone(), source(&missing));
+
+        // `agent-task auth status` and `agent-task providers --secret-env`
+        // both call this with no explicit names when the operator names none,
+        // and must report the identical scope the same way (#13629): every
+        // secret this scope declares a source for, not an empty list.
+        let defaulted = secret_env_status_for_scope(&[], &fallback_sources);
+        let mut names: Vec<&str> = defaulted.iter().map(|entry| entry.name.as_str()).collect();
+        names.sort();
+        let mut expected = vec![configured.as_str(), missing.as_str()];
+        expected.sort();
+        assert_eq!(names, expected);
+        assert!(defaulted
+            .iter()
+            .any(|entry| entry.name == configured && entry.configured));
+        assert!(defaulted
+            .iter()
+            .any(|entry| entry.name == missing && !entry.configured));
+
+        // An explicit name list still wins and is not silently expanded, and
+        // it must resolve to the same verdict the default sweep produced for
+        // that name — one resolution path, one answer.
+        let explicit =
+            secret_env_status_for_scope(std::slice::from_ref(&configured), &fallback_sources);
+        assert_eq!(explicit.len(), 1);
+        assert_eq!(explicit[0].name, configured);
+        assert_eq!(
+            explicit[0].configured,
+            defaulted
+                .iter()
+                .find(|entry| entry.name == configured)
+                .expect("configured entry present in default sweep")
+                .configured
+        );
+
+        std::env::remove_var(configured);
     }
 
     #[test]

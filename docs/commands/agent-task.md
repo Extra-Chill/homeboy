@@ -1100,6 +1100,16 @@ missing-`--backend` error instead of failing with the same precondition (#12569)
 A supplied `--backend` still fails fast: that query names one backend and has no
 fuller picture to report.
 
+A `ready` verdict means "no reason found to block dispatch," not "confirmed to
+work." `dispatchability.checks.credentials.verified` distinguishes the two: it
+is `true` only when the routed provider declared its own live readiness probe
+(`readiness_invocation`) and that probe ran and passed. When it is `false`,
+`ready: true` reflects presence only — the declared credential material is
+readable somewhere, which is not proof it is still valid. A revoked or expired
+provider-owned credential (e.g. an OAuth refresh token) stays present on disk
+after revocation, so presence-only readiness must not be read as a live
+go/no-go signal for that class of credential (#13628).
+
 ## Repo-Local Gate Tasks
 
 Use `execution_kind: repo_local_gate` for deterministic, repo-local gate
