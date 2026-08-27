@@ -518,8 +518,7 @@ mod tests {
         let staged_path = repo.path().join("build/staged/runtime.zip");
         std::fs::create_dir_all(staged_path.parent().unwrap()).expect("staged dir");
         write_zip(&staged_path, &[("bundle/main.php", "<?php\n")]);
-        durable[0].durable_path =
-            Some(staged_path.to_str().expect("durable path").to_string());
+        durable[0].durable_path = Some(staged_path.to_str().expect("durable path").to_string());
         artifacts.extend(durable);
 
         validate_package_completeness(&component, repo.path(), &artifacts)
