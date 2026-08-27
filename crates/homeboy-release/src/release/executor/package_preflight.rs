@@ -40,9 +40,10 @@ pub(crate) fn validate_package_completeness(
     component.release.validate_package_coverage()?;
     // One archive can be referenced more than once, for example when a component
     // declares it as its build artifact and the release package manifest reports
-    // the same path. Those references resolve to a single file on disk, so count
-    // each resolved path once and let coverage selectors stay `exact`.
-    let mut counted_paths: BTreeSet<PathBuf> = BTreeSet::new();
+    // the same path, possibly carrying a different `durable_path`. Coverage
+    // selectors match on the declared artifact path, so dedupe on that same key
+    // rather than the resolved location, and let selectors stay `exact`.
+    let mut counted_paths: BTreeSet<String> = BTreeSet::new();
     let zip_artifacts: Vec<(&ReleaseArtifact, BTreeSet<String>)> = artifacts
         .iter()
         .filter_map(|artifact| {
@@ -51,7 +52,7 @@ pub(crate) fn validate_package_completeness(
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"));
-            if !is_zip || !counted_paths.insert(artifact_path.clone()) {
+            if !is_zip || !counted_paths.insert(normalize_archive_path(&artifact.path)) {
                 return None;
             }
             Some(read_zip_entries(&artifact_path).map(|entries| (artifact, entries)))
@@ -510,8 +511,15 @@ mod tests {
         // A component may declare an archive as its build artifact while the
         // release package manifest reports the same path. Both references
         // resolve to one file, so an exact selector still covers exactly one.
+        // The second reference can carry a different `durable_path`, so it
+        // resolves elsewhere on disk while still matching the same selector.
         let mut artifacts = zip_artifacts("build/runtime.zip");
-        artifacts.extend(zip_artifacts("build/runtime.zip"));
+        let mut durable = zip_artifacts("build/runtime.zip");
+        let staged_path = repo.path().join("build/staged/runtime.zip");
+        std::fs::create_dir_all(staged_path.parent().unwrap()).expect("staged dir");
+        write_zip(&staged_path, &[("bundle/main.php", "<?php\n")]);
+        durable[0].durable_path = Some(staged_path.to_str().expect("durable path").to_string());
+        artifacts.extend(durable);
 
         validate_package_completeness(&component, repo.path(), &artifacts)
             .expect("one archive referenced twice must count once");
