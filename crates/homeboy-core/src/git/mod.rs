@@ -388,6 +388,25 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::error::R
     Ok(())
 }
 
+/// Resolve the configured commit identity policy for a repository's origin
+/// remote host, if one is declared in `git_hosts` config.
+///
+/// Returns `Ok(None)` when the repository has no usable origin remote host
+/// or no policy is configured for that host — callers should treat this as
+/// "no opinion" rather than an error, matching [`validate_identities`]'s
+/// `*_unrestricted` behavior.
+pub fn resolve_host_identity_policy(path: &str) -> crate::error::Result<Option<GitIdentity>> {
+    let remote = git_config(path, &["config", "--get", "remote.origin.url"])?;
+    let Some(host) = remote_host(&remote) else {
+        return Ok(None);
+    };
+    let config = crate::defaults::load_config();
+    Ok(config.git_hosts.get(&host).map(|expected| GitIdentity {
+        name: expected.name.clone(),
+        email: expected.email.clone(),
+    }))
+}
+
 /// Resolve a (component_id, path) pair for a git operation.
 ///
 /// Resolution order:
