@@ -845,6 +845,12 @@ fn managed_runner_source_check(
         ))
         .success;
     if !is_git {
+        // `repair::repair_managed_sources` runs the declared sync script and
+        // then re-probes, so a missing checkout is definitively within its
+        // reach. The remote-mismatch case below is deliberately left without an
+        // action: whether a sync re-points an existing remote depends on the
+        // provider's script, and an action that cannot fix its check reports as
+        // ineffective at best and repairs the wrong thing at worst.
         return checks::error(
             id,
             format!(
@@ -853,7 +859,8 @@ fn managed_runner_source_check(
             ),
             contract.remediation.clone(),
             details,
-        );
+        )
+        .with_action(types::RunnerRepairAction::RefreshManagedSources);
     }
 
     let actual_remote = common::remote_line(
