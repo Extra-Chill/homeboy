@@ -220,6 +220,19 @@ pub fn map_secret_to_keychain_bundle(
     })
 }
 
+/// Path of the legacy standalone secrets file when it still exists on disk.
+///
+/// Mappings live in the global config at `/agent_task/secrets`; this file is
+/// the superseded location, kept only as a read fallback for installs that
+/// never migrated. The next mutating `agent-task auth` command persists the
+/// mappings to the global config and removes this file, and the command
+/// output discloses the move.
+pub fn legacy_secrets_file() -> Option<PathBuf> {
+    AgentTaskSecretConfig::path()
+        .ok()
+        .filter(|path| path.is_file())
+}
+
 pub fn remove_secret_mapping(
     name: &str,
     remove_keychain: bool,
@@ -446,8 +459,27 @@ impl AgentTaskSecretConfig {
         let mut config = defaults::load_config();
         config.agent_task.secrets = self.secrets.clone();
         defaults::save_config(&config)?;
-        Ok(())
+        remove_superseded_legacy_file()
     }
+}
+
+/// Delete the legacy standalone secrets file once the mappings are persisted
+/// in the global config. The file is never written anymore; leaving it behind
+/// keeps stale mappings looking live, and `load` would fall back to them
+/// whenever the global config has no secrets.
+fn remove_superseded_legacy_file() -> homeboy_core::Result<()> {
+    let Some(path) = legacy_secrets_file() else {
+        return Ok(());
+    };
+    fs::remove_file(&path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "remove superseded agent-task secrets file {} (mappings now live in homeboy.json at /agent_task/secrets)",
+                path.display()
+            )),
+        )
+    })
 }
 
 fn resolve_secret_source(
@@ -767,6 +799,78 @@ mod tests {
             assert!(!status.configured);
             assert_eq!(status.source, "missing");
             std::env::remove_var(source_name);
+        });
+    }
+
+    fn write_legacy_secrets_file(home: &std::path::Path, names: &[String]) -> PathBuf {
+        let legacy_path = home.join(".config/homeboy/agent-task-secrets.json");
+        std::fs::create_dir_all(legacy_path.parent().expect("config root"))
+            .expect("create config root");
+        let secrets: HashMap<String, Value> = names
+            .iter()
+            .map(|name| (name.clone(), serde_json::json!({ "source": "env" })))
+            .collect();
+        std::fs::write(
+            &legacy_path,
+            serde_json::json!({ "secrets": secrets }).to_string(),
+        )
+        .expect("write legacy secrets file");
+        legacy_path
+    }
+
+    #[test]
+    fn mutation_migrates_legacy_secrets_file_into_global_config_and_removes_it() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let kept = unique_env("LEGACY_KEPT_SECRET");
+            let removed = unique_env("LEGACY_REMOVED_SECRET");
+            std::env::remove_var(&kept);
+            std::env::remove_var(&removed);
+            let legacy_path =
+                write_legacy_secrets_file(home.path(), &[kept.clone(), removed.clone()]);
+            assert_eq!(legacy_secrets_file(), Some(legacy_path.clone()));
+
+            let status = remove_secret_mapping(&removed.clone(), false).expect("mapping removed");
+
+            // The mutation answered from the migrated state, and the superseded
+            // file is gone: exactly one authoritative location remains.
+            assert!(!status.configured);
+            assert!(!legacy_path.exists());
+            assert_eq!(legacy_secrets_file(), None);
+            let raw = std::fs::read_to_string(home.path().join(".config/homeboy/homeboy.json"))
+                .expect("global config written");
+            let config: Value = serde_json::from_str(&raw).expect("global config json");
+            let secrets = config
+                .pointer("/agent_task/secrets")
+                .expect("secrets migrated into global config");
+            assert!(secrets.get(&kept).is_some());
+            assert!(secrets.get(&removed).is_none());
+            // The process-global config memo is deliberately unkeyed (ambient
+            // only); force a fresh read of this isolated home's file rather
+            // than trust a memo another concurrently running test may have
+            // primed against a different root.
+            homeboy_core::defaults::reset_config_cache_for_test();
+            let loaded = AgentTaskSecretConfig::load();
+            assert!(loaded.secrets.contains_key(&kept));
+            assert!(!loaded.secrets.contains_key(&removed));
+        });
+    }
+
+    #[test]
+    fn removing_last_legacy_mapping_does_not_resurrect_the_superseded_file() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let name = unique_env("LEGACY_LAST_SECRET");
+            std::env::remove_var(&name);
+            let legacy_path = write_legacy_secrets_file(home.path(), std::slice::from_ref(&name));
+
+            remove_secret_mapping(&name, false).expect("mapping removed");
+
+            // The global config now holds zero secrets; had the legacy file
+            // survived, load() would fall back to it and resurrect the stale
+            // mapping. Force a fresh read (see comment in the sibling test
+            // above) rather than trust the ambient process-global memo.
+            assert!(!legacy_path.exists());
+            homeboy_core::defaults::reset_config_cache_for_test();
+            assert!(AgentTaskSecretConfig::load().secrets.is_empty());
         });
     }
 
