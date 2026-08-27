@@ -13,18 +13,30 @@
 use serde_json::Value;
 
 use super::store::RecoveredTerminalJob;
+use super::types::DaemonLinkedDurableRunState;
 
 /// Resolves a durable agent-task run's terminal outcome into a recovered job.
 pub trait AgentTaskTerminalRecoveryProvider: Send + Sync {
     /// Recover the terminal job for the durable agent-task `run_id`, or `None`
     /// when the run has no terminal result.
     fn recovered_terminal_agent_task_job(&self, run_id: &str) -> Option<RecoveredTerminalJob>;
+
+    /// Classify a linked durable run for replacement evidence. `None` means
+    /// the run cannot be resolved at all, which stays fail-closed.
+    fn linked_durable_run_state(&self, run_id: &str) -> Option<DaemonLinkedDurableRunState> {
+        (self.recovered_terminal_agent_task_job(run_id).is_some())
+            .then_some(DaemonLinkedDurableRunState::Terminal)
+    }
 }
 
 struct NoopProvider;
 
 impl AgentTaskTerminalRecoveryProvider for NoopProvider {
     fn recovered_terminal_agent_task_job(&self, _run_id: &str) -> Option<RecoveredTerminalJob> {
+        None
+    }
+
+    fn linked_durable_run_state(&self, _run_id: &str) -> Option<DaemonLinkedDurableRunState> {
         None
     }
 }
@@ -44,6 +56,12 @@ homeboy_engine_primitives::provider_registry! {
 /// provider (or none when the agent-task subsystem is absent).
 pub(crate) fn recovered_terminal_agent_task_job(run_id: &str) -> Option<RecoveredTerminalJob> {
     with_provider(|p| p.recovered_terminal_agent_task_job(run_id))
+}
+
+/// Classify a linked durable run via the registered provider, or `None` when
+/// no provider can resolve the run.
+pub(crate) fn linked_durable_run_state(run_id: &str) -> Option<DaemonLinkedDurableRunState> {
+    with_provider(|p| p.linked_durable_run_state(run_id))
 }
 
 /// Build a [`RecoveredTerminalJob`] from its parts. Used by the agent-task

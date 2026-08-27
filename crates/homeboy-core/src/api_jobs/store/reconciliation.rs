@@ -60,7 +60,10 @@ impl JobStore {
 
     /// Read active-job recovery evidence without reconciling or persisting jobs.
     /// Typed local-child identity is authoritative; legacy progress payloads are
-    /// intentionally not used to infer ownership.
+    /// intentionally not used to infer ownership. A linked durable run that is
+    /// already terminal is durable terminal evidence: it proves no workload for
+    /// that job remains, so the job is classified reconcilable instead of
+    /// blocking-ambiguous.
     pub fn active_daemon_job_recovery_evidence(
         &self,
         current_lease_id: Option<&str>,
@@ -77,6 +80,15 @@ impl JobStore {
                 }
                 let terminal_evidence =
                     recovered_terminal_from_result(&stored.events).map(|(status, _)| status);
+                let linked_durable_run_id = stored_job_durable_run_id(stored);
+                let linked_terminal = linked_durable_run_id.as_deref().and_then(
+                    super::super::agent_task_terminal_recovery::recovered_terminal_agent_task_job,
+                );
+                let linked_durable_run_state = linked_durable_run_id
+                    .as_deref()
+                    .and_then(super::super::agent_task_terminal_recovery::linked_durable_run_state);
+                let terminal_evidence = terminal_evidence
+                    .or_else(|| linked_terminal.as_ref().map(|recovered| recovered.status));
                 let child_pid = stored
                     .local_child
                     .as_ref()
@@ -112,9 +124,11 @@ impl JobStore {
                     terminal_evidence,
                     child_pid,
                     child_started_at: None,
-                    linked_durable_run_id: None,
-                    linked_durable_run_state: None,
-                    linked_durable_run_terminal_status: None,
+                    linked_durable_run_id,
+                    linked_durable_run_state,
+                    linked_durable_run_terminal_status: linked_terminal
+                        .as_ref()
+                        .map(|recovered| recovered.status),
                     disposition,
                 })
             })
@@ -396,13 +410,15 @@ impl JobStore {
         })
     }
 
-    /// Reconcile only jobs whose linked durable run has already reached a
-    /// terminal state. This deliberately does not inspect, stop, or alter live
-    /// children, so it is safe when a daemon's aggregate count includes both
-    /// stale handoffs and genuine work.
+    /// Reconcile only active jobs whose durable terminal evidence proves no
+    /// workload remains: their linked durable run already reached a terminal
+    /// state, or their own event log recorded a terminal result. This
+    /// deliberately does not inspect, stop, or alter live children, so it is
+    /// safe when a daemon's aggregate count includes both stale handoffs and
+    /// genuine work.
     pub fn reconcile_terminal_linked_daemon_jobs(&self) -> Result<Vec<Uuid>> {
         self.reconcile_terminal_linked_daemon_jobs_with_resolver(
-            recovered_terminal_agent_task_result,
+            recovered_terminal_agent_task_evidence,
         )
     }
 

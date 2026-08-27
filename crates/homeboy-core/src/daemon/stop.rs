@@ -608,7 +608,13 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
 }
 
 pub(super) fn active_daemon_job_ids() -> Result<Vec<Uuid>> {
-    let mut job_ids = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)?
+    let store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)?;
+    // Replacement is authorized without an operator attestation when durable
+    // terminal evidence proves no workload remains, so first reconcile every
+    // active job whose evidence already proves it. Live children, live linked
+    // runs, and unknown-ownership jobs stay untouched and keep blocking.
+    let _ = store.reconcile_terminal_linked_daemon_jobs();
+    let mut job_ids = store
         .list()
         .into_iter()
         .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))

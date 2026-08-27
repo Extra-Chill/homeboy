@@ -242,9 +242,17 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     // no PID to check. The exact job set is a compare-and-swap over the
     // destructive scope, and the store refuses any mismatch — so the ids can be
     // filled from the report, while the workload attestation cannot be.
+    //
+    // Jobs with durable terminal evidence (a terminal linked durable run or a
+    // recorded terminal result) prove no workload remains, so they are
+    // reconciled by the stop gate and never require the attestation.
     let job_ids: Vec<Uuid> = status
         .active_job_recovery_evidence
         .iter()
+        .filter(|evidence| {
+            evidence.disposition
+                != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+        })
         .map(|evidence| evidence.job_id)
         .collect();
     if let Some(lease_id) = freshness.lease_id.as_deref() {
@@ -313,13 +321,17 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
 ///
 /// This policy is intentionally independent of the command requesting daemon
 /// admission. It trusts only the authoritative status report and accepts only
-/// the bounded stop/start plan: zero durable jobs, an explicitly restartable
-/// lease, no attestations, and no other mutation mixed into the plan.
+/// the bounded stop/start plan: an explicitly restartable lease whose active
+/// jobs all carry durable terminal evidence (so no workload remains), no
+/// attestations, and no other mutation mixed into the plan.
 pub fn authorizes_automatic_idle_restart(status: &DaemonStatus) -> bool {
     let plan = plan_recovery(status);
     !status.fresh
         && status.freshness.active_jobs == 0
-        && status.active_job_recovery_evidence.is_empty()
+        && status.active_job_recovery_evidence.iter().all(|evidence| {
+            evidence.disposition
+                == crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+        })
         && status.freshness.restartable
         && plan.executable
         && plan.required_confirmations.is_empty()
@@ -571,6 +583,61 @@ mod tests {
         );
     }
 
+    /// #13619: durable terminal evidence proves no workload remains, so those
+    /// jobs are reconciled by the stop gate without an operator attestation
+    /// and are excluded from the attestation job set. Only the genuinely
+    /// ambiguous live workload still demands the confirmation.
+    #[test]
+    fn terminal_evidence_jobs_are_reconciled_without_workload_attestation() {
+        let mut status = status(
+            Some(super::super::DaemonStaleReasonCode::LeaseCorrupt),
+            Vec::new(),
+            1,
+        );
+        let terminal = terminal_recovery_evidence(Uuid::from_u128(7));
+        let blocking = recovery_evidence(Uuid::from_u128(8));
+        status.active_job_recovery_evidence = vec![terminal, blocking];
+
+        let plan = plan_recovery(&status);
+
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_DEAD_LEASE_ORPHANS);
+        let args = &plan.steps[0].action.as_ref().expect("argv").args;
+        assert!(
+            !args.contains(&Uuid::from_u128(7).to_string()),
+            "terminal-evidence job never requires attestation: {args:?}"
+        );
+        assert!(
+            args.contains(&Uuid::from_u128(8).to_string()),
+            "the ambiguous live workload is still named: {args:?}"
+        );
+        assert_eq!(
+            plan.required_confirmations,
+            vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
+            "the ambiguous workload keeps the operator attestation"
+        );
+    }
+
+    /// Replacement may proceed without any attestation when every active job
+    /// carries durable terminal evidence: no workload remains.
+    #[test]
+    fn terminal_evidence_authorizes_automatic_idle_restart() {
+        let mut status = status(
+            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            vec![
+                DaemonRepairStep::executable(DAEMON_STOP, stop_for_lease(LEASE_ID)),
+                DaemonRepairStep::executable(DAEMON_START, start()),
+            ],
+            0,
+        );
+        status.active_job_recovery_evidence = vec![terminal_recovery_evidence(Uuid::nil())];
+
+        let plan = plan_recovery(&status);
+        assert!(plan.executable);
+        assert!(plan.required_confirmations.is_empty());
+        assert!(authorizes_automatic_idle_restart(&status));
+    }
+
     fn recovery_evidence(job_id: Uuid) -> crate::api_jobs::DaemonActiveJobRecoveryEvidence {
         crate::api_jobs::DaemonActiveJobRecoveryEvidence {
             job_id,
@@ -588,6 +655,18 @@ mod tests {
             linked_durable_run_terminal_status: None,
             disposition:
                 crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable,
+        }
+    }
+
+    fn terminal_recovery_evidence(
+        job_id: Uuid,
+    ) -> crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+        crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+            linked_durable_run_id: Some("run-13619".to_string()),
+            linked_durable_run_state: Some(crate::api_jobs::DaemonLinkedDurableRunState::Terminal),
+            linked_durable_run_terminal_status: Some(crate::api_jobs::JobStatus::Cancelled),
+            disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence,
+            ..recovery_evidence(job_id)
         }
     }
 
