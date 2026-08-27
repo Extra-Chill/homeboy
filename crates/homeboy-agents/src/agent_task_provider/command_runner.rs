@@ -429,6 +429,7 @@ fn classify_provider_policy_denial(
 fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
     if outcome_text_is_rate_limited(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
+        annotate_usage_cap(outcome);
         return;
     }
     let already_transient =
@@ -451,6 +452,38 @@ fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
     if outcome_text_is_transient(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::Transient);
     }
+}
+
+/// Attach a [`super::usage_cap::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS`]
+/// diagnostic naming the reset time when the outcome text carries a usage-cap
+/// signature the scheduler's rotation-skip logic can act on (#13644). A
+/// generic rate-limit failure without a recognizable usage-cap reset stays a
+/// plain `RateLimited` classification, unchanged.
+fn annotate_usage_cap(outcome: &mut AgentTaskOutcome) {
+    let now = chrono::Utc::now();
+    let reset_at = outcome
+        .summary
+        .as_deref()
+        .and_then(|text| super::usage_cap::detect_usage_cap(text, now))
+        .or_else(|| {
+            outcome.diagnostics.iter().find_map(|diagnostic| {
+                super::usage_cap::detect_usage_cap(&diagnostic.message, now).or_else(|| {
+                    super::usage_cap::detect_usage_cap(&diagnostic.data.to_string(), now)
+                })
+            })
+        });
+    let Some(reset_at) = reset_at else {
+        return;
+    };
+    push_unique_diagnostic(
+        &mut outcome.diagnostics,
+        super::usage_cap::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS.to_string(),
+        format!(
+            "provider usage cap reached; resets at {}",
+            reset_at.to_rfc3339()
+        ),
+        json!({ "reset_at": reset_at.to_rfc3339() }),
+    );
 }
 
 fn outcome_text_is_rate_limited(outcome: &AgentTaskOutcome) -> bool {
@@ -530,6 +563,8 @@ pub(super) fn is_rate_limited_provider_error(text: &str) -> bool {
         "provider quota",
         "quota exceeded",
         "exceeded your quota",
+        "usage limit",
+        "usage cap",
     ]
     .iter()
     .any(|pattern| lowered.contains(pattern))

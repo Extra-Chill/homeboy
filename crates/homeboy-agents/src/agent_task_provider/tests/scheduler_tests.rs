@@ -1826,3 +1826,66 @@ fn plan_runtime_preflight_skips_provider_without_declared_checks() {
     enforce_runtime_preflight_checks_for_plan_with_providers(&plan, &[provider])
         .expect("provider without declared checks is a no-op");
 }
+
+#[test]
+fn a_flat_rate_usage_limit_is_classified_rate_limited_and_carries_its_reset_time() {
+    // #13644: "5-hour usage limit reached. Resets in 3hr 3min." (opencode-go)
+    // is not a generic rate-limit blip Homeboy should retry blindly — it is a
+    // known, temporary cap with a computable reset time rotation can act on.
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-usage-cap',status:'provider_error',summary:'5-hour usage limit reached. Resets in 3hr 3min.'}}));"
+        ))
+    );
+    let (request, provider) = request("task-usage-cap", command);
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::RateLimited)
+    );
+    let diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.class
+                == crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
+        })
+        .expect("usage-cap diagnostic naming the reset time");
+    let reset_at = diagnostic.data["reset_at"]
+        .as_str()
+        .expect("reset_at string")
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .expect("reset_at is a valid RFC3339 timestamp");
+    assert!(
+        reset_at > chrono::Utc::now(),
+        "the reported reset time must be in the future relative to when the cap was observed"
+    );
+}
+
+#[test]
+fn a_bare_rate_limit_without_a_recognizable_usage_cap_reset_stays_plain_rate_limited() {
+    // A generic 429 with no reset-time signature is still `RateLimited` for
+    // retry/rotation purposes, but there is no known reset time to skip
+    // rotation entries against, so no usage-cap diagnostic is attached.
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-bare-429',status:'provider_error',summary:'429 Too Many Requests'}}));"
+        ))
+    );
+    let (request, provider) = request("task-bare-429", command);
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::RateLimited)
+    );
+    assert!(!outcome.diagnostics.iter().any(|diagnostic| {
+        diagnostic.class
+            == crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
+    }));
+}
