@@ -7095,7 +7095,7 @@ fi
     }
 
     fn with_materialized_cook_batch_worktrees(test: impl FnOnce()) {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
             let mut config = homeboy::core::defaults::load_config();
             config.agent_task.default_backend = Some("sandbox".to_string());
             config.worktree_providers.clear();
@@ -7104,6 +7104,32 @@ fi
             );
             homeboy::core::defaults::save_config(&config)
                 .expect("configure fixture default backend");
+            // `--repo homeboy` only resolves against a registered primary, so the
+            // fixture has to own that registration as well as the worktrees it
+            // adopts. Without it every cook-batch case fails in repository
+            // resolution before reaching the behavior under test.
+            let primary = home.path().join("cook-batch-primary");
+            std::fs::create_dir_all(&primary).expect("create primary fixture");
+            for args in [
+                ["init", "-b", "main"].as_slice(),
+                ["config", "user.email", "test@example.com"].as_slice(),
+                ["config", "user.name", "Homeboy Test"].as_slice(),
+                ["commit", "--allow-empty", "-m", "initial"].as_slice(),
+                // The planned source ref has to resolve without a network, so the
+                // fixture publishes `origin/main` locally rather than fetching it.
+                ["update-ref", "refs/remotes/origin/main", "HEAD"].as_slice(),
+            ] {
+                assert!(
+                    Command::new("git")
+                        .args(args)
+                        .current_dir(&primary)
+                        .status()
+                        .expect("initialize primary fixture")
+                        .success(),
+                    "git {args:?} failed"
+                );
+            }
+            write_component_registration(home.path(), "homeboy", &primary);
             let worktrees = tempfile::tempdir().expect("managed worktree fixtures");
             for (handle, name) in [
                 ("homeboy@fix-issue-6453-homeboy", "issue-6453"),

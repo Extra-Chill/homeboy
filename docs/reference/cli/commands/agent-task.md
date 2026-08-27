@@ -100,7 +100,7 @@ WAIT POLICY: Cook always persists a durable run id before materialization, so a 
 
 By default Cook observes until the lifecycle is terminal and returns the terminal Cook report.
 
-`--detach-after-handoff` returns once the run is durably accepted. Its result describes a submission, not an outcome. It is honored on every placement: with `--placement local` the Cook is re-executed in its own session, so it survives a client that is interrupted or times out.
+`--detach-after-handoff` returns once the controller durably owns the run. Its submission result reports `accepted` after executable-attempt materialization or `pending` while a live supervised child is still preparing. It is honored on every placement: with `--placement local` the Cook is re-executed in its own session, so it survives a client that is interrupted or times out.
 
 Do not infer the wait policy from client interactivity. An orchestration client that needs the detached contract should pass `--detach-after-handoff` rather than rely on the default, and read the terminal outcome from `agent-task status <run-id>` in either case.
 
@@ -1050,7 +1050,7 @@ This is the core-owned publication boundary for external runtimes.
 | `--external-usage-limitations` | `<TEXT>` | Limitations of the external usage evidence or manual review |
 | `--external-usage-url` | `<URL>` | Reviewer-resolvable HTTPS URL for external usage evidence |
 | `--gate-result` | `<NAME=STATUS[:DETAIL]>` | _no help text_ |
-| `--verify` | `<COMMAND>` | Execute one deterministic verification command against the committed manual candidate |
+| `--verify` | `<COMMAND>` | Execute a deterministic verification command against the committed manual candidate. Repeat for multiple gates |
 | `--changed-file` | `<PATH>` | _no help text_ |
 | `--protected-branch` | `<BRANCH>` | _no help text_ |
 | `--ai-used-for` | `<TEXT>` | _no help text_ |

@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.361.18] - 2026-08-27
+
+### Fixed
+- gate the resolver fixture target on test-support
+- measure liveness from provider artifact activity
+- refuse incomparable legacy baselines
+
+## [0.361.17] - 2026-08-27
+
+### Fixed
+- bind retry ownership at reservation
+
+## [0.361.16] - 2026-08-27
+
+### Fixed
+- recover queued retry runtime
+- preserve retry child diagnostics
+- initialize composed disclosure state
+- disclose substantive Cook retries
+- bound worktree path resolution
+
 ## [0.361.15] - 2026-08-26
 
 ### Fixed

@@ -302,12 +302,21 @@ pub(super) fn intercept_local_cook_retry(
             (pid, start_identity, launch_token)
         }
     };
+    let child_session_ref = launch_token
+        .1
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| {
+            Error::internal_unexpected("detached retry session reference is unavailable")
+        })?;
     let controller_job = match submit_cook_retry_controller_job(
         &controller_client,
         cook_id,
         &run_id,
         pid,
         &start_identity,
+        child_session_ref,
     ) {
         Ok(job) => job,
         Err(error) => {
@@ -461,12 +470,15 @@ fn record_retry_launcher_failure(
 /// concurrent caller advances the recipe.
 fn retry_child_args(normalized_args: &[String], run_id: &str) -> Vec<String> {
     let mut args = Vec::with_capacity(normalized_args.len() + 2);
+    // Only a run-id flag before the bare separator is Homeboy's own. Stripping one
+    // past it would rewrite a forwarded argument instead of this retry (#11577).
+    let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
     let mut index = usize::from(
         normalized_args
             .first()
             .is_some_and(|arg| arg == "homeboy" || arg.ends_with("/homeboy")),
     );
-    while index < normalized_args.len() {
+    while index < owned {
         let arg = &normalized_args[index];
         if arg == "--new-run-id" {
             index += 2;
@@ -477,8 +489,11 @@ fn retry_child_args(normalized_args: &[String], run_id: &str) -> Vec<String> {
         }
         index += 1;
     }
+    // The pin belongs to Homeboy, so it stays ahead of the separator and the
+    // forwarded tail is carried through untouched.
     args.push("--new-run-id".to_string());
     args.push(run_id.to_string());
+    args.extend_from_slice(&normalized_args[owned..]);
     args
 }
 
@@ -907,12 +922,14 @@ fn submit_cook_retry_controller_job(
     run_id: &str,
     pid: u32,
     start_identity: &homeboy::core::process::ProcessStartIdentity,
+    child_session_ref: &str,
 ) -> homeboy::core::Result<ControllerJobHandoff> {
     let submission = homeboy::agents::agent_task_service::cook_retry_job_submission(
         cook_id,
         run_id,
         pid,
         start_identity,
+        child_session_ref,
     )?;
     let job = client.submit(submission)?;
     Ok(ControllerJobHandoff::Owned {

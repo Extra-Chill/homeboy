@@ -950,6 +950,57 @@ fn structured_runtime_progress_keeps_provider_alive_until_completion() {
     );
 }
 
+/// A runtime that streams telemetry into an artifact whose name does not
+/// contain `progress` is still working, and must not be killed as stalled.
+///
+/// Regression for #13623: liveness filtered artifacts by file name, so an
+/// OpenCode Cook writing `cook-homeboy-opencode-runtime-stdout.log` was read as
+/// producing nothing. It was killed at the liveness deadline with
+/// `stdout_bytes: 0` and `runtime_progress_events: 0` while that file already
+/// held 94KB. The script below reproduces that shape: it writes only to a
+/// non-`progress` artifact and keeps its stdout silent until the end, so the
+/// parent pipes stay empty and the artifact is the only evidence of life.
+#[test]
+fn non_progress_named_runtime_artifact_keeps_provider_alive_until_completion() {
+    let command = format!(
+        "node {}",
+        script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let log=path.join(req.artifacts_path,'task-runtime-stdout.log'); let timer=setInterval(()=>fs.appendFileSync(log,'working\\n'),10); setTimeout(()=>{clearInterval(timer); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed while streaming a runtime log'}));},900);")
+    );
+    let (mut request, provider) = request("task-liveness-runtime-log", command);
+    request.limits.timeout_ms = Some(1_500);
+    request.limits.liveness_timeout_ms = Some(500);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(
+        outcome.summary.as_deref(),
+        Some("completed while streaming a runtime log")
+    );
+}
+
+/// Counting every artifact file must not blunt the watchdog: a provider that
+/// writes nothing anywhere is still stalled and still gets killed.
+#[test]
+fn provider_writing_no_artifacts_is_still_killed_for_liveness() {
+    let command = format!("node {}", script("setInterval(() => {}, 1000);"));
+    let (mut request, provider) = request("task-liveness-no-artifacts", command);
+    request.limits.timeout_ms = Some(5_000);
+    request.limits.liveness_timeout_ms = Some(300);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.provider_liveness_timeout"
+    );
+    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("liveness"));
+    assert_eq!(
+        outcome.diagnostics[0].data["runtime_progress_events"],
+        json!(0)
+    );
+}
+
 #[test]
 fn stalled_provider_retains_declared_attempt_workspace_artifact() {
     let temp = tempfile::tempdir().expect("tempdir");

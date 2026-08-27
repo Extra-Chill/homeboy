@@ -694,6 +694,12 @@ fn process_baseline(
             }
 
             baseline_comparison = Some(comparison);
+        } else if provenance.resolution
+            == lint_baseline::LintBaselineResolution::LegacyEmptyIncomparable
+        {
+            eprintln!(
+                "[lint] Legacy full baseline is incomparable: it has no fingerprints or scope provenance"
+            );
         }
     }
 
@@ -783,6 +789,7 @@ fn process_changed_since_baseline(
 
     let mut provenance = provenance.clone();
     provenance.compared = true;
+    provenance.resolution = lint_baseline::LintBaselineResolution::GitBase;
     provenance.base_ref = Some(base_ref);
     let comparison = lint_baseline::compare_against_findings(lint_findings, &baseline_findings);
     let exit_override = Some(if comparison.drift_increased { 1 } else { 0 });
