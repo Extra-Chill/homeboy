@@ -341,13 +341,19 @@ pub fn base_advance_warning(path: &str, baseline_ref: &str) -> Option<String> {
     let merge_base = resolve_merge_base(path, baseline_ref).ok()?;
     let tip_output = execute_git(
         path,
-        &["rev-parse", "--verify", &format!("{baseline_ref}^{{commit}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{baseline_ref}^{{commit}}"),
+        ],
     )
     .ok()?;
     if !tip_output.status.success() {
         return None;
     }
-    let tip = String::from_utf8_lossy(&tip_output.stdout).trim().to_string();
+    let tip = String::from_utf8_lossy(&tip_output.stdout)
+        .trim()
+        .to_string();
     if tip == merge_base {
         return None;
     }
@@ -574,7 +580,10 @@ mod tests {
         git(&path, &["commit", "-q", "-m", "unrelated upstream change"]);
         fs::remove_file(dir.path().join("shared.txt")).unwrap();
         git(&path, &["add", "."]);
-        git(&path, &["commit", "-q", "-m", "unrelated upstream deletion"]);
+        git(
+            &path,
+            &["commit", "-q", "-m", "unrelated upstream deletion"],
+        );
 
         // The candidate makes its own, unrelated, intended change.
         git(&path, &["checkout", "-q", "candidate"]);
@@ -616,8 +625,7 @@ mod tests {
 
         git(&path, &["checkout", "-q", "candidate"]);
 
-        let warning =
-            base_advance_warning(&path, "main").expect("warning when base has advanced");
+        let warning = base_advance_warning(&path, "main").expect("warning when base has advanced");
         assert!(
             warning.contains("2 commits"),
             "expected the warning to report the exact advance count: {warning}"
