@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.362.0] - 2026-08-27
+
+### Added
+- give a doctor remediation a machine-runnable form
+- report workflow action-pin staleness
+
+### Fixed
+- stop reading forwarded arguments as Homeboy's own
+- reuse exact promotion gates
+
 ## [0.361.18] - 2026-08-27
 
 ### Fixed
