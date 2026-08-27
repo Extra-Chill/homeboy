@@ -470,12 +470,15 @@ fn record_retry_launcher_failure(
 /// concurrent caller advances the recipe.
 fn retry_child_args(normalized_args: &[String], run_id: &str) -> Vec<String> {
     let mut args = Vec::with_capacity(normalized_args.len() + 2);
+    // Only a run-id flag before the bare separator is Homeboy's own. Stripping one
+    // past it would rewrite a forwarded argument instead of this retry (#11577).
+    let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
     let mut index = usize::from(
         normalized_args
             .first()
             .is_some_and(|arg| arg == "homeboy" || arg.ends_with("/homeboy")),
     );
-    while index < normalized_args.len() {
+    while index < owned {
         let arg = &normalized_args[index];
         if arg == "--new-run-id" {
             index += 2;
@@ -486,8 +489,11 @@ fn retry_child_args(normalized_args: &[String], run_id: &str) -> Vec<String> {
         }
         index += 1;
     }
+    // The pin belongs to Homeboy, so it stays ahead of the separator and the
+    // forwarded tail is carried through untouched.
     args.push("--new-run-id".to_string());
     args.push(run_id.to_string());
+    args.extend_from_slice(&normalized_args[owned..]);
     args
 }
 
