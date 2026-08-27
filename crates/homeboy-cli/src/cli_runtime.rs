@@ -2817,27 +2817,15 @@ fn preflight_hot_command_with_input(
                     .as_ref()
                     .and_then(|readiness| readiness.selected_runner_id.as_deref()),
             );
-            let runner_admits_offload = if hot_command.allows_warm_runner_coordination {
-                resource_policy::admits_warm_runner_coordination(
-                    hot_command,
-                    &resources,
-                    selected_lab_runner
-                        .filter(|_| !matches!(cli.placement, crate::cli_surface::Placement::Local)),
-                    lab_readiness.as_ref(),
-                )
-            } else {
-                hot_command.lab_offload_supported
-                    && selected_lab_runner.is_some_and(|runner_id| {
-                        lab_readiness.as_ref().is_some_and(|readiness| {
-                            readiness.state
-                                == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-                                && readiness
-                                    .available_runner_ids
-                                    .iter()
-                                    .any(|available| available == runner_id)
-                        })
-                    })
-            };
+            let required_lab_placement = required_lab_placement(cli, hot_command);
+            let runner_admits_offload = resource_policy::runner_admits_lab_dispatch(
+                hot_command,
+                &resources,
+                selected_lab_runner
+                    .filter(|_| !matches!(cli.placement, crate::cli_surface::Placement::Local)),
+                lab_readiness.as_ref(),
+                required_lab_placement,
+            );
             let runner_admits_offload = runner_admits_offload
                 && selected_lab_runner.is_none_or(|runner_id| {
                     review_test_runner_requirements(cli).is_none_or(|requirements| {
@@ -2875,7 +2863,6 @@ fn preflight_hot_command_with_input(
                 lab_readiness.as_ref(),
                 cli.placement,
             );
-            let required_lab_placement = required_lab_placement(cli, hot_command);
             let required_lab_runner = required_lab_placement
                 .then_some(selected_lab_runner)
                 .flatten();

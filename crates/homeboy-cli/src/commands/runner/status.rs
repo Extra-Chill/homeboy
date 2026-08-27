@@ -36,12 +36,19 @@ pub(super) fn status(
     if let Some(id) = id {
         let runners = runner::list()?;
         if is_controller_local_runner(&runners, id) {
+            // Best-effort: a controller-local query must not fail because a
+            // configured Lab runner could not be probed.
+            let lab_readiness = runner::lab_runner_readiness().ok();
             return Ok((
                 RunnerOutput {
                     command: "runner.status".to_string(),
                     id: Some(id.to_string()),
                     extra: RunnerExtra {
-                        execution_capabilities: Some(global_execution_capabilities(&runners, None)?),
+                        execution_capabilities: Some(global_execution_capabilities(
+                            &runners,
+                            None,
+                            lab_readiness.as_ref(),
+                        )?),
                         operator_hints: vec![
                             "Controller-local execution is available; use `homeboy --placement local agent-task cook ...`."
                                 .to_string(),
@@ -53,10 +60,12 @@ pub(super) fn status(
                 0,
             ));
         }
-        let preferred_lab_runner = runner::resolve_default_lab_runner()?;
+        let lab_readiness = runner::lab_runner_readiness()?;
+        let preferred_lab_runner = lab_readiness.selected_runner_id.clone();
         let admission_snapshot = runner::runner_admission_snapshot(id)?;
         let report = admission_snapshot.status;
-        let capabilities = global_execution_capabilities(&runners, Some(&report))?;
+        let capabilities =
+            global_execution_capabilities(&runners, Some(&report), Some(&lab_readiness))?;
         let generation_inventory = admission_snapshot.generation_inventory;
         // Lead with the compact authoritative admission answer, summarizing the
         // draining generations by count rather than expanding the full ledger
@@ -135,10 +144,11 @@ pub(super) fn status(
         ));
     }
 
-    let preferred_lab_runner = runner::resolve_default_lab_runner()?;
+    let lab_readiness = runner::lab_runner_readiness()?;
+    let preferred_lab_runner = lab_readiness.selected_runner_id.clone();
     let runners = runner::list()?;
     let sessions = non_local_sessions(&runners, runner::persisted_statuses()?);
-    let capabilities = execution_capabilities(&runners, &sessions);
+    let capabilities = execution_capabilities(&runners, &sessions, Some(&lab_readiness));
     if !full {
         let omitted = sessions.len().saturating_sub(DEFAULT_STATUS_SESSION_LIMIT);
         let sessions = sessions
@@ -167,7 +177,7 @@ pub(super) fn status(
         ));
     }
     let (sessions, inspection) = full_status_projections(sessions, runner::statuses_indexed());
-    let capabilities = execution_capabilities(&runners, &sessions);
+    let capabilities = execution_capabilities(&runners, &sessions, Some(&lab_readiness));
     let mut operator_hints: Vec<String> = sessions
         .iter()
         .flat_map(runner_status_operator_hints)
@@ -235,6 +245,7 @@ pub(super) fn non_local_sessions(
 fn global_execution_capabilities(
     runners: &[Runner],
     queried_report: Option<&RunnerStatusReport>,
+    lab_readiness: Option<&runner::LabRunnerReadiness>,
 ) -> homeboy::core::Result<RunnerExecutionCapabilities> {
     let mut sessions = runner::persisted_statuses()?;
     if let Some(queried_report) = queried_report {
@@ -247,20 +258,27 @@ fn global_execution_capabilities(
             sessions.push(queried_report.clone());
         }
     }
-    Ok(execution_capabilities(runners, &sessions))
+    Ok(execution_capabilities(runners, &sessions, lab_readiness))
 }
 
 fn execution_capabilities(
     runners: &[Runner],
     sessions: &[RunnerStatusReport],
+    lab_readiness: Option<&runner::LabRunnerReadiness>,
 ) -> RunnerExecutionCapabilities {
-    execution_capabilities_with_local_placement(true, runners, sessions)
+    execution_capabilities_with_local_placement(true, runners, sessions, lab_readiness)
 }
 
+/// `lab_readiness` is the same admission projection dispatch preflight
+/// consults (`resolve_parsed_command_preflight` requires
+/// `LabRunnerReadinessState::ConnectedReady`). Reusing it here keeps
+/// `runner status` from reporting a connected-but-not-admitted runner as
+/// dispatch-ready (#13631).
 pub(super) fn execution_capabilities_with_local_placement(
     local_placement_available: bool,
     runners: &[Runner],
     sessions: &[RunnerStatusReport],
+    lab_readiness: Option<&runner::LabRunnerReadiness>,
 ) -> RunnerExecutionCapabilities {
     let connected_runner_ids = sessions
         .iter()
@@ -268,16 +286,44 @@ pub(super) fn execution_capabilities_with_local_placement(
         .filter(|report| report.connected)
         .map(|report| report.runner_id.clone())
         .collect::<Vec<_>>();
-    let next_action = if connected_runner_ids.is_empty() {
-        sessions
-            .iter()
-            .find(|report| !is_controller_local_runner(runners, &report.runner_id))
-            .map(|report| {
-                terminal_daemon_ownership_diagnostic(report)
-                    .unwrap_or_else(|| report.status_action().render_command())
-            })
+    let admitted_runner_ids = lab_readiness
+        .map(|readiness| readiness.available_runner_ids.clone())
+        .unwrap_or_default();
+    let available = !admitted_runner_ids.is_empty();
+    let (reasons, next_action) = if available {
+        (Vec::new(), None)
+    } else if connected_runner_ids.is_empty() {
+        (
+            Vec::new(),
+            sessions
+                .iter()
+                .find(|report| !is_controller_local_runner(runners, &report.runner_id))
+                .map(|report| {
+                    terminal_daemon_ownership_diagnostic(report)
+                        .unwrap_or_else(|| report.status_action().render_command())
+                }),
+        )
     } else {
-        None
+        // Connected but not admitted: report the true state plainly instead of
+        // presenting connectivity as dispatch readiness, and surface the
+        // action that would admit the runner (#13631).
+        let reasons = lab_readiness
+            .map(|readiness| readiness.reasons.clone())
+            .unwrap_or_default();
+        let next_action = lab_readiness
+            .and_then(|readiness| readiness.remediation_commands.first().cloned())
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .find(|report| {
+                        report.connected && !is_controller_local_runner(runners, &report.runner_id)
+                    })
+                    .map(|report| {
+                        terminal_daemon_ownership_diagnostic(report)
+                            .unwrap_or_else(|| report.status_action().render_command())
+                    })
+            });
+        (reasons, next_action)
     };
     RunnerExecutionCapabilities {
         local_placement: RunnerExecutionCapability {
@@ -294,8 +340,9 @@ pub(super) fn execution_capabilities_with_local_placement(
             },
         },
         lab_runner_connection: LabRunnerConnectionCapability {
-            available: !connected_runner_ids.is_empty(),
+            available,
             connected_runner_ids,
+            reasons,
             next_action,
         },
     }

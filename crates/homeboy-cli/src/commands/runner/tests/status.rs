@@ -1680,8 +1680,13 @@ fn execution_capabilities_separate_local_placement_from_lab_connections() {
     ];
 
     for (name, runners, reports, local_available, connected_ids) in cases {
-        let capabilities =
-            execution_capabilities_with_local_placement(local_available, &runners, &reports);
+        let readiness = admitted_readiness(connected_ids.clone().unwrap_or_default());
+        let capabilities = execution_capabilities_with_local_placement(
+            local_available,
+            &runners,
+            &reports,
+            Some(&readiness),
+        );
         let lab_connection_available = connected_ids.is_some();
         assert_eq!(
             capabilities.local_placement.available, local_available,
@@ -1703,6 +1708,69 @@ fn execution_capabilities_separate_local_placement_from_lab_connections() {
                 .contains("runner connect"),
             "{name}"
         );
+    }
+}
+
+/// #13631: a runner can be connected without being admitted (e.g. its daemon
+/// is stale or its required capabilities never probed ready). `runner status`
+/// must report that gap plainly instead of presenting connectivity as
+/// dispatch readiness — the exact mismatch the issue reported between
+/// `runner status` and cook admission.
+#[test]
+fn connected_but_unadmitted_runner_is_not_reported_as_dispatch_ready() {
+    let connected = connected_report();
+    let remote = configured_runner("homeboy lab", RunnerKind::Ssh);
+    // The runner answered (connected) but the live admission projection found
+    // it ineligible (e.g. required capabilities never probed ready) and
+    // therefore excluded it from `available_runner_ids`.
+    let readiness = runner::LabRunnerReadiness {
+        state: runner::LabRunnerReadinessState::ConnectedIneligible,
+        selected_runner_id: None,
+        available_runner_ids: Vec::new(),
+        reasons: vec!["required_capabilities_unavailable".to_string()],
+        remediation_commands: vec!["homeboy runner status 'homeboy lab'".to_string()],
+    };
+
+    let capabilities = execution_capabilities_with_local_placement(
+        true,
+        &[remote],
+        &[connected],
+        Some(&readiness),
+    );
+
+    // Connectivity is still visible...
+    assert_eq!(
+        capabilities.lab_runner_connection.connected_runner_ids,
+        ["homeboy lab"]
+    );
+    // ...but admission readiness, not connectivity, gates `available`.
+    assert!(
+        !capabilities.lab_runner_connection.available,
+        "a connected but unadmitted runner must not be reported as dispatch-ready"
+    );
+    assert_eq!(
+        capabilities.lab_runner_connection.reasons,
+        ["required_capabilities_unavailable"]
+    );
+    assert_eq!(
+        capabilities.lab_runner_connection.next_action.as_deref(),
+        Some("homeboy runner status 'homeboy lab'")
+    );
+}
+
+fn admitted_readiness(available_runner_ids: Vec<&str>) -> runner::LabRunnerReadiness {
+    let available_runner_ids: Vec<String> =
+        available_runner_ids.into_iter().map(String::from).collect();
+    runner::LabRunnerReadiness {
+        state: if available_runner_ids.is_empty() {
+            runner::LabRunnerReadinessState::Disconnected
+        } else {
+            runner::LabRunnerReadinessState::ConnectedReady
+        },
+        selected_runner_id: available_runner_ids.first().cloned(),
+        available_runner_ids,
+        reasons: Vec::new(),
+        remediation_commands: Vec::new(),
     }
 }
 
@@ -1733,10 +1801,12 @@ fn global_capabilities_include_connected_lab_for_local_and_disconnected_remote_q
     let mut connected_report = connected_report();
     connected_report.runner_id = connected.id.clone();
 
+    let readiness = admitted_readiness(vec!["lab-connected"]);
     let capabilities = execution_capabilities_with_local_placement(
         true,
         &[local, disconnected, connected],
         &[disconnected_report, connected_report],
+        Some(&readiness),
     );
 
     assert!(capabilities.local_placement.available);

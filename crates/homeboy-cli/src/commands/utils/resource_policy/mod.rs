@@ -599,15 +599,53 @@ pub(crate) fn admits_warm_runner_coordination(
             .as_ref()
             .is_none_or(|memory| memory.recommendation == ResourceRecommendation::Ok)
         && resources.processes.recommendation == ResourceRecommendation::Ok
-        && selected_runner.is_some_and(|runner_id| {
-            lab_readiness.is_some_and(|readiness| {
-                readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-                    && readiness
-                        .available_runner_ids
-                        .iter()
-                        .any(|available| available == runner_id)
-            })
-        })
+        && selected_runner
+            .is_some_and(|runner_id| lab_readiness_admits_runner(runner_id, lab_readiness))
+}
+
+/// Whether `lab_readiness` reports `runner_id` as Lab-admitted: connected,
+/// ready, and present in the live available-runner set. This is the same
+/// predicate `resolve_parsed_command_preflight` re-verifies for any selected
+/// runner, so every caller deciding admission must agree with it.
+pub(crate) fn lab_readiness_admits_runner(
+    runner_id: &str,
+    lab_readiness: Option<&LabRunnerReadiness>,
+) -> bool {
+    lab_readiness.is_some_and(|readiness| {
+        readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+            && readiness
+                .available_runner_ids
+                .iter()
+                .any(|available| available == runner_id)
+    })
+}
+
+/// Whether the selected Lab runner is admitted to run a warm-runner-
+/// coordination command's provider attempt.
+///
+/// `admits_warm_runner_coordination` gates *opportunistic* offload on
+/// controller pressure: a warm/hot controller may keep coordinating despite
+/// its own pressure because the provider attempt can move to Lab. Required
+/// Lab placement (`--runner <id>` or `--placement lab`) is a routing decision
+/// the operator already made, not a pressure trade-off, so its admission must
+/// depend only on the selected runner's own Lab readiness — the same plain
+/// check every other lab-offload command uses. Gating a required, genuinely
+/// `ConnectedReady` runner on unrelated controller pressure refused an
+/// explicit runner that `runner status` reported ready (#13631), and let
+/// `cook --preview` (which never evaluates pressure) appear to pass when the
+/// real dispatch would then refuse on this exact mismatch (#13632).
+pub(crate) fn runner_admits_lab_dispatch(
+    command: HotCommand,
+    resources: &DoctorOutput,
+    selected_runner: Option<&str>,
+    lab_readiness: Option<&LabRunnerReadiness>,
+    required_lab_placement: bool,
+) -> bool {
+    if !required_lab_placement && command.allows_warm_runner_coordination {
+        return admits_warm_runner_coordination(command, resources, selected_runner, lab_readiness);
+    }
+    command.lab_offload_supported
+        && selected_runner.is_some_and(|runner_id| lab_readiness_admits_runner(runner_id, lab_readiness))
 }
 
 /// Permit automatic controller execution only when Lab is disconnected and the
@@ -1727,6 +1765,70 @@ mod tests {
             &resources,
             Some("missing-lab"),
             Some(&ready),
+        ));
+    }
+
+    /// #13631/#13632: an operator who explicitly pins `--runner homeboy-lab`
+    /// (or forces `--placement lab`) to a genuinely `ConnectedReady` runner
+    /// has already made the routing decision; that admission must not
+    /// additionally require the *controller* to be under warm/hot pressure.
+    /// Before this fix, `runner_admits_offload` for a cook/fanout coordinator
+    /// was always `admits_warm_runner_coordination`'s pressure-gated result,
+    /// so an idle controller (`ResourceRecommendation::Ok`) refused an
+    /// explicitly requested, fully ready runner — exactly the dispatch
+    /// refusal the issue reported (`runner status` said ready, cook admission
+    /// refused), and exactly why `cook --preview` (which never evaluates
+    /// controller pressure) could report success for a placement the real,
+    /// pressure-gated dispatch would then refuse.
+    #[test]
+    fn required_lab_placement_admits_a_ready_runner_regardless_of_controller_pressure() {
+        let command = HotCommand {
+            label: "agent-task cook/run-plan/retry --run",
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: true,
+            offload_only_when_hot: false,
+        };
+        let ready = ready_lab();
+
+        for recommendation in [
+            ResourceRecommendation::Ok,
+            ResourceRecommendation::Warm,
+            ResourceRecommendation::Hot,
+        ] {
+            let idle_resources = resources(recommendation);
+            assert!(
+                runner_admits_lab_dispatch(
+                    command,
+                    &idle_resources,
+                    Some("homeboy-lab"),
+                    Some(&ready),
+                    true,
+                ),
+                "required lab placement of a ready runner must be admitted at {recommendation:?} controller pressure"
+            );
+        }
+
+        // The exact same idle-controller inputs, without required placement
+        // (automatic/default selection), still require warm/hot pressure —
+        // this fix does not change opportunistic offload semantics.
+        let idle_resources = resources(ResourceRecommendation::Ok);
+        assert!(!runner_admits_lab_dispatch(
+            command,
+            &idle_resources,
+            Some("homeboy-lab"),
+            Some(&ready),
+            false,
+        ));
+
+        // Required placement of a genuinely unready runner still refuses.
+        let not_ready = disconnected_lab();
+        assert!(!runner_admits_lab_dispatch(
+            command,
+            &idle_resources,
+            Some("homeboy-lab"),
+            Some(&not_ready),
+            true,
         ));
     }
 
