@@ -449,7 +449,23 @@ pub(crate) fn acquire_shared_cargo_target_in(
 pub fn cleanup_shared_cargo_targets(
     options: CargoTargetCleanupOptions,
 ) -> Result<CargoTargetCleanupOutput> {
+    cleanup_shared_cargo_targets_with_reserve_deficit(options, None)
+}
+
+fn cleanup_shared_cargo_targets_with_reserve_deficit(
+    options: CargoTargetCleanupOptions,
+    reserve_deficit_bytes: Option<u64>,
+) -> Result<CargoTargetCleanupOutput> {
     let root = options.root.unwrap_or(shared_cargo_target_root()?);
+    let mut reserve_deficit_bytes = match reserve_deficit_bytes {
+        Some(deficit) => deficit,
+        None => {
+            let reserve = crate::capacity::CapacityReserve::configured_for_path(&root);
+            reserve
+                .bytes
+                .saturating_sub(filesystem_capacity(&root)?.available_bytes)
+        }
+    };
     let mut stores = inventory(&root, options.now, options.older_than, options.lease_ttl)?;
     let inventory_bytes: u64 = stores.iter().map(|store| store.size_bytes).sum();
     stores.sort_by(order_stores);
@@ -517,8 +533,10 @@ pub fn cleanup_shared_cargo_targets(
                 }
             }
         }
+        let capacity_eligible = reserve_deficit_bytes > 0;
         let eligible = store.reasons.iter().any(|reason| reason == "age_expired")
-            || remaining > options.max_bytes;
+            || remaining > options.max_bytes
+            || capacity_eligible;
         if !eligible {
             *retained_by_reason
                 .entry(if legacy {
@@ -530,7 +548,12 @@ pub fn cleanup_shared_cargo_targets(
             continue;
         }
         remaining = remaining.saturating_sub(store.size_bytes);
-        candidates.push(store.clone());
+        reserve_deficit_bytes = reserve_deficit_bytes.saturating_sub(store.size_bytes);
+        let mut candidate = store.clone();
+        if capacity_eligible {
+            candidate.reasons.push("capacity_reserve".to_string());
+        }
+        candidates.push(candidate);
     }
 
     let mut applied_count = 0;
@@ -1156,6 +1179,11 @@ fn io_error(error: std::io::Error, operation: &str) -> Error {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    fn cleanup_shared_cargo_targets(
+        options: CargoTargetCleanupOptions,
+    ) -> Result<CargoTargetCleanupOutput> {
+        super::cleanup_shared_cargo_targets_with_reserve_deficit(options, Some(0))
+    }
     fn options(root: &Path, apply: bool, now: SystemTime) -> CargoTargetCleanupOptions {
         CargoTargetCleanupOptions {
             root: Some(root.to_path_buf()),
@@ -1525,6 +1553,28 @@ mod tests {
         );
         assert!(!stale.exists());
         assert_eq!(cleanup_shared_cargo_targets(opts).unwrap().applied_count, 0);
+    }
+    #[test]
+    fn reserve_pressure_reclaims_only_enough_fresh_unleased_stores() {
+        let root = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let larger = store(root.path(), "larger", 7, Duration::from_secs(1), now);
+        let smaller = store(root.path(), "smaller", 5, Duration::ZERO, now);
+        let mut opts = options(root.path(), false, now);
+        opts.max_bytes = 100;
+
+        let output =
+            super::cleanup_shared_cargo_targets_with_reserve_deficit(opts, Some(6)).unwrap();
+
+        assert_eq!(output.candidate_count, 1);
+        assert_eq!(output.applied_count, 0);
+        assert_eq!(output.candidates[0].size_bytes, 7);
+        assert_eq!(
+            output.candidates[0].reasons.last().unwrap(),
+            "capacity_reserve"
+        );
+        assert!(larger.exists());
+        assert!(smaller.exists());
     }
     #[test]
     fn lease_acquired_between_plan_and_apply_is_protected() {

@@ -13,6 +13,11 @@ const MIN_TIMEOUT_GRACE_MS: u64 = 100;
 /// (#12568). Changing it here means changing that help text too.
 pub const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 1_200_000;
 
+/// Default time a provider may produce no stdout/stderr activity before it is
+/// classified as stalled. This is independent of the provider wall-clock
+/// budget so a silent executor cannot consume the full attempt timeout.
+pub const DEFAULT_PROVIDER_LIVENESS_TIMEOUT_MS: u64 = 300_000;
+
 pub(crate) fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -30,6 +35,20 @@ pub fn effective_provider_timeout_ms(timeout_ms: Option<u64>, max_runtime_ms: Op
         .unwrap_or_else(default_provider_timeout_ms)
 }
 
+pub fn effective_provider_liveness_timeout_ms(liveness_timeout_ms: Option<u64>) -> u64 {
+    liveness_timeout_ms.unwrap_or_else(default_provider_liveness_timeout_ms)
+}
+
+fn default_provider_liveness_timeout_ms() -> u64 {
+    #[cfg(test)]
+    if let Some(timeout_ms) = TEST_PROVIDER_LIVENESS_TIMEOUT_OVERRIDE_MS.with(std::cell::Cell::get)
+    {
+        return timeout_ms;
+    }
+
+    DEFAULT_PROVIDER_LIVENESS_TIMEOUT_MS
+}
+
 fn default_provider_timeout_ms() -> u64 {
     #[cfg(test)]
     if let Ok(value) = std::env::var("HOMEBOY_AGENT_TASK_TEST_DEFAULT_PROVIDER_TIMEOUT_MS") {
@@ -43,6 +62,26 @@ fn default_provider_timeout_ms() -> u64 {
 
 thread_local! {
     static CURRENT_COOK_DEADLINE: RefCell<Option<CookDeadline>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static TEST_PROVIDER_LIVENESS_TIMEOUT_OVERRIDE_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_default_provider_liveness_timeout_ms<T>(
+    timeout_ms: u64,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_PROVIDER_LIVENESS_TIMEOUT_OVERRIDE_MS.with(|current| current.set(self.0));
+        }
+    }
+
+    let previous = TEST_PROVIDER_LIVENESS_TIMEOUT_OVERRIDE_MS
+        .with(|current| current.replace(Some(timeout_ms)));
+    let _restore = Restore(previous);
+    operation()
 }
 
 /// An absolute wall-clock budget for a whole Cook, spanning every attempt and
@@ -257,5 +296,14 @@ mod tests {
             timeout_with_grace(1_800_000),
             Duration::from_millis(1_830_000)
         );
+    }
+
+    #[test]
+    fn provider_liveness_is_bounded_by_default_and_explicit_limits_win() {
+        assert_eq!(
+            effective_provider_liveness_timeout_ms(None),
+            DEFAULT_PROVIDER_LIVENESS_TIMEOUT_MS
+        );
+        assert_eq!(effective_provider_liveness_timeout_ms(Some(45_000)), 45_000);
     }
 }

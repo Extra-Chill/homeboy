@@ -194,7 +194,187 @@ exit 1
             .as_ref()
             .expect("baseline provenance");
         assert!(provenance.compared);
+        assert_eq!(
+            provenance.resolution,
+            crate::lint::baseline::LintBaselineResolution::LegacyFull
+        );
         assert_eq!(provenance.baseline_key, "lint");
+    });
+}
+
+#[test]
+fn empty_legacy_full_baseline_is_incomparable_instead_of_new_drift() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        crate::lint::baseline::save_baseline(source.path(), "legacy", &[])
+            .expect("save empty legacy baseline");
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+printf '[{"tool":"phpcs","message":"standing warning","fingerprint":"standing","file":"src/lib.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+printf '[{"tool":"phpcs","status":"passed","finding_count":1}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
+exit 1
+"#,
+        );
+
+        let workflow = run_main_lint_workflow(
+            &component,
+            source.path(),
+            lint_args(),
+            &RunDir::create().expect("run dir"),
+        )
+        .expect("workflow result");
+
+        assert_eq!(workflow.status, "passed");
+        assert_eq!(workflow.exit_code, 0);
+        assert!(workflow.baseline_comparison.is_none());
+        let provenance = workflow
+            .baseline_provenance
+            .as_ref()
+            .expect("baseline provenance");
+        assert!(!provenance.compared);
+        assert_eq!(provenance.baseline_key, "lint");
+        assert_eq!(
+            provenance.resolution,
+            crate::lint::baseline::LintBaselineResolution::LegacyEmptyIncomparable
+        );
+    });
+}
+
+#[test]
+fn scoped_empty_full_baseline_still_blocks_a_genuine_increase() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let provenance = crate::lint::baseline::LintBaselineProvenance::new(
+            Vec::new(),
+            vec!["phpcs".to_string()],
+            "full",
+            None,
+            false,
+            None,
+            None,
+        );
+        crate::lint::baseline::save_baseline_for_scope(
+            source.path(),
+            "scoped",
+            &[],
+            Some(&provenance),
+        )
+        .expect("save scoped empty baseline");
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+printf '[{"tool":"phpcs","message":"introduced warning","fingerprint":"introduced","file":"src/lib.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+printf '[{"tool":"phpcs","status":"passed","finding_count":1}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
+exit 1
+"#,
+        );
+
+        let workflow = run_main_lint_workflow(
+            &component,
+            source.path(),
+            lint_args(),
+            &RunDir::create().expect("run dir"),
+        )
+        .expect("workflow result");
+
+        assert_eq!(workflow.status, "failed");
+        assert_eq!(workflow.exit_code, 1);
+        assert!(workflow
+            .baseline_comparison
+            .as_ref()
+            .is_some_and(|comparison| comparison.new_items.len() == 1));
+        assert_eq!(
+            workflow
+                .baseline_provenance
+                .as_ref()
+                .map(|provenance| &provenance.resolution),
+            Some(&crate::lint::baseline::LintBaselineResolution::Scoped)
+        );
+    });
+}
+
+#[test]
+fn accepted_pr_finding_stays_accepted_on_full_default_branch_run() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let run_git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(source.path())
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["config", "user.email", "homeboy@example.com"]);
+        run_git(&["config", "user.name", "Homeboy Test"]);
+        std::fs::write(
+            source.path().join("legacy.php"),
+            "<?php // standing warning\n",
+        )
+        .expect("base source");
+        run_git(&["add", "."]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        run_git(&["branch", "baseline"]);
+        std::fs::write(
+            source.path().join("legacy.php"),
+            "<?php // standing warning\n// harmless change\n",
+        )
+        .expect("candidate source");
+        run_git(&["add", "."]);
+        run_git(&["commit", "-q", "-m", "candidate"]);
+        crate::lint::baseline::save_baseline(source.path(), "legacy", &[])
+            .expect("save empty legacy baseline");
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+printf '[{"tool":"phpcs","message":"standing warning","fingerprint":"standing","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+printf '[{"tool":"phpcs","status":"passed","finding_count":1}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
+exit 1
+"#,
+        );
+
+        let mut pr_args = lint_args();
+        pr_args.changed_since = Some("baseline".to_string());
+        pr_args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        let pr = run_main_lint_workflow(
+            &component,
+            source.path(),
+            pr_args,
+            &RunDir::create().expect("PR run dir"),
+        )
+        .expect("PR workflow result");
+        let push = run_main_lint_workflow(
+            &component,
+            source.path(),
+            lint_args(),
+            &RunDir::create().expect("push run dir"),
+        )
+        .expect("push workflow result");
+
+        assert_eq!((pr.status.as_str(), pr.exit_code), ("passed", 0));
+        assert_eq!((push.status.as_str(), push.exit_code), ("passed", 0));
+        assert_eq!(
+            pr.baseline_provenance
+                .as_ref()
+                .map(|provenance| &provenance.resolution),
+            Some(&crate::lint::baseline::LintBaselineResolution::GitBase)
+        );
+        assert_eq!(
+            push.baseline_provenance
+                .as_ref()
+                .map(|provenance| &provenance.resolution),
+            Some(&crate::lint::baseline::LintBaselineResolution::LegacyEmptyIncomparable)
+        );
     });
 }
 

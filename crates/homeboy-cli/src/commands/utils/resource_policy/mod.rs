@@ -46,6 +46,10 @@ pub(crate) fn parsed_command_preflight_input(
         RunnerIntent, RunnerNormalization,
     };
 
+    // A runner flag Homeboy owns can only appear before the bare separator.
+    // Reading past it lets a forwarded `--runner` be mistaken for our own (#11577).
+    let normalized_args = crate::command_capability::homeboy_owned_args(normalized_args);
+
     let resource_admission =
         hot_command(&cli.command).map_or(ResourceAdmissionRequirement::Exempt, |command| {
             ResourceAdmissionRequirement::Required {
@@ -779,15 +783,19 @@ fn local_override_command(args: &[String]) -> Option<String> {
         return None;
     }
     let mut command = args.to_vec();
-    if let Some(index) = command
+    // Only a placement flag before the bare separator is Homeboy's own. Rewriting
+    // one past it would retarget a forwarded argument instead of this run (#11577).
+    let owned = crate::command_capability::homeboy_owned_args(args).len();
+    if let Some(index) = command[..owned]
         .iter()
         .position(|arg| arg == "--placement" || arg.starts_with("--placement="))
     {
         if command[index] == "--placement" {
-            if let Some(value) = command.get_mut(index + 1) {
-                *value = "local".to_string();
+            // The value has to be the flag's own, so it must also precede the separator.
+            if index + 1 < owned {
+                command[index + 1] = "local".to_string();
             } else {
-                command.push("local".to_string());
+                command.insert(index + 1, "local".to_string());
             }
         } else {
             command[index] = "--placement=local".to_string();

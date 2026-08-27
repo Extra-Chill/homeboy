@@ -6394,7 +6394,7 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             });
         }
         let provider_failure =
-            homeboy::core::worktree_providers::compact_provider_failure_details(details);
+            homeboy::core::worktree_provider::compact_worktree_provider_failure_details(details);
         return Some(CollectedDiagnostic {
             task_id: "controller".to_string(),
             class: failure

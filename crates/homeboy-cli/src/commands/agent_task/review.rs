@@ -183,6 +183,7 @@ impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
             },
             verification: AgentTaskPrVerification {
                 targeted_checks_run: args.targeted_checks_run,
+                dependency_hydration: Vec::new(),
                 targeted_checks_unavailable: args.targeted_checks_unavailable,
                 ci_expected: args.ci_expected,
                 manual_reviewer_check: args.manual_reviewer_check,
@@ -900,15 +901,30 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
     }
     let path = args.path.expect("clap requires --path without --recover");
     let mut verified_candidate_sha = None;
-    if let Some(command) = args.verify.as_deref() {
-        let verification = execute_manual_verification(&path, command)?;
+    let mut dependency_hydration = Vec::new();
+    if !args.verify.is_empty() {
+        let verification = execute_manual_verification(&path, &args.verify)?;
         verified_candidate_sha = Some(verification.candidate_sha);
-        args.gate_results = vec![format!("manual-verify=passed:{}", verification.command)];
-        args.evidence.targeted_checks_run = vec![verification.command.clone()];
-        args.test_steps = vec![format!(
-            "{}=>passes as recorded by Homeboy's deterministic gate",
-            verification.command
-        )];
+        dependency_hydration = verification.dependency_hydration;
+        args.gate_results = verification
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                let name = if verification.commands.len() == 1 {
+                    "manual-verify".to_string()
+                } else {
+                    format!("manual-verify-{}", index + 1)
+                };
+                format!("{name}=passed:{command}")
+            })
+            .collect();
+        args.evidence.targeted_checks_run = verification.commands.clone();
+        args.test_steps = verification
+            .commands
+            .iter()
+            .map(|command| format!("{command}=>passes as recorded by Homeboy's deterministic gate"))
+            .collect();
     }
     let mut run_id = args
         .run_id
@@ -929,7 +945,8 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         .cloned()
         .map(HomeboyGateResult::from)
         .collect();
-    let evidence: AgentTaskPrEvidence = args.evidence.try_into()?;
+    let mut evidence: AgentTaskPrEvidence = args.evidence.try_into()?;
+    evidence.verification.dependency_hydration = dependency_hydration;
     let how_to_test = if args.test_steps.is_empty() {
         let legacy_steps: Vec<AgentTaskReviewTestStep> = evidence
             .verification
@@ -1023,10 +1040,12 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         evidence,
         ai_used_for: args.ai_used_for,
         review_dossier,
+        composed_ai_model_disclosure: false,
         review_profile,
         manual_finalization: args.manual_finalization,
         expected_candidate_sha: None,
         verified_candidate_sha,
+        inherited_gate_evidence: None,
         protected_branches: args.protected_branches,
         draft_pr: false,
     };
@@ -1098,6 +1117,7 @@ pub(crate) fn record_replacement_gate_proof(
         &args.run_id,
         replacement,
         args.authorize_external_proof,
+        args.accept_inherited_failures,
     )?;
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
@@ -1132,7 +1152,7 @@ fn should_persist_manual_preflight_intent(
 
 fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> {
     let mut errors = Vec::new();
-    if args.verify.is_some() {
+    if !args.verify.is_empty() {
         if !args.manual_finalization {
             errors.push(homeboy::core::Error::validation_invalid_argument(
                 "verify",
@@ -1224,16 +1244,17 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
 /// Run against a detached worktree so the declared gate cannot observe later
 /// working-tree edits or mutate the candidate finalization publishes.
 struct ManualVerification {
-    command: String,
+    commands: Vec<String>,
     candidate_sha: String,
+    dependency_hydration:
+        Vec<homeboy::agents::agent_tasks::finalization::AgentTaskGateSetupEvidence>,
 }
 
 fn execute_manual_verification(
     path: &str,
-    command: &str,
+    commands: &[String],
 ) -> homeboy::core::Result<ManualVerification> {
-    let command = command.trim();
-    if command.is_empty() {
+    if commands.iter().any(|command| command.trim().is_empty()) {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "verify",
             "verification command must be non-empty",
@@ -1279,16 +1300,58 @@ fn execute_manual_verification(
             String::from_utf8_lossy(&add.stderr).trim().to_string(),
         ));
     }
-    let output = Command::new("sh")
-        .args(["-lc", command])
-        .current_dir(&checkout_path)
-        .output()
-        .map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("run manual deterministic verification".to_string()),
+    let verification = (|| {
+        let setup =
+            homeboy::agents::agent_tasks::finalization::hydrate_manual_verification_dependencies(
+                checkout.path(),
+            )?;
+        if manual_checkout_has_tracked_changes(&checkout_path)? {
+            let mut error = homeboy::core::Error::validation_invalid_argument(
+                "verify",
+                "dependency hydration changed tracked candidate files; refusing to verify bytes that differ from the committed candidate",
+                None,
+                None,
+            );
+            error.details = serde_json::json!({ "dependency_hydration": setup });
+            return Err(error);
+        }
+        let mut evidence = Vec::new();
+        for command in commands {
+            let command = command.trim();
+            let mut child = Command::new("sh")
+                .args(["-lc", command])
+                .current_dir(&checkout_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| {
+                    homeboy::core::Error::internal_io(
+                        error.to_string(),
+                        Some("run manual deterministic verification".to_string()),
+                    )
+                })?;
+            let output = homeboy::core::engine::command::wait_with_bounded_output_until_cancelled(
+                &mut child,
+                32 * 1024,
+                || false,
             )
-        })?;
+            .map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("capture manual deterministic verification".to_string()),
+                )
+            })?;
+            let candidate_unchanged = !manual_checkout_has_tracked_changes(&checkout_path)?;
+            evidence.push(serde_json::json!({
+                "command": ["sh", "-lc", homeboy::core::redaction::redact_string(command)],
+                "exit_code": output.status.code().unwrap_or(1),
+                "stdout": bounded_manual_gate_output(&output.stdout),
+                "stderr": bounded_manual_gate_output(&output.stderr),
+                "candidate_unchanged": candidate_unchanged,
+            }));
+        }
+        Ok::<_, homeboy::core::Error>((setup, evidence))
+    })();
     let remove = Command::new("git")
         .args(["worktree", "remove", "--force", &checkout_path])
         .current_dir(path)
@@ -1299,24 +1362,58 @@ fn execute_manual_verification(
             String::from_utf8_lossy(&remove.stderr).trim().to_string(),
         ));
     }
-    if !output.status.success() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
+    let (setup, evidence) = verification?;
+    if evidence.iter().any(|command| {
+        command["exit_code"].as_i64() != Some(0)
+            || command["candidate_unchanged"].as_bool() != Some(true)
+    }) {
+        let mut error = homeboy::core::Error::validation_invalid_argument(
             "verify",
-            format!(
-                "manual deterministic gate failed with exit code {}",
-                output.status.code().unwrap_or(1)
-            ),
-            Some(command.to_string()),
+            "one or more manual deterministic gates failed or changed tracked candidate files; inspect command_evidence for captured stdout and stderr",
+            None,
             Some(vec![
-                "Fix the candidate and rerun the same --verify command before finalization."
+                "Fix the candidate and rerun the same --verify commands before finalization."
                     .to_string(),
             ]),
-        ));
+        );
+        error.details = serde_json::json!({
+            "dependency_hydration": setup,
+            "command_evidence": evidence,
+        });
+        return Err(error);
     }
     Ok(ManualVerification {
-        command: command.to_string(),
+        commands: commands
+            .iter()
+            .map(|command| command.trim().to_string())
+            .collect(),
         candidate_sha,
+        dependency_hydration: setup,
     })
+}
+
+fn bounded_manual_gate_output(bytes: &[u8]) -> String {
+    const LIMIT: usize = 32 * 1024;
+    let bytes = if bytes.len() > LIMIT {
+        &bytes[bytes.len() - LIMIT..]
+    } else {
+        bytes
+    };
+    homeboy::core::redaction::redact_string(&String::from_utf8_lossy(bytes))
+}
+
+fn manual_checkout_has_tracked_changes(path: &str) -> homeboy::core::Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| homeboy::core::Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(homeboy::core::Error::git_command_failed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 fn git_output(path: &str, args: &[&str]) -> homeboy::core::Result<String> {
@@ -4757,7 +4854,9 @@ mod tests {
                 "--changed-file",
                 "feature.txt",
                 "--verify",
-                "false",
+                "printf 'first gate output'",
+                "--verify",
+                "printf 'Authorization: Bearer manual-secret' >&2; false",
                 "--ai-model",
                 "fixture-model",
                 "--ai-used-for",
@@ -4765,8 +4864,60 @@ mod tests {
             ]);
             assert!(failed_gate
                 .message
-                .contains("manual deterministic gate failed"));
+                .contains("manual deterministic gates failed"));
+            assert_eq!(
+                failed_gate.details["command_evidence"]
+                    .as_array()
+                    .expect("captured command evidence")
+                    .len(),
+                2
+            );
+            assert_eq!(
+                failed_gate.details["command_evidence"][0]["stdout"],
+                "first gate output"
+            );
+            assert_eq!(
+                failed_gate.details["command_evidence"][1]["stderr"],
+                "Authorization: Bearer [REDACTED]"
+            );
+            assert!(!failed_gate.to_string().contains("manual-secret"));
             assert!(agent_task_lifecycle::status("manual-cli-failed-gate-13077").is_err());
+            let changed_checkout = dispatch_agent_task_error(&[
+                "homeboy",
+                "agent-task",
+                "finalize-pr",
+                "--manual-finalization",
+                "--run-id",
+                "manual-cli-mutating-gate-13447",
+                "--path",
+                checkout.to_str().expect("checkout path"),
+                "--base",
+                "main",
+                "--verified-base-sha",
+                &base_sha,
+                "--head",
+                "feature",
+                "--title",
+                "Manual mutating gate",
+                "--commit-message",
+                "fixture",
+                "--changed-file",
+                "feature.txt",
+                "--verify",
+                "printf 'changed by gate' > feature.txt",
+                "--ai-model",
+                "fixture-model",
+                "--ai-used-for",
+                "CLI immutable gate coverage",
+            ]);
+            assert!(changed_checkout
+                .message
+                .contains("changed tracked candidate files"));
+            assert_eq!(
+                changed_checkout.details["command_evidence"][0]["candidate_unchanged"],
+                false
+            );
+            assert!(agent_task_lifecycle::status("manual-cli-mutating-gate-13447").is_err());
             let race_gate = format!(
                 "printf 'mutated\\n' > '{}'",
                 checkout.join("feature.txt").display()

@@ -25,8 +25,10 @@ use homeboy::core::observation::runs_service::{
 };
 use homeboy::core::output::OutputBudget;
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
-use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
-use homeboy::core::worktree_providers::WorktreeProviderCleanupOptions;
+use homeboy::core::worktree::WorktreeCleanupOutput;
+use homeboy::core::worktree_provider::{
+    cleanup_worktrees_from_config, WorktreeCleanupRequest, WorktreeCleanupScope,
+};
 use homeboy::runner::runners::{
     self as runner, RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
@@ -214,11 +216,12 @@ pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> Cmd
                 ResourceCleanupOptions {
                     intent: cleanup_intent(args.apply),
                     artifacts: None,
-                    worktree_providers: Some(WorktreeProviderCleanupOptions {
-                        provider: args.provider,
-                        all_providers: args.all_providers,
+                    worktree_providers: Some(WorktreeCleanupRequest {
+                        providers: args.provider,
+                        all_configured_providers: args.all_providers,
                         apply: args.apply,
                         timeout: None,
+                        ..WorktreeCleanupRequest::default()
                     }),
                 },
                 defaults::load_config(),
@@ -1960,12 +1963,21 @@ fn cleanup_inventory_with_deadline(
             deadline,
             CleanupCategoryCommandOverrides::default(),
             || {
-                let output = worktree::cleanup(WorktreeCleanupOptions {
-                    force: false,
-                    dry_run: !apply,
-                    cleanup_branches: apply,
-                    allow_unmerged_branches: false,
-                })?;
+                let output = cleanup_worktrees_from_config(
+                    &WorktreeCleanupRequest {
+                        scope: WorktreeCleanupScope::Native,
+                        providers: Vec::new(),
+                        all_configured_providers: false,
+                        apply,
+                        force: false,
+                        cleanup_branches: apply,
+                        allow_unmerged_branches: false,
+                        timeout: None,
+                    },
+                    &homeboy::core::defaults::load_config(),
+                )?
+                .native
+                .expect("native cleanup scope includes the built-in provider");
                 task_worktrees_category(output, apply).map(|category| vec![category])
             },
         );
@@ -1984,15 +1996,16 @@ fn cleanup_inventory_with_deadline(
                     ResourceCleanupOptions {
                         intent: cleanup_intent(apply),
                         artifacts: None,
-                        worktree_providers: Some(WorktreeProviderCleanupOptions {
-                            provider: Vec::new(),
-                            all_providers: true,
+                        worktree_providers: Some(WorktreeCleanupRequest {
+                            providers: Vec::new(),
+                            all_configured_providers: true,
                             apply,
                             timeout: deadline.map(|deadline| {
                                 deadline
                                     .duration_since(SystemTime::now())
                                     .unwrap_or(Duration::ZERO)
                             }),
+                            ..WorktreeCleanupRequest::default()
                         }),
                     },
                     config.clone(),
@@ -4279,12 +4292,79 @@ mod count_unit_tests {
 
 #[cfg(test)]
 mod tests {
+    use homeboy::core::api_jobs::JobEventKind;
+    use homeboy::core::test_support::{with_isolated_home, ControllerJobHarness};
+    use homeboy::core::worktree;
     use homeboy::runner::runners::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport};
     use serde_json::json;
     use std::process::Command;
     use tempfile::TempDir;
 
     use super::*;
+
+    fn controller_cleanup_request() -> Value {
+        serde_json::to_value(CleanupArgs {
+            apply: true,
+            include: vec![CleanupCategoryArg::ControllerScratch],
+            exclude: Vec::new(),
+            include_untagged: false,
+            older_than_days: None,
+            runtime_tmp_managed_older_than_days: None,
+            limit: None,
+            full: false,
+            cursor: None,
+            command: None,
+        })
+        .expect("serialize cleanup request")
+    }
+
+    #[test]
+    fn execute_and_resume_use_the_controller_job_handle_boundary() {
+        with_isolated_home(|_| {
+            let request = controller_cleanup_request();
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CleanupJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+
+            let result = driver
+                .execute(request.clone(), harness.handle())
+                .expect("execute isolated cleanup");
+            assert_eq!(result["phase"], "completed");
+            let checkpoint = harness
+                .checkpoint()
+                .expect("read checkpoint")
+                .expect("completed cleanup checkpoint");
+            assert_eq!(checkpoint["completed"]["phase"], "completed");
+            assert!(harness
+                .events()
+                .expect("read controller events")
+                .into_iter()
+                .any(|event| event.kind == JobEventKind::Progress
+                    && event.data.as_ref().and_then(|data| data.get("phase"))
+                        == Some(&json!("running"))));
+
+            let first = driver
+                .resume(checkpoint.clone(), harness.handle())
+                .expect("first completed replay");
+            let second = driver
+                .resume(checkpoint, harness.handle())
+                .expect("second completed replay");
+            assert_eq!(first, second);
+            assert_eq!(first, result);
+
+            let cancelled = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct cancelled controller job harness");
+            cancelled
+                .request_cancellation("test cancellation")
+                .expect("request cancellation");
+            assert_eq!(
+                driver
+                    .execute(request, cancelled.handle())
+                    .expect("cancel before cleanup starts"),
+                json!({ "phase": "cancelled" })
+            );
+        });
+    }
 
     #[test]
     fn runtime_temp_retained_records_expose_producer_run_and_unknown_boundaries() {
