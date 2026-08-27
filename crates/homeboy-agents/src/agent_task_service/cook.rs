@@ -4333,7 +4333,18 @@ fn run_cook_reported(
             // lifecycle row or index write failed transiently, complete the
             // same immutable attempt now rather than returning a partial Cook
             // whose advertised continuation has no record to address (#10849).
-            if store.recipe_exists(&failure_options.cook_id)
+            //
+            // Admission is incomplete only when the lifecycle row or the Cook
+            // index is missing. Recovering unconditionally would also rewrite a
+            // later controller-side rejection — a managed workspace that is no
+            // longer active, say — whose durable failure is the correct answer.
+            let admission_incomplete = !lifecycle_store
+                .record_exists(&failure_options.initial_run_id)
+                .unwrap_or(false)
+                || !agent_task_lifecycle::cook_index_exists(&failure_options.cook_id)
+                    .unwrap_or(false);
+            if admission_incomplete
+                && store.recipe_exists(&failure_options.cook_id)
                 && super::cook_pre_execution::recover_recipe_attempt_with_stores(
                     store,
                     lifecycle_store,
