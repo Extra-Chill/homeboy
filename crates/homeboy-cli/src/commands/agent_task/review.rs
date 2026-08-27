@@ -1853,7 +1853,65 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     } else {
         AgentTaskProviderCatalog::discover()
     };
+    if args.set_default {
+        return write_default_backend_from_readiness(&catalog);
+    }
     providers_with_catalog(args, catalog)
+}
+
+/// Live-probes every declared backend and, when at least one is dispatchable
+/// right now, persists it as `agent_task.default_backend` with the remaining
+/// ready backends recorded as an `agent_task.rotation` fallback chain.
+///
+/// A fresh or reset `agent_task` config (`{}`) offers no default and no
+/// discoverable path back to one short of reading source or an old backup
+/// (#13634). This closes that gap by deriving a working configuration from
+/// what actually authenticates here, rather than only documenting the shape.
+fn write_default_backend_from_readiness(catalog: &AgentTaskProviderCatalog) -> CmdResult<Value> {
+    let ready_backends = dispatchable_backend_choices(catalog, true)
+        .into_iter()
+        .map(|choice| choice.backend)
+        .collect::<Vec<_>>();
+
+    let Some((default_backend, rotation_backends)) = ready_backends.split_first() else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "backend",
+            "cannot set a default backend: no declared backend passed a live readiness probe here",
+            None,
+            Some(vec![
+                "Run `homeboy agent-task providers --validate-readiness` to see why each declared backend is not ready.".to_string(),
+                "Fix credentials/config for at least one backend, then retry `homeboy agent-task providers --set-default`.".to_string(),
+            ]),
+        ));
+    };
+
+    let rotation = if rotation_backends.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({
+            "entries": rotation_backends
+                .iter()
+                .map(|backend| serde_json::json!({ "backend": backend }))
+                .collect::<Vec<_>>(),
+        }))
+    };
+
+    let mut config = homeboy::core::defaults::load_config();
+    config.agent_task.default_backend = Some(default_backend.clone());
+    config.agent_task.rotation = rotation.clone();
+    homeboy::core::defaults::save_config(&config)?;
+
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-providers-default-written/v1",
+            "written": true,
+            "default_backend": default_backend,
+            "rotation": rotation,
+            "ready_backends": ready_backends,
+            "config_path": homeboy::core::defaults::config_path().ok(),
+        }),
+        0,
+    ))
 }
 
 fn providers_with_catalog(
@@ -3394,6 +3452,7 @@ mod tests {
             catalog: false,
             full: false,
             machine_catalog: false,
+            set_default: false,
         });
 
         assert_eq!(
@@ -3447,6 +3506,7 @@ mod tests {
             catalog: false,
             full: false,
             machine_catalog: false,
+            set_default: false,
         }
     }
 
@@ -3652,6 +3712,95 @@ mod tests {
                 ])
             );
             assert_eq!(validation["validated"], false);
+        });
+    }
+
+    /// The reported defect (#13634): a fresh/reset `agent_task` config (`{}`)
+    /// offers no default and no discoverable path back to one short of
+    /// reading source or an old backup. `--set-default` must derive a working
+    /// `default_backend`/`rotation` from what actually authenticates *right
+    /// now* and persist it, not merely print a suggestion.
+    #[test]
+    fn providers_set_default_writes_default_backend_and_rotation_from_live_readiness() {
+        crate::test_support::with_isolated_home(|_| {
+            // Starts exactly at the reported defect: no default_backend, no
+            // rotation.
+            let before = homeboy::core::defaults::load_config();
+            assert_eq!(before.agent_task.default_backend, None);
+            assert_eq!(before.agent_task.rotation, None);
+
+            let mut alpha = provider("alpha.provider", "alpha");
+            alpha.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                }))
+                .expect("alpha readiness invocation"),
+            );
+            let mut zeta = provider("zeta.provider", "zeta");
+            zeta.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                }))
+                .expect("zeta readiness invocation"),
+            );
+            // A backend whose declared credential is not configured here —
+            // the shape of a revoked/never-set credential (#11479) — must
+            // never be chosen as the written default.
+            let mut revoked = credential_declaring_provider();
+            revoked.id = "revoked.provider".to_string();
+            revoked.backend = "revoked".to_string();
+
+            let catalog = provider_catalog(vec![alpha, zeta, revoked]);
+            let output = write_default_backend_from_readiness(&catalog)
+                .expect("at least one backend is live-ready")
+                .0;
+
+            assert_eq!(output["written"], true);
+            assert_eq!(output["default_backend"], "alpha");
+            assert_eq!(
+                output["rotation"],
+                serde_json::json!({ "entries": [ { "backend": "zeta" } ] })
+            );
+            assert_eq!(
+                output["ready_backends"],
+                serde_json::json!(["alpha", "zeta"])
+            );
+
+            // The fix must durably repair the config on disk — a printed
+            // suggestion reproduces the reported defect, it does not fix it.
+            let persisted = homeboy::core::defaults::load_config();
+            assert_eq!(
+                persisted.agent_task.default_backend.as_deref(),
+                Some("alpha")
+            );
+            assert_eq!(
+                persisted.agent_task.rotation,
+                Some(serde_json::json!({ "entries": [ { "backend": "zeta" } ] }))
+            );
+        });
+    }
+
+    #[test]
+    fn providers_set_default_fails_closed_and_writes_nothing_when_no_backend_is_ready() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut dead = credential_declaring_provider();
+            dead.id = "dead.provider".to_string();
+            dead.backend = "dead".to_string();
+            let catalog = provider_catalog(vec![dead]);
+
+            let error = write_default_backend_from_readiness(&catalog)
+                .expect_err("no declared backend passes a live readiness probe");
+            assert!(
+                error.message.contains("no declared backend"),
+                "{}",
+                error.message
+            );
+
+            // A written default that cannot dispatch is worse than the
+            // explicit `selection_required` failure it would replace.
+            let after = homeboy::core::defaults::load_config();
+            assert_eq!(after.agent_task.default_backend, None);
+            assert_eq!(after.agent_task.rotation, None);
         });
     }
 
