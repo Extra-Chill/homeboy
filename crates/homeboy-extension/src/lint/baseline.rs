@@ -28,10 +28,21 @@ pub struct LintBaselineMetadata {
 /// latter contains findings the former deliberately did not ask producers to
 /// inspect. The digest is used as the persisted key while this full value is
 /// returned as provenance for humans and automation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LintBaselineResolution {
+    Unavailable,
+    Scoped,
+    LegacyFull,
+    LegacyEmptyIncomparable,
+    GitBase,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LintBaselineProvenance {
     pub baseline_key: String,
     pub compared: bool,
+    pub resolution: LintBaselineResolution,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
     pub files: Vec<String>,
@@ -77,6 +88,7 @@ impl LintBaselineProvenance {
         Self {
             baseline_key: format!("{BASELINE_KEY}:{digest}"),
             compared: false,
+            resolution: LintBaselineResolution::Unavailable,
             base_ref: None,
             files,
             tools,
@@ -223,12 +235,18 @@ pub fn load_baseline_for_scope_or_legacy_full(
     provenance: &mut LintBaselineProvenance,
 ) -> Option<LintBaseline> {
     if let Some(baseline) = load_baseline_for_scope(source_path, Some(provenance)) {
+        provenance.resolution = LintBaselineResolution::Scoped;
         return Some(baseline);
     }
 
     if provenance.permits_legacy_full_baseline() {
         if let Some(baseline) = load_baseline(source_path) {
             provenance.baseline_key = BASELINE_KEY.to_string();
+            if baseline.known_fingerprints.is_empty() {
+                provenance.resolution = LintBaselineResolution::LegacyEmptyIncomparable;
+                return None;
+            }
+            provenance.resolution = LintBaselineResolution::LegacyFull;
             return Some(baseline);
         }
     }
@@ -418,6 +436,7 @@ mod tests {
             .expect("load scoped baseline");
 
         assert_eq!(baseline.context_id, "scoped");
+        assert_eq!(provenance.resolution, LintBaselineResolution::Scoped);
         assert_ne!(provenance.baseline_key, BASELINE_KEY);
     }
 
@@ -444,7 +463,30 @@ mod tests {
             .expect("load legacy baseline");
 
         assert_eq!(baseline.context_id, "legacy");
+        assert_eq!(provenance.resolution, LintBaselineResolution::LegacyFull);
         assert_eq!(provenance.baseline_key, BASELINE_KEY);
+    }
+
+    #[test]
+    fn empty_legacy_baseline_is_explicitly_incomparable() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut provenance = LintBaselineProvenance::new(
+            Vec::new(),
+            vec!["eslint".to_string()],
+            "full",
+            None,
+            false,
+            None,
+            None,
+        );
+        save_baseline(dir.path(), "legacy", &[]).expect("save empty legacy baseline");
+
+        assert!(load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance).is_none());
+        assert_eq!(provenance.baseline_key, BASELINE_KEY);
+        assert_eq!(
+            provenance.resolution,
+            LintBaselineResolution::LegacyEmptyIncomparable
+        );
     }
 
     #[test]

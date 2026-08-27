@@ -2724,8 +2724,16 @@ where
         }
         agent_task_lifecycle::ClaimOutcome::Acquired => {
             let dispatched: CmdResult<Value> = (|| {
-                let dispatcher =
-                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
+                let record = lifecycle_store.read_record(run_id)?;
+                let pre_execution_runtime_recovery =
+                    agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+                        recipe, &record, false,
+                    );
+                let dispatcher = if pre_execution_runtime_recovery {
+                    None
+                } else {
+                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
+                };
                 let attempt = recipe
                     .attempts
                     .iter()
@@ -2738,8 +2746,11 @@ where
                             None,
                         )
                     })?;
-                let mut options =
-                    agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?;
+                let mut options = if pre_execution_runtime_recovery {
+                    agent_task_service::reconstruct_options_for_pre_execution_recovery(recipe)?
+                } else {
+                    agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?
+                };
                 options.initial_run_id = attempt.run_id.clone();
                 options.initial_plan = attempt.plan.clone();
                 agent_task_service::authorize_cook_continue_route(&options)?;
