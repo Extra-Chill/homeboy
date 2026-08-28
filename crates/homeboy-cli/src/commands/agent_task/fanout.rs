@@ -4216,6 +4216,8 @@ fn build_cook_batch_plan_with_profiles(
     args: &AgentTaskFanoutCookBatchArgs,
     profiles: VerificationProfiles,
 ) -> Result<BatchCookFanoutPlan> {
+    let worktree_repo =
+        cook_batch_provision_repository(args, configured_provider_workspace_creation()?)?;
     let bindings = parse_explicit_worktree_bindings(&args.worktrees)?;
     if !bindings.is_empty()
         && bindings
@@ -4241,7 +4243,7 @@ fn build_cook_batch_plan_with_profiles(
             issue.number,
             slugify(&issue.repo)
         );
-        let worktree = format!("{}@{}", args.repo, slugify(&branch));
+        let worktree = format!("{}@{}", worktree_repo, slugify(&branch));
         let explicit_worktree = bindings.get(issue_url).cloned();
         let prompt = render_prompt(
             args.prompt_template.as_deref(),
@@ -7167,37 +7169,18 @@ fi
             homeboy::core::defaults::save_config(&config).expect("save provider config");
 
             let plan = build_cook_batch_plan(&args).expect("fanout plan");
-            assert!(plan
-                .cooks
+            assert!(plan.cooks.iter().all(|cook| {
+                cook.repo.as_deref() == Some("php-transformer")
+                    && cook.to_worktree.starts_with("blocks-engine@")
+            }));
+            args.dry_run = false;
+            let worktrees = queue_or_reuse_worktrees(&args, &plan).expect("provider worktrees");
+            assert_eq!(worktrees.repo, "blocks-engine");
+            assert!(worktrees
+                .rows
                 .iter()
-                .all(|cook| cook.repo.as_deref() == Some("php-transformer")));
-            let rows = plan
-                .cooks
-                .iter()
-                .map(|cook| worktree::WorktreeQueueCreateRow {
-                    branch: cook.head.clone().expect("child branch"),
-                    handle: cook.to_worktree.clone(),
-                    status: worktree::WorktreeQueueCreateStatus::Failed,
-                    command: Vec::new(),
-                    retry_after_seconds: None,
-                    active_lock_holder: None,
-                    path: None,
-                    error: None,
-                    failure: None,
-                })
-                .collect();
-            let worktrees = with_workspace_owner_repair_commands(
-                &args,
-                &plan,
-                worktree::WorktreeQueueCreateOutput {
-                    schema: "homeboy/worktree-queue-create/v1",
-                    repo: "blocks-engine".to_string(),
-                    base_ref: "origin/main".to_string(),
-                    dry_run: false,
-                    rows,
-                },
-            )
-            .expect("provider repair commands");
+                .zip(&plan.cooks)
+                .all(|(row, cook)| { row.handle == cook.to_worktree }));
             assert!(worktrees.rows.iter().all(|row| {
                 row.command.iter().any(|arg| arg == "blocks-engine")
                     && !row.command.iter().any(|arg| arg == "php-transformer")
