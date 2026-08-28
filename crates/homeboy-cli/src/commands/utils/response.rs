@@ -1140,14 +1140,13 @@ fn tail_text(value: String) -> String {
 }
 
 fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
-    let payload_status = data
-        .and_then(|value| {
-            value
-                .get("status")
-                .and_then(Value::as_str)
-                .or_else(|| value.pointer("/batch/state").and_then(Value::as_str))
-        })
-        .and_then(normalize_status);
+    let raw_status = data.and_then(|value| {
+        value
+            .get("status")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/batch/state").and_then(Value::as_str))
+    });
+    let payload_status = raw_status.and_then(normalize_status);
     if exit_code != 0 {
         // A partial result is still a command failure, but retaining its precise
         // aggregate state lets machine consumers distinguish it from all-failed.
@@ -1160,6 +1159,17 @@ fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
                 .to_string();
         }
         return "failed".to_string();
+    }
+
+    // `partial` with a zero exit is a bounded pass that completed every category
+    // it ran and left a resumable continuation. `normalize_status` folds it into
+    // `partial_failure` because the canonical lifecycle vocabulary has no
+    // separate `partial`, which made schedulers record successful continuation
+    // passes as failures and eventually auto-disable them (#12727). The
+    // continuation itself stays legible in the payload's own `status` and
+    // `continuation_required`.
+    if raw_status.is_some_and(|status| status.eq_ignore_ascii_case("partial")) {
+        return "succeeded".to_string();
     }
 
     payload_status.unwrap_or("succeeded").to_string()
@@ -1538,6 +1548,42 @@ fn append_python_json_string(json: &mut String, value: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A bounded pass that left a resumable continuation must not surface to
+    /// schedulers as a failure.
+    ///
+    /// The canonical lifecycle vocabulary has no `partial`, so `normalize_status`
+    /// folds it into `partial_failure`. With a zero exit that turned successful
+    /// continuation passes into recorded scheduler failures, which is what drove
+    /// `automatic-retention` to auto-disable after 49 of them (#12727).
+    #[test]
+    fn a_zero_exit_partial_result_is_not_reported_as_a_failure() {
+        let partial = json!({ "status": "partial", "continuation_required": true });
+        assert_eq!(status_for_result(Some(&partial), 0), "succeeded");
+
+        // Case-insensitive, matching `normalize_status`.
+        let shouty = json!({ "status": "PARTIAL" });
+        assert_eq!(status_for_result(Some(&shouty), 0), "succeeded");
+    }
+
+    /// The regression boundary: a real partial failure keeps its status, and a
+    /// non-zero exit is never laundered into success.
+    #[test]
+    fn genuine_partial_failures_keep_failing() {
+        let failed = json!({ "status": "partial_failure" });
+        assert_eq!(status_for_result(Some(&failed), 1), "partial_failure");
+
+        // `partial` with a non-zero exit stays a failure, keeping its precise
+        // aggregate state rather than collapsing to a bare `failed`.
+        let partial_but_failed = json!({ "status": "partial" });
+        assert_eq!(
+            status_for_result(Some(&partial_but_failed), 1),
+            "partial_failure"
+        );
+
+        let succeeded = json!({ "status": "succeeded" });
+        assert_eq!(status_for_result(Some(&succeeded), 0), "succeeded");
+    }
 
     #[test]
     fn runtime_inventory_fingerprint_matches_python_json_for_unicode_and_controls() {
