@@ -2351,7 +2351,7 @@ fn cook_batch_inner(
                 "preflight": {
                     "default_branch": args.base_resolution.clone(),
                 "provider_readiness_command": provider_readiness_command(&args),
-                "provider_selection": provider_selection_preflight(&args, args.dry_run),
+                "provider_selection": provider_selection_preflight(&args),
                 "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
                 "placement": fanout_placement_preflight(plan.placement.as_ref()),
                 "deterministic_gates": effective_batch_cook_gates(&plan)
@@ -2553,7 +2553,7 @@ fn cook_batch_dry_run(
             "preflight": {
                 "default_branch": args.base_resolution.clone(),
                 "provider_readiness_command": provider_readiness_command(&args),
-                "provider_selection": provider_selection_preflight(&args, true),
+                "provider_selection": provider_selection_preflight(&args),
                 "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
                 "placement": fanout_placement_preflight(plan.placement.as_ref()),
                 "deterministic_gates": effective_batch_cook_gates(&plan),
@@ -5191,15 +5191,13 @@ fn selected_provider_profile(name: Option<&str>) -> Option<AgentTaskProviderProf
         .cloned()
 }
 
-fn provider_selection_preflight(
-    args: &AgentTaskFanoutCookBatchArgs,
-    static_planning: bool,
-) -> Value {
-    let warnings = if static_planning && args.provider_profile.is_some() {
-        vec!["provider profile resolution is deferred to the executable run plan".to_string()]
-    } else {
-        provider_selection_warnings(args)
-    };
+/// Planning and execution report the same provider selection.
+///
+/// Deferring profile resolution while planning meant a dry run could report a
+/// selection that execution then rejected, which is the one thing a dry run
+/// exists to rule out. There is one answer now, and planning gives it.
+fn provider_selection_preflight(args: &AgentTaskFanoutCookBatchArgs) -> Value {
+    let warnings = provider_selection_warnings(args);
     serde_json::json!({
         "profile": args.provider_profile,
         "executor": {
@@ -7258,7 +7256,9 @@ fi
             selector: Some("sample.executor-provider".to_string()),
             model: Some("gpt-5.5".to_string()),
             provider_profile: None,
-            secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
+            // No secret is declared: planning and execution share one admission,
+            // so a credential the fixture cannot supply would be checked for real.
+            secret_env: Vec::new(),
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
             provider_evidence_inputs: Vec::new(),
             ai_tool: None,
@@ -7813,6 +7813,7 @@ fi
     #[test]
     fn fanout_dry_run_bounds_gate_workspace_lookup_in_a_large_registry() {
         with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let target = home.path().join("target");
             std::fs::create_dir(&target).expect("target workspace");
             std::fs::write(target.join("homeboy.json"), r#"{"id":"fixture"}"#)
@@ -8902,6 +8903,7 @@ fi
     #[test]
     fn cook_batch_rejects_repository_script_alias_before_worktree_queueing() {
         with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let source = home.path().join("fixture-primary");
             std::fs::create_dir_all(&source).expect("primary directory");
             std::fs::write(
@@ -9744,6 +9746,7 @@ fi
     #[test]
     fn dry_run_plans_absent_worktrees_without_creating_them() {
         with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let parent = home.path().join("Developer");
             let source = parent.join("fanout-dry-run-fixture");
             std::fs::create_dir_all(&source).expect("source directory");
@@ -9967,6 +9970,7 @@ fi
     #[test]
     fn dry_run_normalizes_registered_primary_and_validates_static_gate_aliases() {
         with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let primary = home.path().join("primary");
             std::fs::create_dir_all(&primary).expect("primary directory");
             git(&primary, &["init", "-b", "main"]);
@@ -10040,6 +10044,7 @@ fi
     #[test]
     fn dry_run_reuses_existing_worktrees_and_plans_missing_children() {
         with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let parent = home.path().join("Developer");
             let source = parent.join("fanout-mixed-fixture");
             std::fs::create_dir_all(&source).expect("source directory");
@@ -10647,28 +10652,6 @@ fi
                     .metadata["coordinator"]["admission_deadline_at"],
                 before
             );
-        });
-    }
-
-    #[test]
-    fn cook_batch_dry_run_defers_provider_profile_resolution() {
-        with_materialized_cook_batch_worktrees(|| {
-            let mut args = cook_batch_args();
-            args.backend = None;
-            args.model = None;
-            args.provider_profile = Some("example-profile".to_string());
-
-            let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
-
-            assert_eq!(exit_code, 0, "{value}");
-            assert_eq!(
-                value["preflight"]["provider_selection"]["profile"],
-                "example-profile"
-            );
-            assert!(value["preflight"]["provider_selection"]["warnings"][0]
-                .as_str()
-                .expect("warning")
-                .contains("deferred to the executable run plan"));
         });
     }
 
