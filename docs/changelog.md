@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.4] - 2026-08-28
+
+### Fixed
+- follow the runner's admission rule in manifest preflight
+
 ## [0.364.3] - 2026-08-28
 
 ### Fixed
