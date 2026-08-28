@@ -199,8 +199,35 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         )
     })?;
     let base = backend.resolve_verified_base(&options.path, verified_base_sha)?;
-    let candidate = backend.candidate_state(&options.path, &base, &head)?;
+    let mut candidate = backend.candidate_state(&options.path, &base, &head)?;
+    if let AgentTaskPrCandidateState::BehindBase { .. } = &candidate {
+        // A manually verified candidate asserts an immutable commit identity, and
+        // merging would move HEAD out from under that proof. Those runs keep the
+        // pre-#13695 refusal and stay a human decision.
+        if options.verified_candidate_sha.is_none() {
+            if let AgentTaskPrBaseConvergence::Converged =
+                backend.converge_base(&options.path, &base)?
+            {
+                candidate = backend.candidate_state(&options.path, &base, &head)?;
+            }
+        }
+    }
     let (mut changed_files, commit_required, push_required) = match candidate {
+        AgentTaskPrCandidateState::BehindBase {
+            behind,
+            base_ref,
+            base_sha,
+            ..
+        } => {
+            return Err(Error::validation_invalid_argument(
+                "base",
+                &format!(
+                    "HEAD is behind or diverged from resolved base `{base_ref}` at `{base_sha}` ({behind} base-only commit(s)) and could not be merged automatically; resolve the conflict in the worktree before finalizing"
+                ),
+                None,
+                None,
+            ));
+        }
         AgentTaskPrCandidateState::Dirty { changed_files } => (changed_files, true, true),
         AgentTaskPrCandidateState::Committed {
             changed_files,

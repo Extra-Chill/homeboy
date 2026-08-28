@@ -344,8 +344,29 @@ pub enum AgentTaskPrCandidateState {
         push_required: bool,
     },
     Equivalent,
+    /// HEAD does not contain the resolved base. `ahead == 0` is a clean
+    /// fast-forward; `ahead > 0` is a divergence that may still merge cleanly.
+    /// Distinguishing the two is what lets finalization converge a base that
+    /// moved during the run instead of discarding the work (#13695).
+    BehindBase {
+        behind: u64,
+        ahead: u64,
+        base_ref: String,
+        base_sha: String,
+    },
     Invalid {
         diagnostic: String,
+    },
+}
+
+/// Outcome of merging the resolved base into the candidate branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTaskPrBaseConvergence {
+    Converged,
+    /// Convergence needs a human. `paths` names the unmerged files when git
+    /// reported them, so the refusal says which content actually conflicts.
+    Conflicted {
+        paths: Vec<String>,
     },
 }
 
@@ -452,6 +473,18 @@ pub trait AgentTaskPrFinalizationBackend {
         } else {
             AgentTaskPrCandidateState::Dirty { changed_files }
         })
+    }
+    /// Merges the resolved base into the candidate branch so a run whose base
+    /// advanced can still finalize.
+    ///
+    /// Backends that cannot merge report [`AgentTaskPrBaseConvergence::Conflicted`]
+    /// with no paths, which keeps the caller on the pre-#13695 refusal.
+    fn converge_base(
+        &mut self,
+        _path: &str,
+        _base: &AgentTaskPrResolvedBase,
+    ) -> Result<AgentTaskPrBaseConvergence> {
+        Ok(AgentTaskPrBaseConvergence::Conflicted { paths: Vec::new() })
     }
     /// Validates the effective prospective identity before commit mutation.
     fn validate_publication_identity(&mut self, path: &str) -> Result<GitIdentityProof>;
