@@ -7060,21 +7060,25 @@ fi
 
     #[test]
     fn compile_batch_cooks_delivers_controller_context_to_every_cell() {
-        let _env_lock = env_lock();
-        let _env = EnvRestore::set(&[
-            ("HOMEBOY_RUNNER_HOSTED_EXEC", None),
-            ("HOMEBOY_SOURCE_SNAPSHOT_JSON", None),
-            ("HOMEBOY_LAB_OFFLOAD_JSON", None),
-        ]);
-        let plan = test_batch_plan();
-        let cooks = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
+        // HomeGuard already holds env_lock; a second env_lock() around
+        // with_isolated_home deadlocks. EnvRestore composes with that guard.
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let _env = EnvRestore::set(&[
+                ("HOMEBOY_RUNNER_HOSTED_EXEC", None),
+                ("HOMEBOY_SOURCE_SNAPSHOT_JSON", None),
+                ("HOMEBOY_LAB_OFFLOAD_JSON", None),
+            ]);
+            let plan = test_batch_plan();
+            let cooks = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
 
-        assert_eq!(cooks.len(), 2);
-        assert!(cooks.iter().all(|cook| cook.initial_plan.tasks.len() == 1));
-        assert!(cooks
-            .iter()
-            .all(|cook| format!("{:?}", cook.harvest_context)
-                == "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"));
+            assert_eq!(cooks.len(), 2);
+            assert!(cooks.iter().all(|cook| cook.initial_plan.tasks.len() == 1));
+            assert!(cooks
+                .iter()
+                .all(|cook| format!("{:?}", cook.harvest_context)
+                    == "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"));
+        });
     }
 
     fn args() -> AgentTaskFanoutInputArgs {
@@ -8793,12 +8797,13 @@ fi
 
     #[test]
     fn cook_batch_resolves_mixed_verification_profiles_and_round_trips_commands() {
-        let mut batch_args = cook_batch_args();
-        batch_args
-            .issues
-            .push("https://github.com/Extra-Chill/homeboy/issues/6455".to_string());
-        batch_args.gates.verify = vec!["shared gate --strict='exact bytes'".to_string()];
-        batch_args.verification_profiles = Some(
+        with_materialized_cook_batch_worktrees(|| {
+            let mut batch_args = cook_batch_args();
+            batch_args
+                .issues
+                .push("https://github.com/Extra-Chill/homeboy/issues/6455".to_string());
+            batch_args.gates.verify = vec!["shared gate --strict='exact bytes'".to_string()];
+            batch_args.verification_profiles = Some(
             serde_json::json!({
                 "profiles": {
                     "php": { "verify": ["composer audit --format=json"], "mode": "append" },
@@ -8814,47 +8819,48 @@ fi
             .to_string(),
         );
 
-        let plan = build_cook_batch_plan(&batch_args).expect("mixed verification plan");
-        assert_eq!(plan.cooks[0].verification_profile.as_deref(), Some("php"));
-        assert_eq!(
-            plan.cooks[0].verify,
-            vec![
-                "shared gate --strict='exact bytes'",
-                "composer audit --format=json"
-            ]
-        );
-        assert_eq!(plan.cooks[1].verification_profile.as_deref(), Some("node"));
-        assert_eq!(plan.cooks[1].verify, vec!["npm audit --omit=dev"]);
-        assert_eq!(plan.cooks[2].verification_profile.as_deref(), Some("rust"));
-        assert_eq!(
-            plan.cooks[2].verify,
-            vec![
-                "shared gate --strict='exact bytes'",
-                "cargo fmt --check",
-                "cargo test -p homeboy-cli"
-            ]
-        );
+            let plan = build_cook_batch_plan(&batch_args).expect("mixed verification plan");
+            assert_eq!(plan.cooks[0].verification_profile.as_deref(), Some("php"));
+            assert_eq!(
+                plan.cooks[0].verify,
+                vec![
+                    "shared gate --strict='exact bytes'",
+                    "composer audit --format=json"
+                ]
+            );
+            assert_eq!(plan.cooks[1].verification_profile.as_deref(), Some("node"));
+            assert_eq!(plan.cooks[1].verify, vec!["npm audit --omit=dev"]);
+            assert_eq!(plan.cooks[2].verification_profile.as_deref(), Some("rust"));
+            assert_eq!(
+                plan.cooks[2].verify,
+                vec![
+                    "shared gate --strict='exact bytes'",
+                    "cargo fmt --check",
+                    "cargo test -p homeboy-cli"
+                ]
+            );
 
-        let round_trip = BatchCookFanoutPlan::from_value(
-            serde_json::to_value(&plan).expect("serialize plan"),
-            &args(),
-        )
-        .expect("deserialize plan");
-        assert_eq!(round_trip.cooks.len(), plan.cooks.len());
-        for (reloaded, original) in round_trip.cooks.iter().zip(&plan.cooks) {
-            assert_eq!(reloaded.verification_profile, original.verification_profile);
-            assert_eq!(reloaded.verify, original.verify);
-            assert_eq!(reloaded.private_verify, original.private_verify);
-        }
-        assert_eq!(
-            round_trip.cooks[2]
-                .to_cook_invocation(&round_trip)
-                .expect("Lab handoff invocation")
-                .options
-                .gates
-                .verify,
-            plan.cooks[2].verify
-        );
+            let round_trip = BatchCookFanoutPlan::from_value(
+                serde_json::to_value(&plan).expect("serialize plan"),
+                &args(),
+            )
+            .expect("deserialize plan");
+            assert_eq!(round_trip.cooks.len(), plan.cooks.len());
+            for (reloaded, original) in round_trip.cooks.iter().zip(&plan.cooks) {
+                assert_eq!(reloaded.verification_profile, original.verification_profile);
+                assert_eq!(reloaded.verify, original.verify);
+                assert_eq!(reloaded.private_verify, original.private_verify);
+            }
+            assert_eq!(
+                round_trip.cooks[2]
+                    .to_cook_invocation(&round_trip)
+                    .expect("Lab handoff invocation")
+                    .options
+                    .gates
+                    .verify,
+                plan.cooks[2].verify
+            );
+        });
     }
 
     #[test]
@@ -9008,49 +9014,51 @@ fi
         // `cook-batch --run-plan` generates children without --cwd/--workspace.
         // Once its declared worktree is materialized, the same canonical root
         // must drive provider dispatch and promotion before execution starts.
-        let mut plan = build_cook_batch_plan(&cook_batch_args()).expect("generated cook plan");
-        let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).expect("canonical root");
-        let rows = plan
-            .cooks
-            .iter()
-            .map(|cook| worktree::WorktreeQueueCreateRow {
-                branch: cook.head.clone().expect("generated head"),
-                handle: cook.to_worktree.clone(),
-                status: worktree::WorktreeQueueCreateStatus::Created,
-                command: Vec::new(),
-                retry_after_seconds: None,
-                active_lock_holder: None,
-                path: Some(root.display().to_string()),
-                error: None,
-                failure: None,
-            })
-            .collect();
-        bind_materialized_worktrees(
-            &mut plan,
-            &worktree::WorktreeQueueCreateOutput {
-                schema: "homeboy/worktree-queue-create/v1",
-                repo: "homeboy".to_string(),
-                base_ref: "origin/main".to_string(),
-                dry_run: false,
-                rows,
-            },
-        )
-        .expect("bind materialized worktrees");
+        with_materialized_cook_batch_worktrees(|| {
+            let mut plan = build_cook_batch_plan(&cook_batch_args()).expect("generated cook plan");
+            let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).expect("canonical root");
+            let rows = plan
+                .cooks
+                .iter()
+                .map(|cook| worktree::WorktreeQueueCreateRow {
+                    branch: cook.head.clone().expect("generated head"),
+                    handle: cook.to_worktree.clone(),
+                    status: worktree::WorktreeQueueCreateStatus::Created,
+                    command: Vec::new(),
+                    retry_after_seconds: None,
+                    active_lock_holder: None,
+                    path: Some(root.display().to_string()),
+                    error: None,
+                    failure: None,
+                })
+                .collect();
+            bind_materialized_worktrees(
+                &mut plan,
+                &worktree::WorktreeQueueCreateOutput {
+                    schema: "homeboy/worktree-queue-create/v1",
+                    repo: "homeboy".to_string(),
+                    base_ref: "origin/main".to_string(),
+                    dry_run: false,
+                    rows,
+                },
+            )
+            .expect("bind materialized worktrees");
 
-        let invocation = plan.cooks[0]
-            .to_cook_invocation(&plan)
-            .expect("workspace-bound cook invocation");
-        assert_eq!(invocation.dispatch.workspace.as_deref(), root.to_str());
-        assert_eq!(
-            invocation.options.source_worktree_path.as_deref(),
-            Some(root.as_path())
-        );
+            let invocation = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("workspace-bound cook invocation");
+            assert_eq!(invocation.dispatch.workspace.as_deref(), root.to_str());
+            assert_eq!(
+                invocation.options.source_worktree_path.as_deref(),
+                Some(root.as_path())
+            );
 
-        let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile before provider");
-        assert_eq!(
-            compiled[0].initial_plan.tasks[0].workspace.root.as_deref(),
-            root.to_str()
-        );
+            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile before provider");
+            assert_eq!(
+                compiled[0].initial_plan.tasks[0].workspace.root.as_deref(),
+                root.to_str()
+            );
+        });
     }
 
     #[test]
@@ -9199,32 +9207,36 @@ fi
 
     #[test]
     fn implicit_fanout_identity_tracks_effective_cook_inputs() {
-        let mut args = cook_batch_args();
-        args.fanout_id = None;
-        let first = build_cook_batch_plan(&args).expect("first implicit plan");
-        let replay = build_cook_batch_plan(&args).expect("exact replay");
-        assert_eq!(first.fanout_id, replay.fanout_id);
-        assert_eq!(first.cooks[0].cook_id, replay.cooks[0].cook_id);
+        with_materialized_cook_batch_worktrees(|| {
+            let mut args = cook_batch_args();
+            args.fanout_id = None;
+            let first = build_cook_batch_plan(&args).expect("first implicit plan");
+            let replay = build_cook_batch_plan(&args).expect("exact replay");
+            assert_eq!(first.fanout_id, replay.fanout_id);
+            assert_eq!(first.cooks[0].cook_id, replay.cooks[0].cook_id);
 
-        args.branch_prefix = "fix-v2".to_string();
-        let changed = build_cook_batch_plan(&args).expect("changed plan");
-        assert_ne!(first.fanout_id, changed.fanout_id);
-        assert_ne!(first.cooks[0].cook_id, changed.cooks[0].cook_id);
+            args.branch_prefix = "fix-v2".to_string();
+            let changed = build_cook_batch_plan(&args).expect("changed plan");
+            assert_ne!(first.fanout_id, changed.fanout_id);
+            assert_ne!(first.cooks[0].cook_id, changed.cooks[0].cook_id);
+        });
     }
 
     #[test]
     fn canonical_cook_batch_identity_matches_the_plan_and_its_child_lineage() {
-        let mut args = cook_batch_args();
-        args.fanout_id = None;
+        with_materialized_cook_batch_worktrees(|| {
+            let mut args = cook_batch_args();
+            args.fanout_id = None;
 
-        let fanout_id = cook_batch_fanout_id(&args).expect("canonical fanout identity");
-        let plan = build_cook_batch_plan(&args).expect("canonical fanout plan");
+            let fanout_id = cook_batch_fanout_id(&args).expect("canonical fanout identity");
+            let plan = build_cook_batch_plan(&args).expect("canonical fanout plan");
 
-        assert_eq!(fanout_id, plan.fanout_id);
-        for cook in plan.cooks {
-            assert!(cook.cook_id.starts_with(&format!("{fanout_id}-")));
-            assert!(cook.run_id().starts_with(&format!("cook-{fanout_id}-")));
-        }
+            assert_eq!(fanout_id, plan.fanout_id);
+            for cook in plan.cooks {
+                assert!(cook.cook_id.starts_with(&format!("{fanout_id}-")));
+                assert!(cook.run_id().starts_with(&format!("cook-{fanout_id}-")));
+            }
+        });
     }
 
     #[test]
@@ -9619,34 +9631,36 @@ fi
 
     #[test]
     fn dry_run_replay_pins_fanout_child_and_worktree_owners() {
-        let mut args = cook_batch_args();
-        args.fanout_id = None;
+        with_materialized_cook_batch_worktrees(|| {
+            let mut args = cook_batch_args();
+            args.fanout_id = None;
 
-        let dry_plan = build_static_cook_batch_plan(&args).expect("dry-run plan");
-        let replay = pin_cook_batch_replay(&args, &dry_plan.fanout_id);
-        let live_plan = build_cook_batch_plan(&replay).expect("replayed live plan");
+            let dry_plan = build_static_cook_batch_plan(&args).expect("dry-run plan");
+            let replay = pin_cook_batch_replay(&args, &dry_plan.fanout_id);
+            let live_plan = build_cook_batch_plan(&replay).expect("replayed live plan");
 
-        assert_eq!(live_plan.fanout_id, dry_plan.fanout_id);
-        assert_eq!(
-            live_plan
-                .cooks
-                .iter()
-                .map(|cook| (&cook.cook_id, cook.run_id(), &cook.to_worktree, &cook.head))
-                .collect::<Vec<_>>(),
-            dry_plan
-                .cooks
-                .iter()
-                .map(|cook| (&cook.cook_id, cook.run_id(), &cook.to_worktree, &cook.head))
-                .collect::<Vec<_>>(),
-            "replay must retain each child cook, worktree owner, and branch identity"
-        );
-        assert!(cook_batch_run_command(&replay)
-            .contains(&format!("--fanout-id {}", dry_plan.fanout_id)));
-        assert_eq!(
-            batch_plan_reference(&dry_plan).expect("plan reference"),
-            batch_plan_reference(&live_plan).expect("plan reference"),
-            "the replayed plan must retain its immutable input digest"
-        );
+            assert_eq!(live_plan.fanout_id, dry_plan.fanout_id);
+            assert_eq!(
+                live_plan
+                    .cooks
+                    .iter()
+                    .map(|cook| (&cook.cook_id, cook.run_id(), &cook.to_worktree, &cook.head))
+                    .collect::<Vec<_>>(),
+                dry_plan
+                    .cooks
+                    .iter()
+                    .map(|cook| (&cook.cook_id, cook.run_id(), &cook.to_worktree, &cook.head))
+                    .collect::<Vec<_>>(),
+                "replay must retain each child cook, worktree owner, and branch identity"
+            );
+            assert!(cook_batch_run_command(&replay)
+                .contains(&format!("--fanout-id {}", dry_plan.fanout_id)));
+            assert_eq!(
+                batch_plan_reference(&dry_plan).expect("plan reference"),
+                batch_plan_reference(&live_plan).expect("plan reference"),
+                "the replayed plan must retain its immutable input digest"
+            );
+        });
     }
 
     #[test]
@@ -10659,7 +10673,10 @@ fi
     fn cook_batch_does_not_warn_for_specific_backend_names_in_core() {
         with_materialized_cook_batch_worktrees(|| {
             let mut args = cook_batch_args();
-            args.backend = Some("example".to_string());
+            // Planning and execution share admission, so this has to name an
+            // installed backend. `sandbox` is specific; the assertion is that
+            // a concrete name is not itself a warning.
+            args.backend = Some("sandbox".to_string());
             args.provider_config = None;
 
             let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
