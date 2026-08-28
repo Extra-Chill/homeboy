@@ -54,6 +54,8 @@ const CLEANUP_CATEGORY_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(120);
 const CLEANUP_CHILD_TERMINATION_ALLOWANCE: Duration = Duration::from_secs(5);
 const CLEANUP_CATEGORY_HEARTBEAT: Duration = Duration::from_secs(5);
+/// Time reserved for the repo-artifact category to report after its last root.
+const REPO_ARTIFACT_REPORTING_HEADROOM: Duration = Duration::from_secs(2);
 const CLEANUP_CATEGORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 #[cfg(any(test, feature = "test-support"))]
 const CLEANUP_CATEGORY_FIXTURE_ENV: &str = "HOMEBOY_TEST_CLEANUP_CATEGORY_FIXTURE";
@@ -197,6 +199,7 @@ pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> Cmd
                     merged_only: args.merged_only,
                     min_age_days: args.min_age_days,
                     include_active_worktrees: args.include_active_worktrees,
+                    max_scan_duration: None,
                 }),
                 worktree_providers: None,
             },
@@ -1967,7 +1970,7 @@ fn cleanup_inventory_with_deadline(
             &args,
             deadline,
             CleanupCategoryCommandOverrides::default(),
-            || repo_artifacts_category(apply).map(|category| vec![category]),
+            || repo_artifacts_category(apply, deadline).map(|category| vec![category]),
         );
     }
 
@@ -3361,14 +3364,18 @@ struct RepoArtifactRootDiagnostic {
     error: Option<String>,
 }
 
-fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventoryCategory> {
+fn repo_artifacts_category(
+    apply: bool,
+    deadline: Option<SystemTime>,
+) -> homeboy::core::Result<CleanupInventoryCategory> {
     let configured_roots: Vec<PathBuf> = homeboy::core::component::registered()
         .unwrap_or_default()
         .into_iter()
         .map(|component| PathBuf::from(component.local_path))
         .collect();
     let include_source_checkout = configured_roots.is_empty();
-    let collected_roots = repo_artifact_roots(configured_roots, include_source_checkout, apply);
+    let mut collected_roots = repo_artifact_roots(configured_roots, include_source_checkout, apply);
+    apply_repo_artifact_scan_budget(&mut collected_roots.roots, deadline);
     let mut output = cleanup_repo_artifact_roots(collected_roots.roots);
     output.diagnostics.extend(collected_roots.diagnostics);
     if !include_source_checkout
@@ -3377,8 +3384,9 @@ fn repo_artifacts_category(apply: bool) -> homeboy::core::Result<CleanupInventor
             .iter()
             .all(|diagnostic| !diagnostic.success)
     {
-        let source_output =
-            cleanup_repo_artifact_roots(repo_artifact_roots(Vec::new(), true, apply).roots);
+        let mut source_roots = repo_artifact_roots(Vec::new(), true, apply);
+        apply_repo_artifact_scan_budget(&mut source_roots.roots, deadline);
+        let source_output = cleanup_repo_artifact_roots(source_roots.roots);
         output.candidate_count += source_output.candidate_count;
         output.applied_count += source_output.applied_count;
         output.skipped_count += source_output.skipped_count;
@@ -3532,6 +3540,7 @@ fn repo_artifact_roots(
                     merged_only: false,
                     min_age_days: None,
                     include_active_worktrees: false,
+                    max_scan_duration: None,
                 },
             ));
         }
@@ -3549,10 +3558,39 @@ fn repo_artifact_roots(
                 merged_only: false,
                 min_age_days: None,
                 include_active_worktrees: false,
+                max_scan_duration: None,
             },
         ));
     }
     collection
+}
+
+/// Share the category's remaining wall-clock across the roots it must visit.
+///
+/// A single large root can exceed the whole category budget on its own, so
+/// every root gets a bounded slice and stops at a worktree boundary with its
+/// progress intact. Previously each root scanned unbounded until the category
+/// wall killed the process, discarding everything it had reclaimed (#12727).
+fn apply_repo_artifact_scan_budget(
+    roots: &mut [(&'static str, ArtifactCleanupOptions)],
+    deadline: Option<SystemTime>,
+) {
+    let Some(deadline) = deadline else {
+        return;
+    };
+    if roots.is_empty() {
+        return;
+    }
+    // Leave the category enough headroom to serialize its result after the
+    // last root returns.
+    let remaining = deadline
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO)
+        .saturating_sub(REPO_ARTIFACT_REPORTING_HEADROOM);
+    let per_root = remaining / u32::try_from(roots.len()).unwrap_or(u32::MAX).max(1);
+    for (_, options) in roots.iter_mut() {
+        options.max_scan_duration = Some(per_root);
+    }
 }
 
 /// Categories that executed and removed at least one resource.
