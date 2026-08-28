@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { spawn } from 'node:child_process';
+
 const DISCORD_CONTENT_LIMIT = 2000;
 const MAX_RETRIES = 2;
 const MAX_RETRY_DELAY_MS = 5000;
@@ -27,6 +29,15 @@ async function main() {
       delivery: proof,
       attempts: 0,
     });
+  }
+
+  if (validation.mode === 'kimaki_session') {
+    const delivered = await sendThroughKimaki(validation, rendered.content);
+    return finish(
+      delivered.ok
+        ? { schema: 'homeboy/discord-notification-result/v1', status: 'delivered', delivery: proof, attempts: 1 }
+        : failure('delivery_error', delivered.error, proof, 1),
+    );
   }
 
   let attempts = 0;
@@ -96,15 +107,35 @@ function validate(args, env) {
     return { ok: false, error: args.error || 'run-id, status, title, and body must be non-empty.' };
   }
 
+  const route = value(args.route);
+  const parsedRoute = route === undefined ? undefined : parseRoute(route);
+  if (parsedRoute?.error) return { ok: false, error: parsedRoute.error };
+
+  // A REST post from Kimaki's own application is a self-message its ingress
+  // drops, so the session that owns this run never sees its own completion.
+  // Delivering the owning thread through Kimaki's CLI makes the notification a
+  // real turn instead of a message the agent cannot read.
+  const sessionThreadId = value(env.KIMAKI_THREAD_ID);
+  if (
+    parsedRoute?.kind === 'thread' &&
+    sessionThreadId !== undefined &&
+    sessionThreadId === parsedRoute.id
+  ) {
+    return {
+      ok: true,
+      mode: 'kimaki_session',
+      route_kind: 'thread',
+      destination: 'session_thread',
+      command: value(env.KIMAKI_CLI) || 'kimaki',
+      threadId: parsedRoute.id,
+    };
+  }
+
   const botToken = value(env.DISCORD_BOT_TOKEN) || value(env.KIMAKI_BOT_TOKEN);
   const webhookUrl = value(env.DISCORD_WEBHOOK_URL);
   if (Boolean(botToken) === Boolean(webhookUrl)) {
     return { ok: false, error: 'Configure exactly one auth mode: DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL.' };
   }
-
-  const route = value(args.route);
-  const parsedRoute = route === undefined ? undefined : parseRoute(route);
-  if (parsedRoute?.error) return { ok: false, error: parsedRoute.error };
 
   const operationsChannelId = value(env.DISCORD_OPERATIONS_CHANNEL_ID);
   if (botToken) {
@@ -207,6 +238,28 @@ function failure(kind, error, delivery = undefined, attempts = 0, httpStatus = u
 function finish(result) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
   process.exitCode = result.status === 'failed' ? 1 : 0;
+}
+
+function sendThroughKimaki(validation, content) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      validation.command,
+      ['send', '--thread', validation.threadId, '--prompt', content],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.once('error', () => resolve({ ok: false, error: 'Kimaki session delivery could not be started.' }));
+    child.once('close', (code) =>
+      resolve(
+        code === 0
+          ? { ok: true }
+          : { ok: false, error: `Kimaki session delivery exited with status ${code}: ${compact(stderr).slice(0, 200)}` },
+      ),
+    );
+  });
 }
 
 function ensureApiBase(base) {
