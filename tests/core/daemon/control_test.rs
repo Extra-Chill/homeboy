@@ -56,7 +56,7 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
     with_isolated_home(|_| {
         let replacement = fake_daemon(4343, "replacement-lease");
         let state = fake_daemon_state(replacement.clone());
-        let status = DaemonStatus {
+        let mut status = DaemonStatus {
             running: true,
             fresh: true,
             reachable: true,
@@ -78,6 +78,9 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
                 repair_plan: Vec::new(),
             },
             stale_reason: None,
+            replacement_blocked: false,
+            replacement_blocked_reason: None,
+            summary: String::new(),
             state: Some(state),
             state_path: "/fake/daemon-state.json".to_string(),
             state_identity: "fresh-replacement".to_string(),
@@ -85,6 +88,8 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
             active_job_recovery_evidence: Vec::new(),
             termination_evidence: None,
         };
+        status.summary = status.render_summary();
+        let status = status;
         let receipt = super::LeaselessRecoveryReceipt {
             affected_job_ids: Vec::new(),
             affected_jobs: Vec::new(),
@@ -1554,8 +1559,10 @@ fn write_legacy_recovery_state(lease_id: &str, pid: u32, endpoint: &str) {
 
 fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonStatus {
     let stale_reason_code = (!fresh).then_some(DaemonStaleReasonCode::VersionMismatch);
-    DaemonStatus {
-        running: fresh,
+    // The fixture models a live daemon whenever a lease is present, matching
+    // the real projection where a version-mismatched lease keeps its live PID.
+    let mut status = DaemonStatus {
+        running: daemon.is_some(),
         fresh,
         reachable: true,
         freshness: DaemonFreshnessReport {
@@ -1576,17 +1583,23 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
             repair_plan: Vec::new(),
         },
         stale_reason: (!fresh).then(|| "simulated stale daemon".to_string()),
+        replacement_blocked: !fresh,
+        replacement_blocked_reason: (!fresh)
+            .then(|| "the recorded evidence authorizes no replacement".to_string()),
+        summary: String::new(),
         state: daemon.map(fake_daemon_state),
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "sha256:fake".to_string(),
         process_candidates: Vec::new(),
         active_job_recovery_evidence: Vec::new(),
         termination_evidence: None,
-    }
+    };
+    status.summary = status.render_summary();
+    status
 }
 
 fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
-    DaemonStatus {
+    let mut status = DaemonStatus {
         running: false,
         fresh: false,
         reachable: false,
@@ -1608,13 +1621,20 @@ fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
             repair_plan: Vec::new(),
         },
         stale_reason: Some("daemon lease pid is not running".to_string()),
+        replacement_blocked: true,
+        replacement_blocked_reason: Some(
+            "1 active durable job(s) are protected from implicit replacement".to_string(),
+        ),
+        summary: String::new(),
         state: Some(fake_daemon_state(daemon)),
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "sha256:fake".to_string(),
         process_candidates: Vec::new(),
         active_job_recovery_evidence: Vec::new(),
         termination_evidence: None,
-    }
+    };
+    status.summary = status.render_summary();
+    status
 }
 
 fn dead_status_with_unexpected_termination(daemon: super::DaemonStartResult) -> DaemonStatus {

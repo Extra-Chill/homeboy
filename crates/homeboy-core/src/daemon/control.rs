@@ -1008,7 +1008,7 @@ fn start_state_loss_replacement(
     start_state_loss_replacement_with(receipt, receipt_path, |startup_token| {
         let replacement = start_or_return_live_unlocked_with_startup_token(addr, startup_token)?;
         let status = read_status()?;
-        if status.running
+        if status.admits_work()
             && status
                 .state
                 .as_ref()
@@ -1057,7 +1057,7 @@ fn replay_replacement_starting(
             Error::internal_unexpected("replacement-starting receipt has no startup token")
         })?;
     if let Some(state) = status.state.as_ref() {
-        if status.running && state.startup_token == token {
+        if status.admits_work() && state.startup_token == token {
             receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
             receipt.replacement = Some(super::DaemonStartResult {
                 pid: state.pid,
@@ -1207,7 +1207,7 @@ fn replay_leaseless_recovery(
         return replay_leaseless_recovery(status, addr, replacement_operation_id);
     }
     if receipt.phase == StateLossRecoveryPhase::ReplacementStarting {
-        if let Some(state) = status.state.as_ref().filter(|_| status.running) {
+        if let Some(state) = status.state.as_ref().filter(|_| status.admits_work()) {
             if receipt.replacement_startup_token.as_deref() != Some(&state.startup_token) {
                 return Err(Error::validation_invalid_argument(
                     "reconcile_leaseless_orphans",
@@ -1235,7 +1235,7 @@ fn replay_leaseless_recovery(
                 })?;
             let replacement = start_or_return_live_unlocked_with_startup_token(addr, token)?;
             let started = read_status()?;
-            if !started.running
+            if !started.admits_work()
                 || started
                     .state
                     .as_ref()
@@ -1257,7 +1257,7 @@ fn replay_leaseless_recovery(
     let Some(state) = status.state.as_ref() else {
         return Ok(None);
     };
-    if status.freshness.active_jobs != 0 || !status.fresh || !status.running {
+    if status.freshness.active_jobs != 0 || !status.admits_work() {
         return Ok(None);
     }
     let replacement = receipt.replacement.as_ref().ok_or_else(|| {
@@ -1871,7 +1871,7 @@ pub fn reconcile_leaseless_orphans(
     write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
     let replacement = start_or_return_live_unlocked_with_startup_token(addr, &startup_token)?;
     let status = read_status()?;
-    if !status.running
+    if !status.admits_work()
         || status
             .state
             .as_ref()
@@ -2485,7 +2485,10 @@ where
     Spawn: FnOnce() -> Result<DaemonStartResult>,
 {
     let existing = read_status()?;
-    if existing.running {
+    // A live-but-stale daemon must not be returned as if it were usable:
+    // `running` is pure process liveness, so the start path gates on the
+    // full live/reachable/current-build predicate before attaching (#13621).
+    if existing.admits_work() {
         if let Some(state) = existing.state {
             return Ok(DaemonStartResult {
                 pid: state.pid,
@@ -2539,8 +2542,9 @@ where
     };
     for attempt in 0..=observations {
         let status = read_status()?;
+        let admits_work = status.admits_work();
         if let Some(state) = status.state {
-            if status.running && state.startup_token == startup_token {
+            if admits_work && state.startup_token == startup_token {
                 return Ok(Ok(DaemonStartResult {
                     pid: state.pid,
                     address: state.address,
@@ -2789,7 +2793,8 @@ fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
         return Ok(url);
     }
     let status = read_status()?;
-    let Some(state) = status.state.filter(|_| status.running) else {
+    let admits_work = status.admits_work();
+    let Some(state) = status.state.filter(|_| admits_work) else {
         return Err(Error::validation_invalid_argument(
             "daemon-url",
             "daemon is not running; pass --daemon-url or start it with `homeboy daemon start`",

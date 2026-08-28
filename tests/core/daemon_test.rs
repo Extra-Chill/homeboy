@@ -1553,9 +1553,13 @@ fn read_status_classifies_unknown_binary_freshness_as_stale() {
 
     let status = read_status().expect("status");
 
-    assert!(!status.running);
+    // #13621: a binary-hash mismatch is staleness, not process death. The
+    // recorded PID stays live and its endpoint stays reachable, so liveness
+    // and reachability are reported independently of freshness.
+    assert!(status.running);
     assert!(!status.fresh);
     assert!(status.reachable);
+    assert!(!status.admits_work());
     assert!(status
         .stale_reason
         .as_deref()
@@ -1624,6 +1628,160 @@ fn freshness_report_classifies_version_mismatch() {
     assert_eq!(
         status.freshness.stale_reason_code,
         Some(DaemonStaleReasonCode::VersionMismatch)
+    );
+}
+
+/// The four daemon-status fixtures of #13621, each pinned deterministically:
+/// liveness is this test process (live) or `u32::MAX` (dead), no daemon is
+/// started or signaled, and each fixture asserts the independent liveness,
+/// reachability, freshness, and replacement-safety fields plus the rendered
+/// operator summary.
+///
+/// This is the live reproduction the fix was written against: a reachable
+/// daemon with a live PID, a valid lease, and one protected active job used
+/// to report `running: false` because `running` encoded build compatibility.
+#[test]
+fn daemon_status_live_but_stale_daemon_reports_liveness_true_and_freshness_false() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.build_identity.version = "0.0.0-stale".to_string();
+    state.build_identity.display = "homeboy 0.0.0-stale+fixture".to_string();
+    state.lease_id = "live-stale-lease".to_string();
+    write_daemon_state_for_test(&state);
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path)
+        .expect("store")
+        .with_daemon_lease(state.lease_id.clone());
+    let job = store.create("runner.exec");
+    store.start(job.id).expect("start job");
+
+    let status = read_status().expect("status");
+
+    assert!(
+        status.running,
+        "a live daemon process stays live regardless of build staleness"
+    );
+    assert!(status.reachable);
+    assert!(!status.fresh);
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::VersionMismatch)
+    );
+    assert!(
+        !status.admits_work(),
+        "a stale build must not admit work just because the process is live"
+    );
+    assert!(
+        status.replacement_blocked,
+        "the protected active job blocks replacement"
+    );
+    assert_eq!(
+        status.replacement_blocked_reason.as_deref(),
+        Some("1 active durable job(s) are protected from implicit replacement")
+    );
+    assert!(
+        status
+            .summary
+            .contains("daemon process is live and its API is reachable"),
+        "{}",
+        status.summary
+    );
+    assert!(
+        status.summary.contains("binary is stale"),
+        "{}",
+        status.summary
+    );
+    assert!(
+        status.summary.contains("replacement is blocked"),
+        "{}",
+        status.summary
+    );
+}
+
+#[test]
+fn daemon_status_dead_lease_reports_a_dead_process_and_an_unblocked_idle_replacement() {
+    let _home = HomeGuard::new();
+    let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
+    write_daemon_state_for_test(&state);
+
+    let status = read_status().expect("status");
+
+    assert!(!status.running);
+    assert!(!status.reachable);
+    assert!(!status.fresh);
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::PidDead)
+    );
+    assert!(!status.admits_work());
+    // The idle dead lease authorizes its stop/start repair, so a replacement
+    // is sequenced rather than blocked.
+    assert!(!status.replacement_blocked);
+    assert_eq!(status.replacement_blocked_reason, None);
+    assert!(
+        status.summary.contains("daemon process is dead"),
+        "{}",
+        status.summary
+    );
+    assert!(
+        !status.summary.contains("daemon process is live"),
+        "{}",
+        status.summary
+    );
+}
+
+#[test]
+fn daemon_status_without_a_lease_reports_no_live_process_and_an_unreachable_api() {
+    let _home = HomeGuard::new();
+
+    let status = read_status().expect("status");
+
+    assert!(!status.running);
+    assert!(!status.reachable);
+    assert!(!status.fresh);
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseMissing)
+    );
+    assert!(!status.admits_work());
+    // An empty store authorizes a plain start; nothing durable is at risk.
+    assert!(!status.replacement_blocked);
+    assert_eq!(status.replacement_blocked_reason, None);
+    assert!(
+        status
+            .summary
+            .contains("no daemon lease is recorded and the daemon API is unreachable"),
+        "{}",
+        status.summary
+    );
+}
+
+#[test]
+fn daemon_status_live_and_fresh_daemon_reports_every_independent_field_true() {
+    let _home = HomeGuard::new();
+    let state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    write_daemon_state_for_test(&state);
+
+    let status = read_status().expect("status");
+
+    assert!(status.running);
+    assert!(status.reachable);
+    assert!(status.fresh);
+    assert_eq!(status.freshness.stale_reason_code, None);
+    assert!(status.admits_work());
+    assert!(!status.replacement_blocked);
+    assert_eq!(status.replacement_blocked_reason, None);
+    assert!(
+        status
+            .summary
+            .contains("daemon process is live and its API is reachable"),
+        "{}",
+        status.summary
+    );
+    assert!(
+        status.summary.contains("binary is fresh"),
+        "{}",
+        status.summary
     );
 }
 

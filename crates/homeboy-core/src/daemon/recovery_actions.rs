@@ -407,12 +407,23 @@ mod tests {
         repair_plan: Vec<DaemonRepairStep>,
         active_jobs: usize,
     ) -> DaemonStatus {
-        DaemonStatus {
-            running: false,
-            fresh: stale_reason_code.is_none(),
+        let fresh = stale_reason_code.is_none();
+        let replacement_blocked = !fresh && repair_plan.is_empty();
+        let replacement_blocked_reason = replacement_blocked.then(|| {
+            if active_jobs > 0 {
+                format!(
+                    "{active_jobs} active durable job(s) are protected from implicit replacement"
+                )
+            } else {
+                "daemon lease evidence is inconclusive".to_string()
+            }
+        });
+        let mut status = DaemonStatus {
+            running: true,
+            fresh,
             reachable: true,
             freshness: super::super::DaemonFreshnessReport {
-                fresh: stale_reason_code.is_none(),
+                fresh,
                 stale_reason_code,
                 restartable: true,
                 lease_id: Some(LEASE_ID.to_string()),
@@ -429,13 +440,18 @@ mod tests {
                 repair_plan,
             },
             stale_reason: None,
+            replacement_blocked,
+            replacement_blocked_reason,
+            summary: String::new(),
             state: None,
             state_path: "/root/.config/homeboy/daemon/state.json".to_string(),
             state_identity: "identity".to_string(),
             process_candidates: Vec::new(),
             active_job_recovery_evidence: Vec::new(),
             termination_evidence: None,
-        }
+        };
+        status.summary = status.render_summary();
+        status
     }
 
     /// The live reproduction this fix was written against: a reachable daemon
