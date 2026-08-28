@@ -5938,7 +5938,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dispatcher_fanout_execution_finalizes_failed_provider_lifecycle() {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let (_fixture, records, mut plan) = provider_finalization_fixture();
             plan.cooks.truncate(1);
             let dispatcher: &CookAttemptDispatcherFactory =
@@ -6894,6 +6895,51 @@ fi
         });
     }
 
+    /// Install the executor providers the fanout fixtures dispatch against.
+    ///
+    /// Provider selection resolves a `--backend`/`--selector` pair against the
+    /// installed catalog, which core discovers from standalone agent-runtime
+    /// manifests under the config root. A hermetic home has none, so every case
+    /// that dispatches fails with "is not dispatchable: the requested
+    /// backend/selector route did not resolve" before reaching what it asserts.
+    ///
+    /// Both fixture argument builders are covered, and their selectors are
+    /// distinct provider ids, so one home can serve both without colliding.
+    fn install_fanout_agent_task_providers(home: &Path) {
+        for (provider_id, backend) in [("sample.executor-provider", "sandbox"), ("fixture", "test")]
+        {
+            let runtime_id = format!("{backend}-runtime");
+            let runtime_dir = home
+                .join(".config/homeboy/agent-runtimes")
+                .join(&runtime_id);
+            std::fs::create_dir_all(&runtime_dir).expect("agent runtime directory");
+            std::fs::write(
+                runtime_dir.join(format!("{runtime_id}.json")),
+                serde_json::json!({
+                    "schema": "homeboy/agent-runtime-manifest/v1",
+                    "id": runtime_id,
+                    "runtime_path": runtime_dir,
+                    "agent_task_executors": [{
+                        "schema": "homeboy/agent-task-executor-provider/v1",
+                        "id": provider_id,
+                        "backend": backend,
+                        "invocation": { "argv": ["node", "{{runtime_path}}/runner.cjs"] },
+                        "request_schema": "homeboy/agent-task-request/v1",
+                        "outcome_schema": "homeboy/agent-task-outcome/v1"
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("agent runtime manifest");
+        }
+        // The catalog is discovered once per process and cached, and that cache
+        // is not keyed by config root. Without an explicit refresh the first
+        // hermetic home to look wins for the whole binary, so a fixture that
+        // installs a provider still sees the empty catalog of whichever test
+        // ran first. Re-discover against the home that just changed.
+        homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::refresh();
+    }
+
     fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
         let components = home.join(".config/homeboy/components");
         std::fs::create_dir_all(&components).expect("components directory");
@@ -7134,6 +7180,7 @@ fi
 
     fn with_materialized_cook_batch_worktrees(test: impl FnOnce()) {
         with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let mut config = homeboy::core::defaults::load_config();
             config.agent_task.default_backend = Some("sandbox".to_string());
             config.worktree_providers.clear();
@@ -8233,7 +8280,8 @@ fi
 
     #[test]
     fn recipe_preflight_accepts_safe_pre_execution_recipe_corrections() {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let plan = test_batch_plan();
             let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
             let mut invocation = plan.cooks[0]
@@ -8257,7 +8305,8 @@ fi
 
     #[test]
     fn local_selected_fanout_recipes_remain_local_through_preflight() {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let plan = test_batch_plan();
 
             persist_batch_cook_recipes(&plan, |_| {}).expect("persist local child recipes");
@@ -8282,7 +8331,8 @@ fi
 
     #[test]
     fn lab_or_local_fanout_recipes_preserve_the_dispatcher_used_for_execution() {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
             let plan = test_batch_plan();
             let dispatcher = |_: &AgentTaskCookServiceOptions| {
                 std::sync::Arc::new(LabRecipeDispatcher)
