@@ -613,6 +613,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                         merged_only: false,
                         min_age_days: None,
                         include_active_worktrees: false,
+                        max_scan_duration: None,
                     },
                 )?)
             } else {
