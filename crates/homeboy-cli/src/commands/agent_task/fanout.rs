@@ -2868,9 +2868,10 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
     retry: bool,
 ) -> Result<(worktree::WorktreeQueueCreateOutput, Value)> {
     let provider_workspace_creation = configured_provider_workspace_creation()?;
+    let provision_repo = cook_batch_provision_repository(args, provider_workspace_creation)?;
     let queue_create = |cooks: Vec<&BatchCookSpec>, dry_run: bool| {
         worktree::queue_create(worktree::WorktreeQueueCreateOptions {
-            repo: args.repo.clone(),
+            repo: provision_repo.clone(),
             requests: cooks.into_iter().map(|cook| worktree::WorktreeQueueCreateRequest {
                 branch: cook.head.clone().expect("generated cooks have heads"),
                 task_url: cook.task_url.clone(),
@@ -3099,7 +3100,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
         plan,
         worktree::WorktreeQueueCreateOutput {
             schema: "homeboy/worktree-queue-create/v1",
-            repo: args.repo.clone(),
+            repo: provision_repo,
             base_ref: cook_batch_from(args).to_string(),
             dry_run: false,
             rows,
@@ -3201,6 +3202,7 @@ fn with_workspace_owner_repair_commands(
     }
 
     let config = homeboy::core::defaults::load_config();
+    let provision_repo = cook_batch_provision_repository(args, true)?;
     for row in &mut worktrees.rows {
         // An empty command on a created row is explicit evidence that current
         // provider authority resolved the exact destination. Do not replace it
@@ -3223,7 +3225,7 @@ fn with_workspace_owner_repair_commands(
         };
         let intent = homeboy::core::worktree_provider::WorktreeProvisionIntent {
             handle: row.handle.clone(),
-            repo: args.repo.clone(),
+            repo: provision_repo.clone(),
             base: cook_batch_from(args).to_string(),
             head: row.branch.clone(),
             task_url: cook
@@ -3243,6 +3245,20 @@ fn with_workspace_owner_repair_commands(
             )?;
     }
     Ok(worktrees)
+}
+
+fn cook_batch_provision_repository(
+    args: &AgentTaskFanoutCookBatchArgs,
+    provider_workspace_creation: bool,
+) -> Result<String> {
+    if !provider_workspace_creation {
+        return Ok(args.repo.clone());
+    }
+    Ok(homeboy::core::component::registered_by_id(&args.repo)?
+        .and_then(|component| component.remote_url)
+        .map(|remote| super::run::normalize_repository_name(&remote))
+        .filter(|repository| !repository.is_empty())
+        .unwrap_or_else(|| args.repo.clone()))
 }
 
 fn configured_provider_workspace_creation() -> Result<bool> {
@@ -6941,11 +6957,24 @@ fi
     }
 
     fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
+        write_component_registration_with_identity(home, id, local_path, None);
+    }
+
+    fn write_component_registration_with_identity(
+        home: &Path,
+        id: &str,
+        local_path: &Path,
+        remote_url: Option<&str>,
+    ) {
         let components = home.join(".config/homeboy/components");
         std::fs::create_dir_all(&components).expect("components directory");
         std::fs::write(
             components.join(format!("{id}.json")),
-            serde_json::json!({ "local_path": local_path }).to_string(),
+            serde_json::json!({
+                "local_path": local_path,
+                "remote_url": remote_url,
+            })
+            .to_string(),
         )
         .expect("component registration");
     }
@@ -7053,6 +7082,126 @@ fi
             path.repo = primary.to_string_lossy().to_string();
             normalize_cook_batch_repo(&mut path).expect("primary path resolves");
             assert_eq!(path.repo, "fixture");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fanout_keeps_component_identity_but_provisions_its_repository() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_isolated_home(|home| {
+            let primary = home.path().join("blocks-engine");
+            let component = primary.join("php-transformer");
+            std::fs::create_dir_all(&component).expect("nested component directory");
+            init_git_primary(&primary);
+            write_component_registration_with_identity(
+                home.path(),
+                "php-transformer",
+                &component,
+                Some("https://github.com/example/blocks-engine.git"),
+            );
+
+            let mut args = cook_batch_args();
+            args.repo = "php-transformer".to_string();
+            normalize_cook_batch_repo(&mut args).expect("component identity resolves");
+            assert_eq!(args.repo, "php-transformer");
+            assert_eq!(
+                cook_batch_provision_repository(&args, true).expect("provider repository"),
+                "blocks-engine"
+            );
+
+            let provider = home.path().join("dmc-worktree-provider");
+            std::fs::write(&provider, "#!/bin/sh\nexit 1\n").expect("provider fixture");
+            let mut permissions = std::fs::metadata(&provider)
+                .expect("provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).expect("provider executable");
+            let mut config = homeboy::core::defaults::HomeboyConfig::default();
+            config.worktree_providers.insert(
+                "dmc".to_string(),
+                homeboy::core::defaults::WorktreeProviderConfig {
+                    enabled: true,
+                    kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                    apply_enabled: true,
+                    lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: homeboy::core::defaults::WorktreeProviderCommands {
+                        resolve: Some(vec![
+                            provider.display().to_string(),
+                            "resolve".to_string(),
+                            "{handle}".to_string(),
+                        ]),
+                        resolve_not_found_exit_codes: vec![1],
+                        ensure: Some(vec![
+                            provider.display().to_string(),
+                            "ensure".to_string(),
+                            "{repo}".to_string(),
+                            "{handle}".to_string(),
+                            "{base}".to_string(),
+                            "{head}".to_string(),
+                            "{task_url}".to_string(),
+                            "{idempotency_key}".to_string(),
+                            "{purpose}".to_string(),
+                            "{owner_run_ref}".to_string(),
+                            "{cleanup_policy}".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                    list_result_mapping: Some(
+                        homeboy::core::defaults::WorktreeProviderListResultMapping {
+                            items: "$.worktrees".to_string(),
+                            handle: "$.handle".to_string(),
+                            path: "$.path".to_string(),
+                            branch: "$.branch".to_string(),
+                            dirty: "$.safety.dirty".to_string(),
+                            unpushed: "$.safety.unpushed".to_string(),
+                            primary: "$.safety.primary".to_string(),
+                            task_url: None,
+                        },
+                    ),
+                },
+            );
+            homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+            let plan = build_cook_batch_plan(&args).expect("fanout plan");
+            assert!(plan
+                .cooks
+                .iter()
+                .all(|cook| cook.repo.as_deref() == Some("php-transformer")));
+            let rows = plan
+                .cooks
+                .iter()
+                .map(|cook| worktree::WorktreeQueueCreateRow {
+                    branch: cook.head.clone().expect("child branch"),
+                    handle: cook.to_worktree.clone(),
+                    status: worktree::WorktreeQueueCreateStatus::Failed,
+                    command: Vec::new(),
+                    retry_after_seconds: None,
+                    active_lock_holder: None,
+                    path: None,
+                    error: None,
+                    failure: None,
+                })
+                .collect();
+            let worktrees = with_workspace_owner_repair_commands(
+                &args,
+                &plan,
+                worktree::WorktreeQueueCreateOutput {
+                    schema: "homeboy/worktree-queue-create/v1",
+                    repo: "blocks-engine".to_string(),
+                    base_ref: "origin/main".to_string(),
+                    dry_run: false,
+                    rows,
+                },
+            )
+            .expect("provider repair commands");
+            assert!(worktrees.rows.iter().all(|row| {
+                row.command.iter().any(|arg| arg == "blocks-engine")
+                    && !row.command.iter().any(|arg| arg == "php-transformer")
+            }));
         });
     }
 
