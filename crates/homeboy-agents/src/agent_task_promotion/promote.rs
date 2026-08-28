@@ -912,6 +912,14 @@ fn promote_with_provider_and_checkpoint_internal(
     }
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     let changed_files = normalized_patch.changed_files.clone();
+    // Resolving the destination is a worktree-safety question: is the dirt in
+    // that checkout this promotion's own candidate, or someone else's work?
+    // The candidate patch answers it. A gate-feedback baseline answers a
+    // different question — which prior gate result this promotion continues —
+    // so it stays whatever the caller supplied and is never synthesized here.
+    let safety_baseline = destination_baseline
+        .clone()
+        .unwrap_or_else(|| candidate_patch_safety_baseline(&patch, &artifact, &patch_path));
 
     // Validate the declared remote base BEFORE mutating the target worktree.
     // Promotion must be atomic around base validation: a nonexistent declared
@@ -919,7 +927,7 @@ fn promote_with_provider_and_checkpoint_internal(
     // no patch applied and no durable post-apply state recorded, so the same
     // artifact/target can be retried with a corrected base (#9400).
     let pre_apply_verified_base = if !options.dry_run {
-        match resolve_promotion_target_path(&options.to_worktree, None)? {
+        match resolve_promotion_target_path(&options.to_worktree, None, Some(&safety_baseline))? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
             // No provider-owned pre-apply target path resolves; fall back to
             // validating against the applied worktree below.
@@ -1629,6 +1637,7 @@ fn promote_committed_changes(
         match resolve_promotion_target_path(
             &options.to_worktree,
             trusted_unpushed_candidate_destination.as_ref(),
+            None,
         )? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
             None => None,
@@ -2377,9 +2386,27 @@ fn promotion_source(
 /// Resolve a provider-owned target before the patch is applied, so the declared
 /// base can be validated against it without mutating the working tree (#9400).
 /// Genuinely unmanaged destinations retain the post-apply validation fallback.
+fn candidate_patch_safety_baseline(
+    patch: &str,
+    artifact: &AgentTaskArtifact,
+    patch_path: &Path,
+) -> Value {
+    json!({
+        "schema": "homeboy/agent-task-gate-feedback-baseline/v1",
+        "current_diff": patch,
+        "patch_artifact": {
+            "id": artifact.id,
+            "kind": artifact.kind,
+            "path": patch_path.display().to_string(),
+            "sha256": artifact.sha256,
+        }
+    })
+}
+
 fn resolve_promotion_target_path(
     to_worktree: &str,
     trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
+    safety_baseline: Option<&Value>,
 ) -> Result<Option<PathBuf>> {
     if Path::new(to_worktree).is_dir() {
         return Ok(None);
@@ -2394,7 +2421,7 @@ fn resolve_promotion_target_path(
         to_worktree,
         &homeboy_core::defaults::load_config(),
         homeboy_core::worktree_provider::WorktreeMutationContext {
-            safety_baseline: None,
+            safety_baseline,
             trusted_unpushed_destination: trusted_unpushed_destination.as_ref(),
         },
     ) {
