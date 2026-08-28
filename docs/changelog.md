@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.2] - 2026-08-28
+
+### Fixed
+- give repo-artifact scanning a wall-clock budget
+- stop reporting a zero-exit partial result as a failure
+- separate liveness from build freshness
+
 ## [0.364.1] - 2026-08-27
 
 ### Fixed
