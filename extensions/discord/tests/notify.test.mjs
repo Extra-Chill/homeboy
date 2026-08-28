@@ -28,6 +28,7 @@ await testAuthFailureClassification();
 await testTruncation();
 await testRedactionAndDryRun();
 await testTransportFlagIsAccepted();
+await testKimakiBotTokenAlias();
 console.log('discord notification tests passed');
 
 // Homeboy appends --transport alongside --route whenever a caller selects a
@@ -53,6 +54,19 @@ async function testTransportFlagIsAccepted() {
   );
   assert.equal(run.code, 1);
   assert.match(run.stdout, /input_error/);
+}
+
+async function testKimakiBotTokenAlias() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      { KIMAKI_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` },
+      { route: threadRoute(threadOneId) },
+    );
+    assert.equal(result.status, 'delivered');
+    assert.equal(result.delivery.mode, 'bot');
+    assert.equal(requests[0].url, `/api/v10/channels/${threadOneId}/messages`);
+    assert.equal(requests[0].headers.authorization, `Bot ${secretToken}`);
+  });
 }
 
 async function testConcurrentThreadRoutesDoNotCrossDeliver() {
@@ -242,7 +256,7 @@ function notifyRaw(env, overrides = {}, extraArgs = []) {
   args.push(...extraArgs);
   return new Promise((resolve, reject) => {
     const childEnv = { ...process.env };
-    for (const name of ['DISCORD_BOT_TOKEN', 'DISCORD_WEBHOOK_URL', 'DISCORD_OPERATIONS_CHANNEL_ID', 'DISCORD_API_BASE_URL']) delete childEnv[name];
+    for (const name of ['DISCORD_BOT_TOKEN', 'DISCORD_WEBHOOK_URL', 'DISCORD_OPERATIONS_CHANNEL_ID', 'DISCORD_API_BASE_URL', 'KIMAKI_BOT_TOKEN']) delete childEnv[name];
     const child = spawn(process.execPath, [helper, ...args], { env: { ...childEnv, ...env } });
     let stdout = '';
     let stderr = '';

@@ -96,7 +96,7 @@ function validate(args, env) {
     return { ok: false, error: args.error || 'run-id, status, title, and body must be non-empty.' };
   }
 
-  const botToken = value(env.DISCORD_BOT_TOKEN);
+  const botToken = value(env.DISCORD_BOT_TOKEN) || value(env.KIMAKI_BOT_TOKEN);
   const webhookUrl = value(env.DISCORD_WEBHOOK_URL);
   if (Boolean(botToken) === Boolean(webhookUrl)) {
     return { ok: false, error: 'Configure exactly one auth mode: DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL.' };
