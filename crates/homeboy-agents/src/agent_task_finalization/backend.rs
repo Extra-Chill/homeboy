@@ -1,8 +1,8 @@
 use super::{
     AgentTaskPrBaseConvergence, AgentTaskPrCandidateState, AgentTaskPrDurableGateProof,
-    AgentTaskPrFinalizationBackend,
-    AgentTaskPrFinalizationOptions, AgentTaskPrQuarantineCapability, AgentTaskPrRef,
-    AgentTaskPrResolvedBase, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
+    AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
+    AgentTaskPrQuarantineCapability, AgentTaskPrRef, AgentTaskPrResolvedBase,
+    AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use homeboy_core::error::{Error, Result};
@@ -1568,7 +1568,8 @@ mod remote_base_tests {
         let advanced = git_output(path, &["rev-parse", "HEAD"]).expect("advanced base sha");
 
         git(repo.path(), &["checkout", "-b", "feature", "HEAD~1"]);
-        std::fs::write(repo.path().join("shared.txt"), "from the agent\n").expect("write shared.txt");
+        std::fs::write(repo.path().join("shared.txt"), "from the agent\n")
+            .expect("write shared.txt");
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-m", "candidate work"]);
 
