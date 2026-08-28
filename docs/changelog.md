@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.6] - 2026-08-28
+
+### Changed
+- Converge a base that advanced during a Cook run
+- Allow first-cook promote when destination dirt matches the candidate
+
 ## [0.364.5] - 2026-08-28
 
 ### Changed
