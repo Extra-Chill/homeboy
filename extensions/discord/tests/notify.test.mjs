@@ -4,6 +4,8 @@ import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 
 const extensionPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const helper = path.join(extensionPath, 'scripts/notify.mjs');
@@ -28,6 +30,8 @@ await testAuthFailureClassification();
 await testTruncation();
 await testRedactionAndDryRun();
 await testTransportFlagIsAccepted();
+await testKimakiBotTokenAlias();
+await testOwningSessionThreadDeliversThroughKimaki();
 console.log('discord notification tests passed');
 
 // Homeboy appends --transport alongside --route whenever a caller selects a
@@ -53,6 +57,85 @@ async function testTransportFlagIsAccepted() {
   );
   assert.equal(run.code, 1);
   assert.match(run.stdout, /input_error/);
+}
+
+// Kimaki drops messages authored by its own bot, so a REST post to the thread
+// that owns this run is invisible to that session. The owning thread is
+// delivered through Kimaki's CLI so the notification becomes a real turn.
+async function testOwningSessionThreadDeliversThroughKimaki() {
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'discord-notify-kimaki-'));
+  const argvLog = path.join(stubDir, 'argv.json');
+  const stub = path.join(stubDir, 'kimaki-stub.mjs');
+  fs.writeFileSync(
+    stub,
+    `#!/usr/bin/env node\nimport fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)));\n`,
+  );
+  fs.chmodSync(stub, 0o755);
+
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      {
+        KIMAKI_BOT_TOKEN: secretToken,
+        KIMAKI_THREAD_ID: threadOneId,
+        KIMAKI_CLI: stub,
+        DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
+      },
+      { route: threadRoute(threadOneId), body: 'cook finished' },
+    );
+    assert.equal(result.status, 'delivered');
+    assert.equal(result.delivery.mode, 'kimaki_session');
+    assert.equal(result.delivery.destination, 'session_thread');
+    assert.equal(requests.length, 0);
+  });
+
+  const argv = JSON.parse(fs.readFileSync(argvLog, 'utf8'));
+  assert.deepEqual(argv.slice(0, 4), ['send', '--thread', threadOneId, '--prompt']);
+  assert.match(argv[4], /cook finished/);
+
+  // A run that only announces its start carries no outcome to act on, so it is
+  // posted for the human to read rather than interrupting the agent.
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      {
+        KIMAKI_BOT_TOKEN: secretToken,
+        KIMAKI_THREAD_ID: threadOneId,
+        KIMAKI_CLI: stub,
+        DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
+      },
+      { route: threadRoute(threadOneId), status: 'started' },
+    );
+    assert.equal(result.delivery.mode, 'bot');
+    assert.equal(requests[0].url, `/api/v10/channels/${threadOneId}/messages`);
+  });
+
+  // A thread that is not this session's own thread keeps REST delivery.
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      {
+        KIMAKI_BOT_TOKEN: secretToken,
+        KIMAKI_THREAD_ID: threadOneId,
+        DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
+      },
+      { route: threadRoute(threadTwoId) },
+    );
+    assert.equal(result.delivery.mode, 'bot');
+    assert.equal(requests[0].url, `/api/v10/channels/${threadTwoId}/messages`);
+  });
+
+  fs.rmSync(stubDir, { recursive: true, force: true });
+}
+
+async function testKimakiBotTokenAlias() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      { KIMAKI_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` },
+      { route: threadRoute(threadOneId) },
+    );
+    assert.equal(result.status, 'delivered');
+    assert.equal(result.delivery.mode, 'bot');
+    assert.equal(requests[0].url, `/api/v10/channels/${threadOneId}/messages`);
+    assert.equal(requests[0].headers.authorization, `Bot ${secretToken}`);
+  });
 }
 
 async function testConcurrentThreadRoutesDoNotCrossDeliver() {
@@ -235,14 +318,14 @@ function notify(env, overrides = {}) {
 }
 
 function notifyRaw(env, overrides = {}, extraArgs = []) {
-  const args = ['--run-id', overrides.runId || 'run-123', '--status', 'pass', '--title', 'homeboy run pass', '--body', overrides.body || 'Run completed'];
+  const args = ['--run-id', overrides.runId || 'run-123', '--status', overrides.status || 'pass', '--title', 'homeboy run pass', '--body', overrides.body || 'Run completed'];
   if (overrides.transport !== undefined) args.push('--transport', overrides.transport);
   if (overrides.route !== undefined) args.push('--route', overrides.route);
   if (overrides.dryRun) args.push('--dry-run');
   args.push(...extraArgs);
   return new Promise((resolve, reject) => {
     const childEnv = { ...process.env };
-    for (const name of ['DISCORD_BOT_TOKEN', 'DISCORD_WEBHOOK_URL', 'DISCORD_OPERATIONS_CHANNEL_ID', 'DISCORD_API_BASE_URL']) delete childEnv[name];
+    for (const name of ['DISCORD_BOT_TOKEN', 'DISCORD_WEBHOOK_URL', 'DISCORD_OPERATIONS_CHANNEL_ID', 'DISCORD_API_BASE_URL', 'KIMAKI_BOT_TOKEN', 'KIMAKI_THREAD_ID', 'KIMAKI_CLI']) delete childEnv[name];
     const child = spawn(process.execPath, [helper, ...args], { env: { ...childEnv, ...env } });
     let stdout = '';
     let stderr = '';
