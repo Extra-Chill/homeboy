@@ -4571,6 +4571,185 @@ fn initial_cook_adopts_only_clean_issue_owned_unpushed_provider_worktree() {
 
 #[cfg(unix)]
 #[test]
+fn first_cook_promotes_resolved_but_dirty_destination_matching_candidate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::agent_task_candidate_baseline::register();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("candidate");
+        std::fs::create_dir(&target).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&output.stdout).to_string()
+        };
+        git(&target, &["init", "--quiet", "-b", "cook-candidate"]);
+        git(&target, &["config", "user.email", "test@example.com"]);
+        git(&target, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(target.join("tracked.txt"), "base\n").unwrap();
+        git(&target, &["add", "tracked.txt"]);
+        git(&target, &["commit", "--quiet", "-m", "base"]);
+        std::fs::write(target.join("tracked.txt"), "candidate\n").unwrap();
+        let patch = git(&target, &["diff", "--binary", "--full-index"]);
+        let patch_path = temp.path().join("candidate.patch");
+        std::fs::write(&patch_path, &patch).unwrap();
+
+        let handle = "fixture@cook-candidate";
+        let provider = temp.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({ "worktrees": [{
+                    "handle": handle,
+                    "path": target,
+                    "branch": "cook-candidate",
+                    "safety": { "dirty": true, "unpushed": false, "primary": false },
+                }] })
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).unwrap();
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                        task_url: None,
+                    },
+                ),
+            },
+        );
+        homeboy_core::defaults::save_config(&config).expect("save provider config");
+
+        let mut options = batch_cook_options(
+            "cook-candidate-dirt",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.to_worktree = handle.to_string();
+        let error = validate_cook_workspace(&options)
+            .expect_err("pre-provider dirty destination with no candidate remains blocked");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        assert_eq!(error.details["workspace"]["reason"], "unattributed_drift");
+
+        let apply = temp.path().join("apply");
+        std::fs::write(
+            &apply,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-promotion-apply-response/v1",
+                    "workspace_path": target,
+                    "command_evidence": []
+                })
+            ),
+        )
+        .expect("write apply provider");
+        let mut permissions = std::fs::metadata(&apply).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&apply, permissions).unwrap();
+
+        let source = serde_json::json!({
+            "schema": crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "provider",
+            "status": "succeeded",
+            "artifacts": [{
+                "schema": crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA,
+                "id": "patch",
+                "kind": "patch",
+                "path": patch_path,
+                "size_bytes": patch.len(),
+                "sha256": homeboy_engine_primitives::content_hash::sha256_hex(patch.as_bytes()),
+            }]
+        })
+        .to_string();
+        let promotion_options = crate::agent_task_promotion::AgentTaskPromotionOptions {
+            source: source.clone(),
+            source_run_id: Some("cook-candidate-dirt-run".to_string()),
+            source_path: None,
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: handle.to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: crate::agent_task_gate::VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec![apply.display().to_string()],
+                ..Default::default()
+            }),
+        };
+        let report = crate::agent_task_promotion::promote(promotion_options)
+            .expect("matching candidate dirt is admitted for promote");
+        assert!(
+            report.status.patch_promoted(),
+            "cook must promote matching candidate dirt, got {:?}",
+            report.status
+        );
+
+        std::fs::write(target.join("extra.txt"), "unrelated\n").unwrap();
+        let error = crate::agent_task_promotion::promote(
+            crate::agent_task_promotion::AgentTaskPromotionOptions {
+                source,
+                source_run_id: Some("cook-candidate-dirt-run".to_string()),
+                source_path: None,
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: handle.to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: crate::agent_task_gate::VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: Some(homeboy_core::command_invocation::CommandInvocation {
+                    argv: vec![apply.display().to_string()],
+                    ..Default::default()
+                }),
+            },
+        )
+        .expect_err("unrelated dirty files still fail");
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn explicit_cook_workspace_bypasses_a_timed_out_provider_lookup() {
     use std::os::unix::fs::PermissionsExt;
 
