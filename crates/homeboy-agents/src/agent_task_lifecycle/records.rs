@@ -705,8 +705,8 @@ impl AgentTaskRunRecord {
             supervisor["state"].as_str(),
             Some("pending" | "supervising")
         ) && self.metadata["cook_id"]
-                .as_str()
-                .is_some_and(|cook_id| !cook_id.trim().is_empty())
+            .as_str()
+            .is_some_and(|cook_id| !cook_id.trim().is_empty())
             && supervisor["pinned_run_id"] == self.run_id
             && started_at <= now
             && now < expires_at
