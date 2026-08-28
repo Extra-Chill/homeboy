@@ -912,6 +912,11 @@ fn promote_with_provider_and_checkpoint_internal(
     }
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     let changed_files = normalized_patch.changed_files.clone();
+    // Resolving the destination is a worktree-safety question: is the dirt in
+    // that checkout this promotion's own candidate, or someone else's work?
+    // The candidate patch answers it. A gate-feedback baseline answers a
+    // different question — which prior gate result this promotion continues —
+    // so it stays whatever the caller supplied and is never synthesized here.
     let safety_baseline = destination_baseline
         .clone()
         .unwrap_or_else(|| candidate_patch_safety_baseline(&patch, &artifact, &patch_path));
@@ -955,7 +960,7 @@ fn promote_with_provider_and_checkpoint_internal(
             patch: Some(normalized_patch.content.clone()),
             patch_path: provider_patch_path,
             changed_files: changed_files.clone(),
-            gate_feedback_baseline: Some(safety_baseline),
+            gate_feedback_baseline: destination_baseline,
             dry_run: options.dry_run,
             trusted_unpushed_candidate_destination: None,
         })?;
