@@ -129,6 +129,15 @@ pub struct ArtifactCleanupOptions {
     /// because removing an install tree makes a live checkout unusable until it
     /// is rehydrated.
     pub include_active_worktrees: bool,
+    /// Wall-clock budget for scanning and reclaiming. When the budget is spent
+    /// the scan stops at a worktree boundary and returns what it has already
+    /// reclaimed, rather than being killed mid-scan.
+    ///
+    /// Without this, a caller that imposes its own deadline — the `cleanup`
+    /// aggregate's per-category wall — could only terminate an unbounded scan,
+    /// discarding every byte it had reclaimed and reporting zero progress
+    /// forever on a workspace too large to inventory inside that wall (#12727).
+    pub max_scan_duration: Option<Duration>,
 }
 
 #[derive(Clone, Copy)]
@@ -867,13 +876,19 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
     crate::worktree::with_task_worktree_registry_read_lock(|| {
         let root = resolve_root(&options)?;
         let worktrees = discover_worktrees(&root)?;
+        let bounds = ArtifactInventoryBounds {
+            deadline: options
+                .max_scan_duration
+                .and_then(|budget| Instant::now().checked_add(budget)),
+            ..ArtifactInventoryBounds::default()
+        };
         cleanup_artifacts_in_worktrees(
             root,
             worktrees,
             &options,
             true,
             registry_quarantines,
-            ArtifactInventoryBounds::default(),
+            bounds,
         )
     })
 }
@@ -2736,6 +2751,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("dry-run cleanup");
 
@@ -3055,6 +3071,55 @@ mod tests {
         });
     }
 
+    /// A scan budget must bound `cleanup_artifacts` itself.
+    ///
+    /// The `cleanup` aggregate gives each category a wall-clock wall. Without a
+    /// budget of its own this scan ran unbounded until that wall killed the
+    /// process, so a workspace too large to inventory inside the wall reported
+    /// zero reclaimed bytes on every pass, forever (#12727).
+    ///
+    /// Both directions live in one test: an exhausted budget must not delete,
+    /// and an ample budget must still reclaim — otherwise the bound could be
+    /// satisfied by never doing any work. Kept as a single test because each
+    /// applying `cleanup_artifacts` call contends on shared process state.
+    #[test]
+    fn a_scan_budget_bounds_the_pass_without_disabling_reclaim() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let artifact = repo.path().join("target/debug/app");
+            write_file(&artifact, "artifact");
+
+            let exhausted = cleanup_artifacts(ArtifactCleanupOptions {
+                path: Some(repo.path().to_path_buf()),
+                apply: true,
+                // Already spent: the scan must stop at the first boundary.
+                max_scan_duration: Some(Duration::ZERO),
+                ..ArtifactCleanupOptions::default()
+            })
+            .expect("an exhausted budget is a bounded pass, not an error");
+
+            assert_eq!(
+                exhausted.applied_count, 0,
+                "an exhausted budget must not delete"
+            );
+            assert!(
+                artifact.exists(),
+                "artifact must survive a budget that expired before inspection"
+            );
+
+            let ample = cleanup_artifacts(ArtifactCleanupOptions {
+                path: Some(repo.path().to_path_buf()),
+                apply: true,
+                max_scan_duration: Some(Duration::from_secs(120)),
+                ..ArtifactCleanupOptions::default()
+            })
+            .expect("ample budget");
+
+            assert_eq!(ample.applied_count, 1, "an ample budget must reclaim");
+            assert!(!artifact.exists(), "the reclaimed artifact must be gone");
+        });
+    }
+
     #[test]
     fn apply_rechecks_git_safety_after_candidate_discovery() {
         crate::test_support::with_isolated_home(|_| {
@@ -3318,6 +3383,7 @@ mod tests {
                     merged_only: false,
                     min_age_days: None,
                     include_active_worktrees: false,
+                    max_scan_duration: None,
                 }),
                 worktree_providers: Some(WorktreeCleanupRequest {
                     providers: vec!["fixture".to_string()],
@@ -3382,6 +3448,7 @@ mod tests {
                     merged_only: false,
                     min_age_days: None,
                     include_active_worktrees: false,
+                    max_scan_duration: None,
                 }),
                 worktree_providers: Some(WorktreeCleanupRequest {
                     providers: vec!["fixture".to_string()],
@@ -3507,6 +3574,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect_err("reject ambiguous cleanup root");
 
@@ -3526,6 +3594,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect_err("reject non-git cleanup root");
 
@@ -3569,6 +3638,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("temp artifact candidates");
 
@@ -3615,6 +3685,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("apply cleanup");
 
@@ -3654,6 +3725,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("temp artifact candidates");
 
@@ -3688,6 +3760,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("apply cleanup");
 
@@ -3722,6 +3795,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("temp artifact candidates");
 
@@ -3750,6 +3824,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("temp artifact candidates");
 
@@ -3779,6 +3854,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("temp artifact candidates");
 
@@ -3805,6 +3881,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("apply cleanup");
 
@@ -3829,6 +3906,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("dry-run cleanup");
 
@@ -3863,6 +3941,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("dry-run cleanup");
 
@@ -3901,6 +3980,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("dry-run cleanup");
 
@@ -3934,6 +4014,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("apply cleanup");
 
@@ -3968,6 +4049,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("apply cleanup");
 
@@ -3998,6 +4080,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("first apply cleanup");
 
@@ -4025,6 +4108,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("second apply cleanup");
 
@@ -4201,6 +4285,7 @@ mod tests {
             merged_only: false,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("apply cleanup");
 
@@ -4341,6 +4426,7 @@ mod tests {
             merged_only: true,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("merged-only cleanup");
 
@@ -4376,6 +4462,7 @@ mod tests {
             merged_only: true,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         })
         .expect("merged-only cleanup");
 
@@ -4398,6 +4485,7 @@ mod tests {
             merged_only: true,
             min_age_days: None,
             include_active_worktrees: false,
+            max_scan_duration: None,
         };
 
         assert_eq!(
@@ -5115,6 +5203,7 @@ mod tests {
             let output = cleanup_artifacts(ArtifactCleanupOptions {
                 apply: true,
                 include_active_worktrees: true,
+                max_scan_duration: None,
                 ..dry_run_options(repo.path())
             })
             .expect("apply");

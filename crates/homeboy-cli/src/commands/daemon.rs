@@ -1207,10 +1207,17 @@ mod tests {
         stale_reason_code: Option<daemon::DaemonStaleReasonCode>,
         repair_plan: Vec<daemon::DaemonRepairStep>,
     ) -> DaemonStatus {
-        DaemonStatus {
-            running: fresh,
+        // A version-mismatched daemon is live and reachable but stale; an
+        // unreachable transport is neither. Fresh is always live.
+        let live = matches!(
+            stale_reason_code,
+            None | Some(daemon::DaemonStaleReasonCode::VersionMismatch)
+        );
+        let replacement_blocked = !fresh && repair_plan.is_empty();
+        let mut status = DaemonStatus {
+            running: live,
             fresh,
-            reachable: fresh,
+            reachable: live,
             freshness: daemon::DaemonFreshnessReport {
                 fresh,
                 stale_reason_code,
@@ -1229,13 +1236,19 @@ mod tests {
                 repair_plan,
             },
             stale_reason: (!fresh).then(|| "test daemon remains stale".to_string()),
+            replacement_blocked,
+            replacement_blocked_reason: replacement_blocked
+                .then(|| "test daemon remains stale".to_string()),
+            summary: String::new(),
             state: None,
             state_path: "test".to_string(),
             state_identity: "test".to_string(),
             process_candidates: Vec::new(),
             active_job_recovery_evidence: Vec::new(),
             termination_evidence: None,
-        }
+        };
+        status.summary = status.render_summary();
+        status
     }
 
     /// A durable job whose daemon died before persisting any child identity:
