@@ -2919,6 +2919,53 @@ mod tests {
             .has_live_pending_local_cook_supervisor(started_at + chrono::Duration::seconds(1)));
     }
 
+    /// A supervisor that has begun supervising still owns its run. Admitting
+    /// only `pending` reconciled every detached local Cook as ownerless the
+    /// moment its lease advanced, cancelling a healthy attempt before it had
+    /// published an owner pid (#13692). The lease window remains the bound that
+    /// keeps an abandoned lease from protecting a dead run.
+    #[test]
+    fn supervising_local_cook_lease_still_owns_its_run() {
+        let run_id = "local-supervising-reservation";
+        let started_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("lease timestamp")
+            .with_timezone(&chrono::Utc);
+        let launcher_pid = std::process::id();
+        let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
+            .expect("inspect launcher identity")
+            .expect("launcher is live");
+        let mut metadata = local_cook_retry_reservation_metadata(
+            "local-supervising-cook",
+            run_id,
+            started_at,
+            launcher_pid,
+            launcher_start_identity,
+        );
+        metadata["local_cook_supervisor"]["state"] = json!("supervising");
+        let record: agent_task_lifecycle::AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": run_id,
+            "plan_id": "local-supervising-plan",
+            "state": "running",
+            "submitted_at": started_at.to_rfc3339(),
+            "plan_path": "plan.json",
+            "metadata": metadata,
+        }))
+        .expect("supervising record");
+
+        assert!(record
+            .has_live_pending_local_cook_supervisor(started_at + chrono::Duration::seconds(1)));
+
+        // The lease window still bounds ownership: once it expires, a
+        // supervising state no longer shields the run from reconciliation.
+        assert!(!record.has_live_pending_local_cook_supervisor(
+            started_at
+                + chrono::Duration::seconds(
+                    agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS + 1,
+                )
+        ));
+    }
+
     #[test]
     fn local_execution_isolates_identical_run_ids_in_explicit_lifecycle_stores() {
         let first = homeboy_core::test_support::HermeticTestContext::new();
