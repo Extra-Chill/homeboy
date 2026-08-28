@@ -92,6 +92,22 @@ async function testOwningSessionThreadDeliversThroughKimaki() {
   assert.deepEqual(argv.slice(0, 4), ['send', '--thread', threadOneId, '--prompt']);
   assert.match(argv[4], /cook finished/);
 
+  // A run that only announces its start carries no outcome to act on, so it is
+  // posted for the human to read rather than interrupting the agent.
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      {
+        KIMAKI_BOT_TOKEN: secretToken,
+        KIMAKI_THREAD_ID: threadOneId,
+        KIMAKI_CLI: stub,
+        DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
+      },
+      { route: threadRoute(threadOneId), status: 'started' },
+    );
+    assert.equal(result.delivery.mode, 'bot');
+    assert.equal(requests[0].url, `/api/v10/channels/${threadOneId}/messages`);
+  });
+
   // A thread that is not this session's own thread keeps REST delivery.
   await withServer(async ({ baseUrl, requests }) => {
     const result = await notify(
@@ -302,7 +318,7 @@ function notify(env, overrides = {}) {
 }
 
 function notifyRaw(env, overrides = {}, extraArgs = []) {
-  const args = ['--run-id', overrides.runId || 'run-123', '--status', 'pass', '--title', 'homeboy run pass', '--body', overrides.body || 'Run completed'];
+  const args = ['--run-id', overrides.runId || 'run-123', '--status', overrides.status || 'pass', '--title', 'homeboy run pass', '--body', overrides.body || 'Run completed'];
   if (overrides.transport !== undefined) args.push('--transport', overrides.transport);
   if (overrides.route !== undefined) args.push('--route', overrides.route);
   if (overrides.dryRun) args.push('--dry-run');

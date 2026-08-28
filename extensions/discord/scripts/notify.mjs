@@ -115,11 +115,16 @@ function validate(args, env) {
   // drops, so the session that owns this run never sees its own completion.
   // Delivering the owning thread through Kimaki's CLI makes the notification a
   // real turn instead of a message the agent cannot read.
+  //
+  // Only a state the session might act on is worth a turn. A run that merely
+  // started reports no outcome and no decision, so it is posted for the human
+  // to read without interrupting the agent.
   const sessionThreadId = value(env.KIMAKI_THREAD_ID);
   if (
     parsedRoute?.kind === 'thread' &&
     sessionThreadId !== undefined &&
-    sessionThreadId === parsedRoute.id
+    sessionThreadId === parsedRoute.id &&
+    !isProgressOnlyStatus(args.status)
   ) {
     return {
       ok: true,
@@ -238,6 +243,14 @@ function failure(kind, error, delivery = undefined, attempts = 0, httpStatus = u
 function finish(result) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
   process.exitCode = result.status === 'failed' ? 1 : 0;
+}
+
+// Statuses that announce progress rather than an outcome. Homeboy emits one of
+// these when a run begins, before any result exists to act on.
+const PROGRESS_ONLY_STATUSES = new Set(['started', 'running', 'queued']);
+
+function isProgressOnlyStatus(status) {
+  return PROGRESS_ONLY_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
 function sendThroughKimaki(validation, content) {
