@@ -97,7 +97,6 @@ fn item_from_run(store: &ObservationStore, run: RunRecord) -> Result<ActivityIte
         },
         refs: ActivityCrossRefs {
             run_id: Some(run.id.clone()),
-            agent_task_run_id: None,
             runner_job_id: job_id,
         },
         context: ActivityContext::default(),

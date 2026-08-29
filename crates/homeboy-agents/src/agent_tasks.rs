@@ -311,7 +311,8 @@ pub mod lifecycle {
         run_record_exists, run_record_exists_readonly, run_status, submit_plan,
     };
     pub use super::super::agent_task_lifecycle::{
-        cancel, claim_cook_operation_in_store, claim_local_cook_retry_launch_in_store,
+        cancel, canonical_control_plane_identities, canonical_control_plane_identities_for_run,
+        claim_cook_operation_in_store, claim_local_cook_retry_launch_in_store,
         complete_cook_operation_in_store, consume_unmaterialized_cook_replay_claim,
         cook_attempt_run_id, cook_index_exists_in_store, cook_index_in_store,
         cook_terminal_notification_outcome, durable_local_read_in_store,
@@ -351,11 +352,11 @@ pub mod lifecycle {
         AgentTaskRecordReconciliationReport, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
         AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
         AgentTaskRunStatus, AgentTaskRunTask, AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe,
-        AgentTaskRunnerProbePlan, AgentTaskStatusOptions, AgentTaskStatusOutcome, ClaimOutcome,
-        ControllerRuntimePruneResult, DetachedCookMaterializingAttempt, DetachedLabRunRecord,
-        LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
-        RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT, RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL,
-        RUNNER_PROBE_SKIPPED_NOT_RUNNING,
+        AgentTaskRunnerProbePlan, AgentTaskStatusOptions, AgentTaskStatusOutcome,
+        CanonicalControlPlaneIdentities, ClaimOutcome, ControllerRuntimePruneResult,
+        DetachedCookMaterializingAttempt, DetachedLabRunRecord, LabOffloadProxyPlan,
+        LocalCookRetryLaunchClaim, RunnerPinnedRuntime, RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT,
+        RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL, RUNNER_PROBE_SKIPPED_NOT_RUNNING,
     };
     pub use super::super::agent_task_lifecycle::{
         cook_index_exists, mark_running, record_run_aggregate, record_runner_job_identity,

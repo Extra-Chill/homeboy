@@ -12,6 +12,7 @@ use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+use homeboy_control_plane_contract::{resolve, IdentityKind, MissionId, ResolveError};
 use homeboy_core::{Error, Result};
 
 use crate::runner_staging_operation::{
@@ -28,16 +29,16 @@ const REMOTE_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 #[serde(deny_unknown_fields)]
 pub struct DeferredControllerReceipt {
     pub schema: String,
-    pub mission_id: String,
+    pub mission_id: MissionId,
     pub runner_receipt: RemoteRunnerStagingReceipt,
     pub controller_projection: String,
 }
 
 impl DeferredControllerReceipt {
-    fn new(mission_id: impl Into<String>, runner_receipt: RemoteRunnerStagingReceipt) -> Self {
+    fn new(mission_id: MissionId, runner_receipt: RemoteRunnerStagingReceipt) -> Self {
         Self {
             schema: STORE_SCHEMA.to_string(),
-            mission_id: mission_id.into(),
+            mission_id,
             runner_receipt,
             controller_projection: "deferred".to_string(),
         }
@@ -45,7 +46,7 @@ impl DeferredControllerReceipt {
 
     fn validate_for(&self, envelope: &RemoteRunnerStagingEnvelope) -> Result<()> {
         if self.schema != STORE_SCHEMA
-            || self.mission_id.trim().is_empty()
+            || self.mission_id.as_str().trim().is_empty()
             || self.controller_projection != "deferred"
         {
             return Err(Error::validation_invalid_argument(
@@ -57,6 +58,39 @@ impl DeferredControllerReceipt {
         }
         self.runner_receipt.validate_for(envelope)
     }
+}
+
+fn mission_from_handoff_run_id(run_id: &str) -> Result<MissionId> {
+    match resolve(IdentityKind::RunId, run_id) {
+        Ok(resolved) => resolved.mission.ok_or_else(|| {
+            resolve_to_error(
+                ResolveError::MalformedRun {
+                    value: run_id.to_string(),
+                },
+                run_id,
+            )
+        }),
+        Err(ResolveError::MalformedRun { .. }) => mission_id_from_grouping(run_id),
+        Err(error) => Err(resolve_to_error(error, run_id)),
+    }
+}
+
+fn mission_id_from_grouping(value: &str) -> Result<MissionId> {
+    match resolve(IdentityKind::CookId, value) {
+        Ok(resolved) => resolved.mission.ok_or_else(|| {
+            resolve_to_error(
+                ResolveError::Empty {
+                    kind: IdentityKind::CookId,
+                },
+                value,
+            )
+        }),
+        Err(error) => Err(resolve_to_error(error, value)),
+    }
+}
+
+fn resolve_to_error(error: ResolveError, id: &str) -> Error {
+    Error::validation_invalid_argument("mission_id", error.to_string(), Some(id.to_string()), None)
 }
 
 /// Terminal evidence from the runner-owned store. The controller copies these
@@ -157,18 +191,18 @@ impl ControllerFallbackProjectionStore {
         envelope: &RemoteRunnerStagingEnvelope,
     ) -> Result<DeferredControllerReceipt> {
         let receipt = DeferredControllerReceipt::new(
-            &envelope.handoff.run_id,
+            mission_from_handoff_run_id(&envelope.handoff.run_id)?,
             submit_remote_runner_staging(transport, envelope)?,
         );
         receipt.validate_for(envelope)?;
         let _lock = self.lock()?;
         let mut state = self.load()?;
-        if let Some(existing) = state.receipts.get(&receipt.mission_id) {
+        if let Some(existing) = state.receipts.get(receipt.mission_id.as_str()) {
             if existing != &receipt {
                 return Err(Error::validation_invalid_argument(
                     "idempotency_key",
                     "controller fallback mission is already bound to a different runner receipt",
-                    Some(receipt.mission_id),
+                    Some(receipt.mission_id.to_string()),
                     None,
                 ));
             }
@@ -176,7 +210,7 @@ impl ControllerFallbackProjectionStore {
         }
         state
             .receipts
-            .insert(receipt.mission_id.clone(), receipt.clone());
+            .insert(receipt.mission_id.to_string(), receipt.clone());
         self.persist(&state)?;
         Ok(receipt)
     }
@@ -597,7 +631,7 @@ mod tests {
             .expect("admit");
         let projected = store
             .project_terminal_evidence(
-                &receipt.mission_id,
+                receipt.mission_id.as_str(),
                 RunnerTerminalEvidence {
                     outcome: "succeeded".to_string(),
                     artifacts: receipt.runner_receipt.artifacts.clone(),
@@ -618,7 +652,7 @@ mod tests {
             .expect("admit");
         store
             .project_terminal_evidence(
-                &receipt.mission_id,
+                receipt.mission_id.as_str(),
                 RunnerTerminalEvidence {
                     outcome: "succeeded".to_string(),
                     artifacts: receipt.runner_receipt.artifacts.clone(),
@@ -627,7 +661,7 @@ mod tests {
             .expect("first terminal projection");
         assert!(store
             .project_terminal_evidence(
-                &receipt.mission_id,
+                receipt.mission_id.as_str(),
                 RunnerTerminalEvidence {
                     outcome: "failed".to_string(),
                     artifacts: receipt.runner_receipt.artifacts,
@@ -661,7 +695,9 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(250));
         assert!(projected.is_empty());
         assert_eq!(
-            store.observation(&receipt.mission_id).expect("observation"),
+            store
+                .observation(receipt.mission_id.as_str())
+                .expect("observation"),
             Some(ReconciliationObservation {
                 state: "retryable".to_string(),
                 detail: "runner status query timed out after 20ms: timed out waiting on channel"
@@ -688,7 +724,9 @@ mod tests {
 
         assert!(projected.is_empty());
         assert_eq!(
-            store.observation(&receipt.mission_id).expect("observation"),
+            store
+                .observation(receipt.mission_id.as_str())
+                .expect("observation"),
             Some(ReconciliationObservation {
                 state: "pending".to_string(),
                 detail: "runner job remains running".to_string(),
@@ -771,5 +809,15 @@ mod tests {
             )
             .expect("restart replay");
         assert!(replay.is_empty());
+    }
+
+    #[test]
+    fn run_id_supplied_as_a_mission_is_refused() {
+        const RUN: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+        let error = mission_id_from_grouping(RUN).expect_err("run is not a mission");
+        assert!(error
+            .message
+            .contains("encodes a run, not a grouping identity"));
+        assert!(error.message.contains(RUN));
     }
 }

@@ -181,8 +181,7 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
             transport: remote_run_id,
         },
         refs: ActivityCrossRefs {
-            run_id: None,
-            agent_task_run_id: Some(record.run_id.clone()),
+            run_id: Some(record.run_id.clone()),
             runner_job_id: job_id,
         },
         context: activity_context(&record),
@@ -405,10 +404,7 @@ mod tests {
             assert_eq!(item.id, target);
             assert_eq!(item.kind, "agent-task");
             assert_eq!(item.source_store, "agent-task.lifecycle");
-            assert_eq!(
-                item.refs.agent_task_run_id.as_deref(),
-                Some(target.as_str())
-            );
+            assert_eq!(item.refs.run_id.as_deref(), Some(target.as_str()));
             assert_eq!(
                 agent_task_lifecycle::exact_record(&target).expect("target remains readable"),
                 target_before
@@ -483,10 +479,7 @@ mod tests {
 
             assert_eq!(item.id, attempt);
             assert_eq!(item.source_store, "agent-task.lifecycle");
-            assert_eq!(
-                item.refs.agent_task_run_id.as_deref(),
-                Some(attempt.as_str())
-            );
+            assert_eq!(item.refs.run_id.as_deref(), Some(attempt.as_str()));
             assert_eq!(
                 agent_task_lifecycle::exact_record(&attempt).expect("record remains readable"),
                 before

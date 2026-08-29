@@ -24,6 +24,7 @@ slow-tests = []
 
 [dependencies]
 homeboy-artifact-ref-contract = { version = "0.1.0", path = "../contracts/homeboy-artifact-ref-contract" }
+homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
 homeboy-api-jobs-contract = { version = "0.1.0", path = "../contracts/homeboy-api-jobs-contract" }
 homeboy-source-snapshot-contract = { version = "0.1.0", path = "../contracts/homeboy-source-snapshot-contract" }

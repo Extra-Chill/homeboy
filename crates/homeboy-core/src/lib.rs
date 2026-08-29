@@ -78,6 +78,7 @@ pub mod cleanup;
 pub use homeboy_code_audit as code_audit;
 pub mod command_execution_plan;
 pub use homeboy_command_contract as command_invocation;
+pub use homeboy_control_plane_contract as control_plane_contract;
 pub mod component;
 pub mod content_diff;
 pub mod context;
