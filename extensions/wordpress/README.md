@@ -312,7 +312,7 @@ homeboy build <component>
     ├─ Build frontend assets     (@wordpress/scripts when present)
     ├─ Install production deps   (composer --no-dev)
     ├─ Stage into .homeboy-build/  (avoids @wordpress/scripts build/ collision)
-    ├─ Copy files                (rsync, respects .buildignore)
+    ├─ Copy files                (rsync, or an exact package profile)
     ├─ Validate build structure  (php -l, PSR-4)
     ├─ ZIP → build/<component-id>.zip
     └─ Restore dev dependencies
@@ -351,6 +351,36 @@ output. The managed `.homeboy-build/` staging directory is never eligible.
 defaults, or mandatory Homeboy safety exclusions. Use component-root rsync
 patterns such as `/playground-runtime/` to exclude a root directory. Exclude
 patterns are strings and cannot traverse outside the component.
+
+Components that already declare an authoritative runtime package profile can
+point the build at that contract instead of duplicating its selectors as rsync
+exclusions:
+
+```json
+{
+	"extensions": {
+		"wordpress": {
+			"package_profile": {
+				"manifest": "package-manifest.json",
+				"profile": "runtime"
+			}
+		}
+	}
+}
+```
+
+`package_profile.manifest` is a component-relative JSON file. `package_profile.profile`
+names an entry under `profiles`. Each profile provides `selectors` with
+`type` `file` or `prefix` and a component-relative `path`, plus optional
+`required_files`. Selection runs after production dependency preparation so
+generated `vendor/` files are eligible. When the setting is present, staging
+copies exactly the selected regular files under the existing package root.
+Homeboy still excludes `.homeboy-build/`. Invalid manifest or profile names,
+absolute paths, traversal, malformed selectors, unmatched explicit files, and
+missing required files fail closed. Components without this setting keep the
+current rsync behavior. The build writes a deterministic selected-file
+inventory plus the manifest and profile identity as
+`wordpress.package_profile` evidence.
 
 ### Release provenance preparation
 

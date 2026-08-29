@@ -17,7 +17,7 @@
 # - Extracts version for validation and logging
 # - Builds Gutenberg blocks (@wordpress/scripts support)
 # - Installs production dependencies (composer --no-dev)
-# - Copies files using rsync with .buildignore exclusions
+# - Copies files using rsync with .buildignore exclusions, or exact files from a declared package profile
 # - Validates build structure before packaging
 # - Restores dev dependencies after build
 #
@@ -918,12 +918,247 @@ include_package_artifacts() {
     rm -f "$manifest_file" "$list_file"
 }
 
+# Stage exactly the regular files selected by a declared package profile.
+# Exit 0 when staged, 2 when the setting is unset so the caller keeps rsync.
+stage_package_profile() {
+    local staging_dir="$1"
+
+    HOMEBOY_WORDPRESS_PACKAGE_STAGING_DIR="$staging_dir" \
+    php <<'PHP'
+<?php
+$settings = json_decode( getenv( 'HOMEBOY_SETTINGS_JSON' ) ?: '{}', true );
+if ( ! is_array( $settings ) ) {
+	fwrite( STDERR, "Invalid HOMEBOY_SETTINGS_JSON; expected a JSON object.\n" );
+	exit( 1 );
+}
+
+$package_profile = $settings['package_profile'] ?? null;
+if ( null === $package_profile || [] === $package_profile ) {
+	exit( 2 );
+}
+if ( ! is_array( $package_profile ) ) {
+	fwrite( STDERR, "extensions.wordpress.package_profile must be an object with manifest and profile.\n" );
+	exit( 1 );
+}
+
+$manifest_setting = $package_profile['manifest'] ?? null;
+$profile_setting  = $package_profile['profile'] ?? null;
+if ( ( null === $manifest_setting || '' === $manifest_setting ) && ( null === $profile_setting || '' === $profile_setting ) ) {
+	exit( 2 );
+}
+
+function homeboy_wordpress_package_relative_path( $path, $label ) {
+	if ( ! is_string( $path ) || '' === trim( $path ) ) {
+		fwrite( STDERR, "{$label} must be a non-empty component-relative path.\n" );
+		exit( 1 );
+	}
+
+	$normalized = str_replace( '\\', '/', $path );
+	$normalized = preg_replace( '#^\./+#', '', $normalized );
+	if (
+		'' === $normalized
+		|| '.' === $normalized
+		|| str_starts_with( $normalized, '/' )
+		|| str_starts_with( $normalized, '//' )
+		|| preg_match( '#^[A-Za-z]:/#', $normalized )
+		|| preg_match( '#(^|/)\.\.(/|$)#', $normalized )
+		|| preg_match( '#^\.homeboy-build(?:/|$)#', $normalized )
+		|| str_contains( $normalized, "\0" )
+	) {
+		fwrite( STDERR, "{$label} must be component-relative and cannot contain traversal or filesystem-absolute paths: {$path}\n" );
+		exit( 1 );
+	}
+
+	return $normalized;
+}
+
+function homeboy_wordpress_package_contained_relative( $path, $label ) {
+	$relative = homeboy_wordpress_package_relative_path( $path, $label );
+	$root     = realpath( '.' );
+	if ( false === $root ) {
+		fwrite( STDERR, "Could not resolve the component root for package profile staging.\n" );
+		exit( 1 );
+	}
+
+	$candidate = realpath( $relative );
+	if ( false === $candidate ) {
+		return $relative;
+	}
+
+	$root      = str_replace( '\\', '/', $root );
+	$candidate = str_replace( '\\', '/', $candidate );
+	if ( $candidate !== $root && ! str_starts_with( $candidate, $root . '/' ) ) {
+		fwrite( STDERR, "{$label} must be component-relative and cannot contain traversal or filesystem-absolute paths: {$path}\n" );
+		exit( 1 );
+	}
+
+	return $relative;
+}
+
+if ( ! is_string( $manifest_setting ) ) {
+	fwrite( STDERR, "extensions.wordpress.package_profile.manifest must be a component-relative JSON path.\n" );
+	exit( 1 );
+}
+if ( ! is_string( $profile_setting ) || 1 !== preg_match( '/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $profile_setting ) ) {
+	fwrite( STDERR, "extensions.wordpress.package_profile.profile must be a safe profile name.\n" );
+	exit( 1 );
+}
+
+$manifest_relative = homeboy_wordpress_package_contained_relative( $manifest_setting, 'Package profile manifest' );
+if ( ! is_file( $manifest_relative ) || is_link( $manifest_relative ) ) {
+	fwrite( STDERR, "Package profile manifest must be an existing component-relative JSON file: {$manifest_setting}\n" );
+	exit( 1 );
+}
+
+$manifest_json = file_get_contents( $manifest_relative );
+$manifest      = json_decode( $manifest_json, true );
+if ( ! is_array( $manifest ) ) {
+	fwrite( STDERR, "Package profile manifest must be a JSON object: {$manifest_setting}\n" );
+	exit( 1 );
+}
+
+$profiles = $manifest['profiles'] ?? null;
+if ( ! is_array( $profiles ) ) {
+	fwrite( STDERR, "Package profile manifest must declare a profiles object.\n" );
+	exit( 1 );
+}
+
+$profile = $profiles[ $profile_setting ] ?? null;
+if ( ! is_array( $profile ) ) {
+	fwrite( STDERR, "Package profile not found: {$profile_setting}\n" );
+	exit( 1 );
+}
+
+$selectors = $profile['selectors'] ?? null;
+if ( ! is_array( $selectors ) || [] === $selectors ) {
+	fwrite( STDERR, "Package profile selectors must be a non-empty array.\n" );
+	exit( 1 );
+}
+
+$selected = [];
+
+function homeboy_wordpress_package_prefix_files( $prefix ) {
+	$prefix = rtrim( $prefix, '/' );
+	if ( ! is_dir( $prefix ) || is_link( $prefix ) ) {
+		return [];
+	}
+
+	$files    = [];
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator( $prefix, FilesystemIterator::SKIP_DOTS )
+	);
+	foreach ( $iterator as $file ) {
+		if ( $file->isLink() || ! $file->isFile() ) {
+			continue;
+		}
+
+		$relative = str_replace( '\\', '/', $file->getPathname() );
+		$relative = preg_replace( '#^\./#', '', $relative );
+		if ( preg_match( '#^\.homeboy-build(?:/|$)#', $relative ) ) {
+			continue;
+		}
+
+		homeboy_wordpress_package_contained_relative( $relative, 'Package profile selected file' );
+		$files[] = $relative;
+	}
+
+	return $files;
+}
+
+foreach ( $selectors as $selector ) {
+	if ( ! is_array( $selector ) || ! isset( $selector['type'], $selector['path'] ) || ! is_string( $selector['type'] ) || ! is_string( $selector['path'] ) ) {
+		fwrite( STDERR, "Package profile selectors must be objects with type and path.\n" );
+		exit( 1 );
+	}
+
+	$type = $selector['type'];
+	if ( 'file' !== $type && 'prefix' !== $type ) {
+		fwrite( STDERR, "Package profile selector type must be file or prefix.\n" );
+		exit( 1 );
+	}
+
+	$selector_path = homeboy_wordpress_package_contained_relative( $selector['path'], 'Package profile selector path' );
+	if ( 'file' === $type ) {
+		if ( is_link( $selector_path ) || ! is_file( $selector_path ) ) {
+			fwrite( STDERR, "Package profile file selector did not match a regular file: {$selector['path']}\n" );
+			exit( 1 );
+		}
+
+		$selected[ $selector_path ] = true;
+		continue;
+	}
+
+	foreach ( homeboy_wordpress_package_prefix_files( $selector_path ) as $relative ) {
+		$selected[ $relative ] = true;
+	}
+}
+
+$required_files = $profile['required_files'] ?? [];
+if ( ! is_array( $required_files ) ) {
+	fwrite( STDERR, "Package profile required_files must be an array of component-relative paths.\n" );
+	exit( 1 );
+}
+
+foreach ( $required_files as $required ) {
+	if ( ! is_string( $required ) ) {
+		fwrite( STDERR, "Package profile required_files must be an array of component-relative paths.\n" );
+		exit( 1 );
+	}
+
+	$required_path = homeboy_wordpress_package_relative_path( $required, 'Package profile required file' );
+	if ( ! isset( $selected[ $required_path ] ) ) {
+		fwrite( STDERR, "Package profile required file is missing: {$required}\n" );
+		exit( 1 );
+	}
+}
+
+ksort( $selected, SORT_STRING );
+
+$staging_dir = getenv( 'HOMEBOY_WORDPRESS_PACKAGE_STAGING_DIR' );
+if ( ! is_string( $staging_dir ) || '' === $staging_dir ) {
+	fwrite( STDERR, "Package profile staging directory is required.\n" );
+	exit( 1 );
+}
+
+foreach ( array_keys( $selected ) as $relative ) {
+	$destination = $staging_dir . '/' . $relative;
+	$directory   = dirname( $destination );
+	if ( ! is_dir( $directory ) && ! mkdir( $directory, 0777, true ) && ! is_dir( $directory ) ) {
+		fwrite( STDERR, "Could not stage package profile file: {$relative}\n" );
+		exit( 1 );
+	}
+	if ( ! copy( $relative, $destination ) ) {
+		fwrite( STDERR, "Could not stage package profile file: {$relative}\n" );
+		exit( 1 );
+	}
+}
+
+$evidence = [
+	'type'     => 'wordpress.package_profile',
+	'manifest' => $manifest_relative,
+	'profile'  => $profile_setting,
+	'files'    => array_keys( $selected ),
+];
+echo json_encode( $evidence, JSON_UNESCAPED_SLASHES ) . "\n";
+PHP
+}
+
 # Copy files to staging directory
 copy_project_files() {
     print_status "Copying project files to staging directory..."
 
     local staging_dir="${STAGING_ROOT}/$PROJECT_NAME"
     mkdir -p "$staging_dir"
+
+    local profile_status=0
+    stage_package_profile "$staging_dir" || profile_status=$?
+    if [ "$profile_status" -eq 0 ]; then
+        print_success "Project files copied successfully"
+        return
+    fi
+    if [ "$profile_status" -ne 2 ]; then
+        exit "$profile_status"
+    fi
 
     # Create rsync excludes file
     local exclude_file="/tmp/.rsync-excludes-$$"

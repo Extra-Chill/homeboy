@@ -217,4 +217,309 @@ if ! grep -Fq 'package_excludes entries must be non-empty strings' "${TMP_DIR}/e
     exit 1
 fi
 
+profile_dir="${TMP_DIR}/profile-plugin"
+mkdir -p "${profile_dir}/includes" "${profile_dir}/docs" "${profile_dir}/.homeboy-build/stale"
+
+cat > "${profile_dir}/profile-plugin.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Profile Plugin
+ * Version: 1.0.0
+ */
+PHP
+
+printf '%s\n' '<?php' > "${profile_dir}/includes/bootstrap.php"
+printf '%s\n' '<?php' > "${profile_dir}/includes/keep.php"
+printf '%s\n' 'unselected docs' > "${profile_dir}/docs/guide.md"
+printf '%s\n' 'stale staging' > "${profile_dir}/.homeboy-build/stale/skip.txt"
+
+cat > "${profile_dir}/package-manifest.json" <<'JSON'
+{
+  "profiles": {
+    "runtime": {
+      "selectors": [
+        { "type": "file", "path": "profile-plugin.php" },
+        { "type": "prefix", "path": "includes/" },
+        { "type": "file", "path": "package-manifest.json" }
+      ],
+      "required_files": [
+        "profile-plugin.php",
+        "includes/bootstrap.php",
+        "package-manifest.json"
+      ]
+    }
+  }
+}
+JSON
+
+(
+    cd "$profile_dir"
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_ID="profile-plugin" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
+    HOMEBOY_SKIP_TESTS=1 \
+    HOMEBOY_SETTINGS_JSON='{"package_profile":{"manifest":"package-manifest.json","profile":"runtime"}}' \
+        bash "${EXTENSION_DIR}/scripts/build/build.sh" > "${TMP_DIR}/profile-build.out"
+)
+
+profile_zip="${profile_dir}/build/profile-plugin.zip"
+assert_zip_contains "$profile_zip" "profile-plugin/profile-plugin.php"
+assert_zip_contains "$profile_zip" "profile-plugin/includes/bootstrap.php"
+assert_zip_contains "$profile_zip" "profile-plugin/includes/keep.php"
+assert_zip_contains "$profile_zip" "profile-plugin/package-manifest.json"
+assert_zip_not_contains "$profile_zip" "profile-plugin/docs/guide.md"
+assert_zip_not_contains "$profile_zip" "profile-plugin/.homeboy-build/stale/skip.txt"
+
+if ! grep -Fq '"type":"wordpress.package_profile"' "${TMP_DIR}/profile-build.out"; then
+    echo "Expected structured package profile output" >&2
+    sed 's/^/  /' "${TMP_DIR}/profile-build.out" >&2
+    exit 1
+fi
+
+if ! grep -Fq '"manifest":"package-manifest.json"' "${TMP_DIR}/profile-build.out"; then
+    echo "Expected package profile manifest identity" >&2
+    sed 's/^/  /' "${TMP_DIR}/profile-build.out" >&2
+    exit 1
+fi
+
+if ! grep -Fq '"profile":"runtime"' "${TMP_DIR}/profile-build.out"; then
+    echo "Expected package profile name in structured output" >&2
+    sed 's/^/  /' "${TMP_DIR}/profile-build.out" >&2
+    exit 1
+fi
+
+if ! grep -Fq '"files":["includes/bootstrap.php","includes/keep.php","package-manifest.json","profile-plugin.php"]' "${TMP_DIR}/profile-build.out"; then
+    echo "Expected deterministic selected-file inventory" >&2
+    sed 's/^/  /' "${TMP_DIR}/profile-build.out" >&2
+    exit 1
+fi
+
+(
+    cd "$component_dir"
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_ID="package-artifact-plugin" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
+    HOMEBOY_SKIP_TESTS=1 \
+    HOMEBOY_SETTINGS_JSON='{"package_profile":{}}' \
+        bash "${EXTENSION_DIR}/scripts/build/build.sh" > "${TMP_DIR}/empty-profile-build.out"
+)
+
+empty_profile_zip="${component_dir}/build/package-artifact-plugin.zip"
+assert_zip_contains "$empty_profile_zip" "package-artifact-plugin/package-artifact-plugin.php"
+assert_zip_contains "$empty_profile_zip" "package-artifact-plugin/includes/bootstrap.php"
+assert_zip_not_contains "$empty_profile_zip" "package-artifact-plugin/accidental.zip"
+
+if grep -Fq '"type":"wordpress.package_profile"' "${TMP_DIR}/empty-profile-build.out"; then
+    echo "Empty package_profile must keep default rsync staging" >&2
+    sed 's/^/  /' "${TMP_DIR}/empty-profile-build.out" >&2
+    exit 1
+fi
+
+vendor_dir="${TMP_DIR}/vendor-profile-plugin"
+mkdir -p "$vendor_dir"
+cat > "${vendor_dir}/vendor-profile-plugin.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Vendor Profile Plugin
+ * Version: 1.0.0
+ */
+PHP
+
+cat > "${vendor_dir}/composer.json" <<'JSON'
+{
+  "name": "smoke/vendor-profile-plugin"
+}
+JSON
+
+cat > "${vendor_dir}/package-manifest.json" <<'JSON'
+{
+  "profiles": {
+    "runtime": {
+      "selectors": [
+        { "type": "file", "path": "vendor-profile-plugin.php" },
+        { "type": "file", "path": "vendor/autoload.php" },
+        { "type": "prefix", "path": "vendor/selected/" }
+      ],
+      "required_files": [
+        "vendor-profile-plugin.php",
+        "vendor/autoload.php"
+      ]
+    }
+  }
+}
+JSON
+
+fake_bin="${TMP_DIR}/bin"
+mkdir -p "$fake_bin"
+cat > "${fake_bin}/composer" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "install" ]; then
+    rm -rf vendor
+    mkdir -p vendor/composer vendor/selected vendor/omitted
+    printf '%s\n' '<?php' > vendor/autoload.php
+    printf '%s\n' '<?php' > vendor/composer/autoload_real.php
+    printf '%s\n' '<?php' > vendor/selected/lib.php
+    printf '%s\n' '<?php' > vendor/omitted/secret.php
+fi
+exit 0
+SH
+chmod +x "${fake_bin}/composer"
+
+(
+    cd "$vendor_dir"
+    PATH="${fake_bin}:$PATH" \
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_ID="vendor-profile-plugin" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
+    HOMEBOY_SKIP_TESTS=1 \
+    HOMEBOY_SETTINGS_JSON='{"package_profile":{"manifest":"package-manifest.json","profile":"runtime"}}' \
+        bash "${EXTENSION_DIR}/scripts/build/build.sh" > "${TMP_DIR}/vendor-profile-build.out"
+)
+
+vendor_zip="${vendor_dir}/build/vendor-profile-plugin.zip"
+assert_zip_contains "$vendor_zip" "vendor-profile-plugin/vendor/autoload.php"
+assert_zip_contains "$vendor_zip" "vendor-profile-plugin/vendor/selected/lib.php"
+assert_zip_not_contains "$vendor_zip" "vendor-profile-plugin/vendor/omitted/secret.php"
+assert_zip_not_contains "$vendor_zip" "vendor-profile-plugin/vendor/composer/autoload_real.php"
+
+cat > "${profile_dir}/required-missing.json" <<'JSON'
+{
+  "profiles": {
+    "runtime": {
+      "selectors": [
+        { "type": "file", "path": "profile-plugin.php" }
+      ],
+      "required_files": [
+        "includes/missing.php"
+      ]
+    }
+  }
+}
+JSON
+
+cat > "${profile_dir}/missing-file.json" <<'JSON'
+{
+  "profiles": {
+    "runtime": {
+      "selectors": [
+        { "type": "file", "path": "profile-plugin.php" },
+        { "type": "file", "path": "includes/missing.php" }
+      ]
+    }
+  }
+}
+JSON
+
+cat > "${profile_dir}/traversal.json" <<'JSON'
+{
+  "profiles": {
+    "runtime": {
+      "selectors": [
+        { "type": "file", "path": "../outside.php" }
+      ]
+    }
+  }
+}
+JSON
+
+cat > "${profile_dir}/absolute.json" <<'JSON'
+{
+  "profiles": {
+    "runtime": {
+      "selectors": [
+        { "type": "file", "path": "/tmp/outside.php" }
+      ]
+    }
+  }
+}
+JSON
+
+cat > "${profile_dir}/malformed.json" <<'JSON'
+{
+  "profiles": {
+    "runtime": {
+      "selectors": [
+        { "type": "glob", "path": "includes/" }
+      ]
+    }
+  }
+}
+JSON
+
+expect_profile_failure() {
+    local out_file="$1"
+    local settings="$2"
+    local expected="$3"
+    local message="$4"
+
+    if (
+        cd "$profile_dir"
+        HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+        HOMEBOY_COMPONENT_ID="profile-plugin" \
+        HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
+        HOMEBOY_SKIP_TESTS=1 \
+        HOMEBOY_SETTINGS_JSON="$settings" \
+            bash "${EXTENSION_DIR}/scripts/build/build.sh" > "$out_file" 2>&1
+    ); then
+        echo "$message" >&2
+        sed 's/^/  /' "$out_file" >&2
+        exit 1
+    fi
+
+    if ! grep -Fq "$expected" "$out_file"; then
+        echo "Expected error: $expected" >&2
+        sed 's/^/  /' "$out_file" >&2
+        exit 1
+    fi
+}
+
+expect_profile_failure \
+    "${TMP_DIR}/required-build.out" \
+    '{"package_profile":{"manifest":"required-missing.json","profile":"runtime"}}' \
+    'Package profile required file is missing: includes/missing.php' \
+    'Expected missing required file to fail'
+
+expect_profile_failure \
+    "${TMP_DIR}/missing-file-build.out" \
+    '{"package_profile":{"manifest":"missing-file.json","profile":"runtime"}}' \
+    'Package profile file selector did not match a regular file: includes/missing.php' \
+    'Expected missing explicit file selector to fail'
+
+expect_profile_failure \
+    "${TMP_DIR}/profile-traversal-build.out" \
+    '{"package_profile":{"manifest":"traversal.json","profile":"runtime"}}' \
+    'cannot contain traversal or filesystem-absolute paths' \
+    'Expected traversal selector path to fail'
+
+expect_profile_failure \
+    "${TMP_DIR}/profile-absolute-build.out" \
+    '{"package_profile":{"manifest":"absolute.json","profile":"runtime"}}' \
+    'cannot contain traversal or filesystem-absolute paths' \
+    'Expected absolute selector path to fail'
+
+expect_profile_failure \
+    "${TMP_DIR}/malformed-build.out" \
+    '{"package_profile":{"manifest":"malformed.json","profile":"runtime"}}' \
+    'Package profile selector type must be file or prefix' \
+    'Expected malformed selector type to fail'
+
+expect_profile_failure \
+    "${TMP_DIR}/manifest-traversal-build.out" \
+    '{"package_profile":{"manifest":"../outside.json","profile":"runtime"}}' \
+    'cannot contain traversal or filesystem-absolute paths' \
+    'Expected traversal manifest path to fail'
+
+expect_profile_failure \
+    "${TMP_DIR}/manifest-absolute-build.out" \
+    '{"package_profile":{"manifest":"/tmp/outside.json","profile":"runtime"}}' \
+    'cannot contain traversal or filesystem-absolute paths' \
+    'Expected absolute manifest path to fail'
+
+expect_profile_failure \
+    "${TMP_DIR}/profile-name-build.out" \
+    '{"package_profile":{"manifest":"package-manifest.json","profile":"../runtime"}}' \
+    'extensions.wordpress.package_profile.profile must be a safe profile name' \
+    'Expected unsafe profile name to fail'
+
 echo "WordPress package artifacts build smoke passed."
+
