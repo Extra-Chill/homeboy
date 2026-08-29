@@ -29,6 +29,7 @@ pub mod phase_timing;
 pub mod provider_registry;
 pub mod shell;
 pub mod template;
+pub mod test_execution;
 pub mod test_path;
 pub mod text;
 pub mod validation;
