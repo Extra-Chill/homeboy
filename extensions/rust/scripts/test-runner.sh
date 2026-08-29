@@ -22,13 +22,11 @@ if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${H
     SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
 fi
 SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
-# shellcheck source=../../scripts/lib/runtime-helper-resolver.sh
-source "${SHARED_LIB_DIR}/runtime-helper-resolver.sh"
-SETTINGS_HELPER="$(homeboy_runtime_helper "${SHARED_LIB_DIR%/scripts/lib}" HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || exit 1
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/runner-harness.sh"
 homeboy_runner_harness_load_adapter test-failures-adapter
 homeboy_runner_harness_init --steps --failure-trap --sidecar-writer
+SETTINGS_HELPER="$(homeboy_runner_harness_resolve_helper HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || exit 1
 # shellcheck source=/dev/null
 homeboy_runner_harness_source_command_capture
 # shellcheck source=/dev/null

@@ -22,9 +22,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
-HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_PATH}/../.." && pwd)/homeboy}"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
+REPOSITORY_ROOT="$(cd "${EXTENSION_PATH}/.." && pwd)"
+# Helpers resolve through the shared resolver rather than a hardcoded core
+# layout. The previous literal path pointed at src/core/extension/runtime,
+# which has not existed since Homeboy moved to crates/, so this smoke could
+# not run at all.
+# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+source "${REPOSITORY_ROOT}/scripts/lib/runtime-helper-resolver.sh"
+BASH_PREFLIGHT_HELPER="$(homeboy_runtime_helper "$REPOSITORY_ROOT" HOMEBOY_RUNTIME_BASH_PREFLIGHT bash-preflight.sh)" || exit 1
+RESOLVE_CONTEXT_HELPER="$(homeboy_runtime_helper "$REPOSITORY_ROOT" HOMEBOY_RUNTIME_RESOLVE_CONTEXT resolve-context.sh)" || exit 1
 FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-noop"
 CRITERION_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-criterion"
 
