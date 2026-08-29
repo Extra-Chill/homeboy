@@ -75,7 +75,6 @@ const TEST_INVENTORY_FILE: &str = "test-inventory.json";
 const TEST_INVENTORY_PUBLIC_FILE: &str = "homeboy-test-inventory.json";
 #[cfg(unix)]
 const MAX_TEST_INVENTORY_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
 const MAX_CHANGED_TEST_FILES_ENV: &str = "HOMEBOY_MAX_CHANGED_TEST_FILES";
 
 #[derive(Debug, Deserialize)]
@@ -366,12 +365,7 @@ fn execution_fingerprint(
 }
 
 pub(crate) fn test_timeout() -> Duration {
-    std::env::var("HOMEBOY_TEST_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_TEST_TIMEOUT_SECONDS))
+    homeboy_engine_primitives::test_execution::suite_timeout_from_env().suite_timeout()
 }
 
 /// Resolve the optional changed-scope selection cap.
@@ -1560,6 +1554,8 @@ fn run_main_test_workflow_inner(
     let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
     let no_tests_nonce = uuid::Uuid::new_v4().to_string();
     let write_results_helper = write_test_results_helper(run_dir)?;
+    let test_plan = homeboy_engine_primitives::test_execution::suite_timeout_from_env();
+    let (suite_timeout_env, suite_timeout_value) = test_plan.suite_timeout_env();
     let inventory_profile = test_context.as_ref().and_then(|_| {
         InventoryProfile::resolve(
             test_config
@@ -1618,6 +1614,7 @@ fn run_main_test_workflow_inner(
                             .iter()
                             .fold(producer, |producer, (key, value)| producer.env(key, value));
                         let output = producer
+                            .env(suite_timeout_env, &suite_timeout_value)
                             .env(TEST_INVENTORY_ONLY_ENV, "1")
                             .env(
                                 TEST_INVENTORY_FILE_ENV,
@@ -1685,6 +1682,10 @@ fn run_main_test_workflow_inner(
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
     let runner = runner
+        // Normalize inherited configuration before a Cargo adapter reaches the
+        // global runner: an explicit zero falls back to the declared default,
+        // never to the runner's debug-only unbounded mode.
+        .env(suite_timeout_env, &suite_timeout_value)
         .env(
             "HOMEBOY_TEST_RESULTS_FILE",
             results_file.to_string_lossy().as_ref(),
@@ -1738,7 +1739,7 @@ fn run_main_test_workflow_inner(
         vec![("test runner".to_string(), args.component_label.clone())],
     )?;
     progress.start(0)?;
-    let timeout = test_timeout();
+    let timeout = test_plan.suite_timeout();
     homeboy_core::log_status!(
         "test",
         "phase=child command=test runner timeout={}s; streaming bounded child supervision",
