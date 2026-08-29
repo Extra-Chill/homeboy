@@ -822,6 +822,72 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn account_block_rotates_to_the_next_configured_entry_without_retrying_it() {
+        let executor = RotationScriptedExecutor::new(vec![
+            (
+                AgentTaskOutcomeStatus::ProviderError,
+                Some(AgentTaskFailureClassification::ProviderAccountBlocked),
+            ),
+            success(),
+        ]);
+        let observed = Arc::clone(&executor.observed);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("xai/grok-4.6".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("zai-coding-plan/glm-5.3".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("opencode-go/kimi-k3".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("anthropic/claude-sonnet-5".to_string()),
+                    ..Default::default()
+                },
+            ],
+            max_attempts: Some(4),
+            ..Default::default()
+        });
+        plan.options.execution_budget = AgentTaskExecutionBudget {
+            version: AgentTaskExecutionBudget::VERSION,
+            deadline_unix_ms: None,
+            max_provider_executions: 4,
+            max_same_provider_retries: 1,
+            max_provider_rotations: 3,
+        };
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(
+            observed
+                .iter()
+                .map(|request| request.executor.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("xai/grok-4.6"), Some("zai-coding-plan/glm-5.3")]
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["same_provider_retries_used"], 0,
+            "an explicitly non-retryable account rejection must rotate immediately"
+        );
+    }
+
+    #[test]
     fn timed_out_attempt_rotates_after_recovering_a_malformed_scratch_index() {
         struct TimeoutThenSuccessExecutor {
             calls: AtomicUsize,
@@ -990,6 +1056,15 @@ mod provider_rotation_tests {
         assert!(attempts
             .iter()
             .all(|attempt| attempt["failure_classification"] == "provider"));
+        let diagnostic = aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.provider_rotation_exhausted")
+            .expect("rotation exhaustion diagnostic");
+        assert_eq!(
+            diagnostic.message,
+            "all configured provider routes were rejected: test/default model: provider; fallback-backend-a/default model: provider; fallback-backend-b/default model: provider"
+        );
     }
 
     #[test]

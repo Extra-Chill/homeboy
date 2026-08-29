@@ -686,6 +686,39 @@ fn typed_provider_quota_normalizes_to_rate_limited_and_preserves_retry_hint() {
 }
 
 #[test]
+fn opencode_account_block_maps_to_rotatable_provider_classification() {
+    let (_, mut provider) = request("quota-task", "node provider.js".to_string());
+    provider.backend = "opencode".to_string();
+    let mut outcome = AgentTaskOutcome {
+        task_id: "quota-task".to_string(),
+        status: AgentTaskOutcomeStatus::Failed,
+        failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
+        metadata: json!({
+            "provider_error": {
+                "name": "APIError",
+                "data": {
+                    "message": "personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription.",
+                    "statusCode": 403,
+                    "isRetryable": false
+                }
+            }
+        }),
+        ..Default::default()
+    };
+
+    normalize_provider_outcome_roles(&mut outcome, &provider);
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::ProviderAccountBlocked)
+    );
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "opencode.provider_account_blocked"));
+}
+
+#[test]
 fn empty_failed_run_result_surfaces_explanatory_diagnostic() {
     // Mirrors the #4105 repro: a failed run-result that is an empty shell.
     let mut outcome = failed_outcome_with_run_result(json!({

@@ -12,6 +12,63 @@ pub(super) fn normalize_provider_outcome_roles(
     if result_contract_valid {
         surface_provider_run_result_diagnostics(outcome);
     }
+    normalize_opencode_account_block(outcome, provider);
+}
+
+/// OpenCode exposes vendor failures in its structured provider error payload.
+/// Keep its payload vocabulary at this adapter boundary; the scheduler only
+/// acts on Homeboy's generic failure classification.
+fn normalize_opencode_account_block(
+    outcome: &mut AgentTaskOutcome,
+    provider: &AgentTaskExecutorProvider,
+) {
+    if provider.backend != "opencode"
+        || outcome.failure_classification != Some(AgentTaskFailureClassification::ExecutionFailed)
+    {
+        return;
+    }
+    let Some(error) = outcome.metadata.get("provider_error") else {
+        return;
+    };
+    if !opencode_account_block(error) {
+        return;
+    }
+
+    outcome.failure_classification = Some(AgentTaskFailureClassification::ProviderAccountBlocked);
+    push_unique_diagnostic(
+        &mut outcome.diagnostics,
+        "opencode.provider_account_blocked".to_string(),
+        "OpenCode provider account rejected the request; retrying this account is disabled and the scheduler may rotate to the next configured provider."
+            .to_string(),
+        error.clone(),
+    );
+}
+
+fn opencode_account_block(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            let status = object
+                .get("statusCode")
+                .or_else(|| object.get("status_code"))
+                .and_then(Value::as_u64);
+            let non_retryable = object
+                .get("isRetryable")
+                .or_else(|| object.get("is_retryable"))
+                .and_then(Value::as_bool)
+                == Some(false);
+            let account_code = object.values().filter_map(Value::as_str).any(|text| {
+                let text = text.to_ascii_lowercase();
+                text.contains("team-blocked")
+                    || text.contains("spending-limit")
+                    || text.contains("run out of credits")
+                    || text.contains("grok subscription")
+            });
+            (matches!(status, Some(402 | 403)) && non_retryable && account_code)
+                || object.values().any(opencode_account_block)
+        }
+        Value::Array(values) => values.iter().any(opencode_account_block),
+        _ => false,
+    }
 }
 
 const HOMEBOY_ARTIFACT_PROVENANCE_KEY: &str = "artifact_provenance";
