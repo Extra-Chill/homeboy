@@ -3015,6 +3015,66 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 }
 
 #[test]
+fn diagnose_hydrates_and_redacts_structured_provider_runtime_errors() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let runtime_stdout = evidence_dir
+            .path()
+            .join("cook-homeboy-opencode-runtime-stdout.log");
+        std::fs::write(
+            &runtime_stdout,
+            concat!(
+                "set-cookie: session=fixture-secret\n",
+                r#"{"type":"error","error":{"name":"APIError","data":{"message":"personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription.","statusCode":403,"isRetryable":false}}}"#,
+                "\n"
+            ),
+        )
+        .expect("write runtime stdout");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            r#"{"status":"failed","exit_code":1,"diagnostics":[{"class":"provider.process_exit","message":"OpenCode CLI exited with status 1."}]}"#,
+        )
+        .expect("write executor result");
+
+        let run_id = "run-cli-diagnose-structured-provider-error";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            }),
+        )
+        .expect("run completed with failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["root_cause"]["message"],
+            "provider rejected the request (HTTP 403, not retryable): personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription."
+        );
+        assert_eq!(value["root_cause"]["details"]["status_code"], 403);
+        assert_eq!(value["root_cause"]["details"]["retryable"], false);
+        assert_eq!(
+            value["root_cause"]["details"]["failure_classification"],
+            "provider_account_blocked"
+        );
+        assert!(value["hydrated_evidence"][0]["summary"]["stdout_excerpt"]
+            .as_str()
+            .expect("stdout excerpt")
+            .contains("personal-team-blocked:spending-limit"));
+        let output = value.to_string();
+        assert!(!output.contains("fixture-secret"));
+        assert!(output.contains("[REDACTED]"));
+    });
+}
+
+#[test]
 fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() {
     with_temp_home(|| {
         let cook_id = "cook-diagnose-review-form";

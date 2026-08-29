@@ -715,7 +715,7 @@ fn opencode_account_block_maps_to_rotatable_provider_classification() {
     assert!(outcome
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.class == "opencode.provider_account_blocked"));
+        .any(|diagnostic| diagnostic.class == "provider.account_blocked"));
 }
 
 #[test]
