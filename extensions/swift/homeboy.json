@@ -15,7 +15,9 @@
     ],
     "test": [
       "bash tests/fingerprint-smoke.sh",
-      "bash tests/swift-extension-smoke.sh"
+      "bash tests/swift-extension-smoke.sh",
+      "bash tests/lint-runner-smoke.sh",
+      "bash tests/script-runner-smoke.sh"
     ]
   }
 }

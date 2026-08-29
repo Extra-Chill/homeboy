@@ -7,20 +7,11 @@ if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${H
     SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
 fi
 SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
-if [ -n "$RESOLVE_CONTEXT_HELPER" ]; then
-    # shellcheck source=/dev/null
-    source "$RESOLVE_CONTEXT_HELPER"
-    homeboy_resolve_context
-else
-    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
-fi
-homeboy_runner_harness_source_if_file "$SIDECAR_WRITER_HELPER"
+homeboy_runner_harness_init --sidecar-writer
 homeboy_lint_findings_init
 
 echo "Running Swift lint for: $(basename "$COMPONENT_PATH")"
