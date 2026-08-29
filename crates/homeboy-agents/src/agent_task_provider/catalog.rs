@@ -645,6 +645,24 @@ pub fn provider_secret_sources_for_providers(
     sources
 }
 
+/// One secret-env scope per provider so catalog `secret_env` resolves each
+/// required name against the provider that requires it (#13629).
+pub fn provider_secret_env_scopes(
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<crate::agent_task_secrets::AgentTaskSecretEnvScope> {
+    providers
+        .iter()
+        .map(
+            |provider| crate::agent_task_secrets::AgentTaskSecretEnvScope {
+                fallback_sources: provider_declared_secret_sources(provider),
+                required_names: super::credential_readiness::provider_required_secret_env_names(
+                    provider,
+                ),
+            },
+        )
+        .collect()
+}
+
 /// Secret sources scoped to a single backend (and optional provider selector).
 ///
 /// Mirrors the backend/selector resolution `agent-task doctor` uses so auth
