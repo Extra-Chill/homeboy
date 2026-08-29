@@ -629,6 +629,55 @@ pub fn resolve_execution_context_if_available(
     execution_context_for_extension(component, None, capability, extension_id).map(Some)
 }
 
+/// Resolve an execution context for one named linked extension.
+///
+/// Owner-elected capabilities (Lint, Test, Bench, Trace, Deps, Build, Fuzz)
+/// resolve exactly one provider and should use [`resolve_execution_context`].
+/// Aggregating capabilities compose a result from every linked extension that
+/// advertises them — audit reference paths are the union of each extension's
+/// contribution, not one extension's answer — so they need a context bound to a
+/// specific extension rather than an elected owner.
+///
+/// The extension must be linked to the component and must advertise
+/// `capability`; both are validation errors rather than silent skips.
+pub fn resolve_execution_context_for_extension(
+    component: &Component,
+    capability: ExtensionCapability,
+    extension_id: &str,
+) -> Result<ExtensionExecutionContext> {
+    let linked = component
+        .extensions
+        .as_ref()
+        .is_some_and(|extensions| extensions.contains_key(extension_id));
+    if !linked {
+        return Err(Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Component '{}' does not link extension '{}'",
+                component.id, extension_id
+            ),
+            Some(extension_id.to_string()),
+            None,
+        ));
+    }
+
+    let manifest = load_extension(extension_id)?;
+    if !capability.has_manifest_support(&manifest) {
+        return Err(Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "Extension '{}' does not provide {} support",
+                extension_id,
+                capability.label()
+            ),
+            Some(extension_id.to_string()),
+            None,
+        ));
+    }
+
+    execution_context_for_extension(component, None, capability, extension_id.to_string())
+}
+
 /// Resolve a capability against a project attachment, retaining the project
 /// settings and attachment path for the runner environment.
 pub fn resolve_execution_context_for_project(

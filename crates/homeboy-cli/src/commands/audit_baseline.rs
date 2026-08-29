@@ -207,7 +207,7 @@ fn refresh(args: AuditBaselineRefreshArgs) -> CmdResult<AuditBaselineRefreshOutp
         &args.extension_override,
         None,
     )?;
-    let reference_paths = super::audit::resolve_audit_reference_paths(&source_ctx);
+    let reference_paths = super::audit::resolve_audit_reference_paths(&source_ctx)?;
     let source_path = source_ctx.source_path.to_string_lossy().to_string();
     let source = Path::new(&source_path);
 

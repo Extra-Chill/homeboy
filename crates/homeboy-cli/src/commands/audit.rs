@@ -11,6 +11,8 @@ use homeboy::core::observation::{
     finding_records_from_audit, ActiveObservation, NewFindingRecord, NewRunRecord, RunStatus,
 };
 
+use homeboy_extension::{ExtensionCapability, ExtensionRunner};
+
 use super::source_command::resolve_source_context;
 use super::utils::args::{
     BaselineArgs, ChangedSinceArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
@@ -142,7 +144,7 @@ pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
         &args.extension_override,
         None,
     )?;
-    let reference_paths = resolve_audit_reference_paths(&source_ctx);
+    let reference_paths = resolve_audit_reference_paths(&source_ctx)?;
     let resolved_id = source_ctx.component_id.clone();
     let resolved_path = source_ctx.source_path.to_string_lossy().to_string();
 
@@ -514,69 +516,100 @@ fn code_audit_result_observation_summary(
     summary
 }
 
-/// Run configured extension audit reference setup scripts for the resolved audit target.
+/// Wall-clock budget for a single extension's audit reference setup.
 ///
-/// Setup still speaks the legacy shell boundary (`--export` stdout), but the command
-/// converts that output into typed workflow input instead of process-global state.
-pub(crate) fn resolve_audit_reference_paths(source_ctx: &ExecutionContext) -> Vec<String> {
-    let extensions = match &source_ctx.component.extensions {
-        Some(ext) => ext,
-        None => return Vec::new(),
+/// Reference setup resolves dependency directories; it is not a build. Before
+/// this ran through [`ExtensionRunner`] it had no budget at all, so a setup
+/// script that hung wedged the audit indefinitely.
+const AUDIT_REFERENCE_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Run configured extension audit reference setup for the resolved audit target.
+///
+/// Audit is an *aggregating* capability: reference paths are the union of every
+/// linked extension's contribution, so this resolves one execution context per
+/// linked extension rather than electing a single owner the way Lint or Test do.
+///
+/// Setup still speaks the legacy shell boundary (`--export` stdout), but it now
+/// runs through [`ExtensionRunner`], which supplies resolved settings, the
+/// component environment, the env-provider chain, and a wall-clock budget. A
+/// declared setup script that fails is an error rather than an empty result:
+/// reference paths feed cross-reference analysis, so silently dropping them
+/// degrades findings instead of reporting a problem.
+pub(crate) fn resolve_audit_reference_paths(
+    source_ctx: &ExecutionContext,
+) -> homeboy::core::Result<Vec<String>> {
+    let Some(extensions) = &source_ctx.component.extensions else {
+        return Ok(Vec::new());
     };
 
+    // Deterministic order: `extensions` is a HashMap, and which extension's
+    // failure surfaces first should not depend on hash iteration order.
+    let mut extension_ids: Vec<&String> = extensions.keys().collect();
+    extension_ids.sort();
+
     let mut reference_paths = Vec::new();
-    for ext_id in extensions.keys() {
-        let ext_manifest = match homeboy_extension::load_extension(ext_id) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        let setup_script = match ext_manifest.audit_setup_references() {
-            Some(s) => s,
-            None => continue,
-        };
-
-        // Resolve script path relative to extension directory
-        let ext_path = homeboy_extension::extension_path(ext_id);
-        if !ext_path.is_dir() {
+    for ext_id in extension_ids {
+        // An unreadable sibling manifest does not get to fail audit for the
+        // extensions that are readable (#11122). Only a declared-and-broken
+        // setup script is an error.
+        let Ok(manifest) = homeboy_extension::load_extension(ext_id) else {
             continue;
-        }
-        let script_path = ext_path.join(setup_script);
-        if !script_path.is_file() {
+        };
+        if !manifest.has_audit() {
             continue;
         }
 
-        homeboy::log_status!(
-            "audit",
-            "Running reference setup: {}",
-            script_path.display()
-        );
+        let execution_context =
+            homeboy::core::extension_execution::resolve_execution_context_for_extension(
+                &source_ctx.component,
+                ExtensionCapability::Audit,
+                ext_id,
+            )?;
 
-        // Run the script with --export flag and capture stdout.
-        let output = std::process::Command::new("bash")
-            .arg(script_path.to_str().unwrap_or(""))
-            .arg("--export")
-            .env("HOMEBOY_COMPONENT_PATH", &source_ctx.component.local_path)
-            .current_dir(&source_ctx.source_path)
-            .output();
+        homeboy::log_status!("audit", "Running reference setup: {}", ext_id);
 
-        if let Ok(output) = output {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            reference_paths.extend(parse_audit_reference_paths_export(&stdout));
+        let output = ExtensionRunner::for_context(execution_context)
+            .path_override(Some(source_ctx.source_path.to_string_lossy().to_string()))
+            .script_args(&["--export".to_string()])
+            .passthrough(false)
+            .timeout(Some(AUDIT_REFERENCE_SETUP_TIMEOUT))
+            .run()?;
 
-            // Log stderr (the script's informational output)
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            for line in stderr.lines() {
-                if !line.is_empty() {
-                    homeboy::log_status!("audit", "{}", line);
-                }
-            }
+        // Setup scripts report progress on stderr; keep surfacing it.
+        for line in output.stderr.lines().filter(|line| !line.is_empty()) {
+            homeboy::log_status!("audit", "{}", line);
         }
+
+        if !output.success {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "audit.setup_references",
+                format!(
+                    "Extension '{}' audit reference setup failed with exit code {}{}",
+                    ext_id,
+                    output.exit_code,
+                    if output.timed_out {
+                        format!(
+                            " (timed out after {}s)",
+                            AUDIT_REFERENCE_SETUP_TIMEOUT.as_secs()
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+                Some(ext_id.clone()),
+                Some(vec![
+                    homeboy::core::extension_execution::stderr_tail(&output.stderr),
+                    "Reference paths feed cross-reference analysis; running audit without them would change findings.".to_string(),
+                ]),
+            ));
+        }
+
+        reference_paths.extend(parse_audit_reference_paths_export(&output.stdout));
     }
 
     reference_paths.sort();
     reference_paths.dedup();
-    reference_paths
+    Ok(reference_paths)
 }
 
 fn parse_audit_reference_paths_export(stdout: &str) -> Vec<String> {
@@ -766,14 +799,44 @@ mod tests {
             .to_string(),
         )
         .expect("extension manifest");
-        fs::write(
-            extension_dir.join("setup.sh"),
-            format!(
-                "printf '%s\\n' \"export HOMEBOY_AUDIT_REFERENCE_PATHS='{}'\"\n",
+        write_executable_script(
+            &extension_dir.join("setup.sh"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"export HOMEBOY_AUDIT_REFERENCE_PATHS='{}'\"\n",
                 reference_path.display()
             ),
+        );
+    }
+
+    /// Extension whose declared reference setup exists but exits non-zero.
+    fn write_failing_reference_extension(home: &std::path::Path, id: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": id,
+                "version": "0.0.0",
+                "audit": { "setup_references": "setup.sh" }
+            })
+            .to_string(),
         )
-        .expect("setup script");
+        .expect("extension manifest");
+        write_executable_script(
+            &extension_dir.join("setup.sh"),
+            "#!/bin/sh\necho 'dependency resolution failed' >&2\nexit 3\n",
+        );
+    }
+
+    fn write_executable_script(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("setup script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(path).expect("script metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("make script executable");
+        }
     }
 
     fn write_extension_without_reference_setup(home: &std::path::Path, id: &str) {
@@ -889,7 +952,8 @@ mod tests {
             write_standalone_component(home.path(), "demo", &component_dir, "fixture");
 
             let source_ctx = source_context_for(Some("demo".to_string()), None, vec![]);
-            let reference_paths = resolve_audit_reference_paths(&source_ctx);
+            let reference_paths =
+                resolve_audit_reference_paths(&source_ctx).expect("reference setup succeeds");
 
             assert_eq!(
                 reference_paths,
@@ -924,7 +988,8 @@ mod tests {
                 Some(component_dir.to_string_lossy().to_string()),
                 vec![],
             );
-            let reference_paths = resolve_audit_reference_paths(&source_ctx);
+            let reference_paths =
+                resolve_audit_reference_paths(&source_ctx).expect("reference setup succeeds");
 
             assert_eq!(source_ctx.component_id, "portable-demo");
             assert_eq!(
@@ -960,7 +1025,8 @@ mod tests {
                 Some(component_dir.to_string_lossy().to_string()),
                 vec!["override".to_string()],
             );
-            let reference_paths = resolve_audit_reference_paths(&source_ctx);
+            let reference_paths =
+                resolve_audit_reference_paths(&source_ctx).expect("reference setup succeeds");
 
             assert_eq!(
                 reference_paths,
@@ -993,7 +1059,50 @@ mod tests {
                 vec![],
             );
 
-            assert!(resolve_audit_reference_paths(&source_ctx).is_empty());
+            assert!(resolve_audit_reference_paths(&source_ctx)
+                .expect("no declared setup is not a failure")
+                .is_empty());
+            let _ = fs::remove_dir_all(component_dir);
+        });
+    }
+
+    /// Before #13723 this resolved to an empty path list, so audit ran without
+    /// the extension's reference dependencies and silently produced different
+    /// cross-reference findings. A declared setup script that fails is now an
+    /// error carrying the script's own stderr.
+    #[test]
+    fn audit_reference_setup_reports_failing_setup_script() {
+        with_isolated_home(|home| {
+            let component_dir = tmp_dir("failing-reference-component");
+            fs::create_dir_all(&component_dir).expect("component dir");
+            fs::write(
+                component_dir.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "failing-demo",
+                    "extensions": { "fixture": {} }
+                })
+                .to_string(),
+            )
+            .expect("portable config");
+            write_failing_reference_extension(home.path(), "fixture");
+
+            let source_ctx = source_context_for(
+                None,
+                Some(component_dir.to_string_lossy().to_string()),
+                vec![],
+            );
+
+            let error = resolve_audit_reference_paths(&source_ctx)
+                .expect_err("a failing reference setup must not resolve to an empty path list");
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("fixture"),
+                "error should name the extension: {rendered}"
+            );
+            assert!(
+                rendered.contains("reference setup failed"),
+                "error should name the failure: {rendered}"
+            );
             let _ = fs::remove_dir_all(component_dir);
         });
     }
