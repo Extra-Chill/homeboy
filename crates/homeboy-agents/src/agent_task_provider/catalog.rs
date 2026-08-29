@@ -19,8 +19,6 @@ static PROVIDER_CATALOG: OnceLock<RwLock<AgentTaskProviderCatalog>> = OnceLock::
 pub struct ExtensionProviderAgentTaskExecutor {
     providers: Vec<AgentTaskExecutorProvider>,
     diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
-    #[cfg(test)]
-    pub(super) path_roots: Option<homeboy_core::paths::PathRoots>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,8 +247,6 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers: catalog.providers,
             diagnostics: catalog.diagnostics,
-            #[cfg(test)]
-            path_roots: None,
         }
     }
 
@@ -259,14 +255,7 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers,
             diagnostics: Vec::new(),
-            path_roots: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_path_roots(mut self, path_roots: homeboy_core::paths::PathRoots) -> Self {
-        self.path_roots = Some(path_roots);
-        self
     }
 
     pub fn providers(&self) -> &[AgentTaskExecutorProvider] {

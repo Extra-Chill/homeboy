@@ -5,9 +5,13 @@ use super::*;
 fn controller_owned_publication_is_reported_as_not_attempted() {
     let (mut request, _) = request("controller-publication", "node provider.js".to_string());
     request.controller_owns_publication();
+    let artifact_store_root = tempfile::tempdir().expect("artifacts").keep();
+    let artifacts_path = artifact_store_root.join("task");
+    std::fs::create_dir_all(&artifacts_path).expect("artifact path");
     let executor_request = AgentTaskExecutorRequest {
         request,
-        artifacts_path: tempfile::tempdir().expect("artifacts").keep(),
+        artifacts_path: artifacts_path.clone(),
+        artifact_store_root: artifact_store_root.clone(),
         artifacts_path_provenance: AgentTaskArtifactsPathProvenance {
             owner: "homeboy".to_string(),
             locality: "runner".to_string(),
@@ -17,7 +21,7 @@ fn controller_owned_publication_is_reported_as_not_attempted() {
             attempt: 1,
         },
         resolved_runtime_tools: Vec::new(),
-        artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&tempfile::tempdir().expect("identity artifacts").keep()).expect("artifact identity"),
+        artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture_with_finalized_root(&artifacts_path, artifact_store_root.join("executor-finalized")).expect("artifact identity"),
     };
     let mut outcome = AgentTaskOutcome {
         task_id: "controller-publication".to_string(),

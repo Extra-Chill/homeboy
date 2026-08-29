@@ -334,12 +334,16 @@ pub(super) mod concurrency_tests {
 
     #[test]
     fn serializes_tasks_that_share_a_mutable_workspace() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let lifecycle_store =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         init_git_workspace(&workspace);
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let scheduler =
+            AgentTaskScheduler::new(Arc::new(executor)).with_lifecycle_store(lifecycle_store);
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         for task in &mut plan.tasks {
@@ -582,17 +586,10 @@ pub(super) mod concurrency_tests {
                     .expect("scratch roots")
                     .push(scratch_root.clone());
                 std::thread::sleep(Duration::from_millis(3_000));
-                let run_id = scratch_root
-                    .ancestors()
-                    .nth(4)
-                    .and_then(std::path::Path::file_name)
-                    .expect("scheduler scratch run id");
                 let scratch_index = scratch_root
                     .ancestors()
                     .nth(6)
                     .expect("controller scratch root")
-                    .join("test-indexes")
-                    .join(run_id)
                     .join("resources.json");
                 let active = serde_json::from_str::<Value>(
                     &fs::read_to_string(scratch_index).expect("scratch index"),
@@ -686,17 +683,10 @@ pub(super) mod concurrency_tests {
             finished.load(Ordering::SeqCst)
         });
         let scratch_root = scratch_roots.lock().expect("scratch roots")[0].clone();
-        let scratch_run_id = scratch_root
-            .ancestors()
-            .nth(4)
-            .and_then(std::path::Path::file_name)
-            .expect("scheduler scratch run id");
         let scratch_index = scratch_root
             .ancestors()
             .nth(6)
             .expect("controller scratch root")
-            .join("test-indexes")
-            .join(scratch_run_id)
             .join("resources.json");
         assert!(scratch_active_while_running.load(Ordering::SeqCst));
         let cleanup_action = aggregate

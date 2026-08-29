@@ -866,9 +866,7 @@ mod provider_rotation_tests {
         let run_id = "timeout-rotation-scratch-recovery";
         let scratch_index = homeboy_core::paths::homeboy_data()
             .expect("homeboy data")
-            .join("controller-scratch/test-indexes")
-            .join(run_id)
-            .join("resources.json");
+            .join("controller-scratch/resources.json");
         let scratch_roots = Arc::new(Mutex::new(Vec::new()));
         let (cancellation, cancellation_receiver) = std::sync::mpsc::channel();
         let cancel_calls = Arc::new(AtomicUsize::new(0));

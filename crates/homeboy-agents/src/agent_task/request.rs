@@ -179,6 +179,7 @@ pub struct AgentTaskRequest {
 pub struct AgentTaskExecutorRequest {
     pub request: AgentTaskRequest,
     pub artifacts_path: PathBuf,
+    pub(crate) artifact_store_root: PathBuf,
     pub artifacts_path_provenance: AgentTaskArtifactsPathProvenance,
     /// Host-resolved runtime attachments for the provider adapter. This is
     /// distinct from the caller declaration carried in the flattened request.
