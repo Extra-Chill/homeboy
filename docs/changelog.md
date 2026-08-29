@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.10] - 2026-08-29
+
+### Changed
+- Report truthful fanout command outcomes
+- Delete duplicate executor artifact roots
+
+### Fixed
+- key the provider catalog by the config root it came from
+
 ## [0.364.9] - 2026-08-29
 
 ### Changed
