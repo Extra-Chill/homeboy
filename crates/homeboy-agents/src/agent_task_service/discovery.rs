@@ -180,6 +180,8 @@ pub struct AgentTaskDiscoveryRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
@@ -847,6 +849,13 @@ fn discovery_run(
         .or_else(|| first_task.and_then(|task| task.group_key.clone()))
         .or_else(|| first_task.and_then(|task| task.workspace.component_id.clone()))
         .or_else(|| first_task.and_then(|task| task.workspace.slug.clone()));
+    let component = plan.as_ref().and_then(|plan| {
+        plan.metadata
+            .pointer("/cook_repository_identity/component_id")
+            .or_else(|| plan.metadata.get("component"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
     let workspace = first_task
         .and_then(|task| task.workspace.root.clone())
         .or_else(|| metadata_string(&record.metadata, "remote_workspace"));
@@ -891,6 +900,7 @@ fn discovery_run(
         run_id: run_id.clone(),
         state: record.state,
         repo,
+        component,
         workspace,
         task_url,
         counts: discovery_counts(&record.tasks),

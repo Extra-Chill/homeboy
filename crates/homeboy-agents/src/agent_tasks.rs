@@ -210,7 +210,7 @@ pub mod batch {
     pub use super::super::agent_task_batch::{
         artifacts, claim_fanout_run_batch, fanout_dependency_graph_with_finalization_statuses,
         heartbeat_fanout_run_batch, owned_child_run_ids, persist_fanout_run_batch,
-        read_batch_record, record_fanout_run_batch_failure,
+        read_batch_record, record_fanout_run_batch_failure, start_fanout_run_batch,
     };
     pub use super::super::agent_task_batch::{
         fanout_aggregate_state, record_fanout_run_batch_failed_admissions, submit_plan_batch,
@@ -246,9 +246,10 @@ pub mod dispatch_service {
     };
     pub use super::super::agent_task_dispatch_service::{
         build_controller_dispatch_plan, controller_resolved_execution_policy, dispatch,
-        dispatch_with_provider_requirements, resolve_cook_initial_provider_route,
-        resolve_cook_initial_provider_route_with_catalog, resolve_dispatch_request,
-        resolve_dispatch_request_with_default, run_dispatch_command,
+        dispatch_with_provider_requirements, preflight_dispatch_provider_admission,
+        resolve_cook_initial_provider_route, resolve_cook_initial_provider_route_with_catalog,
+        resolve_dispatch_request, resolve_dispatch_request_with_default,
+        resolve_dispatch_request_with_default_and_catalog, run_dispatch_command,
         run_dispatch_command_with_provider_catalog, AgentTaskDispatchCommand,
         AgentTaskDispatchReport, AgentTaskDispatchRequest, DispatchCoreInputs,
         DISPATCH_RESULT_SCHEMA,
@@ -307,8 +308,9 @@ pub mod lifecycle {
         aggregate_source, artifacts, cancel_run, cook_index, durable_local_read,
         fail_detached_cook_handoff_parent, list_records, load_plan, logs, persisted_status,
         reconcile_terminal_artifact_projection, record_cook_finalization,
-        recover_unmaterialized_cook_input_publication, retry, run_id_for_aggregate_path,
-        run_record_exists, run_record_exists_readonly, run_status, submit_plan,
+        record_execution_placement_outcome, recover_unmaterialized_cook_input_publication, retry,
+        run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, run_status,
+        submit_plan,
     };
     pub use super::super::agent_task_lifecycle::{
         cancel, canonical_control_plane_identities, canonical_control_plane_identities_for_run,

@@ -2,7 +2,10 @@ use crate::component::{discover_from_portable, portable::read_portable_config, C
 use crate::error::{Error, Result};
 use crate::project;
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+const MAX_BASE_REGISTRATION_BYTES: u64 = 1024 * 1024;
 
 // ============================================================================
 // Config-root boundary (#7505)
@@ -211,7 +214,7 @@ pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Compo
             if seen.contains(id) {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&path) else {
+            let Some(content) = read_bounded_base_registration(&path) else {
                 continue;
             };
             let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
@@ -226,6 +229,29 @@ pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Compo
 
     components.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(components)
+}
+
+fn read_bounded_base_registration(path: &Path) -> Option<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_BASE_REGISTRATION_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_BASE_REGISTRATION_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_BASE_REGISTRATION_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// Resolve one persisted component without reconstructing the full inventory.

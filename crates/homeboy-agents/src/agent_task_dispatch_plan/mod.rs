@@ -139,6 +139,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
         });
+    let component = request.component.clone().or_else(|| repo.clone());
     let mut prompt_specs = Vec::new();
     if let Some(prompt) = &request.prompt {
         prompt_specs.push(DispatchPromptSpec {
@@ -153,8 +154,13 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?);
 
     let client_context = dispatch_client_context(request)?;
-    let mut provider_config =
-        dispatch_provider_config(request, &repo, workspace_target.as_ref(), &client_context)?;
+    let mut provider_config = dispatch_provider_config(
+        request,
+        &repo,
+        &component,
+        workspace_target.as_ref(),
+        &client_context,
+    )?;
     let policy = request.core.resolved_provider_policy.clone();
     let initial_route = policy.map(initial_provider_route_from_policy);
     let policy_backend = initial_route
@@ -333,6 +339,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
             runtime_tools: Vec::new(),
             metadata: serde_json::json!({
                 "repo": repo,
+                "component": component,
                 "client_context": client_context,
                 "workspace": workspace_target.as_ref().map(|target| target.metadata.clone()),
                 "task_url": request.task_url,
@@ -397,6 +404,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     plan.metadata = serde_json::json!({
         "kind": "agent-task-dispatch",
         "repo": repo,
+        "component": component,
         "workspace": workspace_target.as_ref().map(|target| target.metadata.clone()),
         "workspace_root": workspace_root.map(|path| path.display().to_string()),
         "client_context": client_context,
@@ -2280,6 +2288,7 @@ mod tests {
             cwd: overrides.cwd,
             workspace: overrides.workspace,
             repo: overrides.repo,
+            component: None,
             task_url: overrides.task_url,
             backend: overrides.backend.unwrap_or_else(|| "fixture".to_string()),
             selector: overrides.selector,

@@ -60,6 +60,91 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
     AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
 }
 
+#[test]
+fn deferred_materialization_binds_nested_component_without_replacing_repository_root() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let repository = tempfile::tempdir().expect("materialized repository");
+        homeboy_core::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
+        let component_path = repository.path().join("packages/php-transformer");
+        std::fs::create_dir_all(&component_path).expect("nested component");
+        let registrations = home.path().join(".config/homeboy/components");
+        std::fs::create_dir_all(&registrations).expect("component registrations");
+        std::fs::write(
+            registrations.join("php-transformer.json"),
+            serde_json::json!({
+                "local_path": component_path,
+                "remote_url": "https://github.com/example/blocks-engine.git"
+            })
+            .to_string(),
+        )
+        .expect("register nested component");
+
+        let mut plan = AgentTaskPlan::new(
+            "deferred-component",
+            vec![AgentTaskRequest {
+                schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "task-a".to_string(),
+                group_key: Some("blocks-engine".to_string()),
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "fixture".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: "run".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
+                metadata: Value::Null,
+            }],
+        );
+        plan.group_key = Some("blocks-engine".to_string());
+        plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "blocks-engine",
+            "component_id": "php-transformer",
+            "component_cwd": "packages/php-transformer"
+        });
+
+        bind_materialized_cook_component_workspace(&mut plan, repository.path())
+            .expect("bind deferred component workspace");
+
+        assert!(plan.tasks[0].workspace.root.is_none());
+        assert_eq!(
+            plan.tasks[0].executor.config["component_cwd"],
+            "packages/php-transformer"
+        );
+        assert_eq!(
+            plan.metadata["gate_workspace"]["component_cwd"],
+            "packages/php-transformer"
+        );
+        assert_eq!(
+            plan.metadata["gate_workspace"]["requested_cwd"],
+            repository.path().display().to_string()
+        );
+
+        let mut stale = plan.clone();
+        stale.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "blocks-engine",
+            "component_id": "removed-transformer",
+            "provenance": "--repo:configured-component"
+        });
+        let error = bind_materialized_cook_component_workspace(&mut stale, repository.path())
+            .expect_err("stale component registration must fail closed");
+        assert!(error.message.contains("no longer registered"));
+    });
+}
+
 const DURABLE_COOK_FIXTURE_SCHEMA: &str = "homeboy/durable-cook-fixture/v1";
 static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -20065,6 +20150,124 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
         .expect("second resume is idempotent");
         assert_eq!(second.exit_code, 0);
         assert_eq!(second.value.succeeded, 3);
+    });
+}
+
+#[test]
+fn fanout_coordinator_converges_recoverable_and_failed_terminal_children() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary task worktree root");
+        let workspace = temporary.path().join("task-worktree");
+        let source = std::env::current_dir().expect("test repository checkout");
+        assert!(Command::new("git")
+            .args(["worktree", "add", "--detach"])
+            .arg(&workspace)
+            .arg("HEAD")
+            .current_dir(source)
+            .status()
+            .expect("create linked task worktree")
+            .success());
+
+        let recoverable = stage_terminal_batch_child(
+            "cook-13591-recoverable",
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
+            true,
+            &workspace,
+        );
+        let failed = stage_terminal_batch_child(
+            "cook-13591-failed",
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
+            false,
+            &workspace,
+        );
+        let batch_id = "batch-13591-terminal-children";
+        let children = [recoverable.clone(), failed.clone()]
+            .into_iter()
+            .map(|run_id| crate::agent_task_batch::FanoutRunBatchChild {
+                task_id: run_id.clone(),
+                run_id,
+            })
+            .collect::<Vec<_>>();
+        crate::agent_task_batch::persist_fanout_run_batch(
+            batch_id,
+            batch_id,
+            &children,
+            serde_json::json!({}),
+        )
+        .expect("persist batch");
+        let claim = crate::agent_task_batch::claim_fanout_run_batch(batch_id)
+            .expect("claim batch")
+            .expect("coordinator claim");
+        crate::agent_task_batch::start_fanout_run_batch(batch_id, &claim).expect("leave admission");
+
+        let cooks: Vec<_> = [recoverable.clone(), failed.clone()]
+            .into_iter()
+            .map(|cook_id| {
+                let recipe = super::super::load_recipe(&cook_id).expect("load child recipe");
+                super::super::reconstruct_options_with_dispatcher(
+                    &recipe,
+                    Some(Arc::new(RecordingDetachedAttemptDispatcher {
+                        dispatches: Arc::new(AtomicUsize::new(0)),
+                    })),
+                )
+                .expect("reconstruct child")
+            })
+            .collect();
+        let run = || {
+            run_cook_batch_with_control(
+                AgentTaskCookBatchOptions {
+                    batch_id: batch_id.to_string(),
+                    cooks: cooks.clone(),
+                    max_concurrency: 2,
+                },
+                Arc::new(UnusedExecutor),
+                AgentTaskCookBatchControl {
+                    skip_durably_terminal_children: true,
+                    publish_child_terminalization: true,
+                    ..Default::default()
+                },
+            )
+            .expect("terminal children converge")
+        };
+
+        let first = run();
+        assert_eq!(first.value.status, "partial_failure", "{:#?}", first.value);
+        assert_eq!(first.value.succeeded, 1);
+        assert_eq!(first.value.failed, 1);
+        assert_eq!(
+            first.value.cooks[0]
+                .result
+                .as_ref()
+                .map(|report| report.status.as_str()),
+            Some("review_ready"),
+            "the recoverable child must be harvested, not merely observed"
+        );
+
+        let record = crate::agent_task_batch::read_batch_record(batch_id).expect("read batch");
+        assert_eq!(
+            record.state,
+            crate::agent_task_batch::AgentTaskBatchState::PartialFailure,
+            "{record:#?}"
+        );
+        assert_eq!(record.metadata["coordinator"]["stage"], "completed");
+        assert_eq!(
+            record.metadata["child_finalizations"]
+                .as_object()
+                .expect("terminal checkpoints")
+                .len(),
+            2
+        );
+
+        let second = run();
+        assert_eq!(second.value.status, "partial_failure");
+        let record = crate::agent_task_batch::read_batch_record(batch_id).expect("read replay");
+        assert_eq!(
+            record.metadata["child_finalizations"]
+                .as_object()
+                .expect("idempotent terminal checkpoints")
+                .len(),
+            2
+        );
     });
 }
 

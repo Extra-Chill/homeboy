@@ -995,6 +995,11 @@ fn admit_unmaterialized_cook(
     };
     let resolved = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
+    let mut replay_args = normalized_args.to_vec();
+    crate::commands::agent_task::run::rewrite_cook_identity_replay_argv(
+        &mut replay_args,
+        &resolved,
+    );
     let cook_id = resolved
         .dispatch
         .run_id
@@ -1016,7 +1021,7 @@ fn admit_unmaterialized_cook(
         |value: serde_json::Value| admission_digest(serde_json::to_vec(&value).unwrap_or_default());
     let current_notification = homeboy::core::notification_route::current();
     let request_ref = digest_json(serde_json::json!({
-        "argv": normalized_args,
+        "argv": &replay_args,
         "notification": current_notification,
     }));
     let existing =
@@ -1029,7 +1034,7 @@ fn admit_unmaterialized_cook(
     });
     let mut staged_intent = if existing.is_none() {
         Some(stage_unmaterialized_cook_replay_intent(
-            normalized_args,
+            &replay_args,
             &cook_id,
             current_notification.as_ref(),
         )?)
@@ -2160,9 +2165,21 @@ fn run_split_placement_fanout(
             .first()
             .map(|task| task.task_id.as_str())
             .unwrap_or("fanout-provider-attempt");
+        let placement_decision = options
+            .initial_plan
+            .metadata
+            .get("execution_placement_decision")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_else(|| finalize_placement(&directive, task, source_path.as_deref()));
+        let selected_runner_id = placement_decision
+            .runner
+            .as_ref()
+            .map(|runner| runner.runner_id.clone())
+            .unwrap_or_else(|| runner_id.clone());
         Arc::new(LabCookAttemptDispatcher {
-            runner_id: runner_id.clone(),
-            placement_decision: finalize_placement(&directive, task, source_path.as_deref()),
+            runner_id: selected_runner_id,
+            placement_decision,
             allow_local_fallback: false,
             allow_dirty_lab_workspace,
             skip_deps_hydration,

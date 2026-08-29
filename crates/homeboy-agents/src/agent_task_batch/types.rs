@@ -1,3 +1,6 @@
+use homeboy_lab_runner_contract::{
+    EffectiveExecutionPlacement, ExecutionPlacementRequirement, Placement, RunnerSelectionSource,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,6 +30,24 @@ pub struct AgentTaskBatchChildRun {
     pub task_id: String,
     pub run_id: String,
     pub state: AgentTaskRunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<AgentTaskBatchChildPlacement>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskBatchChildPlacement {
+    pub requested: Placement,
+    pub required: ExecutionPlacementRequirement,
+    pub selected: EffectiveExecutionPlacement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective: Option<EffectiveExecutionPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_source: Option<RunnerSelectionSource>,
+    pub authority: String,
+    pub decision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_decision_id: Option<String>,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

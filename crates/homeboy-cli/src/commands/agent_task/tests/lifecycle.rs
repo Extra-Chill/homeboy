@@ -1027,6 +1027,15 @@ fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
         .status()
         .expect("configure fixture remote");
     assert!(remote.success());
+    homeboy::core::component::write_standalone_component_config(
+        &homeboy::core::component::Component {
+            id: "fixture".to_string(),
+            local_path: primary.display().to_string(),
+            remote_url: Some("https://github.com/example/fixture.git".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("register fixture primary");
     let worktree = Command::new("git")
         .args(["worktree", "add", "-b", "fixture-recovery"])
         .arg(&source)
