@@ -5,8 +5,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_DIR}/../.." && pwd)/homeboy}"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
+REPOSITORY_ROOT="$(cd "${EXTENSION_DIR}/.." && pwd)"
+# Helpers resolve through the shared resolver. The literal path used
+# here previously pointed at src/core/extension/runtime, a Homeboy layout
+# that has not existed since the move to crates/.
+# shellcheck source=/dev/null
+source "${REPOSITORY_ROOT}/scripts/lib/runtime-helper-resolver.sh"
+BASH_PREFLIGHT_HELPER="$(homeboy_runtime_helper "$REPOSITORY_ROOT" HOMEBOY_RUNTIME_BASH_PREFLIGHT bash-preflight.sh)" || exit 1
+RESOLVE_CONTEXT_HELPER="$(homeboy_runtime_helper "$REPOSITORY_ROOT" HOMEBOY_RUNTIME_RESOLVE_CONTEXT resolve-context.sh)" || exit 1
 MANIFEST="${EXTENSION_DIR}/nodejs.json"
 RUNNER="${SCRIPT_DIR}/fuzz-runner.sh"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-node-fuzz.XXXXXX")"
@@ -59,7 +65,11 @@ const fs = require('fs');
 const [manifestPath, runnerPath] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const runner = fs.readFileSync(runnerPath, 'utf8');
-if (!manifest.provides?.capabilities?.includes('fuzz')) throw new Error('Node.js manifest does not advertise fuzz capability');
+// Fuzz support is advertised by the top-level `fuzz` block, which is what
+// ExtensionManifest::has_fuzz reads. `provides.capabilities` is not a field any
+// manifest in this repository declares, so the previous assertion could never
+// pass — it went unnoticed because this smoke could not run at all.
+if (!manifest.fuzz) throw new Error('Node.js manifest does not advertise fuzz capability');
 if (manifest.fuzz?.extension_script !== 'scripts/fuzz/fuzz-runner.sh') throw new Error('fuzz runner path is not declared in nodejs.json');
 if (!manifest.fuzz?.capabilities?.includes('nodejs-fuzz-workload')) throw new Error('Node.js fuzz workload capability missing');
 if (!manifest.fuzz?.runtime_helpers?.some((helper) => helper.id === 'runtime-settings')) throw new Error('Node.js fuzz runner must declare the runtime-settings helper capability');
@@ -94,15 +104,21 @@ if (data.args.join(",") !== "--flag") throw new Error(`script args not forwarded
 '
 
 ISOLATED_EXTENSION="$TMP_DIR/isolated/nodejs"
-mkdir -p "$ISOLATED_EXTENSION/scripts/fuzz" "$ISOLATED_EXTENSION/scripts/lib"
+mkdir -p "$ISOLATED_EXTENSION/scripts/fuzz" "$ISOLATED_EXTENSION/scripts/lib" \
+    "$TMP_DIR/isolated/scripts/lib"
 cp "$RUNNER" "$ISOLATED_EXTENSION/scripts/fuzz/fuzz-runner.sh"
 cp "$EXTENSION_DIR/scripts/lib/node-helpers.sh" "$ISOLATED_EXTENSION/scripts/lib/node-helpers.sh"
+# An installed extension sits beside the shared lib directory
+# (extensions/nodejs and extensions/scripts/lib), so the fixture reproduces
+# that sibling rather than only the extension's own scripts/lib.
+cp "$REPOSITORY_ROOT/scripts/lib/runner-harness.sh" \
+    "$REPOSITORY_ROOT/scripts/lib/runtime-helper-resolver.sh" \
+    "$TMP_DIR/isolated/scripts/lib/"
 ISOLATED_RESULTS="$TMP_DIR/isolated-results.json"
-ISOLATED_SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:?HOMEBOY_RUNTIME_SETTINGS_HELPER must name the core-declared settings helper}"
-if [ ! -f "$ISOLATED_SETTINGS_HELPER" ]; then
-    echo "Missing core-declared settings helper: $ISOLATED_SETTINGS_HELPER" >&2
-    exit 1
-fi
+# The point of this case is that an extension copied outside the repository
+# still runs against the core-declared settings helper. Resolve it the same way
+# the runner does rather than demanding the caller export it.
+ISOLATED_SETTINGS_HELPER="$(homeboy_runtime_helper "$REPOSITORY_ROOT" HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || exit 1
 HOMEBOY_RUNTIME_SETTINGS_HELPER="$ISOLATED_SETTINGS_HELPER" \
 HOMEBOY_RUNTIME_PROJECT_SCRIPTS="$EXTENSION_DIR/../scripts/lib/project-scripts.sh" \
     run_fuzz "$SCRIPT_PROJECT" "$ISOLATED_RESULTS" "$WORKLOAD_SCRIPT" \

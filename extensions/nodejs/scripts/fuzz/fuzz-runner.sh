@@ -11,17 +11,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:?Homeboy core must provide HOMEBOY_RUNTIME_SETTINGS_HELPER}"
-
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:?Homeboy core must provide HOMEBOY_RUNTIME_BASH_PREFLIGHT}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${EXTENSION_DIR}/../scripts/lib" && pwd)}"
 # shellcheck source=/dev/null
-source "$BASH_PREFLIGHT_HELPER"
-homeboy_require_bash_version 4
+source "${SHARED_LIB_DIR}/runner-harness.sh"
 
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
-# shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context
+# --bash 4 replaces the bash-preflight source, and resolve-context runs inside
+# the prelude.
+homeboy_runner_harness_init --bash 4
+
+SETTINGS_HELPER="$(homeboy_runner_harness_resolve_helper HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || exit 1
 # shellcheck source=/dev/null
 source "$SETTINGS_HELPER"
 # shellcheck source=/dev/null

@@ -35,7 +35,16 @@
       "bash tests/node-helpers-packaged-project-scripts-smoke.sh",
       "bash tests/nodejs-dev-overlay-browser-result-shapes-smoke.sh",
       "cd .. && bash nodejs/tests/playwright-utility-smoke.sh",
-      "bash ../tests/nodejs-deps-provider-smoke.sh"
+      "bash ../tests/nodejs-deps-provider-smoke.sh",
+      "bash scripts/lint/lint-fix-results-smoke.sh",
+      "bash scripts/lint/nodejs-lint-findings-sidecar-smoke.sh",
+      "bash scripts/lint/typecheck-ci-command-smoke.sh",
+      "bash scripts/test/nodejs-changed-scope-smoke.sh",
+      "bash scripts/test/nodejs-nx-vitest-timeout-smoke.sh",
+      "bash scripts/test/nodejs-targeted-script-smoke.sh",
+      "bash scripts/test/typescript-test-loader-smoke.sh",
+      "bash scripts/trace/nodejs-trace-runner-smoke.sh",
+      "bash scripts/fuzz/nodejs-fuzz-runner-smoke.sh"
     ]
   }
 }

@@ -18,15 +18,18 @@ set -euo pipefail
 
 BENCH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$BENCH_SCRIPT_DIR"
-BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:?Homeboy core must provide HOMEBOY_RUNTIME_BASH_PREFLIGHT}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${BENCH_SCRIPT_DIR}/../../../scripts/lib" && pwd)}"
 # shellcheck source=/dev/null
-source "$BASH_PREFLIGHT_HELPER"
-homeboy_require_bash_version 4
+source "${SHARED_LIB_DIR}/runner-harness.sh"
 
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
-# shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context
+# --bash 4 replaces the bash-preflight source, resolve-context runs inside the
+# prelude, and --failure-trap carries the same FAILED_STEP/FAILURE_OUTPUT
+# fallback this runner used to spell out by hand.
+homeboy_runner_harness_init --bash 4 --failure-trap
 # shellcheck source=../lib/node-helpers.sh
 source "${BENCH_SCRIPT_DIR}/../lib/node-helpers.sh"
 
@@ -61,23 +64,9 @@ else
     homeboy_require_package_json
 fi
 
-FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
-BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:?Homeboy core must provide HOMEBOY_RUNTIME_BENCH_HELPER_SH}"
+BENCH_HELPER_SH="$(homeboy_runner_harness_resolve_helper HOMEBOY_RUNTIME_BENCH_HELPER_SH bench-helper.sh)" || exit 1
 # shellcheck source=/dev/null
-if [ -n "$FAILURE_TRAP_HELPER" ] && [ -f "$FAILURE_TRAP_HELPER" ]; then
-    source "$FAILURE_TRAP_HELPER"
-    homeboy_init_failure_trap
-else
-    FAILED_STEP=""
-    FAILURE_OUTPUT=""
-fi
-# shellcheck source=/dev/null
-if [ -f "$BENCH_HELPER_SH" ]; then
-    source "$BENCH_HELPER_SH"
-else
-    echo "ERROR: Homeboy bench helper not found at ${BENCH_HELPER_SH}" >&2
-    exit 2
-fi
+source "$BENCH_HELPER_SH"
 
 ITERATIONS="${HOMEBOY_BENCH_ITERATIONS:-10}"
 RESULTS_FILE="${HOMEBOY_BENCH_RESULTS_FILE:-${PROJECT_PATH}/.node-bench-results.json}"
