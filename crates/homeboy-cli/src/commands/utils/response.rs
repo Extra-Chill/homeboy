@@ -623,7 +623,9 @@ fn envelope_for_data(
         }
     }
 
-    let diagnostics = failure_diagnostics_for_data(exit_code, &run, &artifacts, &data);
+    let subject_state = subject_state_for_identity(identity, &data);
+    let diagnostics = failure_diagnostics_for_data(exit_code, &run, &artifacts, &data)
+        .or_else(|| unnamed_failure_diagnostics(identity, exit_code, &subject_state, &data));
     let failure_next_actions = diagnostics
         .as_ref()
         .and_then(|diagnostics| diagnostics.failure_digest.as_ref())
@@ -646,14 +648,7 @@ fn envelope_for_data(
         success,
         exit_code,
         status: status_for_result(Some(&data), exit_code),
-        subject_state: (identity.command == "agent-task"
-            && identity.operation.as_deref() == Some("status"))
-        .then(|| {
-            data.get("state")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .flatten(),
+        subject_state,
         run,
         refs,
         summary,
@@ -665,6 +660,64 @@ fn envelope_for_data(
         presentation,
         contract_warnings,
     }
+}
+
+/// Lifecycle state of the inspected subject for read-only status operations.
+///
+/// These commands describe their *operation* through `success` / `exit_code` /
+/// `status`: a read that returns the requested projection succeeded, whatever
+/// state the subject is in (#13702). The subject's own state travels in
+/// `subject_state` and `data` so machine consumers never have to conflate the
+/// two.
+fn subject_state_for_identity(identity: &CommandIdentity, data: &Value) -> Option<String> {
+    match (identity.command.as_str(), identity.operation.as_deref()) {
+        ("agent-task", Some("status")) => data
+            .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+/// A failed operation must name its cause (#13702).
+///
+/// A nonzero exit arriving with a payload that carries no failure digest used
+/// to serialize `success: false` with no error and no summary — the exact
+/// "failed with error: null" shape callers cannot branch on. Keep a named, if
+/// generic, cause so `success: false` is always explained.
+fn unnamed_failure_diagnostics(
+    identity: &CommandIdentity,
+    exit_code: i32,
+    subject_state: &Option<String>,
+    data: &Value,
+) -> Option<CommandDiagnostics> {
+    if exit_code == 0 {
+        return None;
+    }
+    let mut operation = identity.command.clone();
+    if let Some(operation_name) = identity.operation.as_deref() {
+        operation.push(' ');
+        operation.push_str(operation_name);
+    }
+    let subject = subject_state.as_deref().map(str::to_string).or_else(|| {
+        data.get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let message = match subject {
+        Some(subject) => {
+            format!("{operation} exited {exit_code} without reporting a failure cause; subject state: {subject}")
+        }
+        None => format!("{operation} exited {exit_code} without reporting a failure cause"),
+    };
+    Some(CommandDiagnostics {
+        code: "command.failed".to_string(),
+        message,
+        details: serde_json::json!({ "exit_code": exit_code }),
+        hints: None,
+        retryable: None,
+        failure_digest: None,
+    })
 }
 
 fn failure_diagnostics_for_data(
@@ -727,6 +780,9 @@ fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
     if let Some(digest) = release_failure_digest(data) {
         return Some(digest);
     }
+    if let Some(digest) = cook_batch_failure_digest(data) {
+        return Some(digest);
+    }
     if let Some(digest) = formatting_failure_digest(data) {
         return Some(digest);
     }
@@ -750,6 +806,56 @@ fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
         stderr_tail: raw_output_tail(data, "stderr_tail"),
         artifact_refs: Vec::new(),
         next_actions: Vec::new(),
+        retryable: None,
+    })
+}
+
+/// Lift the first blocked worktree row of a cook-batch preflight into the
+/// bounded command envelope. The blocked batch exits nonzero while the
+/// complete per-row evidence stays under `data.worktrees.rows` (#13702).
+fn cook_batch_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
+    if data.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-cook-batch/v1") {
+        return None;
+    }
+    if data.get("status").and_then(Value::as_str) != Some("blocked") {
+        return None;
+    }
+    let primary = data.get("primary_failure")?;
+    let phase = primary
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("worktree_preflight");
+    let handle = primary
+        .get("handle")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let cause = primary
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("worktree preflight blocked without a reported reason");
+    let blocked_rows = data
+        .pointer("/causal_failures/total")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    let next_actions = primary
+        .get("next_action")
+        .and_then(Value::as_str)
+        .map(|command| {
+            vec![
+                CommandNextAction::new("create the blocked worktree", command)
+                    .with_kind(CommandNextActionKind::Repair),
+            ]
+        })
+        .unwrap_or_default();
+    Some(CommandFailureDigest {
+        summary: format!(
+            "cook-batch blocked in {phase} on worktree {handle} ({blocked_rows} blocked row(s)): {}",
+            bounded_text(cause, 1000)
+        ),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions,
         retryable: None,
     })
 }
@@ -1180,6 +1286,12 @@ fn normalize_status(status: &str) -> Option<&'static str> {
         "queued" => Some("queued"),
         "running" | "in_progress" | "active" => Some("running"),
         "succeeded" | "success" | "passed" | "pass" | "complete" | "completed" => Some("succeeded"),
+        // A payload that self-describes as `ready` planned work without
+        // executing it (cook-batch without `--run-plan`, or `--dry-run`).
+        // Reporting `succeeded` told orchestrators the wave shipped when no
+        // agent ran (#13702); `planned` matches the vocabulary already used by
+        // fuzz planning and refactor operations.
+        "ready" => Some("planned"),
         "partial_failure" | "partial-failure" | "partial" => Some("partial_failure"),
         "failed" | "failure" | "error" => Some("failed"),
         "cancelled" | "canceled" => Some("cancelled"),
@@ -1706,6 +1818,146 @@ mod tests {
             assert_eq!(value["status"], "succeeded", "{subject_state}");
             assert_eq!(value["subject_state"], subject_state, "{subject_state}");
             assert_eq!(value["data"]["state"], subject_state, "{subject_state}");
+        }
+    }
+
+    /// #13702 direction 2: reading a failed fanout batch is a successful
+    /// operation. The envelope reports the read; the batch's own state stays
+    /// in `data`.
+    #[test]
+    fn fanout_status_read_of_a_failed_batch_is_a_successful_envelope() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "homeboy/agent-task-fanout-status/v2",
+                "batch": {
+                    "status": "failed",
+                    "batch": {
+                        "batch_id": "cook-batch-homeboy-issue-13400-2-5665d644ed6f",
+                        "state": "failed",
+                    },
+                },
+            })),
+            0,
+            &CommandIdentity::with_operation("agent-task", "fanout status"),
+            Some(CommandPresentationEnvelope {
+                stdout: Some(
+                    "Fanout batch cook-batch-homeboy-issue-13400-2: failed (1 failed)\n"
+                        .to_string(),
+                ),
+                stderr: None,
+            }),
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["success"], true);
+        assert_eq!(value["exit_code"], 0);
+        assert_eq!(value["status"], "succeeded");
+        assert!(value.get("subject_state").is_none());
+        assert_eq!(value["data"]["batch"]["batch"]["state"], "failed");
+        assert_eq!(
+            value["presentation"]["stdout"],
+            "Fanout batch cook-batch-homeboy-issue-13400-2: failed (1 failed)\n"
+        );
+    }
+
+    /// #13702 direction 1: a cook-batch that only provisioned and planned —
+    /// no agent ran, no PR opened — must not report `succeeded`. The
+    /// plan-ready payload maps to the distinct `planned` status.
+    #[test]
+    fn plan_only_cook_batch_reports_planned_not_succeeded() {
+        for dry_run in [false, true] {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(json!({
+                    "schema": "homeboy/agent-task-cook-batch/v1",
+                    "fanout_id": "cook-batch-homeboy-issue-13400-2-5665d644ed6f",
+                    "status": "ready",
+                    "dry_run": dry_run,
+                    "run_result": null,
+                })),
+                0,
+                &CommandIdentity::with_operation("agent-task", "fanout cook-batch"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            assert_eq!(value["success"], true, "planning itself succeeded");
+            assert_eq!(value["exit_code"], 0);
+            assert_eq!(value["status"], "planned", "dry_run: {dry_run}");
+            assert_ne!(value["status"], "succeeded");
+        }
+    }
+
+    /// A blocked cook-batch preflight is a failed operation and must lift the
+    /// primary worktree blocker into the envelope instead of failing silently.
+    #[test]
+    fn blocked_cook_batch_names_its_primary_worktree_failure() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "homeboy/agent-task-cook-batch/v1",
+                "fanout_id": "issue-wave",
+                "status": "blocked",
+                "primary_failure": {
+                    "phase": "worktree_preflight",
+                    "handle": "homeboy@fix-a",
+                    "reason": "worktree creation failed: branch already exists",
+                    "next_action": "homeboy workspace worktrees add homeboy@fix-a",
+                },
+                "causal_failures": { "total": 1, "returned": 1, "omitted": 0 },
+            })),
+            1,
+            &CommandIdentity::with_operation("agent-task", "fanout cook-batch"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["success"], false);
+        let summary = value["summary"].as_str().expect("named cause");
+        assert!(summary.contains("worktree_preflight"), "got: {summary}");
+        assert!(summary.contains("homeboy@fix-a"), "got: {summary}");
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
+            "homeboy workspace worktrees add homeboy@fix-a"
+        );
+    }
+
+    /// #13702: `success: false` is never emitted without a named cause. A
+    /// nonzero exit whose payload carries no digest anywhere still gets
+    /// diagnostics and a summary; the typed-error path always did.
+    #[test]
+    fn failed_results_always_name_their_cause() {
+        let causeless = json!({
+            "schema": "homeboy/agent-task-status-summary/v1",
+            "run_id": "run-1",
+            "state": "succeeded",
+        });
+        for (label, result, exit_code) in [
+            ("payload without a digest", Ok(causeless.clone()), 1),
+            (
+                "typed error",
+                Err(Error::validation_invalid_argument(
+                    "runner",
+                    "stale daemon",
+                    None,
+                    None,
+                )),
+                2,
+            ),
+        ] {
+            let response = cli_response_for_json_result_for_identity(
+                &result,
+                exit_code,
+                &CommandIdentity::with_operation("agent-task", "status"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            assert_eq!(value["success"], false, "{label}");
+            let message = value["diagnostics"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(!message.trim().is_empty(), "{label} must name its cause");
+            assert_eq!(value["summary"].as_str(), Some(message.as_str()));
         }
     }
 

@@ -74,7 +74,9 @@ For `homeboy agent-task status`, `status` and `success` describe whether the
 read completed. The inspected run's lifecycle value is exposed separately as
 `subject_state` (for example `queued`, `running`, `failed`, or `succeeded`).
 Status reads exit zero even when the subject needs action; use
-`--strict-subject-exit` to preserve the legacy nonzero exit behavior.
+`--strict-subject-exit` to preserve the legacy nonzero exit behavior. A payload
+that planned work without executing it (cook-batch without `--run-plan`, or
+`--dry-run`) reports envelope status `planned` rather than `succeeded`.
 
 Failure:
 
