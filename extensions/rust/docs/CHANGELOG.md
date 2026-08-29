@@ -2,6 +2,12 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.6] - 2026-08-29
+
+### Changed
+- Converge rust runners on the shared runner harness
+- Declare settings runtime helpers
+
 ## [1.37.5] - 2026-08-29
 
 ### Changed
