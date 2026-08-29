@@ -2466,7 +2466,6 @@ fn cook_batch_dry_run(
     mut args: AgentTaskFanoutCookBatchArgs,
     placement: Placement,
 ) -> CmdResult<Value> {
-    normalize_static_cook_batch_repo_with_placement(&mut args, placement)?;
     let mut planner = DryRunPlanner::new(&args, placement);
     planner.begin("gate_inputs");
     if args.issues.len() > DRY_RUN_MAX_ISSUES {
@@ -2517,6 +2516,7 @@ fn cook_batch_dry_run(
     let mut normalized_args = args.clone();
     normalized_args =
         planner.run_bounded("repository", "registered primary repository", move || {
+            normalize_static_cook_batch_repo_with_placement(&mut normalized_args, placement)?;
             resolve_cook_batch_default_branch(&mut normalized_args)?;
             Ok(normalized_args)
         })?;
