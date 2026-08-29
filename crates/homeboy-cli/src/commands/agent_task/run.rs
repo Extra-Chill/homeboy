@@ -4721,18 +4721,48 @@ pub(super) fn cook_repository_identity_for_selection(
     cook_repository_identity_for_name(component)
 }
 
+pub(super) fn cook_repository_names_for_selection(
+    repo: &str,
+    component: Option<&str>,
+) -> homeboy::core::Result<(String, String)> {
+    let component = match component {
+        Some(component) => {
+            validate_cook_repository_component_selection(repo, component)?;
+            cook_components_for_repository_name(component)?
+                .into_iter()
+                .next()
+        }
+        None => cook_components_for_repository_name(repo)?
+            .into_iter()
+            .next(),
+    };
+    let component_id = component
+        .as_ref()
+        .map(|component| component.id.clone())
+        .unwrap_or_else(|| normalize_repository_name(repo));
+    let repository_name = component
+        .as_ref()
+        .and_then(|component| component.remote_url.as_deref())
+        .map(normalize_repository_name)
+        .unwrap_or_else(|| normalize_repository_name(repo));
+    Ok((repository_name, component_id))
+}
+
 fn validate_cook_repository_component_selection(
     repo: &str,
     component_id: &str,
 ) -> homeboy::core::Result<()> {
-    let component = homeboy::core::component::registered_by_id(component_id)?.ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "component",
-            format!("--component `{component_id}` is not a registered component"),
-            Some(component_id.to_string()),
-            None,
-        )
-    })?;
+    let component = homeboy::core::component::inventory::registered_base()?
+        .into_iter()
+        .find(|component| component.id == component_id)
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "component",
+                format!("--component `{component_id}` is not a registered component"),
+                Some(component_id.to_string()),
+                None,
+            )
+        })?;
     let repository = component
         .remote_url
         .as_deref()
@@ -4782,11 +4812,16 @@ fn cook_component_id(args: &AgentTaskCookArgs) -> Option<&str> {
 fn cook_components_for_repository_name(
     repository_name: &str,
 ) -> homeboy::core::Result<Vec<homeboy::core::component::Component>> {
-    if let Some(component) = homeboy::core::component::registered_by_id(repository_name)? {
+    let components = homeboy::core::component::inventory::registered_base()?;
+    if let Some(component) = components
+        .iter()
+        .find(|component| component.id == repository_name)
+        .cloned()
+    {
         return Ok(vec![component]);
     }
     let repository_name = normalize_repository_name(repository_name);
-    let matches = homeboy::core::component::inventory::registered_base()?
+    let matches = components
         .into_iter()
         .filter(|component| {
             component

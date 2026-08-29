@@ -68,9 +68,10 @@ pub use remote_path::{
 pub use resolution::{
     local_path_is_relative, normalize_component_local_path, normalize_component_local_path_against,
     resolve, resolve_artifact, resolve_artifact_in_root, resolve_effective,
-    resolve_effective_in_root, resolve_in_root, resolve_registered_primary_path, resolve_target,
-    resolve_target_from_component, validate_local_path, RegisteredPathCandidates,
-    RegisteredPrimaryPathResolution, RegistryLookupPolicy, ResolvedTarget, TargetSpec,
+    resolve_effective_in_root, resolve_in_root, resolve_registered_primary_identity,
+    resolve_registered_primary_path, resolve_target, resolve_target_from_component,
+    validate_local_path, RegisteredPathCandidates, RegisteredPrimaryPathResolution,
+    RegistryLookupPolicy, ResolvedTarget, TargetSpec,
 };
 pub use scope::{resolve_component_scope, EffectiveScope, ScopeCommand};
 pub use versioning::{

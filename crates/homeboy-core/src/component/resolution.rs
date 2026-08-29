@@ -152,6 +152,44 @@ pub enum RegisteredPrimaryPathResolution {
     AmbiguousNestedComponent(RegisteredPathCandidates),
 }
 
+/// Resolve a registered component slug or classify a repository path.
+///
+/// Exact persisted IDs win over coincidental relative filesystem entries. This
+/// keeps a registered slug stable when the invocation directory happens to
+/// contain a file or directory with the same name.
+pub fn resolve_registered_primary_identity(input: &str) -> Result<RegisteredPrimaryPathResolution> {
+    let components = crate::component::registered_base()?;
+    if let Some(component) = components.iter().find(|component| component.id == input) {
+        return Ok(RegisteredPrimaryPathResolution::Primary(
+            component.id.clone(),
+        ));
+    }
+
+    let expanded = shellexpand::tilde(input);
+    let path = Path::new(expanded.as_ref());
+    if path.is_absolute() || input.contains('/') || input.contains('\\') || path.exists() {
+        return resolve_registered_primary_path_with_components(path, components);
+    }
+
+    let mut repositories = components
+        .iter()
+        .filter_map(|component| component.remote_url.as_deref())
+        .filter_map(repository_name)
+        .collect::<Vec<_>>();
+    repositories.sort();
+    repositories.dedup();
+    let components = components
+        .into_iter()
+        .map(|component| component.id)
+        .collect();
+    Ok(RegisteredPrimaryPathResolution::UnregisteredRepository(
+        RegisteredPathCandidates {
+            repositories,
+            components,
+        },
+    ))
+}
+
 /// Resolve a path to a registered primary component identity.
 ///
 /// Resolution reads only persisted registrations and bounded Git metadata. It
@@ -159,13 +197,20 @@ pub enum RegisteredPrimaryPathResolution {
 /// failures cannot inherit a caller's planner timeout.
 pub fn resolve_registered_primary_path(input: &str) -> Result<RegisteredPrimaryPathResolution> {
     let expanded = shellexpand::tilde(input);
-    let Ok(path) = Path::new(expanded.as_ref()).canonicalize() else {
+    let components = crate::component::registered_base()?;
+    resolve_registered_primary_path_with_components(Path::new(expanded.as_ref()), components)
+}
+
+fn resolve_registered_primary_path_with_components(
+    path: &Path,
+    components: Vec<Component>,
+) -> Result<RegisteredPrimaryPathResolution> {
+    let Ok(path) = path.canonicalize() else {
         return Ok(RegisteredPrimaryPathResolution::MissingPath);
     };
     let Some(input_git) = static_git_checkout(&path) else {
         return Ok(RegisteredPrimaryPathResolution::NonGitPath);
     };
-    let components = crate::component::registered_base()?;
     let mut primary = Vec::new();
     let mut nested = Vec::new();
     let mut remote_matches = Vec::new();
@@ -1689,6 +1734,60 @@ mod tests {
                     .expect("classify non-Git path"),
                 RegisteredPrimaryPathResolution::NonGitPath
             );
+        });
+    }
+
+    #[test]
+    fn registered_primary_identity_prefers_an_exact_slug_over_a_relative_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("fixture root");
+            let primary = root.path().join("primary");
+            fs::create_dir(&primary).expect("primary directory");
+            git(&primary, &["init"]);
+            write_standalone_registration(home.path(), "fixture", &primary);
+            fs::create_dir(root.path().join("fixture")).expect("colliding relative directory");
+
+            let resolution = with_cwd(root.path(), || {
+                resolve_registered_primary_identity("fixture").expect("resolve exact slug")
+            });
+
+            assert_eq!(
+                resolution,
+                RegisteredPrimaryPathResolution::Primary("fixture".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn registered_primary_identity_rejects_unknown_slugs_with_sorted_candidates() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("fixture root");
+            for index in (0..64).rev() {
+                let id = format!("component-{index:02}");
+                write_standalone_config(
+                    home.path(),
+                    &id,
+                    serde_json::json!({
+                        "local_path": root.path().join(&id),
+                        "remote_url": format!("https://example.test/acme/repository-{index:02}.git")
+                    }),
+                );
+            }
+
+            let started = std::time::Instant::now();
+            let resolution =
+                resolve_registered_primary_identity("unknown").expect("classify unknown slug");
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            let RegisteredPrimaryPathResolution::UnregisteredRepository(candidates) = resolution
+            else {
+                panic!("unknown slug must be rejected")
+            };
+            assert_eq!(candidates.components.len(), 64);
+            assert_eq!(candidates.components[0], "component-00");
+            assert_eq!(candidates.components[63], "component-63");
+            assert_eq!(candidates.repositories.len(), 64);
+            assert_eq!(candidates.repositories[0], "repository-00");
+            assert_eq!(candidates.repositories[63], "repository-63");
         });
     }
 
