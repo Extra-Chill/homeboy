@@ -37,6 +37,8 @@ pub fn controller_request_dispatch_command(
         workspace: optional_string(dispatch, "workspace")
             .or_else(|| optional_string(request, "workspace")),
         repo: optional_string(dispatch, "repo").or_else(|| optional_string(request, "repo")),
+        component: optional_string(dispatch, "component")
+            .or_else(|| optional_string(request, "component")),
         task_url: optional_string(dispatch, "task_url"),
         backend: optional_string(dispatch, "backend"),
         selector: optional_string(dispatch, "selector"),

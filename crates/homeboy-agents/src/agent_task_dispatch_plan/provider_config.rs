@@ -29,6 +29,7 @@ fn provider_config_must_be_object_error() -> Error {
 pub(crate) fn dispatch_provider_config(
     request: &AgentTaskDispatchRequest,
     repo: &Option<String>,
+    component: &Option<String>,
     workspace: Option<&DispatchWorkspaceTarget>,
     client_context: &Value,
 ) -> Result<Value> {
@@ -72,6 +73,8 @@ pub(crate) fn dispatch_provider_config(
     let map = config.as_object_mut().expect("provider config object");
     map.entry("repo".to_string())
         .or_insert_with(|| serde_json::json!(repo));
+    map.entry("component_id".to_string())
+        .or_insert_with(|| serde_json::json!(component));
     map.entry("workspace".to_string())
         .or_insert_with(|| serde_json::json!(workspace.map(|target| target.metadata.clone())));
     map.entry("workspace_required".to_string())

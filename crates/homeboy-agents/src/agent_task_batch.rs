@@ -16,6 +16,9 @@ use crate::agent_task_lifecycle::{self, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use crate::agent_task_service;
 use homeboy_core::{paths, Error, ErrorCode, Result};
+use homeboy_lab_runner_contract::{
+    ExecutionPlacementDecision, ExecutionPlacementOutcome, RunnerSelectionSource,
+};
 
 mod types;
 
@@ -121,6 +124,7 @@ where
                 task_id: task.task_id.clone(),
                 run_id: run_id.clone(),
                 state: AgentTaskRunState::Queued,
+                placement: None,
             })
             .collect(),
         metadata: batch_metadata(plan),
@@ -244,6 +248,7 @@ pub fn persist_fanout_run_batch_in_store(
                     task_id: child.task_id.clone(),
                     run_id: child.run_id.clone(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 })
                 .collect(),
             metadata,
@@ -299,6 +304,33 @@ pub fn claim_fanout_run_batch_in_store(
 
 pub fn heartbeat_fanout_run_batch(batch_id: &str, claim_id: &str) -> Result<()> {
     AgentTaskBatchStore::from_current_data_root()?.heartbeat_fanout_run_batch(batch_id, claim_id)
+}
+
+/// Leave admission once child execution is ready to begin.
+pub fn start_fanout_run_batch(batch_id: &str, claim_id: &str) -> Result<()> {
+    AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, |batch| {
+        if batch.metadata["coordinator"]["claim_id"].as_str() != Some(claim_id) {
+            return Err(Error::validation_invalid_argument(
+                "claim_id",
+                "fanout coordinator claim is stale",
+                Some(batch_id.to_string()),
+                None,
+            ));
+        }
+        if batch.state != AgentTaskBatchState::Admitting {
+            return Ok(());
+        }
+        let coordinator = batch
+            .metadata
+            .get_mut("coordinator")
+            .and_then(Value::as_object_mut)
+            .expect("validated coordinator object");
+        coordinator.insert("stage".to_string(), json!("running"));
+        coordinator.insert("heartbeat_at".to_string(), json!(now_timestamp()));
+        batch.state = AgentTaskBatchState::Running;
+        batch.updated_at = Some(now_timestamp());
+        Ok(())
+    })
 }
 
 pub fn heartbeat_fanout_run_batch_in_store(
@@ -581,11 +613,15 @@ where
         let commands = commands(&batch.batch_id);
         let admission_blocker = batch.metadata["terminal_failure"].clone();
         let expected = batch.child_runs.len();
-        let admitted = batch
-            .child_runs
-            .iter()
-            .filter(|child| lifecycle_record_exists(&child.run_id).unwrap_or(false))
-            .count();
+        let mut admitted = 0;
+        for child in &mut batch.child_runs {
+            if lifecycle_record_exists(&child.run_id).unwrap_or(false) {
+                admitted += 1;
+                if let Ok(record) = child_status(&child.run_id) {
+                    child.placement = child_placement(&record);
+                }
+            }
+        }
         let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
         if let Some(command) = admission_blocker
             .pointer("/failure/next_action")
@@ -631,6 +667,7 @@ where
                 if child.state != record.state {
                     child.state = record.state;
                 }
+                child.placement = child_placement(&record);
                 if record
                     .totals
                     .as_ref()
@@ -1143,6 +1180,53 @@ fn child_plan(
     child
 }
 
+fn child_placement(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<AgentTaskBatchChildPlacement> {
+    let decision: ExecutionPlacementDecision =
+        serde_json::from_value(record.metadata.get("execution_placement_decision")?.clone())
+            .ok()?;
+    let outcome = record
+        .metadata
+        .get("execution_placement_outcome")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ExecutionPlacementOutcome>(value).ok())
+        .filter(|outcome| outcome.decision_id == decision.decision_id);
+    let authority = if decision.override_authorization.authorized {
+        "operator_overridable"
+    } else if decision.runner.as_ref().map(|runner| runner.source)
+        == Some(RunnerSelectionSource::Explicit)
+    {
+        "operator_pinned"
+    } else if decision.requested == homeboy_lab_runner_contract::Placement::Auto
+        || decision.runner.as_ref().map(|runner| runner.source)
+            == Some(RunnerSelectionSource::Policy)
+    {
+        "policy_pinned"
+    } else {
+        "recipe_pinned"
+    };
+    Some(AgentTaskBatchChildPlacement {
+        requested: decision.requested,
+        required: decision.required,
+        selected: decision.selected,
+        effective: outcome.as_ref().map(|outcome| outcome.effective),
+        runner_id: outcome
+            .as_ref()
+            .and_then(|outcome| outcome.runner_id.clone())
+            .or_else(|| {
+                decision
+                    .runner
+                    .as_ref()
+                    .map(|runner| runner.runner_id.clone())
+            }),
+        runner_source: decision.runner.as_ref().map(|runner| runner.source),
+        authority: authority.to_string(),
+        decision_id: decision.decision_id,
+        outcome_decision_id: outcome.map(|outcome| outcome.decision_id),
+    })
+}
+
 fn batch_metadata(plan: &AgentTaskPlan) -> Value {
     json!({
         "parent_plan_id": plan.plan_id,
@@ -1564,6 +1648,36 @@ pub fn record_child_finalization_in_store(
     finalization: Value,
 ) -> Result<()> {
     store.mutate_batch(batch_id, |batch| {
+        let terminal_state = finalization
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .filter(|terminal| *terminal)
+            .and_then(|_| finalization.get("lifecycle_status"))
+            .cloned()
+            .and_then(|state| {
+                serde_json::from_value::<homeboy_core::run_lifecycle_status::RunLifecycleStatus>(
+                    state,
+                )
+                .ok()
+            })
+            .and_then(|state| {
+                use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
+                Some(match state {
+                    RunLifecycleStatus::Succeeded => AgentTaskRunState::Succeeded,
+                    RunLifecycleStatus::CandidateRecoverable => {
+                        AgentTaskRunState::CandidateRecoverable
+                    }
+                    RunLifecycleStatus::PartialRecoverable => AgentTaskRunState::PartialRecoverable,
+                    RunLifecycleStatus::PartialFailure => AgentTaskRunState::PartialFailure,
+                    RunLifecycleStatus::Cancelled => AgentTaskRunState::Cancelled,
+                    RunLifecycleStatus::Failed
+                    | RunLifecycleStatus::TimedOut
+                    | RunLifecycleStatus::Stale => AgentTaskRunState::Failed,
+                    RunLifecycleStatus::Queued
+                    | RunLifecycleStatus::Running
+                    | RunLifecycleStatus::Unknown => return None,
+                })
+            });
         let metadata = match &mut batch.metadata {
             Value::Object(map) => map,
             other => {
@@ -1581,6 +1695,34 @@ pub fn record_child_finalization_in_store(
             .as_object_mut()
             .expect("child_finalizations is an object")
             .insert(child_run_id.to_string(), finalization);
+        if let Some(state) = terminal_state {
+            if let Some(child) = batch
+                .child_runs
+                .iter_mut()
+                .find(|child| child.run_id == child_run_id)
+            {
+                child.state = state;
+            }
+            let all_terminal = batch
+                .child_runs
+                .iter()
+                .all(|child| child.state.is_terminal());
+            batch.state = aggregate_state(&totals_for_children(&batch.child_runs));
+            if let Some(coordinator) = batch
+                .metadata
+                .get_mut("coordinator")
+                .and_then(Value::as_object_mut)
+            {
+                coordinator.insert(
+                    "stage".to_string(),
+                    json!(if all_terminal {
+                        "completed"
+                    } else {
+                        "terminalizing"
+                    }),
+                );
+            }
+        }
         batch.updated_at = Some(now_timestamp());
         Ok(())
     })
@@ -1929,6 +2071,7 @@ mod tests {
             task_id: "orphan".to_string(),
             run_id: "batch_restart-orphan".to_string(),
             state: AgentTaskRunState::Running,
+            placement: None,
         });
         batch.task_count = batch.child_runs.len();
         batch_store
@@ -2742,11 +2885,13 @@ mod tests {
                     task_id: "a".to_string(),
                     run_id: "a-run".to_string(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 },
                 AgentTaskBatchChildRun {
                     task_id: "b".to_string(),
                     run_id: "b-run".to_string(),
                     state: AgentTaskRunState::Queued,
+                    placement: None,
                 },
             ],
             metadata: json!({
