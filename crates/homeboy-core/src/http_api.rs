@@ -87,9 +87,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["activity", id]) => Ok(HttpEndpoint::ActivityItem {
             id: (*id).to_string(),
         }),
-        (HttpMethod::Get, ["agent-task", "runs", id]) => Ok(HttpEndpoint::AgentTaskRun {
-            id: (*id).to_string(),
-        }),
         (HttpMethod::Get, ["v1", "control-plane", "capabilities"]) => {
             Ok(HttpEndpoint::ControlPlaneCapabilities)
         }
@@ -157,7 +154,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /bench/runs".to_string(),
                 "GET /activity".to_string(),
                 "GET /activity/:id".to_string(),
-                "GET /agent-task/runs/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
                 "GET /v1/control-plane/runs/:id".to_string(),
                 "GET /jobs".to_string(),
@@ -193,9 +189,6 @@ where
 {
     let endpoint = route(request.method, &request.path)?;
     match &endpoint {
-        HttpEndpoint::AgentTaskRun { id } => {
-            return legacy_agent_task_run_response(endpoint.clone(), id);
-        }
         HttpEndpoint::ControlPlaneRun { id } => {
             return control_plane_run_response(endpoint.clone(), id);
         }
@@ -361,9 +354,9 @@ where
                 },
             )?,
         }),
-        HttpEndpoint::AgentTaskRun { .. }
-        | HttpEndpoint::ControlPlaneRun { .. }
-        | HttpEndpoint::ControlPlaneCapabilities => unreachable!("returned before store open"),
+        HttpEndpoint::ControlPlaneRun { .. } | HttpEndpoint::ControlPlaneCapabilities => {
+            unreachable!("returned before store open")
+        }
         HttpEndpoint::Jobs => {
             let active_runner_jobs = job_store.active_runner_jobs();
             let stale_runner_jobs = job_store.stale_runner_jobs();
@@ -447,8 +440,7 @@ const MAX_AGENT_TASK_RUN_ID_LEN: usize = 256;
 /// `GET /v1/control-plane/capabilities` and `GET /v1/control-plane/runs/:id`.
 ///
 /// Route handlers only parse HTTP, call the registered orchestration provider,
-/// and serialize the contract. The unversioned `GET /agent-task/runs/:id`
-/// route is a compatibility alias for the same `run` implementation.
+/// and serialize the contract.
 ///
 /// # This is a pure read, deliberately
 ///
@@ -493,46 +485,6 @@ fn control_plane_run(
         }
     };
     crate::control_plane::run(&run_id)
-}
-
-/// One-minor compatibility adapter for the shipped unversioned route.
-/// Resource assembly still belongs exclusively to the orchestration service.
-fn legacy_agent_task_run_response(
-    endpoint: HttpEndpoint,
-    requested_id: &str,
-) -> Result<HttpApiResponse> {
-    let run = control_plane_run(requested_id).map_err(|error| {
-        Error::validation_invalid_argument(
-            "run_id",
-            error.message,
-            Some(requested_id.to_string()),
-            error.next_action.map(|action| vec![action]),
-        )
-    })?;
-    let run_id = run.run.as_str().to_string();
-    Ok(HttpApiResponse {
-        status: 200,
-        endpoint: endpoint.name().to_string(),
-        body: json!({
-            "command": "api.agent_task.runs.show",
-            "run_id": run_id,
-            "requested_id": requested_id,
-            "run": run,
-            "projection": {
-                "source": "agent-task.lifecycle",
-                "reconciles": false,
-                "probe_failed": false,
-                "reconcile_with": "homeboy agent-task status",
-            },
-            "job_surface": {
-                "list": "/jobs",
-                "show": "/jobs/:job_id",
-                "events": "/jobs/:job_id/events",
-                "cancel": "/controller/jobs/:job_id/cancel",
-                "note": "POST /jobs/:id/cancel refuses controller jobs; controller-owned work is cancelled through its driver so the driver can stop the work it owns.",
-            },
-        }),
-    })
 }
 
 fn control_plane_ok<T: serde::Serialize>(

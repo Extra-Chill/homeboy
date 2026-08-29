@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 
 pub const CONTROL_PLANE_CAPABILITIES_SCHEMA: &str = "homeboy/control-plane-capabilities/v1";
-pub const LEGACY_COMPATIBILITY_MINOR_VERSIONS: u32 = 1;
 
 /// Pure serializable declaration of control-plane resources, operations, and
 /// compatibility. `operations` is the truthful surface: it lists what this
@@ -15,7 +14,6 @@ pub struct ControlPlaneCapabilities {
     pub resources: Vec<ControlPlaneResource>,
     #[serde(default)]
     pub operations: Vec<ControlPlaneOperation>,
-    pub compatibility: CompatibilityWindow,
 }
 
 /// An operation this build/transport actually serves.
@@ -24,13 +22,6 @@ pub struct ControlPlaneCapabilities {
 pub enum ControlPlaneOperation {
     GetCapabilities,
     GetRun,
-}
-
-/// Declared legacy-compatibility window of one minor version.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CompatibilityWindow {
-    pub legacy_minor_versions: u32,
 }
 
 /// A resource identity this build serves.
@@ -56,9 +47,6 @@ impl ControlPlaneCapabilities {
             schema: CONTROL_PLANE_CAPABILITIES_SCHEMA.to_string(),
             resources,
             operations,
-            compatibility: CompatibilityWindow {
-                legacy_minor_versions: LEGACY_COMPATIBILITY_MINOR_VERSIONS,
-            },
         }
     }
 }
@@ -67,11 +55,11 @@ impl ControlPlaneCapabilities {
 mod tests {
     use super::{
         ControlPlaneCapabilities, ControlPlaneOperation, ControlPlaneResource,
-        CONTROL_PLANE_CAPABILITIES_SCHEMA, LEGACY_COMPATIBILITY_MINOR_VERSIONS,
+        CONTROL_PLANE_CAPABILITIES_SCHEMA,
     };
 
     #[test]
-    fn capabilities_document_serializes_schema_and_compatibility_window() {
+    fn capabilities_document_serializes_only_runtime_declared_operations() {
         let document = ControlPlaneCapabilities::new(
             vec![ControlPlaneResource::Run],
             vec![
@@ -81,11 +69,6 @@ mod tests {
         );
         let value = serde_json::to_value(&document).expect("serialize");
         assert_eq!(value["schema"], CONTROL_PLANE_CAPABILITIES_SCHEMA);
-        assert_eq!(value["compatibility"]["legacy_minor_versions"], 1);
-        assert_eq!(
-            document.compatibility.legacy_minor_versions,
-            LEGACY_COMPATIBILITY_MINOR_VERSIONS
-        );
         assert_eq!(value["resources"], serde_json::json!(["run"]));
         assert_eq!(
             value["operations"],

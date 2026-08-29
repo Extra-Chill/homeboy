@@ -49,17 +49,14 @@ impl<T> ControlPlaneResult<T> {
 pub struct ControlPlaneError {
     pub class: ControlPlaneErrorClass,
     pub retryable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_action: Option<String>,
     pub message: String,
 }
 
 impl ControlPlaneError {
-    pub fn not_found(message: impl Into<String>, next_action: impl Into<String>) -> Self {
+    pub fn not_found(message: impl Into<String>) -> Self {
         Self {
             class: ControlPlaneErrorClass::NotFound,
             retryable: false,
-            next_action: Some(next_action.into()),
             message: message.into(),
         }
     }
@@ -68,16 +65,14 @@ impl ControlPlaneError {
         Self {
             class: ControlPlaneErrorClass::InvalidArgument,
             retryable: false,
-            next_action: None,
             message: message.into(),
         }
     }
 
-    pub fn unavailable(message: impl Into<String>, next_action: impl Into<String>) -> Self {
+    pub fn unavailable(message: impl Into<String>) -> Self {
         Self {
             class: ControlPlaneErrorClass::Unavailable,
             retryable: true,
-            next_action: Some(next_action.into()),
             message: message.into(),
         }
     }
@@ -268,13 +263,11 @@ mod tests {
 
         let err = ControlPlaneResult::<ControlPlaneRun>::err(ControlPlaneError::not_found(
             "agent-task run not found: missing",
-            "homeboy agent-task active",
         ));
         let value = serde_json::to_value(&err).expect("serialize");
         assert_eq!(value["ok"], false);
         assert_eq!(value["error"]["class"], "not_found");
         assert_eq!(value["error"]["retryable"], false);
-        assert_eq!(value["error"]["next_action"], "homeboy agent-task active");
         let decoded: ControlPlaneResult<ControlPlaneRun> =
             serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, err);

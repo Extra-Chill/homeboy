@@ -15,10 +15,9 @@ pub trait ControlPlaneProvider: Send + Sync {
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
-        Err(ControlPlaneError::not_found(
-            format!("agent-task run not found: {requested_id}"),
-            "homeboy agent-task active",
-        ))
+        Err(ControlPlaneError::not_found(format!(
+            "agent-task run not found: {requested_id}"
+        )))
     }
 }
 

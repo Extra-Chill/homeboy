@@ -13,15 +13,14 @@ use homeboy_control_plane_contract::{
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 
 use crate::agent_task_lifecycle::{
-    canonical_control_plane_identities, resolve_run_id_in_store, AgentTaskLifecycleStore,
-    AgentTaskRunRecord, AgentTaskRunState, CanonicalControlPlaneIdentities,
+    canonical_control_plane_identities, AgentTaskLifecycleStore, AgentTaskRunRecord,
+    AgentTaskRunState, CanonicalControlPlaneIdentities,
 };
 
 /// Lookup used by [`OrchestrationService`]. Callers inject stores or test
 /// doubles; the service never opens an environment-rooted store itself.
 pub trait RunLookup {
     fn get(&self, id: &RunId) -> Result<Option<AgentTaskRunRecord>, ControlPlaneError>;
-    fn resolve_alias(&self, id: &RunId) -> Result<RunId, ControlPlaneError>;
 }
 
 /// Durable lifecycle-store lookup. Bounded, non-reconciling, non-writing.
@@ -40,18 +39,8 @@ impl RunLookup for LifecycleStoreLookup {
         match self.store.read_record_bounded(id.as_str()) {
             Ok(record) => Ok(Some(record)),
             Err(error) if is_run_not_found(&error) => Ok(None),
-            Err(error) => Err(ControlPlaneError::unavailable(
-                error.message,
-                "homeboy agent-task status",
-            )),
+            Err(error) => Err(ControlPlaneError::unavailable(error.message)),
         }
-    }
-
-    fn resolve_alias(&self, id: &RunId) -> Result<RunId, ControlPlaneError> {
-        let resolved = resolve_run_id_in_store(&self.store, id.as_str()).map_err(|error| {
-            ControlPlaneError::unavailable(error.message, "homeboy agent-task status")
-        })?;
-        RunId::new(resolved).map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
     }
 }
 
@@ -78,24 +67,9 @@ impl<L: RunLookup> OrchestrationService<L> {
 
     /// Pure, bounded, non-reconciling run read.
     pub fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
-        let record = match self.lookup.get(requested_id)? {
-            Some(record) => record,
-            None => {
-                let resolved = self.lookup.resolve_alias(requested_id)?;
-                if resolved == *requested_id {
-                    return Err(ControlPlaneError::not_found(
-                        format!("agent-task run not found: {requested_id}"),
-                        "homeboy agent-task active",
-                    ));
-                }
-                self.lookup.get(&resolved)?.ok_or_else(|| {
-                    ControlPlaneError::not_found(
-                        format!("agent-task run not found: {requested_id}"),
-                        "homeboy agent-task active",
-                    )
-                })?
-            }
-        };
+        let record = self.lookup.get(requested_id)?.ok_or_else(|| {
+            ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
+        })?;
         project_record(&record)
     }
 }
@@ -217,9 +191,8 @@ impl ControlPlaneProvider for RegisteredProvider {
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
-        let store = AgentTaskLifecycleStore::from_environment().map_err(|error| {
-            ControlPlaneError::unavailable(error.message, "homeboy agent-task status")
-        })?;
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
     }
 }
@@ -246,7 +219,6 @@ mod tests {
 
     struct MapLookup {
         records: BTreeMap<String, AgentTaskRunRecord>,
-        aliases: BTreeMap<String, String>,
     }
 
     impl RunLookup for MapLookup {
@@ -256,22 +228,6 @@ mod tests {
         ) -> Result<Option<AgentTaskRunRecord>, homeboy_control_plane_contract::ControlPlaneError>
         {
             Ok(self.records.get(id.as_str()).cloned())
-        }
-
-        fn resolve_alias(
-            &self,
-            id: &RunId,
-        ) -> Result<RunId, homeboy_control_plane_contract::ControlPlaneError> {
-            let resolved = self
-                .aliases
-                .get(id.as_str())
-                .cloned()
-                .unwrap_or_else(|| id.as_str().to_string());
-            RunId::new(resolved).map_err(|error| {
-                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
-                    error.to_string(),
-                )
-            })
         }
     }
 
@@ -304,9 +260,7 @@ mod tests {
     fn service() -> OrchestrationService<MapLookup> {
         let mut records = BTreeMap::new();
         records.insert(AGENT_TASK_RUN.to_string(), record(AGENT_TASK_RUN));
-        let mut aliases = BTreeMap::new();
-        aliases.insert(AGENT_TASK_COOK.to_string(), AGENT_TASK_RUN.to_string());
-        OrchestrationService::new(MapLookup { records, aliases })
+        OrchestrationService::new(MapLookup { records })
     }
 
     #[test]
@@ -358,15 +312,11 @@ mod tests {
     }
 
     #[test]
-    fn cook_alias_resolves_to_the_canonical_run_resource() {
-        let resource = service()
+    fn mission_alias_is_not_accepted_as_a_run_id() {
+        let error = service()
             .run(&RunId::new(AGENT_TASK_COOK).expect("Cook alias"))
-            .expect("alias");
-        assert_eq!(resource.run.as_str(), AGENT_TASK_RUN);
-        assert_eq!(
-            resource.mission.as_ref().map(|id| id.as_str()),
-            Some(AGENT_TASK_COOK)
-        );
+            .expect_err("mission alias must use a mission resource");
+        assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
     }
 
     #[test]
@@ -376,10 +326,6 @@ mod tests {
             .expect_err("missing");
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
         assert!(!error.retryable);
-        assert_eq!(
-            error.next_action.as_deref(),
-            Some("homeboy agent-task active")
-        );
     }
 
     #[test]
