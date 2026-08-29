@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.39.4] - 2026-08-29
+
+### Changed
+- Declare settings runtime helpers
+
 ## [3.39.3] - 2026-08-29
 
 ### Fixed
