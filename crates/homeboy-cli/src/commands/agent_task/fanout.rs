@@ -51,8 +51,8 @@ use crate::commands::utils::response::{CommandNextAction, CommandNextActionKind}
 use super::super::CmdResult;
 use super::args::{
     AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
-    AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs, AgentTaskFanoutRunPlanArgs,
-    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
+    AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs, AgentTaskFanoutPlanArgs,
+    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
 };
 use super::command_json_value;
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
@@ -71,9 +71,32 @@ pub(crate) fn fanout_with_placement(
             cook_batch_with_placement(*cook_batch_args, placement)
         }
         AgentTaskFanoutCommand::Plan(plan_args) => {
+            // `fanout plan` accepts the same --repo plus issue-URL inputs
+            // cook-batch accepts; those route through cook-batch's fully
+            // static preview planner so both surfaces validate identically
+            // (#13704). A persisted plan input keeps the read-only
+            // normalize-and-inspect contract below.
+            if !plan_args.issues.is_empty() {
+                return cook_batch_with_placement(plan_args.into_cook_batch_preview(), placement);
+            }
+            let AgentTaskFanoutPlanArgs {
+                input,
+                fanout_id,
+                backend,
+                selector,
+                model,
+                ..
+            } = plan_args;
+            let load_args = AgentTaskFanoutInputArgs {
+                input: input.unwrap_or_default(),
+                fanout_id,
+                backend,
+                selector,
+                model,
+            };
             // A private controller artifact is accepted only from its owned path,
             // then immediately projected before this read-only response renders.
-            let plan = load_batch_cook_fanout_plan(&plan_args.input, true)?;
+            let plan = load_batch_cook_fanout_plan(&load_args, true)?;
             Ok((command_json_value(public_batch_cook_plan(&plan))?, 0))
         }
         AgentTaskFanoutCommand::Submit(submit_args) => submit_batch_cook_fanout(submit_args),
@@ -2006,7 +2029,7 @@ fn cook_batch_inner(
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
     placement: Placement,
 ) -> CmdResult<Value> {
-    if args.dry_run {
+    if args.preview {
         return cook_batch_dry_run(args, placement);
     }
     args.gates.snapshot_file_inputs()?;
@@ -2029,7 +2052,7 @@ fn cook_batch_inner(
         .cooks
         .iter()
         .any(|cook| !cook.private_verify.is_empty());
-    let persisted = args.run_plan && !args.dry_run;
+    let persisted = args.run_plan && !args.preview;
     let claim = persisted
         .then(|| claim_fanout_run_batch_coordinator(&plan, placement))
         .transpose()?;
@@ -2091,7 +2114,7 @@ fn cook_batch_inner(
             }),
         )?;
     }
-    let can_run = !args.dry_run
+    let can_run = !args.preview
         && blocked == 0
         && worktrees
             .rows
@@ -2162,7 +2185,7 @@ fn cook_batch_inner(
             .unwrap_or("completed")
     } else if blocked > 0 {
         "blocked"
-    } else if args.dry_run {
+    } else if args.preview {
         "ready"
     } else {
         "ready"
@@ -2181,7 +2204,7 @@ fn cook_batch_inner(
                 "schema": "homeboy/agent-task-cook-batch/v1",
                 "fanout_id": plan.fanout_id,
                 "status": status,
-                "dry_run": args.dry_run,
+                "dry_run": args.preview,
                 "summary": {
                     "issues": plan.cooks.len(),
                      "worktrees_total": worktrees.rows.len(),
@@ -2193,7 +2216,7 @@ fn cook_batch_inner(
                 "preflight": {
                     "default_branch": args.base_resolution.clone(),
                     "provider_readiness_command": provider_readiness_command(&args),
-                    "provider_selection": provider_selection_preflight(&args, args.dry_run),
+                    "provider_selection": provider_selection_preflight(&args, args.preview),
                     "deterministic_gates": effective_batch_cook_gates(&plan)
                 },
                 "worktrees": worktrees,
@@ -2740,8 +2763,8 @@ fn cook_batch_argv_with_placement(
             value.to_string(),
         ]);
     }
-    if args.dry_run {
-        command.push("--dry-run".to_string());
+    if args.preview {
+        command.push("--preview".to_string());
     }
     if args.run_plan {
         command.push("--run-plan".to_string());
@@ -2895,7 +2918,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
         })
     };
 
-    if args.dry_run {
+    if args.preview {
         let worktrees = static_worktrees_dry_run(args, plan);
         let states = worktrees
             .rows
@@ -4691,7 +4714,7 @@ fn resolve_and_validate_effective_backend_with_providers(
     // (e.g. CI compiling the plan), so a hard provider check there would reject
     // valid planning. Execution is where an unresolved backend fails late, so
     // that is exactly where we fail early instead.
-    let will_execute = args.run_plan && !args.dry_run;
+    let will_execute = args.run_plan && !args.preview;
     if will_execute {
         let selector = args.selector.as_deref();
         match provider::resolve_provider_for_backend(providers, &effective, selector) {
@@ -4877,7 +4900,7 @@ fn worktree_create_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) ->
 
 fn cook_batch_plan_command(args: &AgentTaskFanoutCookBatchArgs, placement: Placement) -> String {
     let mut planned = args.clone();
-    planned.dry_run = true;
+    planned.preview = true;
     planned.run_plan = false;
     quote_args(&cook_batch_argv_with_placement(&planned, placement))
 }
@@ -5037,7 +5060,7 @@ fn cook_batch_run_command_with_placement(
     placement: Placement,
 ) -> String {
     let mut runnable = args.clone();
-    runnable.dry_run = false;
+    runnable.preview = false;
     runnable.run_plan = true;
     quote_args(&cook_batch_argv_with_placement(&runnable, placement))
 }
@@ -5510,7 +5533,7 @@ mod tests {
 
             let mut dry = cook_batch_args();
             dry.verification_profiles = Some(profiles.clone());
-            dry.dry_run = true;
+            dry.preview = true;
             let plan = build_cook_batch_plan(&dry).expect("profile plan");
             let public = serde_json::to_string(&public_batch_cook_plan(&plan)).unwrap();
             assert!(!public.contains(sentinel));
@@ -5526,7 +5549,7 @@ mod tests {
         with_materialized_cook_batch_worktrees(|| {
             let mut executable = cook_batch_args();
             executable.verification_profiles = Some(profiles);
-            executable.dry_run = false;
+            executable.preview = false;
             executable.run_plan = false;
             let resolved = build_cook_batch_plan(&executable).expect("resolve executable profile");
             assert!(resolved
@@ -5593,7 +5616,7 @@ mod tests {
             let sentinel = "PRIVATE_UNPERSISTED_SENTINEL";
             let mut args = cook_batch_args();
             args.gates.private_verify = vec![sentinel.to_string()];
-            args.dry_run = true;
+            args.preview = true;
             let artifact = private_batch_plan_path("issue-wave").expect("artifact path");
             assert!(!artifact.exists(), "dry-run begins without an artifact");
             let commands = cook_batch_commands(&args, true, None);
@@ -6835,7 +6858,7 @@ fi
             verification_profiles: None,
             max_concurrency: None,
             max_duration: None,
-            dry_run: true,
+            preview: true,
             dry_run_planner_timeout_seconds: None,
             run_plan: false,
         }
@@ -7221,7 +7244,7 @@ fi
                 cook.repo.as_deref() == Some("php-transformer")
                     && cook.to_worktree.starts_with("blocks-engine@")
             }));
-            args.dry_run = false;
+            args.preview = false;
             let worktrees = queue_or_reuse_worktrees(&args, &plan).expect("provider worktrees");
             assert_eq!(worktrees.repo, "blocks-engine");
             assert!(worktrees
@@ -7535,7 +7558,7 @@ fi
             args.issues = (6453..=6458)
                 .map(|number| format!("https://github.com/Extra-Chill/homeboy/issues/{number}"))
                 .collect();
-            args.dry_run = false;
+            args.preview = false;
             let mut plan = build_cook_batch_plan(&args).expect("fanout plan");
             let (worktrees, resolution) =
                 queue_or_reuse_worktrees_with_terminal_paths(&args, &plan, None, false)
@@ -7668,7 +7691,7 @@ fi
             homeboy::core::defaults::save_config(&config).expect("save provider config");
 
             let mut args = cook_batch_args();
-            args.dry_run = false;
+            args.preview = false;
             let plan = build_cook_batch_plan(&args).expect("immutable fanout plan");
             let original_plan = plan.clone();
             let (first_claim, retry) =
@@ -7986,7 +8009,7 @@ fi
             let sentinel = "PRIVATE_GATE_BOUND_PLAN_SENTINEL";
             let mut args = cook_batch_args();
             args.gates.private_verify = vec![sentinel.to_string()];
-            args.dry_run = false;
+            args.preview = false;
             args.run_plan = false;
 
             let (public, exit_code) = cook_batch(args).expect("prepare private batch");
@@ -8123,7 +8146,7 @@ fi
             let mut args = cook_batch_args();
             args.repo = "fixture".to_string();
             args.gates.verify = vec!["homeboy lint fixture --path .".to_string()];
-            args.dry_run = false;
+            args.preview = false;
             let error =
                 cook_batch(args).expect_err("script alias must reject before queuing worktrees");
             assert!(error.message.contains("repository script identity"));
@@ -8562,7 +8585,7 @@ fi
         let mut args = cook_batch_args();
         args.backend = Some("codebox-nonexistent".to_string());
         args.selector = None;
-        args.dry_run = false;
+        args.preview = false;
         args.run_plan = true;
 
         let error = resolve_and_validate_effective_backend(&mut args)
@@ -8586,7 +8609,7 @@ fi
         let mut args = cook_batch_args();
         args.backend = Some("opencode".to_string());
         args.selector = Some("dmc".to_string());
-        args.dry_run = false;
+        args.preview = false;
         args.run_plan = true;
         let providers = vec![serde_json::from_value(serde_json::json!({
             "id": "opencode.agent-task-executor",
@@ -8614,7 +8637,7 @@ fi
         // visible and carried consistently.
         let mut args = cook_batch_args();
         args.backend = Some("sandbox".to_string());
-        args.dry_run = true;
+        args.preview = true;
         args.run_plan = false;
 
         resolve_and_validate_effective_backend(&mut args)
