@@ -2038,8 +2038,6 @@ fn providers_with_catalog(
                 _ => None,
             })
         });
-    let fallback_sources =
-        homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
 
     let full_command = provider_full_command(&args);
     let shown_providers = if args.full {
@@ -2119,9 +2117,10 @@ fn providers_with_catalog(
             ),
             "diagnostics": shown_diagnostics,
             // Explicit `--secret-env` names win; otherwise report every secret
-            // the shown providers declare, so this agrees with `agent-task
-            // auth status` about the same secrets by construction (#13629).
-            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_for_scope(&args.secret_env, &fallback_sources),
+            // the shown providers declare. Resolved per provider so another
+            // backend's json-file cannot mark a requiring backend configured
+            // (#13629).
+            "secret_env": homeboy::agents::agent_tasks::provider::secret_env_status_for_providers(&args.secret_env, providers),
         }),
         0,
     ))
@@ -3928,6 +3927,97 @@ mod tests {
                     .expect("declared credential entry")["configured"],
                 false,
                 "unconfigured in this hermetic test environment, matching auth status"
+            );
+        });
+    }
+
+    /// #13629: a catalog that mixes a requiring backend with no sources and
+    /// another backend that can resolve the same name from a json-file must
+    /// not report `secret_env.configured=true` while `credential_readiness`
+    /// lists that name as missing.
+    #[test]
+    fn providers_catalog_secret_env_agrees_with_credential_readiness_across_backends() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let auth = tempfile::NamedTempFile::new().expect("auth file");
+            std::fs::write(auth.path(), r#"{"token":"refresh-token-value"}"#).expect("write auth");
+            let requiring = credential_declaring_provider();
+            let other: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+                "id": "wordpress.codebox-agent-task-executor",
+                "backend": "wp-codebox",
+                "provider_defaults": {
+                    "claude-code": {
+                        "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+                        "secret_env_sources": {
+                            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
+                                "source": "json-file",
+                                "path": auth.path().display().to_string(),
+                                "field": "token"
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("other provider fixture");
+            let output =
+                providers_with_catalog(providers_args(), provider_catalog(vec![requiring, other]))
+                    .expect("provider report")
+                    .0;
+
+            let missing = output["credential_readiness"]
+                .as_array()
+                .expect("credential_readiness")
+                .iter()
+                .find(|entry| entry["backend"] == "claude-code")
+                .expect("claude-code readiness")["missing"]
+                .as_array()
+                .expect("missing names")
+                .iter()
+                .any(|name| name == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN");
+            assert!(
+                missing,
+                "claude-code still cannot resolve the required credential from its own sources"
+            );
+
+            let secret_env = output["secret_env"]
+                .as_array()
+                .expect("secret_env is an array");
+            let token = secret_env
+                .iter()
+                .find(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
+                .expect("catalog still names the required credential");
+            assert_eq!(
+                token["configured"], false,
+                "catalog secret_env must not contradict credential_readiness: {token:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn providers_scoped_secret_env_lists_a_required_credential_with_no_declared_source() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let mut args = providers_args();
+            args.backend = Some("claude-code".to_string());
+            let output = providers_with_catalog(
+                args,
+                provider_catalog(vec![credential_declaring_provider()]),
+            )
+            .expect("provider report")
+            .0;
+
+            let secret_env = output["secret_env"]
+                .as_array()
+                .expect("secret_env is an array");
+            let token = secret_env
+                .iter()
+                .find(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
+                .expect("required credential is listed even without a declared source");
+            assert_eq!(token["configured"], false);
+            assert_eq!(token["source"], "missing");
+            assert_eq!(
+                output["credential_readiness"][0]["requirements"][0]["configured"],
+                false
             );
         });
     }

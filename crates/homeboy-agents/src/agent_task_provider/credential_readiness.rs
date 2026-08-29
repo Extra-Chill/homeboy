@@ -41,6 +41,9 @@
 
 use super::secrets::provider_declared_secret_sources;
 use super::*;
+use crate::agent_task_secrets::{
+    secret_env_status_for_scopes, AgentTaskSecretEnvScope, AgentTaskSecretEnvStatus,
+};
 
 pub const AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA: &str =
     "homeboy/agent-task-provider-credential-readiness/v1";
@@ -247,6 +250,29 @@ fn sole_provider_default_required_secret_env(provider: &AgentTaskExecutorProvide
         }
     }
     Vec::new()
+}
+
+/// Redacted secret-env status for the shown providers, resolved per provider.
+///
+/// This is the single catalog answer shared by `agent-task providers` and
+/// `agent-task auth status`. Merging every provider's sources before resolving
+/// made a required credential look configured from another backend's json-file
+/// while that requiring provider still reported it missing (#13629).
+pub fn secret_env_status_for_providers(
+    explicit_names: &[String],
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<AgentTaskSecretEnvStatus> {
+    let scopes = providers
+        .iter()
+        .map(|provider| AgentTaskSecretEnvScope {
+            fallback_sources: provider_declared_secret_sources(provider),
+            required_names: declared_credentials(provider)
+                .into_iter()
+                .map(|entry| entry.env)
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    secret_env_status_for_scopes(explicit_names, &scopes)
 }
 
 /// Resolve a provider's declared credentials against the observed scope.
@@ -591,6 +617,70 @@ mod tests {
             structured.contains("\"failure_classification\":\"configuration\""),
             "a credential gap is configuration, not a spent provider execution: {structured}"
         );
+    }
+
+    #[test]
+    fn catalog_secret_env_does_not_inherit_another_provider_source_for_a_required_credential() {
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let auth = tempfile::NamedTempFile::new().expect("auth file");
+        std::fs::write(auth.path(), r#"{"token":"refresh-token-value"}"#).expect("write auth");
+        let requiring = provider(serde_json::json!({
+            "id": "claude-code.agent-task-executor",
+            "backend": "claude-code",
+            "provider_defaults": {
+                "claude-code": {
+                    "secret_env": [required.clone()],
+                    "required_secret_env": [required.clone()]
+                }
+            }
+        }));
+        let other = provider(serde_json::json!({
+            "id": "wordpress.codebox-agent-task-executor",
+            "backend": "wp-codebox",
+            "provider_defaults": {
+                "claude-code": {
+                    "secret_env": [required.clone()],
+                    "secret_env_sources": {
+                        required.clone(): {
+                            "source": "json-file",
+                            "path": auth.path().display().to_string(),
+                            "field": "token"
+                        }
+                    }
+                }
+            }
+        }));
+
+        let readiness = provider_credential_readiness(&requiring);
+        assert!(
+            !readiness.dispatchable,
+            "the requiring provider still cannot resolve the credential from its own sources"
+        );
+        assert_eq!(readiness.missing, vec![required.clone()]);
+
+        let catalog = secret_env_status_for_providers(&[], &[requiring.clone(), other.clone()]);
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.name == required)
+            .expect("required name is reported");
+        assert!(
+            !entry.configured,
+            "catalog secret_env must not report configured=true from the other provider: {entry:?}"
+        );
+        assert_eq!(
+            entry.configured,
+            readiness
+                .requirements
+                .iter()
+                .find(|requirement| requirement.env == required)
+                .expect("requirement row")
+                .configured
+        );
+
+        let explicit =
+            secret_env_status_for_providers(std::slice::from_ref(&required), &[requiring, other]);
+        assert_eq!(explicit.len(), 1);
+        assert!(!explicit[0].configured);
     }
 
     #[test]

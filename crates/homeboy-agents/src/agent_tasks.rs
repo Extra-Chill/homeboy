@@ -455,9 +455,9 @@ pub mod provider {
         preflight_provider_credentials_for_backend, preflight_provider_dispatchability,
         preflight_provider_dispatchability_with_config,
         preflight_provider_dispatchability_without_runtime_with_config,
-        provider_credential_readiness, AgentTaskProviderCredentialReadiness,
-        AgentTaskProviderCredentialRequirement, AgentTaskProviderDispatchability,
-        AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
+        provider_credential_readiness, secret_env_status_for_providers,
+        AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
+        AgentTaskProviderDispatchability, AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
     };
     pub use crate::agent_task_provider::{
         probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,
@@ -493,8 +493,9 @@ pub mod secrets {
     pub use super::super::agent_task_secrets::{
         legacy_secrets_file, map_secret_to_env, map_secret_to_keychain_bundle,
         remove_secret_mapping, resolve_secret_env, resolve_secret_env_with_fallbacks,
-        secret_env_status, secret_env_status_for_scope, secret_env_status_with_fallbacks,
-        set_config_secret, set_keychain_bundle, set_keychain_secret, validate_secret_env,
+        secret_env_status, secret_env_status_for_scope, secret_env_status_for_scopes,
+        secret_env_status_with_fallbacks, set_config_secret, set_keychain_bundle,
+        set_keychain_secret, validate_secret_env, AgentTaskSecretEnvScope,
         AgentTaskSecretEnvStatus, AgentTaskSecretResolutionError,
     };
 }

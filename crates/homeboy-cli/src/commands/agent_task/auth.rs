@@ -126,23 +126,28 @@ fn auth_status(status_args: AgentTaskAuthStatusArgs) -> Value {
         .clone()
         .or_else(|| default_backend.clone());
 
-    // Scope provider secret sources to the selected backend (and optional
-    // selector). Falling back to all-provider sources keeps status useful when
-    // no backend can be resolved.
-    let fallback_sources = match selected_backend.as_deref() {
-        Some(backend) => agent_task_provider::provider_secret_sources_for_backend(
-            providers,
-            backend,
-            status_args.selector.as_deref(),
-        ),
-        None => agent_task_provider::provider_secret_sources_for_providers(providers),
+    // Scope status to the selected backend (and optional selector). Falling
+    // back to every discovered provider keeps status useful when no backend
+    // can be resolved. Shared with `agent-task providers --secret-env` so
+    // the two commands agree about the same secrets (#13629).
+    let scoped_providers: Vec<_> = match selected_backend.as_deref() {
+        Some(backend) => providers
+            .iter()
+            .filter(|provider| provider.backend == backend)
+            .filter(|provider| {
+                status_args
+                    .selector
+                    .as_deref()
+                    .is_none_or(|selector| provider.id == selector)
+            })
+            .cloned()
+            .collect(),
+        None => providers.to_vec(),
     };
-
-    // Explicit operator-supplied names win; otherwise report every secret the
-    // selected backend declares. Shared with `agent-task providers
-    // --secret-env` so the two commands agree about the same secrets (#13629).
-    let secret_env =
-        agent_task_secrets::secret_env_status_for_scope(&status_args.secret_env, &fallback_sources);
+    let secret_env = agent_task_provider::secret_env_status_for_providers(
+        &status_args.secret_env,
+        &scoped_providers,
+    );
 
     serde_json::json!({
         "schema": "homeboy/agent-task-auth-status/v1",
