@@ -1184,10 +1184,9 @@ impl WorktreeFinalizationProvider for CommandWorktreeProvider<'_> {
         disposition: WorktreeTerminalDisposition,
     ) -> Result<WorktreeFinalizationLookup> {
         let resolution =
-            match worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            match worktree_providers::observe_apply_enabled_worktree_provider_from_config(
                 handle,
                 self.config,
-                None,
             ) {
                 Ok(resolution) => resolution,
                 Err(error) if worktree_providers::is_worktree_provider_not_found(&error) => {

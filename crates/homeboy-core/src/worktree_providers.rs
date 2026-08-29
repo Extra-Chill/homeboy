@@ -740,6 +740,16 @@ pub(crate) fn observe_worktree_provider_from_config(
     resolve_worktree_provider_with_policy_from_config(handle, config, false, false, None, None)
 }
 
+/// Resolve lifecycle ownership without reapplying mutation-admission safety.
+/// A terminal owner is expected to have changed its workspace; the configured
+/// provider remains responsible for enforcing cleanup safety during finalization.
+pub(crate) fn observe_apply_enabled_worktree_provider_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
+    resolve_worktree_provider_with_policy_from_config(handle, config, true, false, None, None)
+}
+
 /// Resolve a workspace only from providers explicitly authorized for apply operations.
 pub fn resolve_apply_enabled_worktree_provider_from_config(
     handle: &str,

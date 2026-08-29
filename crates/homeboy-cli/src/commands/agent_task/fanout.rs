@@ -5830,7 +5830,9 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn provider_finalization_fixture() -> (tempfile::TempDir, PathBuf, BatchCookFanoutPlan) {
+    fn provider_finalization_fixture(
+        dirty: bool,
+    ) -> (tempfile::TempDir, PathBuf, BatchCookFanoutPlan) {
         let fixture = tempfile::tempdir().expect("provider fixture");
         let workspace = fixture.path().join("workspace");
         let records = fixture.path().join("records");
@@ -5845,8 +5847,9 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"{}\",\"branch\":\"fixture\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\"\nelse\n  printf '%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"{}\",\"branch\":\"fixture\",\"safety\":{{\"dirty\":{},\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\"\nelse\n  printf '%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
                 workspace.display(),
+                dirty,
                 records.display(),
             ),
         )
@@ -5905,7 +5908,7 @@ mod tests {
     #[test]
     fn dispatcher_fanout_terminalization_finalizes_success_and_failure_provider_records() {
         with_isolated_home(|_| {
-            let (_fixture, records, plan) = provider_finalization_fixture();
+            let (_fixture, records, plan) = provider_finalization_fixture(false);
             let report = agent_task_service::AgentTaskCookBatchReport {
                 schema: "homeboy/agent-task-cook-batch/v1",
                 batch_id: plan.fanout_id.clone(),
@@ -5955,10 +5958,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn dispatcher_fanout_finalizes_a_terminal_provider_owned_dirty_candidate() {
+        with_isolated_home(|_| {
+            let (_fixture, records, mut plan) = provider_finalization_fixture(true);
+            plan.cooks.truncate(1);
+            let cook = &plan.cooks[0];
+            let report = agent_task_service::AgentTaskCookBatchReport {
+                schema: "homeboy/agent-task-cook-batch/v1",
+                batch_id: plan.fanout_id.clone(),
+                status: "succeeded".to_string(),
+                total: 1,
+                queued: 0,
+                running: 0,
+                succeeded: 1,
+                failed: 0,
+                cancelled: 0,
+                timed_out: 0,
+                cooks: vec![agent_task_service::AgentTaskCookBatchCellReport {
+                    cook_id: cook.cook_id.clone(),
+                    initial_run_id: cook.run_id(),
+                    status: "succeeded".to_string(),
+                    exit_code: 0,
+                    result: None,
+                    error: None,
+                }],
+            };
+
+            finalize_provider_worktrees(&plan, &report, None)
+                .expect("terminal owner may finalize its dirty candidate");
+
+            let records = std::fs::read_to_string(records).expect("provider finalization record");
+            assert!(records.contains(&format!(
+                "homeboy@{}|agent_task_cook|{}|remove_on_success|succeeded|finalize:{}",
+                cook.cook_id,
+                cook.run_id(),
+                cook.run_id(),
+            )));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dispatcher_fanout_execution_finalizes_failed_provider_lifecycle() {
         with_isolated_home(|home| {
             install_fanout_agent_task_providers(home.path());
-            let (_fixture, records, mut plan) = provider_finalization_fixture();
+            let (_fixture, records, mut plan) = provider_finalization_fixture(false);
             plan.cooks.truncate(1);
             let dispatcher: &CookAttemptDispatcherFactory =
                 &|_| std::sync::Arc::new(FailingFanoutDispatcher);
