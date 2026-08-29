@@ -220,6 +220,7 @@ impl RunnerContinuationProvider for NoopProvider {
     }
 }
 
+#[cfg(not(test))]
 homeboy_engine_primitives::provider_registry! {
     provider: dyn RunnerContinuationProvider,
     noop: NoopProvider,
@@ -229,6 +230,30 @@ homeboy_engine_primitives::provider_registry! {
     /// Run `f` against the registered provider, falling back to the no-op provider
     /// when the runner subsystem is absent.
     with: pub(crate) fn with_runner_continuation,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PROVIDER: std::cell::RefCell<Option<Box<dyn RunnerContinuationProvider>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub fn register_runner_continuation_provider(provider: Box<dyn RunnerContinuationProvider>) {
+    TEST_PROVIDER.with(|slot| *slot.borrow_mut() = Some(provider));
+}
+
+#[cfg(test)]
+pub(crate) fn with_runner_continuation<T>(
+    operation: impl FnOnce(&dyn RunnerContinuationProvider) -> T,
+) -> T {
+    TEST_PROVIDER.with(|slot| {
+        let provider = slot.borrow();
+        match provider.as_deref() {
+            Some(provider) => operation(provider),
+            None => operation(&NoopProvider),
+        }
+    })
 }
 
 /// Resolve the current provider's authoritative configuration state for a
@@ -243,10 +268,31 @@ pub fn runner_authority(runner_id: &str) -> RunnerAuthority {
 /// process, making lifecycle results order-dependent (#8964).
 #[cfg(any(test, feature = "test-support"))]
 pub fn clear_runner_continuation_provider_for_test() {
-    let mut slot = provider_slot()
+    let _guard = runner_continuation_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *slot = None;
+    clear_runner_continuation_provider_for_test_unlocked();
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn clear_runner_continuation_provider_for_test_unlocked() {
+    #[cfg(test)]
+    {
+        TEST_PROVIDER.with(|slot| *slot.borrow_mut() = None);
+    }
+    #[cfg(not(test))]
+    {
+        let mut slot = provider_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = None;
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn runner_continuation_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
 }
 
 /// RAII guard that installs a runner-continuation provider for the duration of a
@@ -254,21 +300,24 @@ pub fn clear_runner_continuation_provider_for_test() {
 /// registration cannot leak into another test.
 #[cfg(any(test, feature = "test-support"))]
 pub struct RunnerContinuationTestGuard {
-    _private: (),
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl RunnerContinuationTestGuard {
     pub fn install(provider: Box<dyn RunnerContinuationProvider>) -> Self {
+        let guard = runner_continuation_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         register_runner_continuation_provider(provider);
-        Self { _private: () }
+        Self { _guard: guard }
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for RunnerContinuationTestGuard {
     fn drop(&mut self) {
-        clear_runner_continuation_provider_for_test();
+        clear_runner_continuation_provider_for_test_unlocked();
     }
 }
 

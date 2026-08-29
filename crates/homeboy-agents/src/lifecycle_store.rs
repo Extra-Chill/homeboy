@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(any(test, feature = "test-support"))]
+use std::cell::Cell;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value};
@@ -1051,7 +1053,11 @@ fn default_store() -> Result<AgentTaskLifecycleStore> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    /// One-shot write failure owned by the test thread that armed it. A global
+    /// atomic let unrelated parallel tests consume each other's fault (#11897).
+    static FAIL_NEXT_RECORD_WRITE: Cell<bool> = const { Cell::new(false) };
+}
 #[cfg(test)]
 static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 
@@ -1278,7 +1284,7 @@ pub(super) fn write_aggregate_and_record(
 
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn fail_next_record_write_for_test() {
-    FAIL_NEXT_RECORD_WRITE.store(true, Ordering::SeqCst);
+    FAIL_NEXT_RECORD_WRITE.set(true);
 }
 
 #[cfg(test)]
@@ -1306,7 +1312,7 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     preserve_terminal: bool,
 ) -> Result<AgentTaskRunRecord> {
     #[cfg(any(test, feature = "test-support"))]
-    if FAIL_NEXT_RECORD_WRITE.swap(false, Ordering::SeqCst) {
+    if FAIL_NEXT_RECORD_WRITE.replace(false) {
         return Err(Error::internal_io(
             "injected lifecycle record persistence failure",
             Some(record.run_id.clone()),

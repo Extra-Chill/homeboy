@@ -409,11 +409,9 @@ fn accepted_daemon_context_keeps_a_pidless_runner_submission_live() {
     assert!(status.metadata.get("stale_running_reason").is_none());
 }
 
-/// Stays on `with_isolated_home` (#7505). `store::fail_next_record_write_for_test`
-/// arms a process-global `AtomicBool` in `lifecycle_store`, not a per-store
-/// flag. The hermetic home's global mutex is the only thing serializing that
-/// fault injection against every peer test, so rooting this would arm a
-/// one-shot write failure that some *other* test could consume.
+/// Stays on `with_isolated_home` because the retry API still resolves its store
+/// from the ambient test home. The injected failure itself is thread-scoped, so
+/// parallel explicit-store tests cannot consume it (#11897).
 #[test]
 fn retry_first_visible_record_always_has_indexed_predecessor_identity() {
     with_isolated_home(|_| {
@@ -4555,9 +4553,9 @@ fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
     assert!(cancelled.metadata.get("live_cancellation").is_none());
 }
 
-/// Stays on `with_isolated_home` (#7505). `store::fail_next_record_write_for_test`
-/// arms a process-global `AtomicBool`; see
-/// `retry_first_visible_record_always_has_indexed_predecessor_identity`.
+/// Stays on `with_isolated_home` because record-health reconciliation still
+/// resolves its store from the ambient test home. Fault injection is scoped to
+/// this thread, independently of that legacy path (#11897).
 #[test]
 fn record_health_recovers_after_interrupted_migration_without_changing_terminal_status() {
     with_isolated_home(|_| {
