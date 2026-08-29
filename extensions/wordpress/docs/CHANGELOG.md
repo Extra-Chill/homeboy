@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.39.5] - 2026-08-29
+
+### Changed
+- Converge WordPress runners and register 76 smokes
+
+### Fixed
+- stream codebox descriptor preflight
+
 ## [3.39.4] - 2026-08-29
 
 ### Changed
