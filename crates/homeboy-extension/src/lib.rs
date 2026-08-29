@@ -138,7 +138,7 @@ pub use manifest::{
     NOTIFICATION_TRANSPORT_SCHEMA,
 };
 pub use recipe_run::{
-    recipe_run_provider_inventory, recipe_run_providers, resolve_recipe_run_provider,
+    recipe_run_provider_inventory, render_recipe_run_command, resolve_recipe_run_provider,
     RecipeRunProviderDescriptor, RecipeRunProviderInventoryEntry, RecipeRunProviderValidation,
     RecipeRunRequest,
 };

@@ -15,7 +15,9 @@ pub use ci_config::{
     CiJobSpec, CiLocalContext, CiProfileSpec,
 };
 pub use manifest_capability_config::AgentRuntimeManifestConfig;
-pub use manifest_capability_config::{DiscoveryMarkerConfig, ScriptsConfig};
+pub use manifest_capability_config::{
+    DiscoveryMarkerConfig, RecipeRunProviderDeclaration, RecipeRunProviderDescriptor, ScriptsConfig,
+};
 pub use manifest_toolchain_config::{
     CliAutoFlag, CliAutoFlagCondition, CliHelpConfig, DatabaseCliConfig, DeployVerification,
     LintChangedFileRoute, RemotePathRootRule, RequirementsConfig, TestSecretEnvProjection,
