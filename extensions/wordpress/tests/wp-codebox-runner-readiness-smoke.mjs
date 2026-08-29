@@ -43,6 +43,7 @@ const managedRuntime = (root, version, browserPreview = true, browserRuntimeRead
 try {
   const declaration = manifest.agent_task_executors[0].runner_readiness[0];
   assert.deepEqual(declaration.invocation.argv, ['node', '{{runtime_path}}/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs']);
+  assert.deepEqual(declaration.required_extensions, ['wordpress']);
   assert.equal(declaration.remediation, 'homeboy extension setup wordpress');
   assert.equal(manifest.minimum_version, '0.21.0');
   assert.equal(manifest.version, '1.5.4');

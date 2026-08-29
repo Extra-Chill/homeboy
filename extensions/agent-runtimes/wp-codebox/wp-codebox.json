@@ -408,6 +408,7 @@
         {
           "id": "wp-codebox.runner",
           "label": "WP Codebox managed runner",
+          "required_extensions": ["wordpress"],
           "invocation": {
             "schema": "homeboy/command-invocation/v1",
             "argv": [

@@ -285,6 +285,7 @@ assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocation
 assert.deepEqual(provider.runner_readiness, [{
   id: 'wp-codebox.runner',
   label: 'WP Codebox managed runner',
+  required_extensions: ['wordpress'],
   invocation: {
     schema: 'homeboy/command-invocation/v1',
     argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs'],
