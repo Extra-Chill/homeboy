@@ -4531,7 +4531,7 @@ fn repository_component_identity_ambiguity_error(
     )
 }
 
-fn normalize_repository_name(repository: &str) -> String {
+pub(crate) fn normalize_repository_name(repository: &str) -> String {
     repository
         .trim()
         .trim_end_matches(".git")
