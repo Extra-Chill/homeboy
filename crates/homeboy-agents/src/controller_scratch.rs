@@ -118,38 +118,6 @@ pub(crate) fn allocate_attempt_at(
     )
 }
 
-#[cfg(test)]
-pub fn allocate_test_attempt(
-    run_id: &str,
-    plan_id: &str,
-    task_id: &str,
-    attempt: u32,
-) -> Result<ControllerScratchAllocation> {
-    allocate_test_attempt_at(&paths::homeboy_data()?, run_id, plan_id, task_id, attempt)
-}
-
-#[cfg(test)]
-pub fn allocate_test_attempt_at(
-    data_root: &Path,
-    run_id: &str,
-    plan_id: &str,
-    task_id: &str,
-    attempt: u32,
-) -> Result<ControllerScratchAllocation> {
-    let index_path = data_root.join(format!(
-        "controller-scratch/test-indexes/{}/resources.json",
-        paths::sanitize_path_segment(run_id)
-    ));
-    allocate_attempt_at_roots(
-        run_id,
-        plan_id,
-        task_id,
-        attempt,
-        data_root.join("controller-scratch/attempts"),
-        index_path,
-    )
-}
-
 fn allocate_attempt_at_roots(
     run_id: &str,
     plan_id: &str,

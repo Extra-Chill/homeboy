@@ -122,6 +122,10 @@ fn fanout_resume_runs_and_persists_the_production_supervisor_across_restart() {
     });
 }
 
+/// #13702: reading a batch that failed before admission is a *successful
+/// read*. The command exits zero so the recovery path Homeboy itself prints
+/// survives `set -e`; the failed subject state stays in `data`, and the
+/// envelope carries a human summary.
 #[test]
 fn fanout_status_reports_a_pre_child_coordinator_failure() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -152,11 +156,17 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
             .output()
             .expect("run Homeboy fanout status");
         assert!(
-            !output.status.success(),
-            "terminal coordinator failure exits nonzero"
+            output.status.success(),
+            "the read itself succeeded; stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         let output: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("fanout status JSON output");
+        assert_eq!(output["success"], true);
+        assert_eq!(output["exit_code"], 0);
+        assert_eq!(output["status"], "succeeded");
+        assert!(output.get("subject_state").is_none());
         assert_eq!(output["data"]["batch"]["status"], "failed");
         assert_eq!(
             output["data"]["batch"]["admission_blocker"]["stage"],
@@ -170,6 +180,14 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
                 "rejected": 1,
                 "absent": 0,
             })
+        );
+        let summary = output["presentation"]["stdout"]
+            .as_str()
+            .expect("failed subject states still get a human summary");
+        assert!(summary.contains("failed"), "summary: {summary}");
+        assert!(
+            summary.contains("worktree_preflight"),
+            "summary names the blocker: {summary}"
         );
     });
 }

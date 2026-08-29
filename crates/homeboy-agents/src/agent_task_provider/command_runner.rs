@@ -1693,15 +1693,20 @@ fn test_execution_context(run_id: Option<&str>) -> AgentTaskExecutionContext {
 
 #[cfg(test)]
 fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest {
-    let artifacts_path = std::env::temp_dir()
-        .join("homeboy-agent-task-provider-tests")
+    let artifact_store_root = tempfile::Builder::new()
+        .prefix("homeboy-agent-task-provider-test-")
+        .tempdir()
+        .expect("test artifact store")
+        .keep();
+    let artifacts_path = artifact_store_root
         .join(homeboy_core::paths::sanitize_path_segment(&request.task_id))
         .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&artifacts_path).expect("test executor artifact root");
     AgentTaskExecutorRequest {
         request: request.clone(),
-        artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("test artifact identity"),
+        artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture_with_finalized_root(&artifacts_path, artifact_store_root.join("executor-finalized")).expect("test artifact identity"),
         artifacts_path,
+        artifact_store_root,
         artifacts_path_provenance: AgentTaskArtifactsPathProvenance {
             owner: "homeboy".to_string(),
             locality: "runner".to_string(),

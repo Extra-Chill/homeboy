@@ -19,6 +19,7 @@ pub(crate) enum AgentTaskSummaryKind {
     Controller,
     Providers,
     FanoutCookBatch,
+    FanoutStatus,
 }
 
 pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskSummaryKind> {
@@ -28,11 +29,11 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
         AgentTaskCommand::Logs(_) => Some(AgentTaskSummaryKind::Logs),
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
         AgentTaskCommand::Providers(_) => Some(AgentTaskSummaryKind::Providers),
-        AgentTaskCommand::Fanout(args)
-            if matches!(&args.command, AgentTaskFanoutCommand::CookBatch(_)) =>
-        {
-            Some(AgentTaskSummaryKind::FanoutCookBatch)
-        }
+        AgentTaskCommand::Fanout(args) => match &args.command {
+            AgentTaskFanoutCommand::CookBatch(_) => Some(AgentTaskSummaryKind::FanoutCookBatch),
+            AgentTaskFanoutCommand::Status(_) => Some(AgentTaskSummaryKind::FanoutStatus),
+            _ => None,
+        },
         AgentTaskCommand::Controller(controller_args) => match &controller_args.command {
             AgentTaskControllerCommand::Status(_)
             | AgentTaskControllerCommand::Diagnose(_)
@@ -60,7 +61,74 @@ pub(crate) fn render_agent_task_summary(
         AgentTaskSummaryKind::Controller => controller::render_controller_summary(payload),
         AgentTaskSummaryKind::Providers => render_providers_summary(payload),
         AgentTaskSummaryKind::FanoutCookBatch => render_fanout_cook_batch_summary(payload),
+        AgentTaskSummaryKind::FanoutStatus => render_fanout_status_summary(payload),
     }
+}
+
+/// `fanout status` is a read that succeeds even when the batch it inspected
+/// failed, so its human summary must render for every terminal subject state —
+/// including failures (#13702).
+fn render_fanout_status_summary(payload: &Value) -> Option<String> {
+    if payload.get("schema")?.as_str()? != "homeboy/agent-task-fanout-status/v2" {
+        return None;
+    }
+    let batch_id = payload
+        .pointer("/batch/batch/batch_id")
+        .and_then(Value::as_str)?;
+    let state = payload.pointer("/batch/status").and_then(Value::as_str)?;
+    let mut lines = vec![format!(
+        "Fanout batch {batch_id}: {state}{}",
+        fanout_totals_sentence(payload)
+            .map(|totals| format!(" ({totals})"))
+            .unwrap_or_default()
+    )];
+    if let Some(blocker) = payload.pointer("/batch/admission_blocker") {
+        let stage = blocker
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let cause = blocker
+            .pointer("/failure/message")
+            .and_then(Value::as_str)
+            .or_else(|| blocker.pointer("/failure/code").and_then(Value::as_str))
+            .unwrap_or("no reported cause");
+        lines.push(format!("Blocked before admission in {stage}: {cause}"));
+    }
+    if payload
+        .pointer("/batch/resumable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        if let Some(resume) = payload.pointer("/commands/resume").and_then(Value::as_str) {
+            lines.push(format!("Resume unfinalized children: {resume}"));
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+/// Compact "2 succeeded, 1 failed" child tally from the batch totals.
+fn fanout_totals_sentence(payload: &Value) -> Option<String> {
+    let totals = payload.pointer("/batch/totals")?;
+    let mut parts = Vec::new();
+    for key in [
+        "queued",
+        "running",
+        "succeeded",
+        "partial_failure",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "unavailable",
+    ] {
+        let count = totals.get(key).and_then(Value::as_u64).unwrap_or(0);
+        if count > 0 {
+            parts.push(format!("{count} {key}"));
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(", "))
 }
 
 fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
@@ -2172,6 +2240,55 @@ mod tests {
         ));
         assert!(summary.contains(
             "Next: homeboy agent-task controller diagnose loop-123  # inspect failed action evidence\n"
+        ));
+    }
+
+    /// #13702: a failed batch's status read still renders a human summary —
+    /// the read succeeded, and the summary is how the envelope populates
+    /// `presentation.stdout` for terminal subject states including failures.
+    #[test]
+    fn fanout_status_summary_renders_for_failed_batches() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-fanout-status/v2",
+            "batch": {
+                "status": "failed",
+                "batch": { "batch_id": "cook-batch-homeboy-issue-13400-2-5665d644ed6f", "state": "failed", "task_count": 2 },
+                "totals": { "succeeded": 1, "failed": 1 },
+                "resumable": true,
+            },
+            "commands": {
+                "resume": "homeboy agent-task fanout resume cook-batch-homeboy-issue-13400-2-5665d644ed6f"
+            },
+        });
+
+        let summary =
+            render_agent_task_summary(AgentTaskSummaryKind::FanoutStatus, &payload).unwrap();
+
+        assert!(summary.contains("Fanout batch cook-batch-homeboy-issue-13400-2-5665d644ed6f: failed (1 succeeded, 1 failed)"));
+        assert!(summary.contains("Resume unfinalized children: homeboy agent-task fanout resume cook-batch-homeboy-issue-13400-2-5665d644ed6f"));
+    }
+
+    #[test]
+    fn fanout_status_summary_names_pre_admission_blockers() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-fanout-status/v2",
+            "batch": {
+                "status": "failed",
+                "batch": { "batch_id": "failed-before-admission", "state": "failed", "task_count": 1 },
+                "totals": { "failed": 1 },
+                "admission_blocker": {
+                    "stage": "worktree_preflight",
+                    "failure": { "code": "worktree.creation_failed", "message": "fixture failure before first child" }
+                },
+            },
+        });
+
+        let summary =
+            render_agent_task_summary(AgentTaskSummaryKind::FanoutStatus, &payload).unwrap();
+
+        assert!(summary.contains("Fanout batch failed-before-admission: failed"));
+        assert!(summary.contains(
+            "Blocked before admission in worktree_preflight: fixture failure before first child"
         ));
     }
 
