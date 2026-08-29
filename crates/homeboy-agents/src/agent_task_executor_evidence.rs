@@ -25,7 +25,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::agent_task::{AgentTaskEvidenceRef, AgentTaskExecutorRequest, AgentTaskOutcome};
+use crate::agent_task::{
+    AgentTaskEvidenceRef, AgentTaskExecutorRequest, AgentTaskFailureClassification,
+    AgentTaskOutcome,
+};
 use homeboy_core::redaction::RedactionPolicy;
 
 /// Evidence kind for the latest raw executor request (input piped to the
@@ -124,12 +127,31 @@ fn link_runtime_evidence(
         hydrate_structured_runtime_evidence(outcome, &runtime_files, policy);
     }
     let sessions = provider_session_metadata(outcome);
+    let structured_error = runtime_files
+        .get(RUNTIME_STDOUT_EVIDENCE_KIND)
+        .and_then(|paths| {
+            structured_error_from_runtime_files(&request.request.executor.backend, paths)
+        });
+    if structured_error
+        .as_ref()
+        .and_then(|error| error.get("failure_classification"))
+        .and_then(Value::as_str)
+        == Some(crate::agent_task_provider::PROVIDER_ACCOUNT_QUOTA_REJECTED)
+    {
+        // This is a provider-side account rejection, not a code-level failure.
+        // Rotation remains an explicit scheduler policy decision (#13691).
+        outcome.failure_classification =
+            Some(AgentTaskFailureClassification::ProviderAccountQuotaRejected);
+    }
     let index = json!({
         "artifact_root": artifact_root.as_ref().map(|path| format!("file://{}", path.display())),
         "provider_runtime_identities": sessions,
         "runtime_stdout": runtime_files.get(RUNTIME_STDOUT_EVIDENCE_KIND),
         "runtime_stderr": runtime_files.get(RUNTIME_STDERR_EVIDENCE_KIND),
         "runtime_progress": runtime_files.get(RUNTIME_PROGRESS_EVIDENCE_KIND),
+        // Adapter-normalized terminal provider error, redacted. Persisted at
+        // execution time so read paths never need vendor knowledge (#13703).
+        "structured_error": structured_error,
     });
     let Some(index_uri) = persist_evidence_file(
         &evidence_dir.join(RUNTIME_EVIDENCE_FILE),
@@ -265,6 +287,29 @@ fn structured_session_id(event: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .or_else(|| event.pointer("/part/sessionID").and_then(Value::as_str))
         .filter(|id| !id.trim().is_empty())
+}
+
+/// Normalize a terminal structured provider error out of the runtime stdout
+/// capture files, backend-aware through the provider adapter registry. The
+/// latest capture file wins: it belongs to the final attempt. Only the
+/// adapter's normalized, redacted output is persisted.
+fn structured_error_from_runtime_files(backend: &str, paths: &[PathBuf]) -> Option<Value> {
+    for path in paths.iter().rev() {
+        let Some(tail) =
+            crate::agent_task_provider::structured_error::read_runtime_stream_tail(path)
+        else {
+            continue;
+        };
+        if let Some(error) =
+            crate::agent_task_provider::structured_error::normalize_runtime_stream_error(
+                Some(backend),
+                &tail.raw,
+            )
+        {
+            return Some(error);
+        }
+    }
+    None
 }
 
 fn structured_progress_event(event: &Value) -> Option<Value> {
@@ -463,8 +508,9 @@ fn push_unique_evidence_ref(outcome: &mut AgentTaskOutcome, evidence_ref: AgentT
 mod tests {
     use super::*;
     use crate::agent_task::{
-        AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcomeStatus,
-        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskComponentContract, AgentTaskExecutor, AgentTaskFailureClassification,
+        AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
+        AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
     };
     use serde_json::Map;
     use std::sync::Mutex;
@@ -734,6 +780,28 @@ mod tests {
             assert!(!fs::read_to_string(&progress_path)
                 .expect("read progress")
                 .contains("private transcript content"));
+        });
+    }
+
+    #[test]
+    fn classifies_a_structured_opencode_account_rejection() {
+        with_artifact_root(|_| {
+            let mut request = executor_test_request();
+            request.request.executor.backend = "opencode".to_string();
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout.log"),
+                r#"{"type":"error","error":{"name":"APIError","data":{"message":"spending-limit: You have run out of credits.","statusCode":403,"isRetryable":false}}}"#,
+            )
+            .expect("write stdout");
+            let mut outcome = test_outcome();
+            outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            assert_eq!(
+                outcome.failure_classification,
+                Some(AgentTaskFailureClassification::ProviderAccountQuotaRejected)
+            );
         });
     }
 

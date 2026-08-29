@@ -4,6 +4,13 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::agent_task_executor_evidence::{
+    RUNTIME_STDERR_EVIDENCE_KIND, RUNTIME_STDOUT_EVIDENCE_KIND,
+};
+use crate::agent_task_provider::structured_error::{
+    normalize_runtime_stream_error, normalized_structured_error, read_runtime_stream_tail,
+    RUNTIME_STREAM_TAIL_BYTES,
+};
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::agent_tasks::AgentTaskEvidenceRef;
 use homeboy_core::observation::ObservationStore;
@@ -598,6 +605,9 @@ pub fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<Strin
 }
 
 pub fn hydrate_evidence_summary(task_id: &str, evidence: &AgentTaskEvidenceRef) -> Option<Value> {
+    if let Some(summary) = runtime_stream_evidence_summary(task_id, evidence) {
+        return Some(summary);
+    }
     let path = evidence.uri.strip_prefix("file://")?;
     if !path.ends_with(".json") {
         return None;
@@ -622,6 +632,9 @@ const EVIDENCE_DIAGNOSTIC_MAX_DEPTH: usize = 16;
 /// ranking. The compact evidence summary deliberately previews only three
 /// diagnostics, so callers must use this reader before presentation bounds.
 pub fn hydrate_evidence_diagnostics(evidence: &AgentTaskEvidenceRef) -> Option<Value> {
+    if let Some(value) = runtime_stream_evidence_diagnostics(evidence) {
+        return Some(value);
+    }
     let path = evidence.uri.strip_prefix("file://")?;
     if !path.ends_with(".json") {
         return None;
@@ -648,9 +661,38 @@ pub fn hydrate_evidence_diagnostics(evidence: &AgentTaskEvidenceRef) -> Option<V
     let mut diagnostics = Vec::new();
     let mut budget = DiagnosticBudget::default();
     collect_diagnostics(&redacted, &mut diagnostics, 0, &mut budget);
+    let mut streams = process_stream_summaries(&redacted, Path::new(path).parent());
+    // The runtime evidence index embeds the adapter-normalized structured
+    // error persisted at execution time. Surface it through the same stream
+    // channel so the diagnostic chain still sees the provider's terminal
+    // error even when the raw runtime log is no longer hydratable.
+    if let Some(error) = redacted
+        .get("structured_error")
+        .and_then(normalized_structured_error)
+    {
+        let already_surfaced = streams.as_array().is_some_and(|streams| {
+            streams
+                .iter()
+                .any(|stream| stream.get("structured_error").is_some())
+        });
+        if !already_surfaced {
+            streams = match streams {
+                Value::Array(mut streams) => {
+                    streams.push(json!({
+                        "name": "stdout",
+                        "source": "runtime_evidence_index",
+                        "status": "available",
+                        "structured_error": error,
+                    }));
+                    Value::Array(streams)
+                }
+                other => other,
+            };
+        }
+    }
     Some(json!({
         "diagnostics": diagnostics,
-        "process_streams": process_stream_summaries(&redacted, Path::new(path).parent()),
+        "process_streams": streams,
         "usage": {
             "diagnostic_count": budget.count,
             "diagnostic_bytes": budget.bytes,
@@ -659,18 +701,237 @@ pub fn hydrate_evidence_diagnostics(evidence: &AgentTaskEvidenceRef) -> Option<V
     }))
 }
 
+/// Which provider runtime stream an evidence ref points at, if any. Matches
+/// Homeboy's own runtime-stream evidence kinds first, then the runtime stream
+/// file naming convention (`...runtime-stdout...` / `...runtime-stderr...`)
+/// used by provider wrappers and the executor's own capture files.
+fn runtime_stream_ref_stream_name(evidence: &AgentTaskEvidenceRef) -> Option<&'static str> {
+    match evidence.kind.as_str() {
+        kind if kind == RUNTIME_STDOUT_EVIDENCE_KIND => return Some("stdout"),
+        kind if kind == RUNTIME_STDERR_EVIDENCE_KIND => return Some("stderr"),
+        _ => {}
+    }
+    let name = Path::new(&evidence.uri)
+        .file_name()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    if name.contains("runtime") && name.contains("stdout") {
+        Some("stdout")
+    } else if name.contains("runtime") && name.contains("stderr") {
+        Some("stderr")
+    } else {
+        None
+    }
+}
+
+fn runtime_stream_ref_path(evidence: &AgentTaskEvidenceRef) -> Option<PathBuf> {
+    let raw = evidence
+        .uri
+        .strip_prefix("file://")
+        .unwrap_or(&evidence.uri);
+    if raw.contains("://") || raw.contains('\0') || raw.trim().is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    path.is_absolute().then_some(path)
+}
+
+/// Hydrate a provider runtime stream evidence ref (`provider-runtime-stdout`
+/// and friends) into a bounded, redacted summary whose `message` is the
+/// normalized structured error when the stream carries one (#13703).
+fn runtime_stream_evidence_summary(
+    task_id: &str,
+    evidence: &AgentTaskEvidenceRef,
+) -> Option<Value> {
+    let stream_name = runtime_stream_ref_stream_name(evidence)?;
+    let path = runtime_stream_ref_path(evidence)?;
+    let stream = runtime_stream_file_summary(stream_name, "evidence_ref", &evidence.uri, &path);
+    let structured = stream.get("structured_error");
+    let stream_excerpt = |name: &str| {
+        (stream.get("name").and_then(Value::as_str) == Some(name))
+            .then(|| stream.get("excerpt").cloned().unwrap_or(Value::Null))
+            .unwrap_or(Value::Null)
+    };
+    Some(json!({
+        "task_id": task_id,
+        "kind": evidence.kind,
+        "label": evidence.label,
+        "uri": evidence.uri,
+        "summary": {
+            "status": stream.get("status"),
+            "failure_classification": structured
+                .and_then(|error| error.get("failure_classification").cloned())
+                .unwrap_or(Value::Null),
+            "message": structured
+                .and_then(|error| error.get("message").cloned())
+                .unwrap_or(Value::Null),
+            "command": Value::Null,
+            "exit_code": Value::Null,
+            "stderr_excerpt": stream_excerpt("stderr"),
+            "stdout_excerpt": stream_excerpt("stdout"),
+            "diagnostics": [],
+            "process_streams": [stream],
+        }
+    }))
+}
+
+/// Contribute a provider runtime stream evidence ref to the diagnostic chain.
+/// The stream summary (bounded tail, structured error) flows through the same
+/// `process_streams` channel the diagnostic ranker already consumes.
+fn runtime_stream_evidence_diagnostics(evidence: &AgentTaskEvidenceRef) -> Option<Value> {
+    let stream_name = runtime_stream_ref_stream_name(evidence)?;
+    let path = runtime_stream_ref_path(evidence)?;
+    let stream = runtime_stream_file_summary(stream_name, "evidence_ref", &evidence.uri, &path);
+    Some(json!({
+        "diagnostics": [],
+        "process_streams": [stream],
+        "usage": {
+            "diagnostic_count": 0,
+            "diagnostic_bytes": 0,
+        },
+        "truncation": {
+            "truncated": stream.get("truncated").and_then(Value::as_bool) == Some(true),
+            "reason": "runtime_stream_tail",
+            "limit_bytes": RUNTIME_STREAM_TAIL_BYTES,
+        },
+    }))
+}
+
+/// Summarize one runtime stream file: a bounded tail excerpt plus the
+/// adapter-normalized structured error when the stream carries a terminal
+/// provider error event. Vendor shapes are parsed by the provider adapter;
+/// only its normalized output is attached here.
+fn runtime_stream_file_summary(name: &str, source: &str, reference: &str, path: &Path) -> Value {
+    let unavailable = |error: &str| {
+        json!({
+            "name": name,
+            "source": source,
+            "reference": reference,
+            "status": "unavailable",
+            "error": error,
+        })
+    };
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return unavailable("not_found");
+    };
+    if !metadata.file_type().is_file() {
+        return unavailable("not_regular_file");
+    }
+    let Some(tail) = read_runtime_stream_tail(path) else {
+        return unavailable("unreadable");
+    };
+    let mut summary = json!({
+        "name": name,
+        "source": source,
+        "reference": reference,
+        "status": "available",
+        "excerpt": tail_excerpt(&tail.redacted),
+        "truncated": tail.truncated,
+    });
+    if let Some(error) = normalize_runtime_stream_error(None, &tail.raw) {
+        summary["structured_error"] = error;
+    }
+    summary
+}
+
+/// Excerpt the END of an already-redacted runtime stream tail. Runtime logs
+/// append, so the terminal cause is the last thing written.
+fn tail_excerpt(text: &str) -> String {
+    const LIMIT: usize = 600;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= LIMIT {
+        trimmed.to_string()
+    } else {
+        let suffix: String = trimmed
+            .chars()
+            .skip(trimmed.chars().count() - LIMIT)
+            .collect();
+        format!("...{suffix}")
+    }
+}
+
+/// Find a provider runtime stream file next to the evidence file. Provider
+/// runtimes write their stdout/stderr logs into the same artifact directory
+/// as the agent result, without linking the two; discovering the sibling by
+/// Homeboy's runtime-stream naming convention closes that gap without
+/// teaching the generic layer any provider (#13703).
+fn sibling_runtime_stream_summary(name: &str, stream_root: Option<&Path>) -> Option<Value> {
+    let root = stream_root?;
+    let mut candidates: Vec<PathBuf> = fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+                && runtime_stream_file_name_matches(path, name)
+        })
+        .collect();
+    candidates.sort();
+    // The lexicographically last match carries the highest attempt suffix.
+    let path = candidates.pop()?;
+    let reference = format!("file://{}", path.display());
+    Some(runtime_stream_file_summary(
+        name, "sibling", &reference, &path,
+    ))
+}
+
+fn runtime_stream_file_name_matches(path: &Path, stream_name: &str) -> bool {
+    let Some(file_name) = path.file_name() else {
+        return false;
+    };
+    let file_name = file_name.to_string_lossy().to_ascii_lowercase();
+    file_name.contains("runtime") && file_name.contains(stream_name)
+}
+
 fn evidence_json_summary(value: &Value, stream_root: Option<&Path>) -> Value {
+    let streams = process_stream_summaries(value, stream_root);
     json!({
         "status": find_string_field(value, &["status", "state"]),
-        "failure_classification": find_string_field(value, &["failure_classification", "failure_class", "classification", "class", "code", "kind"]),
-        "message": find_string_field(value, &["message", "summary", "error", "detail", "reason"]),
+        "failure_classification": find_string_field(value, &["failure_classification", "failure_class", "classification", "class", "code", "kind"])
+            .or_else(|| structured_stream_field(&streams, "failure_classification")),
+        "message": find_string_field(value, &["message", "summary", "error", "detail", "reason"])
+            .or_else(|| structured_stream_field(&streams, "message")),
         "command": find_string_field(value, &["command", "cmd", "failing_command"]),
         "exit_code": find_number_field(value, &["exit_code", "exit_status", "status_code"]),
-        "stderr_excerpt": find_string_field(value, &["stderr", "stderr_excerpt"]).map(|text| excerpt(&text)),
-        "stdout_excerpt": find_string_field(value, &["stdout", "stdout_excerpt"]).map(|text| excerpt(&text)),
+        "stderr_excerpt": find_string_field(value, &["stderr", "stderr_excerpt"])
+            .map(|text| excerpt(&text))
+            .or_else(|| stream_excerpt(&streams, "stderr")),
+        "stdout_excerpt": find_string_field(value, &["stdout", "stdout_excerpt"])
+            .map(|text| excerpt(&text))
+            .or_else(|| stream_excerpt(&streams, "stdout")),
         "diagnostics": first_diagnostics(value),
-        "process_streams": process_stream_summaries(value, stream_root),
+        "process_streams": streams,
     })
+}
+
+/// A field of the normalized structured error carried by one of the hydrated
+/// streams, when the evidence JSON itself did not carry the fact.
+fn structured_stream_field(streams: &Value, field: &str) -> Option<String> {
+    streams
+        .as_array()?
+        .iter()
+        .filter_map(|stream| stream.get("structured_error"))
+        .find_map(|error| {
+            error
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        })
+}
+
+/// The bounded, redacted excerpt of an available hydrated stream, when the
+/// evidence JSON itself did not carry the stream inline.
+fn stream_excerpt(streams: &Value, name: &str) -> Option<String> {
+    streams
+        .as_array()?
+        .iter()
+        .find(|stream| {
+            stream.get("name").and_then(Value::as_str) == Some(name)
+                && stream.get("status").and_then(Value::as_str) == Some("available")
+        })
+        .and_then(|stream| stream.get("excerpt").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 /// Project executor process output without requiring a provider-specific wrapper
@@ -680,6 +941,25 @@ fn process_stream_summaries(value: &Value, stream_root: Option<&Path>) -> Value 
     const LIMIT: usize = 600;
     let mut streams = Vec::new();
     collect_process_stream_summaries(value, &mut streams, LIMIT, stream_root, 0);
+    // A provider runtime writes its stdout/stderr logs next to its result
+    // artifacts without linking them. When the evidence JSON carries no
+    // pointer to its own streams, hydrate the sibling runtime stream so the
+    // actual provider failure reaches stdout_excerpt/stderr_excerpt and the
+    // diagnostic chain instead of a null placeholder (#13703).
+    for name in ["stdout", "stderr"] {
+        if streams.len() >= 2 {
+            break;
+        }
+        let already_present = streams
+            .iter()
+            .any(|stream| stream.get("name").and_then(Value::as_str) == Some(name));
+        if already_present {
+            continue;
+        }
+        if let Some(summary) = sibling_runtime_stream_summary(name, stream_root) {
+            streams.push(summary);
+        }
+    }
     Value::Array(streams)
 }
 
@@ -799,14 +1079,23 @@ fn process_stream_file_summary(
     let truncated = bytes.len() > limit;
     bytes.truncate(limit);
     let excerpt = RedactionPolicy::default().redact_string(&String::from_utf8_lossy(&bytes));
-    json!({
+    let mut summary = json!({
         "name": name,
         "source": source,
         "reference": reference,
         "status": "available",
         "excerpt": excerpt,
         "truncated": truncated,
-    })
+    });
+    // Terminal provider errors are appended at the end of a stream, past the
+    // head excerpt. Scan the bounded tail through the provider adapter so a
+    // structured error is promoted instead of collapsed to an exit code.
+    if let Some(tail) = read_runtime_stream_tail(&path) {
+        if let Some(error) = normalize_runtime_stream_error(None, &tail.raw) {
+            summary["structured_error"] = error;
+        }
+    }
+    summary
 }
 
 fn find_string_field(value: &Value, names: &[&str]) -> Option<String> {

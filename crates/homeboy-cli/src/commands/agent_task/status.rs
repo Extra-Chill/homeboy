@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
@@ -3287,6 +3288,16 @@ fn classification_next_actions(
             actions.extend(retry);
             actions
         }
+        // The provider rejected this account or quota. Diagnose makes the
+        // distinction visible, but #13691 owns whether a rotation is legal.
+        AgentTaskFailureClassification::ProviderAccountQuotaRejected => vec![
+            failure_evidence,
+            CommandNextAction::new(
+                "list registered providers for a possible rotation",
+                "homeboy agent-task providers".to_string(),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        ],
         // Policy refused this request. Retrying an identical request is denied
         // identically, so no retry action is emitted.
         AgentTaskFailureClassification::PolicyDenied => vec![
@@ -5683,6 +5694,10 @@ fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
         0
     } else if is_required_output_diagnostic(&class) {
         1
+    } else if is_provider_structured_error(&class) {
+        // The provider's own terminal error event, already normalized by the
+        // provider adapter: the most specific execution-layer cause there is.
+        1
     } else if is_provider_contract_diagnostic(&class) {
         2
     } else if is_successful_process_exit(&text) {
@@ -5728,13 +5743,24 @@ fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
 
 /// Process streams are untrusted wrapper output. When a stream is JSON, its
 /// diagnostics are the execution-layer cause and therefore rank ahead of the
-/// wrapper's outcome-normalization consequence.
+/// wrapper's outcome-normalization consequence. A stream carrying a
+/// normalized structured provider error (already converted by the provider
+/// adapter) is promoted with its message, status code, retryability, and
+/// account/quota classification instead of collapsing to an exit code
+/// (#13703).
 fn collect_process_stream_diagnostics(
     task_id: &str,
     streams: &Value,
     out: &mut Vec<CollectedDiagnostic>,
 ) {
     for stream in streams.as_array().into_iter().flatten() {
+        if let Some(error) = stream
+            .get("structured_error")
+            .and_then(normalized_structured_error)
+        {
+            out.push(structured_error_diagnostic(task_id, &error));
+            continue;
+        }
         let Some(excerpt) = stream.get("excerpt").and_then(Value::as_str) else {
             continue;
         };
@@ -5751,6 +5777,38 @@ fn collect_process_stream_diagnostics(
                 data: Value::Null,
             });
         }
+    }
+}
+
+/// Project a normalized structured provider error as a diagnostic whose
+/// message carries the provider's own answer: the human-readable message, the
+/// HTTP status, and whether the provider declared the failure retryable.
+fn structured_error_diagnostic(task_id: &str, error: &Value) -> CollectedDiagnostic {
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let status_code = error.get("status_code").and_then(Value::as_i64);
+    let retryable = error.get("retryable").and_then(Value::as_bool);
+    let status_note = status_code
+        .map(|code| format!("HTTP {code}, "))
+        .unwrap_or_default();
+    let retry_note = match retryable {
+        Some(true) => "retryable",
+        Some(false) => "not retryable",
+        None => "retryability unspecified",
+    };
+    CollectedDiagnostic {
+        task_id: task_id.to_string(),
+        class: "provider.structured_error".to_string(),
+        message: format!("provider rejected the request ({status_note}{retry_note}): {message}"),
+        source: "hydrated_process_stream".to_string(),
+        data: json!({
+            "status_code": status_code,
+            "retryable": retryable,
+            "failure_classification": error.get("failure_classification"),
+            "error_name": error.get("error_name"),
+        }),
     }
 }
 
@@ -7542,6 +7600,8 @@ fn collected_diagnostic_value_with_details(
         }
     } else if let Some(details) = policy_denial_details(&item.data) {
         value["details"] = details;
+    } else if let Some(details) = structured_error_details(&item.data) {
+        value["details"] = details;
     } else if item.source == "pre_execution_failure" {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if item.source == "lab_preacceptance_transport" {
@@ -7575,6 +7635,10 @@ fn is_required_output_diagnostic(class: &str) -> bool {
     class.contains("required_output_missing")
 }
 
+fn is_provider_structured_error(class: &str) -> bool {
+    class.contains("provider.structured_error")
+}
+
 fn is_provider_contract_diagnostic(class: &str) -> bool {
     class.contains("provider_outcome_contract_violation")
         || class.contains("outcome_contract_violation")
@@ -7595,8 +7659,28 @@ fn policy_denial_details(data: &Value) -> Option<Value> {
         "policy_mode",
         "reason",
     ];
-    let details = fields.into_iter().filter_map(|field| {
-        data.get(field)
+    structured_details(data, &fields)
+}
+
+/// Preserve the bounded, actionable facts of a normalized structured provider
+/// error — status code, retryability, and the account/quota classification
+/// (#13691 consumes this classification for provider rotation) — without
+/// forwarding arbitrary provider payload.
+fn structured_error_details(data: &Value) -> Option<Value> {
+    structured_details(
+        data,
+        &[
+            "status_code",
+            "retryable",
+            "failure_classification",
+            "error_name",
+        ],
+    )
+}
+
+fn structured_details(data: &Value, fields: &[&str]) -> Option<Value> {
+    let details = fields.iter().filter_map(|field| {
+        data.get(*field)
             .filter(|value| !value.is_null())
             .and_then(|value| {
                 bounded_diagnostic_value(value).map(|value| (field.to_string(), value))
