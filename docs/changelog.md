@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.11] - 2026-08-29
+
+### Changed
+- Derive controller-runtime pin retention from lifecycle mutability
+- Pin canonical enum wire labels
+- Hydrate structured provider errors in diagnose
+- Bound hermetic test execution
+- Unify fanout preview help
+- Rotate blocked provider accounts
+
+### Fixed
+- Fix worktree provider cleanup contract
+
 ## [0.364.10] - 2026-08-29
 
 ### Changed
