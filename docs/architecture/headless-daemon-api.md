@@ -104,8 +104,9 @@ A useful headless UI can be built from this read/query surface:
   durable state and can perform a live runner round trip, which a serial
   accept loop cannot afford. Cook ids resolve through the same alias index the
   CLI uses and the result reports requested vs resolved identity. The legacy
-  `GET /agent-task/runs/:id` route is a compatibility alias for the same
-  implementation. A run is not a job — the job *supervises* the run, so
+  `GET /agent-task/runs/:id` response shape is a one-minor compatibility
+  adapter around the same typed run resource. A run is not a job — the job
+  *supervises* the run, so
   watching and cancelling stay on the controller-job surface below.
 - `GET /jobs`, `GET /jobs/:id`, `GET /jobs/:id/events`, and
   `POST /jobs/:id/cancel` for long-running work. Cook and fanout are both

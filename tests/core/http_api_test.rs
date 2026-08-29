@@ -400,16 +400,23 @@ fn legacy_agent_task_run_route_delegates_to_the_same_control_plane_run() {
     .expect("legacy");
     let versioned: ControlPlaneResult<ControlPlaneRun> =
         serde_json::from_value(versioned.body).expect("v1 result");
-    let legacy: ControlPlaneResult<ControlPlaneRun> =
-        serde_json::from_value(legacy.body).expect("legacy result");
-    assert_eq!(versioned, legacy);
+    let legacy_body = legacy.body;
+    let legacy_run: ControlPlaneRun =
+        serde_json::from_value(legacy_body["run"].clone()).expect("legacy run");
+    assert_eq!(versioned.resource.expect("versioned resource"), legacy_run);
+    assert_eq!(legacy_body["command"], "api.agent_task.runs.show");
+    assert_eq!(legacy_body["run_id"], CONTROL_PLANE_FIXTURE_RUN);
+    assert_eq!(legacy_body["requested_id"], CONTROL_PLANE_FIXTURE_RUN);
+    assert_eq!(legacy_body["projection"]["reconciles"], false);
+    assert_eq!(legacy_body["projection"]["probe_failed"], false);
+    assert_eq!(legacy_body["job_surface"]["list"], "/jobs");
 }
 
 #[test]
-fn agent_task_run_lookup_miss_is_a_structured_not_found() {
+fn control_plane_run_lookup_miss_is_a_structured_not_found() {
     let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
-        path: "/agent-task/runs/no-such-agent-task-run".to_string(),
+        path: "/v1/control-plane/runs/no-such-agent-task-run".to_string(),
         body: None,
     })
     .expect("typed not-found envelope");
@@ -428,11 +435,11 @@ fn agent_task_run_lookup_miss_is_a_structured_not_found() {
 }
 
 #[test]
-fn agent_task_run_id_is_bounded_before_the_record_lookup() {
+fn control_plane_run_id_is_bounded_before_the_record_lookup() {
     let oversized = "a".repeat(4096);
     let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
-        path: format!("/agent-task/runs/{oversized}"),
+        path: format!("/v1/control-plane/runs/{oversized}"),
         body: None,
     })
     .expect("typed invalid-argument envelope");

@@ -350,7 +350,10 @@ where
                 },
             )?,
         }),
-        HttpEndpoint::AgentTaskRun { id } | HttpEndpoint::ControlPlaneRun { id } => {
+        HttpEndpoint::AgentTaskRun { id } => {
+            return legacy_agent_task_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRun { id } => {
             return control_plane_run_response(endpoint.clone(), id);
         }
         HttpEndpoint::ControlPlaneCapabilities => {
@@ -455,9 +458,20 @@ fn control_plane_capabilities_response() -> Result<HttpApiResponse> {
 }
 
 fn control_plane_run_response(endpoint: HttpEndpoint, run_id: &str) -> Result<HttpApiResponse> {
+    match control_plane_run(run_id) {
+        Ok(resource) => control_plane_ok(endpoint, resource),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_run(
+    run_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::ControlPlaneRun,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
     if run_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
-        return control_plane_err(
-            endpoint,
+        return Err(
             homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
                 "agent-task run id exceeds {MAX_AGENT_TASK_RUN_ID_LEN} bytes"
             )),
@@ -466,18 +480,54 @@ fn control_plane_run_response(endpoint: HttpEndpoint, run_id: &str) -> Result<Ht
     let run_id = match homeboy_control_plane_contract::RunId::new(run_id) {
         Ok(run_id) => run_id,
         Err(error) => {
-            return control_plane_err(
-                endpoint,
+            return Err(
                 homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
                     error.to_string(),
                 ),
             )
         }
     };
-    match crate::control_plane::run(&run_id) {
-        Ok(resource) => control_plane_ok(endpoint, resource),
-        Err(error) => control_plane_err(endpoint, error),
-    }
+    crate::control_plane::run(&run_id)
+}
+
+/// One-minor compatibility adapter for the shipped unversioned route.
+/// Resource assembly still belongs exclusively to the orchestration service.
+fn legacy_agent_task_run_response(
+    endpoint: HttpEndpoint,
+    requested_id: &str,
+) -> Result<HttpApiResponse> {
+    let run = control_plane_run(requested_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.message,
+            Some(requested_id.to_string()),
+            error.next_action.map(|action| vec![action]),
+        )
+    })?;
+    let run_id = run.run.as_str().to_string();
+    Ok(HttpApiResponse {
+        status: 200,
+        endpoint: endpoint.name().to_string(),
+        body: json!({
+            "command": "api.agent_task.runs.show",
+            "run_id": run_id,
+            "requested_id": requested_id,
+            "run": run,
+            "projection": {
+                "source": "agent-task.lifecycle",
+                "reconciles": false,
+                "probe_failed": false,
+                "reconcile_with": "homeboy agent-task status",
+            },
+            "job_surface": {
+                "list": "/jobs",
+                "show": "/jobs/:job_id",
+                "events": "/jobs/:job_id/events",
+                "cancel": "/controller/jobs/:job_id/cancel",
+                "note": "POST /jobs/:id/cancel refuses controller jobs; controller-owned work is cancelled through its driver so the driver can stop the work it owns.",
+            },
+        }),
+    })
 }
 
 fn control_plane_ok<T: serde::Serialize>(
