@@ -3966,8 +3966,8 @@ fn snapshot_fence_transition_rejects_same_class_without_pre_provider_identity() 
 
 #[test]
 fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
-    with_strict_config_lock(|| {
-        with_isolated_home(|_| {
+    with_isolated_home(|_| {
+        with_strict_config_lock(|| {
             let run_id = "cook-dead-retry-launcher-strict-attempt-2";
             let plan = test_plan();
             submit_plan(&plan, Some(run_id)).expect("persist retry reservation");

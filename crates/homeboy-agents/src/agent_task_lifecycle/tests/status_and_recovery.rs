@@ -1292,7 +1292,7 @@ fn cancelled_or_expired_pending_handoff_never_submits_new_runner_work() {
     with_isolated_home(|_| {
         let submitted = Arc::new(Mutex::new(Vec::new()));
         let lookups = Arc::new(Mutex::new(Vec::new()));
-        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+        let _provider = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
             store: JobStore::default(),
             submitted: Arc::clone(&submitted),
             lookups: Arc::clone(&lookups),
@@ -1360,7 +1360,7 @@ fn preparing_crash_never_submits_or_queries_the_runner() {
     with_isolated_home(|_| {
         let submitted = Arc::new(Mutex::new(Vec::new()));
         let lookups = Arc::new(Mutex::new(Vec::new()));
-        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+        let _provider = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
             store: JobStore::default(),
             submitted: Arc::clone(&submitted),
             lookups: Arc::clone(&lookups),
@@ -1409,7 +1409,7 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
         let store = JobStore::default();
         let submitted = Arc::new(Mutex::new(Vec::new()));
         let lookups = Arc::new(Mutex::new(Vec::new()));
-        register_runner_continuation_provider(Box::new(IntentReplayProvider {
+        let _provider = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
             store: store.clone(),
             submitted: Arc::clone(&submitted),
             lookups: Arc::clone(&lookups),

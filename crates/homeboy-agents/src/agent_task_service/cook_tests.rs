@@ -20597,21 +20597,12 @@ fn post_recipe_failure_without_lifecycle_retains_identity_but_offers_no_recovery
     });
 }
 
-/// Passes under `cargo nextest` (one process per test) and under
-/// `cargo test -- --test-threads=1`. It can fail under multi-threaded
-/// `cargo test`, at the `baseline_path.exists()` assertion.
-///
-/// That is a harness limitation, not a product defect. `HomeGuard` holds
-/// `home_lock()` for its lifetime, which serializes *writers* — but as its own
-/// doc states, readers never take it, including worker threads a test spawns.
-/// This test materializes and then deliberately deletes a worktree, so a
-/// concurrent test repointing the home root mid-flight can observe the path
-/// after deletion and before re-materialization.
-///
-/// CI runs nextest, so it does not see this. Do not "fix" it by making the hot
-/// path resolvers take the lock on every read.
+/// Baseline materialization still resolves its artifact root from the ambient
+/// test home. Own that root for the fixture's full lifetime so another test
+/// cannot repoint it between materialization, deletion, and recovery (#11897).
 #[test]
 fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
+    let _home = homeboy_core::test_support::HomeGuard::new();
     let temp = tempfile::tempdir().expect("tempdir");
     let root = &temp.path().join("repo");
     std::fs::create_dir(root).unwrap();
