@@ -11,15 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-}"
-if [ -z "$SETTINGS_HELPER" ]; then
-    SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
-    if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
-        SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
-    fi
-    SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${EXTENSION_DIR}/../scripts/lib" && pwd)}"
-    SETTINGS_HELPER="${SHARED_LIB_DIR}/settings.sh"
-fi
+SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:?Homeboy core must provide HOMEBOY_RUNTIME_SETTINGS_HELPER}"
 
 BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:?Homeboy core must provide HOMEBOY_RUNTIME_BASH_PREFLIGHT}"
 # shellcheck source=/dev/null

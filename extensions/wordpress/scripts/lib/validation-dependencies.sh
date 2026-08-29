@@ -21,12 +21,16 @@ set -euo pipefail
 homeboy_get_validation_dependencies_raw() {
     if ! type homeboy_setting_json >/dev/null 2>&1; then
         local settings_helper="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-}"
-        local shared_lib_dir="${HOMEBOY_SHARED_LIB_DIR:-}"
-        if [ -z "$shared_lib_dir" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
-            shared_lib_dir="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+        if [ -z "$settings_helper" ]; then
+            local shared_lib_dir="${HOMEBOY_SHARED_LIB_DIR:-}"
+            if [ -z "$shared_lib_dir" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+                shared_lib_dir="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+            fi
+            shared_lib_dir="${shared_lib_dir:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib" && pwd)}"
+            # shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+            source "${shared_lib_dir}/runtime-helper-resolver.sh"
+            settings_helper="$(homeboy_runtime_helper "${shared_lib_dir%/scripts/lib}" HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || return 1
         fi
-        shared_lib_dir="${shared_lib_dir:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib" && pwd)}"
-        settings_helper="${settings_helper:-${shared_lib_dir}/settings.sh}"
         # shellcheck source=/dev/null
         source "$settings_helper"
     fi

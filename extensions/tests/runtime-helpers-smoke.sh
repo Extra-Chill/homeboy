@@ -16,7 +16,7 @@ PROJECT_SCRIPTS_HELPER="${ROOT_DIR}/scripts/lib/project-scripts.sh"
 # shared asset (materialized as an extensions/scripts/lib sibling at install).
 FIX_RESULTS_HELPER="${ROOT_DIR}/scripts/lib/fix-results.sh"
 BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${CORE_RUNTIME_DIR}/bash-preflight.sh}"
-SETTINGS_HELPER="${ROOT_DIR}/scripts/lib/settings.sh"
+SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${CORE_RUNTIME_DIR}/settings.sh}"
 RUNNER_HARNESS_HELPER="${ROOT_DIR}/scripts/lib/runner-harness.sh"
 TEST_FAILURES_ADAPTER_HELPER="${ROOT_DIR}/scripts/lib/test-failures-adapter.sh"
 LINT_FINDINGS_ADAPTER_HELPER="${ROOT_DIR}/scripts/lib/lint-findings-adapter.sh"

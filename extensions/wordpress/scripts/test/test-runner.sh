@@ -30,7 +30,9 @@ WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX:-${SCRIPT_DIR}/test-
 CORE_WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_CORE_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-core-dev-wp-codebox.sh}"
 WORDPRESS_TEST_RUNTIME_BACKEND="${HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND:-wp-codebox}"
 
-SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SHARED_LIB_DIR}/settings.sh}"
+# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+source "${SHARED_LIB_DIR}/runtime-helper-resolver.sh"
+SETTINGS_HELPER="$(homeboy_runtime_helper "${SHARED_LIB_DIR%/scripts/lib}" HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || exit 1
 PROJECT_SCRIPTS_HELPER="${HOMEBOY_RUNTIME_PROJECT_SCRIPTS_HELPER:-${SHARED_LIB_DIR}/project-scripts.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"

@@ -2,9 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SETTINGS_HELPER="${ROOT_DIR}/scripts/lib/settings.sh"
 
-# shellcheck source=../scripts/lib/settings.sh
+# The settings helper is core-owned; this smoke covers the helper extensions
+# actually run, not a vendored copy of it.
+# shellcheck source=../scripts/lib/runtime-helper-resolver.sh
+source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
+SETTINGS_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || exit 1
+
+# shellcheck source=/dev/null
 source "$SETTINGS_HELPER"
 
 assert_equals() {
