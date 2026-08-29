@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.39.1] - 2026-08-29
+
+### Fixed
+- cook homeboy-extensions
+
 ## [3.38.17] - 2026-08-29
 
 ### Fixed
