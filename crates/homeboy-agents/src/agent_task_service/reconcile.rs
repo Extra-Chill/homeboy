@@ -90,13 +90,13 @@ fn rooted_exact_status(
 }
 
 fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    let now = chrono::Utc::now();
     record.state.is_terminal()
         || record.has_fresh_controller_pre_provider_heartbeat()
         || (record.has_planned_runner_execution() && record.has_fresh_update())
-        || agent_task_lifecycle::has_live_pending_runner_submission_intent(
-            record,
-            chrono::Utc::now(),
-        )
+        || agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now)
+        || record.has_live_pending_local_cook_supervisor(now)
+        || record.owner_process_is_running()
 }
 
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
@@ -1328,6 +1328,182 @@ mod tests {
                 Some("provider lookup started after discovery"),
             )
             .expect("controller heartbeat");
+
+            let fenced =
+                agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
+                    .expect("fenced record");
+            assert!(fenced_record_is_live(&fenced));
+            assert_eq!(
+                fenced.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+        });
+    }
+
+    #[test]
+    fn parallel_local_supervised_submissions_survive_daemon_reconciliation() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_ids = ["reconcile-parallel-local-a", "reconcile-parallel-local-b"];
+            std::thread::scope(|scope| {
+                for run_id in run_ids {
+                    scope.spawn(move || {
+                        let plan = AgentTaskPlan::new("parallel-local-cook", Vec::new());
+                        let metadata = serde_json::Map::from_iter([(
+                            "local_cook_supervisor".to_string(),
+                            serde_json::json!({
+                                "state": "supervising",
+                                "job_id": uuid::Uuid::new_v4(),
+                                "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+                                "pinned_run_id": run_id,
+                            }),
+                        )]);
+                        agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
+                            &test_lifecycle_store(),
+                            &plan,
+                            Some(run_id),
+                            None,
+                            Some(metadata),
+                            None,
+                            |_| Ok(serde_json::json!({ "build": "test" })),
+                        )
+                        .expect("submit supervised local Cook");
+                    });
+                }
+            });
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("tick after parallel local submission");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            for run_id in run_ids {
+                let record = agent_task_lifecycle::status(run_id).expect("retained");
+                assert!(!record.state.is_terminal(), "{run_id} was terminalized");
+                assert_eq!(record.metadata["runner_pid"], std::process::id());
+                assert!(record.owner_process_is_running());
+                assert!(record.metadata.get("cancel_reason").is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn projected_local_retry_supervisor_keeps_lease_ownership_before_runner_pid() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-projected-local-retry";
+            let cook_id = "reconcile-projected-local-retry-cook";
+            let plan = AgentTaskPlan::new("projected-local-retry", Vec::new());
+            let now = chrono::Utc::now();
+            let metadata = serde_json::Map::from_iter([
+                ("cook_id".to_string(), serde_json::json!(cook_id)),
+                (
+                    "local_cook_supervisor".to_string(),
+                    serde_json::json!({
+                        "state": "pending",
+                        "pinned_run_id": run_id,
+                        "lease_started_at": now.to_rfc3339(),
+                        "lease_expires_at": (now
+                            + chrono::Duration::seconds(
+                                agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS
+                            ))
+                        .to_rfc3339(),
+                        "launcher_pid": std::process::id(),
+                    }),
+                ),
+            ]);
+            agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
+                &test_lifecycle_store(),
+                &plan,
+                Some(run_id),
+                None,
+                Some(metadata),
+                None,
+                |_| Ok(serde_json::json!({ "build": "test" })),
+            )
+            .expect("reserve retry");
+
+            agent_task_lifecycle::record_local_cook_retry_supervisor_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                cook_id,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .expect("project supervisor");
+
+            let supervised = agent_task_lifecycle::exact_record(run_id).expect("projected");
+            assert_eq!(
+                supervised.metadata["local_cook_supervisor"]["state"],
+                "supervising"
+            );
+            assert!(supervised.has_live_pending_local_cook_supervisor(now));
+            assert!(supervised.metadata.get("runner_pid").is_none());
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("tick after supervisor projection");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let retained = agent_task_lifecycle::status(run_id).expect("retained");
+            assert!(!retained.state.is_terminal());
+            assert!(retained.metadata.get("cancel_reason").is_none());
+            assert!(retained.has_live_pending_local_cook_supervisor(now));
+        });
+    }
+
+    #[test]
+    fn fenced_recheck_preserves_local_owner_recorded_after_stale_discovery_snapshot() {
+        with_isolated_home(|_| {
+            let run_id = "reconcile-local-owner-after-snapshot";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+
+            let snapshot = discover_runs(AgentTaskDiscoveryFilter::Active)
+                .expect("ownerless queued run discovered");
+            let discovered = snapshot
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id)
+                .expect("stale snapshot contains run");
+            assert_eq!(discovered.liveness, Some(AgentTaskLiveness::Stale));
+
+            agent_task_lifecycle::mark_running(run_id).expect("publish owner pid");
+
+            let fenced =
+                agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
+                    .expect("fenced record");
+            assert!(fenced_record_is_live(&fenced));
+            assert!(fenced.owner_process_is_running());
+        });
+    }
+
+    #[test]
+    fn fenced_recheck_preserves_supervisor_lease_recorded_after_stale_discovery_snapshot() {
+        with_isolated_home(|_| {
+            let run_id = "reconcile-supervisor-after-snapshot";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+
+            let snapshot = discover_runs(AgentTaskDiscoveryFilter::Active)
+                .expect("ownerless queued run discovered");
+            let discovered = snapshot
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id)
+                .expect("stale snapshot contains run");
+            assert_eq!(discovered.liveness, Some(AgentTaskLiveness::Stale));
+
+            let now = chrono::Utc::now();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_id"] = serde_json::json!("cook");
+                record.metadata["local_cook_supervisor"] = serde_json::json!({
+                    "state": "supervising",
+                    "pinned_run_id": run_id,
+                    "lease_started_at": now.to_rfc3339(),
+                    "lease_expires_at": (now
+                        + chrono::Duration::seconds(
+                            agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS
+                        ))
+                    .to_rfc3339(),
+                });
+            })
+            .expect("publish supervisor lease");
 
             let fenced =
                 agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
