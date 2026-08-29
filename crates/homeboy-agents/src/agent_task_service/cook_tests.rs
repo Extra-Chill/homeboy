@@ -10915,7 +10915,12 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
 
         let resumed = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("repaired runner resumes the immutable cook attempt");
-        assert_eq!(resumed.value.status, "in_flight");
+        let resumed_record = agent_task_lifecycle::status(cook_id).expect("resumed cook status");
+        assert_eq!(
+            resumed.value.status, "in_flight",
+            "resumed cook report: {:#?}\nresumed lifecycle: {:#?}",
+            resumed.value, resumed_record
+        );
         assert_eq!(
             agent_task_lifecycle::status(cook_id)
                 .expect("resumed cook alias")

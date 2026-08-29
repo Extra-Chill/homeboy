@@ -413,6 +413,7 @@ mod tests {
     #[test]
     fn cancellation_through_the_shared_harness_stops_the_coordinator() {
         with_isolated_home(|_| {
+            register_loop_work_job_handler();
             agent_task_loop_controller::create_controller("loop-cancel", "repair", "v1")
                 .expect("create controller");
             let child = std::process::Command::new("sh")
