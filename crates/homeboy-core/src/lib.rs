@@ -112,6 +112,7 @@ pub mod extension_update_check;
 pub use homeboy_finding as finding;
 pub mod fleet;
 pub use homeboy_gate_contract::gate;
+pub mod control_plane;
 pub mod gate_feedback_baseline;
 pub mod git;
 pub mod harvest;

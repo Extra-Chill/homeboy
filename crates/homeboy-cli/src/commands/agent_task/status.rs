@@ -928,7 +928,7 @@ fn attach_control_plane_identities_from_record(
     value: &mut Value,
     record: &AgentTaskRunRecord,
 ) -> homeboy::core::Result<()> {
-    match agent_task_lifecycle::canonical_control_plane_identities(record)? {
+    match homeboy::agents::orchestration::status_identities_for_record(record)? {
         Some(identities) => {
             value["control_plane"] = serde_json::to_value(identities).unwrap_or(Value::Null);
         }
@@ -942,10 +942,7 @@ fn attach_resolved_control_plane(
     run_id: &str,
     recorded_attempt: Option<u32>,
 ) -> homeboy::core::Result<()> {
-    match agent_task_lifecycle::canonical_control_plane_identities_for_run(
-        run_id,
-        recorded_attempt,
-    )? {
+    match homeboy::agents::orchestration::status_identities_for_run(run_id, recorded_attempt)? {
         Some(identities) => {
             value["control_plane"] = serde_json::to_value(identities).unwrap_or(Value::Null);
         }
