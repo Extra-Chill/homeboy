@@ -35,7 +35,7 @@ const harnessSource = path.join(extensionRoot, 'vendor');
 let wpCodeboxCommandCache;
 const NATIVE_MARIADB_CAPABILITY = 'runtime-service:mysql:native:mariadb';
 const RUNTIME_SERVICE_CAPABILITIES_SCHEMA = 'wp-codebox/runtime-service-capabilities/v1';
-const slug = process.env.COMPONENT_ID || path.basename(componentPath);
+const slug = process.env.HOMEBOY_COMPONENT_ID || process.env.COMPONENT_ID || path.basename(componentPath);
 const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
 const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;

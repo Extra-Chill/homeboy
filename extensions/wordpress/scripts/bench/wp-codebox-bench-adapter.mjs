@@ -10,7 +10,7 @@ const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, wpCodeboxCommand }
 
 const settings = json(process.env.HOMEBOY_SETTINGS_JSON, {});
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
-const slug = process.env.COMPONENT_ID || path.basename(componentPath);
+const slug = process.env.HOMEBOY_COMPONENT_ID || process.env.COMPONENT_ID || path.basename(componentPath);
 const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
 const directory = await mkdtemp(path.join(tmpdir(), 'homeboy-wp-codebox-bench-'));
