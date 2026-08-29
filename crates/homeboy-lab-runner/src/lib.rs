@@ -372,7 +372,8 @@ pub use evidence::{
 };
 pub(crate) use execution::exec_with_status_snapshot;
 pub use execution::{
-    daemon_api_get, daemon_api_post, exec, finish_scheduled_terminal_runner_exec_recovery,
+    daemon_api_get, daemon_api_post, ensure_runner_extension_parity, exec,
+    finish_scheduled_terminal_runner_exec_recovery, probe_extension_parity_from_show,
     promote_runner_exec_artifact_dirs, promote_runner_exec_artifact_dirs_in_store,
     promote_runner_exec_artifacts_in_store, promote_runner_exec_summaries_in_store,
     promoted_output, reconcile_runner_generation_after_evidence,
@@ -381,9 +382,10 @@ pub use execution::{
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
     runner_exec_failure_error, runner_exec_orchestration_provenance,
     runner_exec_structured_summary, runner_job_cancel, runner_job_cancel_for_session,
-    runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, RunnerExecDiagnostics,
-    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
-    RunnerExecRecoveryChildSchedule, RunnerExecRecoveryDiagnostic, RunnerExecStructuredSummary,
+    runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, ExtensionParityProbe,
+    ExtensionShowOutput, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
+    RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecRecoveryChildSchedule,
+    RunnerExecRecoveryDiagnostic, RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;

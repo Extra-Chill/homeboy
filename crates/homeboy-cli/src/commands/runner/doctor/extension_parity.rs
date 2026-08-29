@@ -2,8 +2,11 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 use homeboy::core::server::SshClient;
+use homeboy::runner::{
+    probe_extension_parity_from_show, ExtensionParityProbe, ExtensionShowOutput, Runner,
+};
 
-use super::types::RunnerCheck;
+use super::types::{RunnerCheck, RunnerDoctorStatus};
 use super::{checks, common};
 
 pub(crate) fn local_check(
@@ -36,6 +39,110 @@ pub(crate) fn local_check(
             &err.to_string(),
             "",
         ),
+    }
+}
+
+pub(crate) fn append_after_extension_parity(
+    checks: &mut Vec<RunnerCheck>,
+    parity_checks: Vec<RunnerCheck>,
+    next: impl FnOnce() -> Vec<RunnerCheck>,
+) {
+    let blocked = parity_checks
+        .iter()
+        .any(|check| check.status == RunnerDoctorStatus::Error);
+    checks.extend(parity_checks);
+    if !blocked {
+        checks.extend(next());
+    }
+}
+
+pub(crate) fn remote_live_readiness_check(
+    client: &SshClient,
+    runner_id: &str,
+    runner: &Runner,
+    homeboy_command: &str,
+    cwd: Option<&str>,
+    extension_id: &str,
+) -> RunnerCheck {
+    let show_command = format!(
+        "{} extension show {} --live-readiness",
+        common::shell_word(homeboy_command),
+        common::shell_word(extension_id)
+    );
+    let command = if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
+        format!("cd {} && {show_command}", common::shell_word(cwd))
+    } else {
+        show_command
+    };
+    let output = client.execute(&command);
+    check_from_parity_probe(
+        "remote",
+        homeboy_command,
+        cwd,
+        extension_id,
+        probe_extension_parity_from_show(
+            runner_id,
+            runner,
+            homeboy_command,
+            extension_id,
+            ExtensionShowOutput {
+                success: output.success,
+                stdout: &output.stdout,
+                stderr: &output.stderr,
+            },
+        ),
+    )
+}
+
+pub(crate) fn check_from_parity_probe(
+    target: &str,
+    homeboy_command: &str,
+    cwd: Option<&str>,
+    extension_id: &str,
+    probe: ExtensionParityProbe,
+) -> RunnerCheck {
+    match probe {
+        ExtensionParityProbe::Current => {
+            let mut details = BTreeMap::new();
+            details.insert("extension_id".to_string(), extension_id.to_string());
+            details.insert(
+                "command".to_string(),
+                format!("{homeboy_command} extension show {extension_id} --live-readiness"),
+            );
+            if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
+                details.insert("cwd".to_string(), cwd.to_string());
+            }
+            checks::ok_with_details(
+                "extension.parity",
+                format!("Extension '{extension_id}' is current on the {target} runner"),
+                details,
+            )
+        }
+        ExtensionParityProbe::NeedsMaterialization { error }
+        | ExtensionParityProbe::Blocked { error } => {
+            let mut details = BTreeMap::new();
+            details.insert("extension_id".to_string(), extension_id.to_string());
+            details.insert(
+                "command".to_string(),
+                format!("{homeboy_command} extension show {extension_id} --live-readiness"),
+            );
+            if let Some(cwd) = cwd.filter(|path| !path.trim().is_empty()) {
+                details.insert("cwd".to_string(), cwd.to_string());
+            }
+            details.insert("diagnostics".to_string(), error.message.clone());
+            checks::error(
+                "extension.parity",
+                format!(
+                    "Extension '{extension_id}' is not current on the {target} runner before provider readiness"
+                ),
+                parity_remediation(&error).or_else(|| {
+                    Some(format!(
+                        "Refresh the runner extension before probing readiness: {homeboy_command} extension refresh <source> --id {extension_id}"
+                    ))
+                }),
+                details,
+            )
+        }
     }
 }
 
@@ -122,6 +229,30 @@ pub(crate) fn check_from_probe(
         )),
         details,
     )
+}
+
+fn parity_remediation(error: &homeboy::core::Error) -> Option<String> {
+    let from_tried = error
+        .details
+        .get("tried")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str())
+        .find(|text| {
+            text.contains("extension install")
+                || text.contains("extension relink")
+                || text.contains("extension refresh")
+                || text.contains("extension update")
+        })
+        .map(str::to_string);
+    from_tried.or_else(|| {
+        error
+            .details
+            .pointer("/diagnostic/next_commands/0")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    })
 }
 
 fn diagnostic_tail(stderr: &str, stdout: &str) -> String {

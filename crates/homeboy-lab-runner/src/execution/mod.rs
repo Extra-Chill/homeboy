@@ -75,6 +75,10 @@ use extension_parity::{
     ensure_extension_materialized, plan_extension_parity, requested_setting_keys_for_command,
     required_extensions_for_command, validate_extension_ready,
 };
+pub use extension_parity::{
+    ensure_runner_extension_parity, probe_extension_parity_from_show, ExtensionParityProbe,
+    ExtensionShowOutput,
+};
 use policy::{preflight_remote_argv, remote_execution_preflight};
 
 // Cross-submodule visibility: re-export each submodule's `pub(super)` surface so

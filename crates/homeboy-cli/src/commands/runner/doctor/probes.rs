@@ -462,6 +462,64 @@ pub(crate) fn provider_readiness_checks(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct LabOffloadExtensionDependency {
+    pub extension_id: String,
+    pub provider_id: Option<String>,
+}
+
+pub(crate) fn lab_offload_extension_dependencies(
+    explicit: &[String],
+    providers: &[AgentTaskExecutorProvider],
+    selected_backend: Option<&str>,
+    selected_provider_id: Option<&str>,
+) -> Vec<LabOffloadExtensionDependency> {
+    let explicit = super::normalized_extension_ids(explicit);
+    let mut dependencies = explicit
+        .iter()
+        .map(|extension_id| LabOffloadExtensionDependency {
+            extension_id: extension_id.clone(),
+            provider_id: None,
+        })
+        .collect::<Vec<_>>();
+    for provider in selected_provider_executor_resolution_providers(
+        providers,
+        selected_backend,
+        selected_provider_id,
+    ) {
+        if let Some(extension_id) = provider
+            .extension_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if !explicit.iter().any(|id| id == extension_id) {
+                dependencies.push(LabOffloadExtensionDependency {
+                    extension_id: extension_id.to_string(),
+                    provider_id: Some(provider.id.clone()),
+                });
+            }
+        }
+        for extension_id in provider
+            .runner_readiness
+            .iter()
+            .flat_map(|readiness| readiness.required_extensions.iter())
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+        {
+            if !explicit.iter().any(|id| id == extension_id) {
+                dependencies.push(LabOffloadExtensionDependency {
+                    extension_id: extension_id.to_string(),
+                    provider_id: Some(provider.id.clone()),
+                });
+            }
+        }
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
+}
+
 pub(crate) fn eligible_provider_ids(
     providers: &[AgentTaskExecutorProvider],
     selected_backend: Option<&str>,
@@ -802,6 +860,65 @@ fn first_stderr_lines(stderr: &str, max: usize) -> String {
     trimmed.lines().take(max).collect::<Vec<_>>().join("\n")
 }
 
+pub(super) fn bounded_invocation_output(stdout: &str, stderr: &str, max_lines: usize) -> String {
+    let stderr = stderr.trim();
+    let stdout = stdout.trim();
+    let combined = match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{stderr}\n{stdout}"),
+        (false, true) => stderr.to_string(),
+        (true, false) => stdout.to_string(),
+        (true, true) => String::new(),
+    };
+    combined
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn provider_command_readiness_failure_check(
+    id: impl Into<String>,
+    label: &str,
+    remediation: Option<String>,
+    mut details: BTreeMap<String, String>,
+    timed_out: bool,
+    stdout: &str,
+    stderr: &str,
+) -> RunnerCheck {
+    if !stdout.trim().is_empty() {
+        details.insert(
+            "stdout".to_string(),
+            bounded_invocation_output(stdout, "", 8),
+        );
+    }
+    if !stderr.trim().is_empty() {
+        details.insert(
+            "stderr".to_string(),
+            bounded_invocation_output("", stderr, 8),
+        );
+    }
+    let bounded = bounded_invocation_output(stdout, stderr, 8);
+    let (message, detail) = if timed_out {
+        (
+            format!("{label} readiness invocation timed out on the Lab runner"),
+            "readiness invocation timed out".to_string(),
+        )
+    } else if bounded.is_empty() {
+        (
+            format!("{label} readiness invocation failed on the Lab runner"),
+            "readiness invocation exited non-zero without stdout or stderr".to_string(),
+        )
+    } else {
+        (
+            format!("{label} readiness invocation failed on the Lab runner:\n{bounded}"),
+            bounded,
+        )
+    };
+    details.insert("detail".to_string(), detail);
+    checks::error(id, message, remediation, details)
+}
+
 /// #3818: report the state of every extension-declared managed runner
 /// source checkout. Surfaces a missing checkout (error) or a checkout that
 /// tracks a different remote than the declared canonical remote (warning)
@@ -1134,22 +1251,14 @@ fn provider_command_readiness_check(
     };
     let output = client.execute(&provider_readiness_remote_shell(&entrypoint, &request));
     if !output.success {
-        details.insert(
-            "detail".to_string(),
-            if output.timed_out {
-                "readiness invocation timed out".to_string()
-            } else {
-                first_stderr_lines(&output.stderr, 8)
-            },
-        );
-        return checks::error(
+        return provider_command_readiness_failure_check(
             readiness.id.clone(),
-            format!(
-                "{} readiness invocation failed on the Lab runner",
-                readiness.label
-            ),
+            &readiness.label,
             readiness.remediation.clone(),
             details,
+            output.timed_out,
+            &output.stdout,
+            &output.stderr,
         );
     }
     let result: homeboy::agents::agent_tasks::provider::ProviderReadinessInvocationResult =
