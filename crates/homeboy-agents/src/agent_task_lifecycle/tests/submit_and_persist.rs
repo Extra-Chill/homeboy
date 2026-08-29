@@ -895,11 +895,8 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
             // Remove the admission-supplied runtime pin rather than leaving a
             // malformed one. An invalid *present* pin sends
             // `validate_controller_runtime_in_store` through
-            // `migrate_legacy_pin_and_persist`, which creates and locks the
-            // process-global controller-runtime store — the one root that is
-            // deliberately not a lifecycle root, and the one this test must not
-            // touch. With no pin at all the preflight fails on the record
-            // itself, entirely inside the injected store.
+            // `migrate_legacy_pin_and_persist`. With no pin at all the preflight
+            // fails on the record itself without materializing runtime state.
             lifecycle_store
                 .mutate_record(run_id, |record| {
                     record

@@ -24,6 +24,8 @@ pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE";
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const TEST_CONTROLLER_RUNTIME_USE_ENV: &str = "HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV";
 /// Names the executable [`TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV`]'s fixture is
 /// copied from.
 ///
@@ -35,8 +37,6 @@ pub(crate) const TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV: &str =
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_SOURCE_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE";
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) const TEST_CONTROLLER_RUNTIME_STORE_ENV: &str = "HOMEBOY_TEST_CONTROLLER_RUNTIME_STORE";
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const TEST_CONTROLLER_RUNTIME_IDENTITY_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY";
@@ -779,13 +779,14 @@ impl Drop for AdmissionLock {
 /// `pin_current` under an already-resolved runtime root.
 pub fn pin_current_in_root(root: &Path) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
-    pin_current_unlocked()
+    pin_current_unlocked(root)
 }
 
-fn pin_current_unlocked() -> Result<Value> {
+fn pin_current_unlocked(root: &Path) -> Result<Value> {
     let identity = build_identity::current();
     let executable = current_executable()?;
-    pin_executable_with_source(
+    pin_executable_with_source_in_root(
+        root,
         &executable,
         &identity.display,
         build_source_provenance(&identity),
@@ -828,22 +829,30 @@ pub fn pin_current_queued_in_root(
             return Err(error);
         }
     };
-    let runtime = pin_current_unlocked()?;
+    let runtime = pin_current_unlocked(root)?;
     drop(lock);
     Ok(runtime)
 }
 
 fn current_executable() -> Result<PathBuf> {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(executable) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) {
-        let executable = PathBuf::from(executable);
-        // The fixture is materialized here, on first read, instead of when the
-        // hermetic home was built: only the handful of readers of this contract
-        // need its bytes, and the copy is of a multi-hundred-megabyte binary.
-        crate::test_support::ensure_test_controller_fixture(&executable);
-        return Ok(executable);
+    #[cfg(test)]
+    {
+        return Ok(crate::test_support::controller_runtime_test_executable());
     }
 
+    #[cfg(all(not(test), feature = "test-support"))]
+    {
+        if std::env::var_os(TEST_CONTROLLER_RUNTIME_USE_ENV).is_some() {
+            if let Some(executable) = std::env::var_os(TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV) {
+                let executable = PathBuf::from(executable);
+                crate::test_support::ensure_test_controller_fixture(&executable);
+                return Ok(executable);
+            }
+        }
+        return Ok(crate::test_support::controller_runtime_test_executable());
+    }
+
+    #[cfg(all(not(test), not(feature = "test-support")))]
     std::env::current_exe().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -855,12 +864,22 @@ fn current_executable() -> Result<PathBuf> {
 /// Seal a verified executable for a command-scoped controller continuation.
 /// The returned pin is content-addressed, executable, and self-identifying.
 pub fn pin_executable(executable: &Path, identity: &str) -> Result<Value> {
-    pin_executable_with_source(executable, identity, unavailable_source_provenance())
+    pin_executable_with_source_in_root(
+        &runtime_root()?,
+        executable,
+        identity,
+        unavailable_source_provenance(),
+    )
 }
 
-fn pin_executable_with_source(executable: &Path, identity: &str, source: Value) -> Result<Value> {
+fn pin_executable_with_source_in_root(
+    root: &Path,
+    executable: &Path,
+    identity: &str,
+    source: Value,
+) -> Result<Value> {
     let digest = controller_executable_digest(executable)?;
-    let pinned_path = pinned_path(identity, &digest)?;
+    let pinned_path = pinned_path_in_root(root, identity, &digest);
     publish_pin(executable, &pinned_path, &digest)?;
 
     let runtime = runtime_pin(identity, executable, &pinned_path, &digest, source);
@@ -932,7 +951,8 @@ pub fn materialize_source_commit(source: &str, commit: &str, identity: &str) -> 
             None,
         ));
     }
-    pin_executable_with_source(
+    pin_executable_with_source_in_root(
+        &runtime_root()?,
         &target.target_dir().join("release/homeboy"),
         identity,
         json!({
@@ -1040,7 +1060,7 @@ pub fn admit_current_for_with_cancellation_check_in_root(
             return Err(error);
         }
     };
-    let runtime = pin_current_unlocked()?;
+    let runtime = pin_current_unlocked(root)?;
     write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     validate_pin(&runtime)?;
     heartbeat_admission_owner(&lock_path, request_id, Some(&runtime))?;
@@ -1064,11 +1084,7 @@ pub fn admission_status(request_id: &str) -> Result<Value> {
 /// admitting siblings do not. The projection below resolves nothing but the
 /// admission queue beneath `runtime_root`, so a rooted status can never report
 /// this installation's queue position against another installation's owner.
-/// `pin_current`, `admit_current_for`, `activate_installed_generation`,
-/// `migrate_legacy_pin`, and `recover_pin` all also publish into the
-/// content-addressed pin store, which is deliberately process-global (#7505);
-/// rooting only their queue half is exactly the split this campaign forbids.
-/// Nothing here touches that store.
+/// Unlike mutation, this projection does not publish pin bytes.
 pub fn admission_status_at(runtime_root: &Path, request_id: &str) -> Result<Value> {
     fs::create_dir_all(runtime_root).map_err(|error| {
         Error::internal_io(
@@ -1154,7 +1170,12 @@ pub fn activate_installed_generation(executable: &Path) -> Result<Value> {
 pub fn activate_installed_generation_in_root(root: &Path, executable: &Path) -> Result<Value> {
     let lock_path = root.join(ADMISSION_LOCK_DIR);
     let _lock = acquire_admission_lock(&lock_path)?;
-    let runtime = pin_executable(executable, &activated_executable_identity(executable)?)?;
+    let runtime = pin_executable_with_source_in_root(
+        root,
+        executable,
+        &activated_executable_identity(executable)?,
+        unavailable_source_provenance(),
+    )?;
     validate_pin(&runtime)?;
     write_active_generation(&root.join(ACTIVE_GENERATION_FILE), &runtime)?;
     Ok(runtime)
@@ -1238,7 +1259,7 @@ fn mutation_identity_mismatch(
 /// `migrate_legacy_pin` under an already-resolved runtime root.
 pub fn migrate_legacy_pin_in_root(root: &Path, runtime: &Value) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
-    migrate_legacy_pin_unlocked(runtime)
+    migrate_legacy_pin_unlocked(root, runtime)
 }
 
 /// [`migrate_legacy_pin_and_persist`] under an already-resolved runtime root.
@@ -1248,14 +1269,14 @@ pub fn migrate_legacy_pin_and_persist_in_root(
     persist: impl FnOnce(&Value) -> Result<()>,
 ) -> Result<Value> {
     let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_DIR))?;
-    let migrated = migrate_legacy_pin_unlocked(runtime)?;
+    let migrated = migrate_legacy_pin_unlocked(runtime_root, runtime)?;
     if &migrated != runtime {
         persist(&migrated)?;
     }
     Ok(migrated)
 }
 
-fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
+fn migrate_legacy_pin_unlocked(root: &Path, runtime: &Value) -> Result<Value> {
     let identity =
         required_runtime_string(runtime, "/originating/build_identity", "build identity")?;
     let current = required_runtime_string(
@@ -1271,7 +1292,7 @@ fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
         verify_executable(current, "legacy controller runtime")?;
         verify_self_status_identity(current, identity)?;
         let digest = executable_digest(current)?;
-        let destination = pinned_path(identity, &digest)?;
+        let destination = pinned_path_in_root(root, identity, &digest);
         publish_pin(current, &destination, &digest)?;
 
         let mut migrated = runtime.clone();
@@ -1288,7 +1309,7 @@ fn migrate_legacy_pin_unlocked(runtime: &Value) -> Result<Value> {
     }
 
     let digest = required_runtime_string(runtime, "/originating/sha256", "content digest")?;
-    let destination = pinned_path(identity, digest)?;
+    let destination = pinned_path_in_root(root, identity, digest);
     if current == destination {
         validate_pin(runtime)?;
         return Ok(runtime.clone());
@@ -1316,7 +1337,7 @@ pub fn recover_pin_in_root(
     source: Option<&Path>,
 ) -> Result<Value> {
     let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
-    recover_pin_unlocked(runtime, artifact, source)
+    recover_pin_unlocked(root, runtime, artifact, source)
 }
 
 /// Publish a recovered pin and persist its durable reference under one
@@ -1339,12 +1360,13 @@ pub fn recover_pin_and_persist_in_root(
     persist: impl FnOnce(&Value) -> Result<()>,
 ) -> Result<Value> {
     let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_DIR))?;
-    let recovered = recover_pin_unlocked(runtime, artifact, source)?;
+    let recovered = recover_pin_unlocked(runtime_root, runtime, artifact, source)?;
     persist(&recovered)?;
     Ok(recovered)
 }
 
 fn recover_pin_unlocked(
+    root: &Path,
     runtime: &Value,
     artifact: Option<&Path>,
     source: Option<&Path>,
@@ -1355,7 +1377,7 @@ fn recover_pin_unlocked(
     // Recovery never repairs an existing path in place. A corrupted canonical
     // path can still be referenced by another durable record, so this record
     // receives a distinct immutable snapshot after the artifact is verified.
-    let destination = recovered_pinned_path(identity, expected)?;
+    let destination = recovered_pinned_path_in_root(root, identity, expected);
     if let Some(artifact) = artifact {
         verify_artifact(artifact, expected, identity)?;
         publish_pin(artifact, &destination, expected)?;
@@ -2895,36 +2917,28 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
     }
 }
 
+#[cfg(test)]
 fn pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(controller_runtime_store_root()?
-        .join("controller-runtimes")
-        .join(format!(
-            "{}-{}",
-            paths::sanitize_path_segment(identity),
-            digest
-        ))
-        .join("homeboy"))
+    Ok(pinned_path_in_root(&runtime_root()?, identity, digest))
 }
 
-fn recovered_pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(controller_runtime_store_root()?
-        .join("controller-runtimes")
-        .join(format!(
-            "{}-{}",
-            paths::sanitize_path_segment(identity),
-            digest
-        ))
-        .join(format!("recovery-{}", uuid::Uuid::new_v4()))
-        .join("homeboy"))
+fn pinned_path_in_root(root: &Path, identity: &str, digest: &str) -> PathBuf {
+    root.join(format!(
+        "{}-{}",
+        paths::sanitize_path_segment(identity),
+        digest
+    ))
+    .join("homeboy")
 }
 
-fn controller_runtime_store_root() -> Result<PathBuf> {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(path) = std::env::var_os(TEST_CONTROLLER_RUNTIME_STORE_ENV) {
-        return Ok(PathBuf::from(path));
-    }
-
-    paths::homeboy_data()
+fn recovered_pinned_path_in_root(root: &Path, identity: &str, digest: &str) -> PathBuf {
+    root.join(format!(
+        "{}-{}",
+        paths::sanitize_path_segment(identity),
+        digest
+    ))
+    .join(format!("recovery-{}", uuid::Uuid::new_v4()))
+    .join("homeboy")
 }
 
 fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Result<()> {
@@ -4319,8 +4333,9 @@ mod tests {
     #[test]
     fn pin_current_uses_the_explicit_test_controller_fixture() {
         crate::test_support::with_isolated_home(|_| {
+            let explicit = tempfile::tempdir().expect("explicit runtime root");
             let runtime =
-                pin_current_in_root(&test_runtime_root()).expect("pin explicit controller fixture");
+                pin_current_in_root(explicit.path()).expect("pin explicit controller fixture");
             let source = runtime
                 .pointer("/originating/executable")
                 .and_then(Value::as_str)
@@ -4340,6 +4355,7 @@ mod tests {
                 source,
                 std::env::current_exe().expect("current test executable")
             );
+            assert!(pinned.starts_with(explicit.path()));
             assert_eq!(
                 executable_identity(&pinned, None).expect("fixture identity"),
                 build_identity::current().display

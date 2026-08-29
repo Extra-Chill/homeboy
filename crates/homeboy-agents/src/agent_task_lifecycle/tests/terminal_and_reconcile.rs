@@ -2447,10 +2447,8 @@ fn acceptance_rejects_a_promotion_that_changes_during_authority_verification() {
 /// false, None, …)` with a stub admission. That is the exact flag pair the
 /// ambient `retry` uses (`retry_in_store` → `retry_with_force_inner_in_store`
 /// with `force: false, enforce_lineage_reservation: false`); only the
-/// controller-runtime admission is stubbed, because that queue lives under
-/// `paths::controller_runtimes_store()` and is deliberately process-global —
-/// a migrated test enqueuing against the real operator data root could block
-/// on its cross-process lock. Same substitution as
+/// controller-runtime admission is stubbed so this test controls the exact
+/// runtime metadata it exercises. Same substitution as
 /// `retry_submits_new_run_from_existing_plan`.
 ///
 /// `revalidate_durable_attestation` stays ambient: it reads no durable state at

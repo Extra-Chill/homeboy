@@ -1436,7 +1436,29 @@ pub fn reconcile_recipe_attempt_for_continuation(
     recipe: &AgentTaskCookRecipe,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    let record = super::cook_pre_execution::recover_recipe_attempt(run_id)?.ok_or_else(|| {
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    reconcile_recipe_attempt_for_continuation_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        recipe,
+        run_id,
+    )
+}
+
+fn reconcile_recipe_attempt_for_continuation_in_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let record = super::cook_pre_execution::recover_recipe_attempt_with_stores(
+        recipe_store,
+        lifecycle_store,
+        run_id,
+    )?
+    .ok_or_else(|| {
         Error::internal_unexpected(
             "Cook recipe unexpectedly disappeared during continuation recovery",
         )
@@ -1445,15 +1467,19 @@ pub fn reconcile_recipe_attempt_for_continuation(
     // Promotion has copied and verified the selected artifact into the
     // controller-owned destination. Once its gates are green, finalization no
     // longer consumes the provider aggregate's artifact transport.
-    let finalized_candidate = super::cook_promotion::persisted_promotion_for_attempt(run_id)?
-        .is_some_and(|promotion| {
-            promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-                && promotion.finalization_eligible(false)
-        });
+    let finalized_candidate =
+        super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
+            .is_some_and(|promotion| {
+                promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                    && promotion.finalization_eligible(false)
+            });
     if finalized_candidate {
         return Ok(record);
     }
-    if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(run_id)? {
+    if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness_in_store(
+        lifecycle_store,
+        run_id,
+    )? {
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
             format!(
@@ -2183,6 +2209,8 @@ fn consume_claimed_with_dispatcher_policy(
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
     allow_historical_terminal: bool,
 ) -> Result<i32> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
     let recipe = match store.load_recipe(&claim.continuation().cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
@@ -2222,10 +2250,16 @@ fn consume_claimed_with_dispatcher_policy(
             .map(|attempt| attempt.attempt)
             .unwrap_or(0);
     }
-    if agent_task_lifecycle::run_record_exists(&claim.continuation().run_id)? {
-        if let Err(error) =
-            reconcile_recipe_attempt_for_continuation(&recipe, &claim.continuation().run_id)
-        {
+    if agent_task_lifecycle::run_record_exists_in_store(
+        &lifecycle_store,
+        &claim.continuation().run_id,
+    )? {
+        if let Err(error) = reconcile_recipe_attempt_for_continuation_in_stores(
+            store,
+            &lifecycle_store,
+            &recipe,
+            &claim.continuation().run_id,
+        ) {
             if error.retryable == Some(true) {
                 claim.retry()?;
             } else {

@@ -3080,11 +3080,8 @@ pub fn load_plan_for_execution_in_store(
 /// Validate a queued lifecycle's pinned controller against an explicitly rooted
 /// store.
 ///
-/// The record read and the legacy-pin migration write both follow
-/// `lifecycle_store`. The immutable controller-runtime pin store that
-/// `controller_runtime::validate` consults is deliberately left process-global:
-/// it is a content-addressed executable cache shared across homes, not durable
-/// lifecycle state, so it is not one of this store's roots.
+/// The record read, legacy-pin migration, and immutable controller runtime all
+/// follow `lifecycle_store`.
 pub fn validate_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -3270,11 +3267,8 @@ fn migrate_record_controller_runtime_in_store(
 /// against one home's provenance and persisting into another leaves the run this
 /// operator is trying to re-enter still holding the broken pin.
 ///
-/// The immutable controller-runtime store that `recover_pin_and_persist`
-/// republishes into is deliberately left process-global, for the same reason
-/// `validate_controller_runtime_in_store` leaves it alone: it is a
-/// content-addressed executable cache shared across homes, not durable lifecycle
-/// state, so it is not one of this store's roots.
+/// Recovery republishes the immutable pin under this lifecycle store's runtime
+/// root before persisting the repaired reference.
 pub fn recover_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
