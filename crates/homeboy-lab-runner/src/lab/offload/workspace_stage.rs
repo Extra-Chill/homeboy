@@ -784,19 +784,8 @@ fn materialize_agent_task_evidence_inputs_on_runner(
                 None,
             )
         })?;
-        let relative = canonical.strip_prefix(&source).map_err(|_| {
-            Error::validation_invalid_argument(
-                "provider_evidence",
-                "Lab offload evidence must be projected inside the Cook workspace",
-                Some(path.clone()),
-                None,
-            )
-        })?;
-        let remote = format!(
-            "{}/{}",
-            remote_cwd.trim_end_matches('/'),
-            relative.display()
-        );
+        let remote =
+            runner_provider_evidence_path(&source, &canonical, remote_cwd, &declared.sha256)?;
         let parent = remote.rsplit_once('/').map_or("/", |(parent, _)| parent);
         transfer.ensure_directory(parent)?;
         transfer.upload_private_evidence_atomic(
@@ -810,11 +799,39 @@ fn materialize_agent_task_evidence_inputs_on_runner(
         )?;
         entries.push(workspace_mapping_entry_for_materialized_file(
             "provider_evidence",
-            "<controller-projected-evidence>",
+            canonical.display().to_string(),
             remote,
         ));
     }
     Ok(entries)
+}
+
+fn runner_provider_evidence_path(
+    source: &Path,
+    evidence: &Path,
+    remote_cwd: &str,
+    digest: &str,
+) -> Result<String> {
+    if let Ok(relative) = evidence.strip_prefix(source) {
+        return Ok(format!(
+            "{}/{}",
+            remote_cwd.trim_end_matches('/'),
+            relative.display()
+        ));
+    }
+    let digest = digest.trim_start_matches("sha256:");
+    if digest.is_empty() || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab evidence SHA-256 cannot identify a runner staging path",
+            Some(digest.to_string()),
+            None,
+        ));
+    }
+    Ok(format!(
+        "{}-homeboy-artifacts/provider-evidence/{digest}",
+        remote_cwd.trim_end_matches('/'),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1426,6 +1443,27 @@ mod tests {
                 }
             )])
         );
+    }
+
+    #[test]
+    fn controller_owned_evidence_stages_outside_runner_candidate_by_digest() {
+        assert_eq!(
+            runner_provider_evidence_path(
+                Path::new("/controller/candidate"),
+                Path::new("/controller/artifacts/provider-evidence/blobs/abc"),
+                "/runner/candidate",
+                "sha256:abc",
+            )
+            .expect("external controller evidence"),
+            "/runner/candidate-homeboy-artifacts/provider-evidence/abc"
+        );
+        assert!(runner_provider_evidence_path(
+            Path::new("/controller/candidate"),
+            Path::new("/controller/artifacts/evidence"),
+            "/runner/candidate",
+            "sha256:../escape",
+        )
+        .is_err());
     }
 
     #[test]
