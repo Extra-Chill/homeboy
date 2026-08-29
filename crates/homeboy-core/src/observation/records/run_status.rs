@@ -41,6 +41,7 @@ pub const RUNNING_HEARTBEAT_STALE_MINUTES: i64 = 30;
 pub const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Running,
     Pass,
@@ -65,6 +66,8 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
+    /// This status as its canonical wire string. Serde and this allocation-free
+    /// storage/query form are pinned together below (#13400).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -192,5 +195,26 @@ mod tests {
                 "{status:?} owns its own outcome"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::RunStatus;
+
+    #[test]
+    fn run_status_matches_its_serialized_form() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                RunStatus::Running,
+                RunStatus::Pass,
+                RunStatus::Fail,
+                RunStatus::Error,
+                RunStatus::Skipped,
+                RunStatus::Stale,
+                RunStatus::HandedOff,
+            ]
+        );
     }
 }

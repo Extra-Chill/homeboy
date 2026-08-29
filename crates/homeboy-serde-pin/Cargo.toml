@@ -1,0 +1,17 @@
+[package]
+name = "homeboy-serde-pin"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Test macro pinning enum labels to their serde wire form"
+repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
+
+[lib]
+name = "homeboy_serde_pin"
+path = "src/lib.rs"
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
