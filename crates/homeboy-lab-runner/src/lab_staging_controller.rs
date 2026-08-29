@@ -1070,6 +1070,20 @@ where
             None,
         ));
     }
+    if let Some(durable_plan) = request.durable_agent_task_plan {
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &lab_lifecycle_store,
+            homeboy_agents::agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id,
+                phase: "materializing",
+                remote_workspace: None,
+                source_checkout: None,
+                provider_rotation: None,
+                durable_plan: Some(durable_plan),
+            },
+        )?;
+    }
     let daemon = match ensure_daemon() {
         Ok(daemon) => daemon,
         Err(daemon_error) => {
@@ -4544,6 +4558,55 @@ mod tests {
             Some(run_id),
         )
         .expect("submit durable attempt");
+    }
+
+    #[test]
+    fn detached_staging_publishes_planned_ownership_before_daemon_convergence() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let _adapter_guard = global_state_lock().lock().expect("adapter lock");
+            clear_installed_adapter();
+            register();
+            enable_production_routing();
+
+            let run_id = "detached-staging-daemon-convergence";
+            let plan = homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(
+                "detached-staging-daemon-convergence",
+                Vec::new(),
+            );
+            submit_recipe_run(run_id);
+            let args = vec!["agent-task".to_string(), "run-plan".to_string()];
+            let mut request = recipe_request(Some(recipe_command()), &args, HashMap::new());
+            request.durable_agent_task_plan = Some(&plan);
+
+            let result = submit_detached_staging_with_daemon_ensure(
+                run_id,
+                "lab-1",
+                crate::RunnerTunnelMode::DirectSsh,
+                &request,
+                || {
+                    let report =
+                        homeboy_agents::agent_task_service::reconcile_stale_active_runs(false)
+                            .expect("reconcile during daemon convergence");
+                    assert_eq!(report.reconciled, 0, "{report:#?}");
+
+                    let record = homeboy_agents::agent_task_lifecycle::exact_record(run_id)
+                        .expect("planned Lab proxy");
+                    assert!(!record.state.is_terminal(), "{record:#?}");
+                    assert_eq!(
+                        record.metadata["runner_execution_record"]["status"],
+                        "planned"
+                    );
+                    assert_eq!(record.metadata["phase"], "materializing");
+                    Err(Error::internal_unexpected("stop after ownership assertion"))
+                },
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("fixture must stop before controller daemon submission"),
+            };
+
+            assert_ne!(error.message, "missing_runner_pid");
+        });
     }
 
     #[cfg(unix)]

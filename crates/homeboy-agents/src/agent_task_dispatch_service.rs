@@ -136,6 +136,7 @@ pub struct AgentTaskDispatchRequest {
     pub cwd: Option<String>,
     pub workspace: Option<String>,
     pub repo: Option<String>,
+    pub component: Option<String>,
     pub task_url: Option<String>,
     pub backend: String,
     pub selector: Option<String>,
@@ -226,6 +227,26 @@ fn dispatch_with_provider_catalog(
         backend_selection,
         executor,
     )
+}
+
+/// Validate every provider declaration needed to dispatch this request without
+/// running live runtime or workspace readiness probes.
+pub fn preflight_dispatch_provider_admission(
+    request: &AgentTaskDispatchRequest,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<()> {
+    preflight_provider_credentials_for_backend(
+        catalog.providers(),
+        &request.backend,
+        request.selector.as_deref(),
+    )?;
+    let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
+        catalog.provider_requires_cwd_git_checkout(backend, selector)
+    })?;
+    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    catalog.validate_selected_models(&plan)?;
+    preflight_dispatch_provider_secrets(&plan)?;
+    preflight_plan_provider_config_with_providers(&plan, catalog.providers())
 }
 
 pub fn dispatch_with_provider_requirements(
@@ -353,6 +374,8 @@ pub struct AgentTaskDispatchCommand {
     pub cwd: Option<String>,
     pub workspace: Option<String>,
     pub repo: Option<String>,
+    /// Configured execution component when it differs from the owning repo.
+    pub component: Option<String>,
     pub task_url: Option<String>,
     pub backend: Option<String>,
     pub selector: Option<String>,
@@ -567,6 +590,20 @@ pub fn resolve_dispatch_request_with_default(
     )
 }
 
+/// Resolve a dispatch request against one observed provider catalog.
+///
+/// Admission callers use this when the selected route and the remediation
+/// choices must come from the same catalog snapshot.
+pub fn resolve_dispatch_request_with_default_and_catalog(
+    command: AgentTaskDispatchCommand,
+    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<AgentTaskDispatchRequest> {
+    resolve_dispatch_request_with_sources(command, default_backend, config_default_backend, || {
+        catalog.backends()
+    })
+}
+
 /// The configured Homeboy-config `agent_task.default_backend`, when set. Read via
 /// the public `defaults` surface so the dispatch service can name the selection
 /// source without touching fleet-owned provider policy code (#5685).
@@ -654,14 +691,16 @@ fn resolve_dispatch_request_with_sources(
         None => match command.backend.clone() {
             Some(backend) => (backend, BackendSelectionSource::Cli),
             None => {
-                let resolved = default_backend(command.repo.as_deref())?.ok_or_else(|| {
-                    // The provider catalog already knows every dispatchable
-                    // backend at this point, so discover it rather than making
-                    // the operator run `agent-task providers` and parse JSON to
-                    // answer a question this command can answer (#11478).
-                    // Discovery only happens on the failure path.
-                    missing_default_backend_error(&available_backends())
-                })?;
+                let resolved =
+                    default_backend(command.component.as_deref().or(command.repo.as_deref()))?
+                        .ok_or_else(|| {
+                            // The provider catalog already knows every dispatchable
+                            // backend at this point, so discover it rather than making
+                            // the operator run `agent-task providers` and parse JSON to
+                            // answer a question this command can answer (#11478).
+                            // Discovery only happens on the failure path.
+                            missing_default_backend_error(&available_backends())
+                        })?;
                 // The policy resolver prefers component/extension defaults over the
                 // Homeboy config default; if the resolved value matches the config
                 // default we attribute it to config, otherwise to higher-priority
@@ -696,6 +735,7 @@ fn resolve_dispatch_request_with_sources(
         cwd: command.cwd,
         workspace: command.workspace,
         repo: command.repo,
+        component: command.component,
         task_url: command.task_url,
         backend,
         selector: submitted_policy
@@ -788,6 +828,7 @@ mod tests {
             cwd: None,
             workspace: None,
             repo: None,
+            component: None,
             task_url: None,
             backend: "claude-code".to_string(),
             selector: None,
@@ -949,6 +990,27 @@ mod tests {
         assert_eq!(selection.backend, "opencode");
         assert_eq!(selection.source, BackendSelectionSource::Config);
         assert!(!selection.overrides_default);
+    }
+
+    #[test]
+    fn component_policy_resolution_does_not_replace_repository_identity() {
+        let mut command = command_with_backend(None);
+        command.repo = Some("blocks-engine".to_string());
+        command.component = Some("php-transformer".to_string());
+
+        let request = resolve_dispatch_request_with_default_and_config(
+            command,
+            |component| {
+                assert_eq!(component, Some("php-transformer"));
+                Ok(Some("opencode".to_string()))
+            },
+            || None,
+        )
+        .expect("component-scoped request");
+
+        assert_eq!(request.repo.as_deref(), Some("blocks-engine"));
+        assert_eq!(request.component.as_deref(), Some("php-transformer"));
+        assert_eq!(request.backend, "opencode");
     }
 
     #[test]
