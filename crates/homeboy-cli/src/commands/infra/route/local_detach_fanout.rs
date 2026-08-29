@@ -127,10 +127,10 @@ fn detachable_local_fanout(cli: &Cli) -> homeboy::core::Result<Option<Detachable
                     "Add `--run-plan` to execute the wave from this machine, which is the coordinator that can be detached.",
                 ));
             }
-            if args.dry_run {
+            if args.preview {
                 return Err(no_coordinator_error(
-                    "agent-task fanout cook-batch --dry-run",
-                    "A dry run plans without executing, so it owns no coordinator. Drop `--dry-run` to detach a real wave.",
+                    "agent-task fanout cook-batch --preview",
+                    "A preview plans without executing, so it owns no coordinator. Drop `--preview` to detach a real wave.",
                 ));
             }
             Ok(Some(match &args.fanout_id {

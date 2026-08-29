@@ -4205,7 +4205,7 @@ fn agent_task_local_fanout_warning(
                 AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
                     command: AgentTaskFanoutCommand::CookBatch(args),
                 }),
-        }) if args.run_plan && !args.dry_run => {
+        }) if args.run_plan && !args.preview => {
             if args.issues.len() <= 1 {
                 return None;
             }

@@ -9,8 +9,10 @@ pub struct RunPlanArgs {
     /// `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json`.
     #[arg(long, value_name = "JSON|@FILE|-")]
     pub plan: String,
+    /// Durable run ID to record for this planned lifecycle.
     #[arg(long, value_name = "ID")]
     pub record_run_id: Option<String>,
+    /// Maximum execution time in milliseconds.
     #[arg(long = "timeout-ms", value_name = "MS")]
     pub timeout_ms: Option<u64>,
 }
@@ -18,6 +20,7 @@ pub struct RunPlanArgs {
 pub struct RunArgs {
     /// Exact durable run id to execute. Use this to bypass older queued work.
     pub run_id: String,
+    /// Maximum execution time in milliseconds.
     #[arg(long = "timeout-ms", value_name = "MS")]
     pub timeout_ms: Option<u64>,
 }
@@ -33,6 +36,7 @@ pub struct SubmitArgs {
     /// `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json`.
     #[arg(long, value_name = "JSON|@FILE|-")]
     pub plan: String,
+    /// Optional durable run ID for the submitted plan.
     #[arg(long, value_name = "ID")]
     pub run_id: Option<String>,
 }
@@ -44,15 +48,19 @@ pub struct ValidatePlanArgs {
 }
 #[derive(Args, Debug)]
 pub struct LifecycleReadArgs {
+    /// Durable run or Cook ID to inspect.
     pub run_id: String,
     /// Inspect this exact lifecycle record instead of resolving a Cook ID to its
     /// current attempt.
     #[arg(long, conflicts_with = "bridge")]
     pub exact: bool,
+    /// Read through the runner bridge instead of controller-only state.
     #[arg(long)]
     pub bridge: bool,
+    /// Resume bridged events after this cursor.
     #[arg(long, value_name = "CURSOR", requires = "bridge")]
     pub since_cursor: Option<u64>,
+    /// Return complete lifecycle details instead of the bounded summary.
     #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
     /// Answer from durable controller state only, without reaching the runner.
@@ -68,13 +76,18 @@ pub struct LifecycleReadArgs {
 #[cfg_attr(test, derive(Default))]
 #[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
+    /// Durable run or Cook ID whose status to inspect.
     pub run_id: String,
+    /// Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt.
     #[arg(long, conflicts_with = "bridge")]
     pub exact: bool,
+    /// Read status through the runner bridge.
     #[arg(long)]
     pub bridge: bool,
+    /// Resume bridged status events after this cursor.
     #[arg(long, value_name = "CURSOR", requires = "bridge")]
     pub since_cursor: Option<u64>,
+    /// Return complete status details instead of the bounded summary.
     #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
     /// Present `--full` as a bounded, outcome-first summary with drill-down refs.
@@ -87,6 +100,7 @@ pub struct StatusArgs {
     /// for scripts that deliberately gate on an actionable Cook.
     #[arg(long, conflicts_with = "bridge")]
     pub strict_subject_exit: bool,
+    /// Answer from durable controller state only, without reaching the runner.
     #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
     pub no_runner_probe: bool,
     /// Follow this durable status until it reaches a terminal state or the timeout expires.
@@ -124,6 +138,7 @@ impl From<StatusArgs> for LifecycleReadArgs {
 }
 #[derive(Args, Debug)]
 pub struct LogsArgs {
+    /// Durable run or Cook ID whose logs to retrieve.
     pub run_id: String,
     /// Include unprojected runner transport frames under `raw_events` for diagnostics.
     #[arg(long)]
@@ -131,11 +146,15 @@ pub struct LogsArgs {
 }
 #[derive(Args, Debug)]
 pub struct EvidenceArgs {
+    /// Durable run or Cook ID whose evidence to retrieve.
     pub run_id: String,
+    /// Restrict results to this evidence kind.
     #[arg(long = "kind", value_name = "KIND")]
     pub kind: Option<String>,
+    /// Restrict results to this task ID.
     #[arg(long = "task", value_name = "TASK_ID")]
     pub task: Option<String>,
+    /// Return only evidence associated with failures.
     #[arg(long = "failure-only")]
     pub failure_only: bool,
     /// Return every matching evidence record rather than the bounded preview.
@@ -144,6 +163,7 @@ pub struct EvidenceArgs {
 }
 #[derive(Args, Debug)]
 pub struct DiagnoseArgs {
+    /// Durable run or Cook ID to diagnose.
     pub run_id: String,
     /// Hydrate every available evidence summary rather than the bounded preview.
     #[arg(long)]
@@ -484,15 +504,20 @@ mod tests {
 }
 #[derive(Args, Debug)]
 pub struct ReplayProviderBoundaryArgs {
+    /// Durable run whose provider boundary to replay.
     pub run_id: String,
+    /// Restrict the replay to this task ID.
     #[arg(long = "task", value_name = "TASK_ID")]
     pub task: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct RetryArgs {
+    /// Durable run or Cook ID to retry.
     pub run_id: String,
+    /// Durable ID to assign to the new retry run.
     #[arg(long, value_name = "ID")]
     pub new_run_id: Option<String>,
+    /// Execute the retry immediately after creating it.
     #[arg(long)]
     pub run: bool,
     /// Permit a new retry after every prior retry in this lineage is terminal.
@@ -501,7 +526,9 @@ pub struct RetryArgs {
 }
 #[derive(Args, Debug)]
 pub struct CancelArgs {
+    /// Durable run or Cook ID to cancel.
     pub run_id: String,
+    /// Optional explanation recorded with the cancellation.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 }
@@ -509,6 +536,7 @@ pub struct CancelArgs {
 pub struct QuarantineArgs {
     /// Exact durable run id. Cook aliases are not accepted for mutations.
     pub run_id: String,
+    /// Explanation recorded with the quarantine action.
     #[arg(long, value_name = "TEXT")]
     pub reason: String,
 }
@@ -519,19 +547,23 @@ pub struct RearmArgs {
 }
 #[derive(Args, Debug)]
 pub struct ReviewArgs {
+    /// Durable run or Cook ID to review.
     pub run_id: String,
     /// Include complete lifecycle, promotion, and gate evidence. The default
     /// keeps one actionable candidate and bounded gate findings.
     #[arg(long)]
     pub full: bool,
+    /// Target managed worktree handle for the review candidate.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
+    /// Deprecated shell command for the promotion apply provider.
     #[arg(
         long,
         value_name = "COMMAND",
         long_help = "Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`."
     )]
     pub provider_command: Option<String>,
+    /// Exact argv element for the promotion apply provider; repeat per element.
     #[arg(
         long = "provider-argv",
         value_name = "ARG",
@@ -542,18 +574,22 @@ pub struct ReviewArgs {
 }
 #[derive(Args, Debug)]
 pub struct PromoteArgs {
+    /// Durable run or Cook ID that supplies the promotion candidate.
     pub source: String,
+    /// Target managed worktree handle for the promoted candidate.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: String,
     /// Declared base branch resolved immediately before promotion gates run.
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
+    /// Deprecated shell command for the promotion apply provider.
     #[arg(
         long,
         value_name = "COMMAND",
         long_help = "Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`."
     )]
     pub provider_command: Option<String>,
+    /// Exact argv element for the promotion apply provider; repeat per element.
     #[arg(
         long = "provider-argv",
         value_name = "ARG",
@@ -561,10 +597,13 @@ pub struct PromoteArgs {
         long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
+    /// Restrict promotion to this task ID.
     #[arg(long, value_name = "TASK_ID")]
     pub task_id: Option<String>,
+    /// Restrict promotion to this artifact ID.
     #[arg(long, value_name = "ARTIFACT_ID")]
     pub artifact_id: Option<String>,
+    /// Validate the promotion without applying it.
     #[arg(long)]
     pub dry_run: bool,
     /// Include complete promotion and gate evidence.
@@ -575,6 +614,7 @@ pub struct PromoteArgs {
     /// programs remain outside reviewer-facing command output.
     #[arg(long = "gates-from-cook-recipe")]
     pub gates_from_cook_recipe: bool,
+    /// Verification gate configuration to run before promotion.
     #[command(flatten)]
     pub gates: VerifyGateArgs,
 }
@@ -618,41 +658,55 @@ pub struct FinalizePrArgs {
         conflicts_with = "manual_finalization"
     )]
     pub recover: Option<String>,
+    /// Durable run ID for a manual finalization record.
     #[arg(long, value_name = "ID", required_unless_present = "recover")]
     pub run_id: Option<String>,
+    /// Worktree path containing the manual finalization candidate.
     #[arg(long, value_name = "PATH", required_unless_present = "recover")]
     pub path: Option<String>,
+    /// Base branch for the manual finalization candidate.
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
     /// Immutable base commit SHA recorded before the declared verification gates ran.
     #[arg(long, value_name = "SHA")]
     pub verified_base_sha: Option<String>,
+    /// Head branch for the manual finalization candidate.
     #[arg(long, value_name = "BRANCH")]
     pub head: Option<String>,
+    /// Pull request title for the manual finalization candidate.
     #[arg(long, value_name = "TEXT", required_unless_present = "recover")]
     pub title: Option<String>,
+    /// Commit message for the manual finalization candidate.
     #[arg(long, value_name = "TEXT", required_unless_present = "recover")]
     pub commit_message: Option<String>,
+    /// Reviewer-facing evidence for the finalization dossier.
     #[command(flatten)]
     pub evidence: review::FinalizePrEvidenceArgs,
+    /// Recorded result for a verification gate: `NAME=STATUS[:DETAIL]`.
     #[arg(long = "gate-result", value_name = "NAME=STATUS[:DETAIL]")]
     pub gate_results: Vec<String>,
     /// Execute a deterministic verification command against the committed manual candidate. Repeat for multiple gates.
     #[arg(long, value_name = "COMMAND")]
     pub verify: Vec<String>,
+    /// Changed file path to include in the finalization dossier.
     #[arg(long = "changed-file", value_name = "PATH")]
     pub changed_files: Vec<String>,
+    /// Branch that must not be updated by finalization; repeat for multiple branches.
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
+    /// Description of how AI was used for the finalization.
     #[arg(long, default_value = "", value_name = "TEXT")]
     pub ai_used_for: String,
+    /// Summary of the finalization candidate.
     #[arg(long, value_name = "TEXT")]
     pub summary: Option<String>,
+    /// User-visible change description; repeat for multiple entries.
     #[arg(long = "what-changed", value_name = "TEXT")]
     pub what_changed: Vec<String>,
     /// Reviewer test step. Strict shape: COMMAND=>EXPECTED.
     #[arg(long = "test-step", value_name = "COMMAND=>EXPECTED")]
     pub test_steps: Vec<String>,
+    /// Compatibility notes for the finalization candidate.
     #[arg(long, value_name = "TEXT")]
     pub compatibility: Option<String>,
     /// Closing issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL.
@@ -661,6 +715,7 @@ pub struct FinalizePrArgs {
     /// Related issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL.
     #[arg(long = "relates-to", value_name = "ISSUE_REF")]
     pub relates_to: Vec<String>,
+    /// Explicit reviewer override in `TARGET=VALUE@PROVENANCE` form.
     #[arg(long = "review-override", value_name = "TARGET=VALUE@PROVENANCE")]
     pub review_overrides: Vec<String>,
     /// Validate the complete hydrated dossier and candidate without publishing.
@@ -692,6 +747,7 @@ pub struct VerifyReplacementArgs {
     /// Explicit operator authorization for the replacement proof recorded by this command.
     #[arg(long, value_name = "TEXT")]
     pub authorize_external_proof: String,
+    /// Verification gate configuration for the replacement candidate.
     #[command(flatten)]
     pub gates: VerifyGateArgs,
 }
@@ -706,12 +762,16 @@ pub struct GateFeedbackArgs {
     /// to read stdin. A bare path is NOT accepted — use `@/path/task.json`.
     #[arg(long = "source-task", value_name = "JSON|@FILE|-")]
     pub source_task: String,
+    /// Current feedback attempt number.
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub attempt: u32,
+    /// Maximum feedback attempts before stopping.
     #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
     pub max_attempts: u32,
+    /// Durable source run ID associated with the feedback.
     #[arg(long = "source-run-id", value_name = "ID")]
     pub source_run_id: Option<String>,
+    /// Current candidate diff as an inline or file-backed specification.
     #[arg(long = "current-diff", value_name = "SPEC")]
     pub current_diff: Option<String>,
 }

@@ -205,7 +205,7 @@ impl Commands {
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
                         command: agent_task::AgentTaskFanoutCommand::CookBatch(args),
                     }),
-            }) if args.dry_run => agent_task_fanout_local_only_contract(
+            }) if args.preview => agent_task_fanout_local_only_contract(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON,
             ),
