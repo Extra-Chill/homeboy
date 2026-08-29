@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.15] - 2026-08-29
+
+### Fixed
+- use canonical component id in codebox adapters
+
 ## [3.38.14] - 2026-08-25
 
 ### Fixed
