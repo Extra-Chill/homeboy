@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.17] - 2026-08-29
+
+### Fixed
+- forward bench runtime mounts
+
 ## [3.38.16] - 2026-08-29
 
 ### Changed
