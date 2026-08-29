@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.20] - 2026-08-29
+
+### Changed
+- Only contradict pr_closed evidence when the PR is really active
+
 ## [2.15.19] - 2026-08-26
 
 ### Changed
