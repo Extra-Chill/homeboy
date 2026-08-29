@@ -29,6 +29,9 @@ use homeboy::core::worktree::WorktreeCleanupOutput;
 use homeboy::core::worktree_provider::{
     cleanup_worktrees_from_config, WorktreeCleanupRequest, WorktreeCleanupScope,
 };
+use homeboy::core::worktree_providers::{
+    max_configured_provider_cleanup_timeout, WorktreeProviderCleanupMode,
+};
 use homeboy::runner::runners::{
     self as runner, RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
@@ -50,8 +53,6 @@ const AUTOMATIC_RETENTION_LOCK_FILE: &str = "automatic-retention-controller.lock
 const AUTOMATIC_RETENTION_STATE_FILE: &str = "automatic-retention-controller.json";
 const CLEANUP_CATEGORY_CHILD_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_CHILD";
 const CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_TIMEOUT_MS";
-const CLEANUP_CATEGORY_TIMEOUT: Duration = Duration::from_secs(30);
-const CLEANUP_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(120);
 const CLEANUP_CHILD_TERMINATION_ALLOWANCE: Duration = Duration::from_secs(5);
 const CLEANUP_CATEGORY_HEARTBEAT: Duration = Duration::from_secs(5);
 /// Time reserved for the repo-artifact category to report after its last root.
@@ -672,8 +673,8 @@ fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResul
             .map(|output| (output, 0));
     }
 
-    let timeout =
-        cleanup_category_timeout(None).saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE);
+    let timeout = cleanup_category_timeout(cleanup_category_base_budget(), None)
+        .saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE);
     let executable = std::env::current_exe().map_err(|error| {
         homeboy::core::Error::internal_io(
             error.to_string(),
@@ -1914,18 +1915,32 @@ fn automatic_retention() -> CmdResult<Value> {
 }
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventoryResult> {
-    cleanup_inventory_with_deadline(
-        args,
-        SystemTime::now().checked_add(cleanup_inventory_timeout()),
-    )
+    let deadline = SystemTime::now().checked_add(cleanup_inventory_timeout(args.apply));
+    cleanup_inventory_with_deadline(args, deadline)
 }
 
-fn cleanup_inventory_timeout() -> Duration {
-    std::env::var(CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV)
+/// Aggregate sweep budget, widened by whatever a category legitimately needs
+/// beyond the shared base.
+///
+/// Without the widening, raising a provider timeout would simply relocate the
+/// failure: the provider category would consume the whole aggregate and starve
+/// every category scheduled after it.
+fn cleanup_inventory_timeout(apply: bool) -> Duration {
+    if let Some(inherited) = std::env::var(CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis)
-        .unwrap_or(CLEANUP_AGGREGATE_TIMEOUT)
+    {
+        return inherited;
+    }
+    let configured = Duration::from_secs(
+        defaults::load_config()
+            .retention
+            .cleanup_aggregate_max_seconds,
+    );
+    let base = cleanup_category_base_budget();
+    let widest = cleanup_category_required_budget(WORKTREE_PROVIDERS_METADATA.category, apply);
+    configured.saturating_add(widest.saturating_sub(base))
 }
 
 fn cleanup_inventory_with_deadline(
@@ -2810,7 +2825,10 @@ fn run_cleanup_category_process(
     args: &CleanupArgs,
     deadline: Option<SystemTime>,
 ) -> std::result::Result<Vec<CleanupInventoryCategory>, Box<CleanupInventoryCategory>> {
-    let wall_clock_budget = cleanup_category_timeout(deadline);
+    let wall_clock_budget = cleanup_category_timeout(
+        cleanup_category_required_budget(metadata.category, args.apply),
+        deadline,
+    );
     if wall_clock_budget <= CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2) {
         return Err(Box::new(cleanup_category_timeout_failure(
             metadata,
@@ -3030,10 +3048,54 @@ fn exhausted_category_budget(deadline: Option<SystemTime>) -> Option<Duration> {
     (remaining < CLEANUP_CATEGORY_MINIMUM_BUDGET).then_some(remaining)
 }
 
-fn cleanup_category_timeout(deadline: Option<SystemTime>) -> Duration {
-    let configured = test_cleanup_category_timeout().unwrap_or(CLEANUP_CATEGORY_TIMEOUT);
-    deadline.map_or(configured, |deadline| {
-        configured.min(
+/// Budget every cleanup category starts from, before category-specific needs.
+fn cleanup_category_base_budget() -> Duration {
+    test_cleanup_category_timeout().unwrap_or_else(|| {
+        Duration::from_secs(
+            defaults::load_config()
+                .retention
+                .cleanup_category_max_seconds,
+        )
+    })
+}
+
+/// Budget a specific category needs to finish the work it delegates.
+///
+/// `worktree_providers` shells out twice before reaching the provider, and each
+/// hop reserves [`CLEANUP_CHILD_TERMINATION_ALLOWANCE`]. Sizing the category at
+/// the configured provider timeout plus both allowances is what makes a
+/// configured provider budget reachable; the previous fixed constant capped
+/// every provider below even its own default.
+fn cleanup_category_required_budget(category: &str, apply: bool) -> Duration {
+    let base = cleanup_category_base_budget();
+    if category != WORKTREE_PROVIDERS_METADATA.category {
+        return base;
+    }
+    let mode = if apply {
+        WorktreeProviderCleanupMode::Apply
+    } else {
+        WorktreeProviderCleanupMode::Preview
+    };
+    provider_category_budget(
+        base,
+        max_configured_provider_cleanup_timeout(&defaults::load_config().worktree_providers, &mode),
+    )
+}
+
+/// Category budget that survives both subprocess hops with the configured
+/// provider timeout intact.
+///
+/// Kept free of global config so the arithmetic that guarantees
+/// `budget - 2 * allowance >= configured` is directly testable.
+fn provider_category_budget(base: Duration, provider: Option<Duration>) -> Duration {
+    provider.map_or(base, |provider| {
+        base.max(provider.saturating_add(CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2)))
+    })
+}
+
+fn cleanup_category_timeout(required: Duration, deadline: Option<SystemTime>) -> Duration {
+    deadline.map_or(required, |deadline| {
+        required.min(
             deadline
                 .duration_since(SystemTime::now())
                 .unwrap_or(Duration::ZERO),
@@ -4413,6 +4475,45 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// A configured provider budget must survive both subprocess hops.
+    ///
+    /// Regression for #13700: the category budget was a fixed 30s constant, so
+    /// the provider received `30s - 5s - 5s = 20s` no matter what was
+    /// configured. Even the 30s provider default was unreachable, and the
+    /// documented 300s maximum was ~93% dead range.
+    #[test]
+    fn provider_category_budget_delivers_the_configured_timeout_through_both_hops() {
+        let base = Duration::from_secs(30);
+        let hops = CLEANUP_CHILD_TERMINATION_ALLOWANCE.saturating_mul(2);
+
+        for configured_secs in [30, 45, 120, 180, 300] {
+            let configured = Duration::from_secs(configured_secs);
+            let budget = provider_category_budget(base, Some(configured));
+            // This subtraction mirrors run_cleanup_category_process: one
+            // allowance for the child, one for the grandchild env budget.
+            let delivered = budget.saturating_sub(hops);
+            assert!(
+                delivered >= configured,
+                "configured {configured:?} must reach the provider, got {delivered:?}"
+            );
+        }
+
+        // The old ceiling is genuinely gone, not merely widened.
+        assert!(
+            provider_category_budget(base, Some(Duration::from_secs(120))).saturating_sub(hops)
+                > Duration::from_secs(20),
+            "120s provider must exceed the previous 20s ceiling"
+        );
+
+        // A provider cheaper than the base never shrinks the category budget,
+        // and no configured provider leaves the base untouched.
+        assert_eq!(
+            provider_category_budget(base, Some(Duration::from_secs(1))),
+            base
+        );
+        assert_eq!(provider_category_budget(base, None), base);
+    }
 
     fn controller_cleanup_request() -> Value {
         serde_json::to_value(CleanupArgs {
