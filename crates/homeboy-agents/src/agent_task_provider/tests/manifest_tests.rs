@@ -447,6 +447,9 @@ fn runtime_tool_cannot_claim_capability_without_a_probe() {
 
 #[test]
 fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
+    let test_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(test_context.path_roots());
     let provider_script = script(
         r#"process.stdin.once('data', input => {
   const tool = JSON.parse(input).resolved_runtime_tools[0];
@@ -479,7 +482,7 @@ fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
             run_id: None,
             attempt: 1,
             cancellation: Default::default(),
-            lifecycle_store: None,
+            lifecycle_store: Some(lifecycle_store),
         },
     );
 

@@ -7,17 +7,12 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
-        #[cfg(test)]
-        let materialized = match self.path_roots.as_ref() {
-            Some(roots) => materialize_executor_request_at_root(
-                request,
-                &context,
-                roots.artifacts().to_path_buf(),
-            ),
+        let materialized = match context.lifecycle_store.as_ref() {
+            Some(store) => {
+                materialize_executor_request_at_root(request, &context, store.artifact_root())
+            }
             None => materialize_executor_request(request, &context),
         };
-        #[cfg(not(test))]
-        let materialized = materialize_executor_request(request, &context);
         let mut request = match materialized {
             Ok(request) => request,
             Err((request, path, error)) => {
@@ -367,6 +362,7 @@ fn materialize_executor_request_at_root(
     Ok(AgentTaskExecutorRequest {
         request,
         artifacts_path: path,
+        artifact_store_root: root,
         artifacts_path_provenance: provenance,
         resolved_runtime_tools: Vec::new(),
         artifacts_root_identity,

@@ -70,7 +70,7 @@ pub(crate) fn link_latest_executor_evidence(
     run_id: Option<&str>,
 ) {
     let policy = RedactionPolicy::default();
-    let dir = executor_evidence_dir(run_id, &request.task_id);
+    let dir = executor_evidence_dir(&request.artifact_store_root, run_id, &request.task_id);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -350,21 +350,16 @@ fn discover_runtime_files(root: &Path) -> BTreeMap<String, Vec<PathBuf>> {
     files
 }
 
-fn executor_evidence_dir(run_id: Option<&str>, task_id: &str) -> PathBuf {
-    durable_executor_evidence_root()
-        .join(sanitize_task_id(run_id.unwrap_or("unrecorded-run")))
-        .join(sanitize_task_id(task_id))
-}
-
-fn durable_executor_evidence_root() -> PathBuf {
-    homeboy_core::artifacts::root()
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".homeboy-artifacts")
-        })
+fn executor_evidence_dir(
+    artifact_store_root: &Path,
+    run_id: Option<&str>,
+    task_id: &str,
+) -> PathBuf {
+    artifact_store_root
         .join("agent-task")
         .join("executor-evidence")
+        .join(sanitize_task_id(run_id.unwrap_or("unrecorded-run")))
+        .join(sanitize_task_id(task_id))
 }
 
 fn sanitize_task_id(task_id: &str) -> String {
@@ -467,9 +462,6 @@ mod tests {
         AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
     };
     use serde_json::Map;
-    use std::sync::Mutex;
-
-    static ARTIFACT_ROOT_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_request() -> AgentTaskRequest {
         AgentTaskRequest {
@@ -517,38 +509,8 @@ mod tests {
         }
     }
 
-    /// Scopes the process-global artifact-root override to one test.
-    ///
-    /// Two properties matter, and both exist so that a panicking `#[test]`
-    /// cannot fail an unrelated later test on something other than its own
-    /// merits:
-    ///
-    /// 1. The lock is poison-tolerant. A panic inside `test` poisons
-    ///    `ARTIFACT_ROOT_LOCK`, and a plain `.expect(...)` then reports every
-    ///    subsequent test in this module as a `PoisonError` rather than its
-    ///    real result. `homeboy_core::test_support::env_lock` already ignores
-    ///    poison for exactly this reason; match it here.
-    /// 2. The override is cleared from `Drop`, not on the straight-line return
-    ///    path. A panic used to skip the reset and leave the override pointing
-    ///    at an already-deleted `TempDir`, so the next test resolved artifacts
-    ///    under a missing directory.
     fn with_artifact_root<R>(test: impl FnOnce(&Path) -> R) -> R {
-        struct ClearArtifactRootOverride;
-
-        impl Drop for ClearArtifactRootOverride {
-            fn drop(&mut self) {
-                homeboy_core::set_artifact_root_override(None);
-            }
-        }
-
-        let _lock = ARTIFACT_ROOT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let guard = tempfile::tempdir().expect("artifact root");
-        homeboy_core::set_artifact_root_override(Some(guard.path().to_path_buf()));
-        // Declared after `guard` so the override is cleared before the
-        // directory it points at is removed, and before the lock is released.
-        let _clear_override = ClearArtifactRootOverride;
         test(guard.path())
     }
 
@@ -594,8 +556,9 @@ mod tests {
         let artifacts_path = root.join("runner").join("artifacts").join("task");
         std::fs::create_dir_all(&artifacts_path).expect("create isolated artifacts path");
         AgentTaskExecutorRequest {
-            artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("artifact root identity"),
+            artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture_with_finalized_root(&artifacts_path, root.join("executor-finalized")).expect("artifact root identity"),
             artifacts_path,
+            artifact_store_root: root,
             artifacts_path_provenance: crate::agent_task::AgentTaskArtifactsPathProvenance {
                 owner: "homeboy".to_string(),
                 locality: "runner".to_string(),
@@ -884,9 +847,10 @@ mod tests {
 
     #[test]
     fn evidence_dir_is_stable_for_a_run_and_task_id() {
-        with_artifact_root(|_| {
-            let first = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
-            let second = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
+        with_artifact_root(|root| {
+            let first = executor_evidence_dir(root, Some("run/attempt:1"), "task/with weird:chars");
+            let second =
+                executor_evidence_dir(root, Some("run/attempt:1"), "task/with weird:chars");
             assert_eq!(first, second);
             assert!(first
                 .to_string_lossy()
@@ -897,7 +861,7 @@ mod tests {
     #[test]
     fn evidence_dir_is_under_durable_artifact_root() {
         with_artifact_root(|artifact_root| {
-            let path = executor_evidence_dir(Some("run-1"), "task-1");
+            let path = executor_evidence_dir(artifact_root, Some("run-1"), "task-1");
             assert!(path.starts_with(artifact_root));
             assert!(!path
                 .to_string_lossy()
