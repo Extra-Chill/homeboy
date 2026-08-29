@@ -48,6 +48,23 @@ const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
 
+fn run_cook_explicit(
+    request: agent_task_service::CookRequest,
+    executor: SharedAgentTaskExecutor,
+    mode: agent_task_service::CookMode,
+) -> homeboy::core::Result<
+    agent_task_service::AgentTaskRunResult<agent_task_service::AgentTaskCookReport>,
+> {
+    let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    agent_task_service::CookService::run(
+        request,
+        agent_task_service::CookRuntime::production(executor, &recipe_store, &lifecycle_store),
+        mode,
+    )
+}
+
 /// Operator-facing durable identity block for a Cook that has just become
 /// addressable.
 ///
@@ -2535,7 +2552,7 @@ fn explicit_local_continuation_decision(
 
 fn apply_explicit_local_continuation(
     run_id: &str,
-    options: &mut homeboy::agents::agent_task_service::AgentTaskCookServiceOptions,
+    options: &mut homeboy::agents::agent_task_service::CookRequest,
 ) -> homeboy::core::Result<()> {
     let Some(decision) = explicit_local_continuation_decision(&options.initial_plan)? else {
         return Ok(());
@@ -2552,7 +2569,7 @@ fn apply_explicit_local_continuation(
 }
 
 fn apply_local_continuation_decision(
-    options: &mut homeboy::agents::agent_task_service::AgentTaskCookServiceOptions,
+    options: &mut homeboy::agents::agent_task_service::CookRequest,
     decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
 ) -> homeboy::core::Result<()> {
     options.initial_plan.metadata["execution_placement_decision"] = serde_json::to_value(decision)
@@ -2670,12 +2687,17 @@ where
                 args.artifact_id.as_deref(),
             )?;
             let cook = if historical_terminal {
-                agent_task_service::run_terminal_cook_continuation(options, executor.clone())?
-            } else {
-                agent_task_service::run_cook(agent_task_service::CookContext::new(
+                run_cook_explicit(
                     options,
                     executor.clone(),
-                ))?
+                    agent_task_service::CookMode::ContinueTerminal,
+                )?
+            } else {
+                run_cook_explicit(
+                    options,
+                    executor.clone(),
+                    agent_task_service::CookMode::Resume,
+                )?
             };
             let exit_code = cook.exit_code;
             result = Some(cook.value);
@@ -2756,9 +2778,17 @@ where
         args.artifact_id.as_deref(),
     )?;
     let result = if terminal_review_form_continuation {
-        agent_task_service::run_terminal_cook_continuation(options, executor)?
+        run_cook_explicit(
+            options,
+            executor,
+            agent_task_service::CookMode::ContinueTerminal,
+        )?
     } else {
-        agent_task_service::run_cook(agent_task_service::CookContext::new(options, executor))?
+        run_cook_explicit(
+            options,
+            executor,
+            agent_task_service::CookMode::RecoverPreExecution,
+        )?
     };
     let value =
         cook_report_with_continuation(serde_json::to_value(result.value).unwrap_or(Value::Null));
@@ -2855,9 +2885,11 @@ where
                 options.initial_run_id = attempt.run_id.clone();
                 options.initial_plan = attempt.plan.clone();
                 agent_task_service::authorize_cook_continue_route(&options)?;
-                let result = agent_task_service::run_cook(agent_task_service::CookContext::new(
-                    options, executor,
-                ))?;
+                let result = run_cook_explicit(
+                    options,
+                    executor,
+                    agent_task_service::CookMode::RecoverPreExecution,
+                )?;
                 let value = cook_report_with_continuation(
                     serde_json::to_value(result.value).unwrap_or(Value::Null),
                 );
@@ -5198,10 +5230,11 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             })
             .unwrap_or(Ok(()))
     };
-    let result = agent_task_service::run_cook(agent_task_service::CookContext {
-        durable_observer: Some(&durable_observer),
-        ..agent_task_service::CookContext::new(
-            agent_task_service::AgentTaskCookServiceOptions {
+    let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let result = agent_task_service::CookService::run(
+            agent_task_service::CookRequest {
             cook_id,
             initial_run_id: run_id,
             initial_plan,
@@ -5243,9 +5276,14 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
                 homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process(
                 )?,
             },
-            executor,
-        )
-    })?;
+            agent_task_service::CookRuntime::production_with_observer(
+                executor,
+                &recipe_store,
+                &lifecycle_store,
+                &durable_observer,
+            ),
+            agent_task_service::CookMode::Start,
+    )?;
     Ok((
         super::status::compact_cook_report(
             cook_report_with_continuation(

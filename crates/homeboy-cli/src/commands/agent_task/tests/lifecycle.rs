@@ -1151,7 +1151,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
             }))
             .expect("provider task")],
         );
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan,
@@ -1239,7 +1239,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             }))
             .expect("provider task")],
         );
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -1372,7 +1372,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
         let cook_id = "cook-pre-execution-null-model";
         let run_id = "cook-pre-execution-null-model-attempt-1";
         let plan = test_plan();
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -1513,7 +1513,7 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
             }))
             .expect("provider task")],
         );
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -1687,7 +1687,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
             }))
             .expect("provider task")],
         );
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -2021,7 +2021,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
         let cook_id = "cook-recoverable-selection";
         let run_id = "cook-recoverable-selection-attempt-1";
         let plan = AgentTaskPlan::new("cook-recoverable-selection-plan", vec![serde_json::from_value(json!({"task_id":"provider","executor":{"backend":"fixture","model":"fixture-model"},"instructions":"recover candidate","workspace":{"root":workspace.path()}})).unwrap()]);
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(), initial_run_id: run_id.to_string(), initial_plan: plan.clone(), to_worktree: "fixture@recoverable".to_string(), source_worktree_path: Some(workspace.path().to_path_buf()), provider_command: None,
             provider_invocation: Some(homeboy::core::command_invocation::CommandInvocation { argv: vec!["sh".to_string(), promotion_provider.display().to_string()], ..Default::default() }), gates: Default::default(), max_attempts: 1, no_finalize: true, draft_pr: false, base: "main".to_string(), task_base_sha: None, head: None, title: "recoverable".to_string(), commit_message: "recoverable".to_string(), source_refs: Vec::new(), protected_branches: Vec::new(), ai_tool: "fixture".to_string(), ai_model: Some("fixture-model".to_string()), ai_used_for: "test".to_string(), attempt_dispatcher: None, harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process().unwrap(),
         };
@@ -2221,7 +2221,7 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
     with_temp_home(|| {
         let cook_id = "cook-diagnose-current-gate";
         let run_id = "run-cli-diagnose-current-gate";
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: test_plan(),
@@ -3090,7 +3090,7 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
                 }
             }
         });
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -4788,7 +4788,7 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
         let cook_id = "cook-retry-run";
         let source_run_id = "cook-retry-run-attempt-1";
         let plan = test_plan();
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: source_run_id.to_string(),
             initial_plan: plan.clone(),
@@ -4875,7 +4875,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
         let cook_id = "cook-retry-run-competing";
         let source_run_id = "cook-retry-run-competing-attempt-1";
         let plan = test_plan();
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: source_run_id.to_string(),
             initial_plan: plan.clone(),

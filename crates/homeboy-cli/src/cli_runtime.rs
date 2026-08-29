@@ -5613,7 +5613,7 @@ mod tests {
 
             let cook_id = "cook-runtime-a";
             let run_id = "cook-runtime-a-attempt-1";
-            let options = crate::agents::agent_tasks::service::AgentTaskCookServiceOptions {
+            let options = crate::agents::agent_tasks::service::CookRequest {
                 cook_id: cook_id.to_string(),
                 initial_run_id: run_id.to_string(),
                 initial_plan: plan.clone(),
@@ -5726,7 +5726,7 @@ mod tests {
 
             let cook_id = "cook-runtime-legacy-terminal";
             let run_id = "cook-runtime-legacy-terminal-attempt-1";
-            let options = crate::agents::agent_tasks::service::AgentTaskCookServiceOptions {
+            let options = crate::agents::agent_tasks::service::CookRequest {
                 cook_id: cook_id.to_string(),
                 initial_run_id: run_id.to_string(),
                 initial_plan: plan.clone(),

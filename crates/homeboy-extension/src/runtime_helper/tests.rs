@@ -57,6 +57,10 @@ fn ensure_all_helpers_writes_all_files() {
             pairs.iter().any(|(k, _)| k == BENCH_HELPER_JS_ENV),
             "bench JS helper should be in pairs"
         );
+        assert!(
+            pairs.iter().any(|(k, _)| k == RUNTIME_SETTINGS_HELPER_ENV),
+            "runtime settings helper should be in pairs"
+        );
     });
 }
 

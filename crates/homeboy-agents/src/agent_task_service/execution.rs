@@ -921,10 +921,13 @@ fn consume_claimed_continuation(
         claim,
         |recipe| dispatcher(recipe),
         |options| {
-            super::run_cook(super::cook::CookContext {
-                store: Some(&store),
-                ..super::cook::CookContext::new(options, executor.clone())
-            })
+            let lifecycle_store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            super::CookService::run(
+                options,
+                super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
+                super::CookMode::Resume,
+            )
             .map(|result| result.exit_code)
         },
     )?;
