@@ -205,7 +205,7 @@ impl From<&CookStatus> for RunLifecycleStatus {
 
             // --- terminal, declared by an operator or a budget ---
             CookStatus::Cancelled => Self::Cancelled,
-            CookStatus::TimedOut => Self::TimedOut,
+            CookStatus::TimedOut | CookStatus::ReviewFormTimeout => Self::TimedOut,
 
             // A status this binary cannot read carries no verdict. Callers read
             // terminality from the declared `CookDisposition` instead.
@@ -296,6 +296,7 @@ mod tests {
             CookStatus::Blocked,
             CookStatus::Cancelled,
             CookStatus::TimedOut,
+            CookStatus::ReviewFormTimeout,
             CookStatus::RetriesExhausted,
             CookStatus::ExecutionBudgetExhausted,
             CookStatus::PolicyFailure,
@@ -328,6 +329,7 @@ mod tests {
                 CookStatus::Blocked => RunLifecycleStatus::PartialFailure,
                 CookStatus::Cancelled => RunLifecycleStatus::Cancelled,
                 CookStatus::TimedOut => RunLifecycleStatus::TimedOut,
+                CookStatus::ReviewFormTimeout => RunLifecycleStatus::TimedOut,
                 CookStatus::RetriesExhausted => RunLifecycleStatus::PartialFailure,
                 CookStatus::ExecutionBudgetExhausted => RunLifecycleStatus::PartialFailure,
                 CookStatus::PolicyFailure => RunLifecycleStatus::PartialFailure,

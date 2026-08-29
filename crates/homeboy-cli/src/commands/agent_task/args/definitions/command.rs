@@ -266,6 +266,14 @@ pub struct CookContinueArgs {
         conflicts_with_all = ["preflight", "rearm", "artifact_id"]
     )]
     pub timeout_ms: Option<u64>,
+    /// Explicitly increase the optional review-form deadline for a new retry
+    /// attempt. Distinct from `--timeout-ms`; capped at 600000ms.
+    #[arg(
+        long = "review-form-timeout-ms",
+        value_name = "MS",
+        conflicts_with_all = ["preflight", "rearm", "artifact_id", "timeout_ms"]
+    )]
+    pub review_form_timeout_ms: Option<u64>,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,

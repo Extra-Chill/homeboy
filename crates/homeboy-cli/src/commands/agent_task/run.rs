@@ -237,6 +237,21 @@ fn cook_provider_timeout_disclosure(plan: &AgentTaskPlan) -> String {
     )
 }
 
+/// Operator-facing statement of the distinct, bounded deadline for the optional
+/// read-only review form. It is not the provider execution timeout.
+fn cook_review_form_timeout_disclosure(plan: &AgentTaskPlan) -> String {
+    let timeout_ms = plan
+        .tasks
+        .first()
+        .map(homeboy::agents::agent_task_service::review_form_timeout_ms)
+        .unwrap_or(homeboy::agents::agent_task_service::DEFAULT_REVIEW_FORM_TIMEOUT_MS);
+    format!(
+        "cook: review-form timeout: {}s for the optional read-only review form (cap {}s; uses the bounded fresh-review provider budget)",
+        timeout_ms / 1_000,
+        homeboy::agents::agent_task_service::MAX_REVIEW_FORM_TIMEOUT_MS / 1_000
+    )
+}
+
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
 /// the root cause (recipe validation, PHP fatal, provider registration, missing
@@ -2598,15 +2613,52 @@ where
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
-    if args.timeout_ms.is_some() && !record.state.is_terminal() {
+    let review_form_only = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .is_some_and(|attempt| {
+            attempt
+                .plan
+                .tasks
+                .iter()
+                .any(homeboy::agents::agent_task_service::cook_request_is_review_form_only)
+        });
+    if (args.timeout_ms.is_some() || args.review_form_timeout_ms.is_some())
+        && !record.state.is_terminal()
+    {
         return Err(homeboy::core::Error::validation_invalid_argument(
-            "timeout-ms",
-            "Cook timeout override requires a terminal provider timeout",
+            if args.review_form_timeout_ms.is_some() {
+                "review-form-timeout-ms"
+            } else {
+                "timeout-ms"
+            },
+            if review_form_only {
+                "Cook review-form timeout override requires a terminal review-form timeout"
+            } else {
+                "Cook timeout override requires a terminal provider timeout"
+            },
             Some(run_id),
             None,
         ));
     }
-    if let Some(timeout_ms) = args.timeout_ms {
+    if args.timeout_ms.is_some() && review_form_only {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "timeout-ms",
+            "a timed-out review form retries with --review-form-timeout-ms, not --timeout-ms",
+            Some(run_id),
+            None,
+        ));
+    }
+    if args.review_form_timeout_ms.is_some() && !review_form_only {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "review-form-timeout-ms",
+            "Cook review-form timeout override requires a review-form attempt",
+            Some(run_id),
+            None,
+        ));
+    }
+    if let Some(timeout_ms) = args.review_form_timeout_ms.or(args.timeout_ms) {
         let retry = agent_task_service::retry_with_timeout_override(&run_id, timeout_ms)?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
@@ -5145,6 +5197,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         );
         eprintln!("{}", cook_rotation_disclosure(&initial_plan));
         eprintln!("{}", cook_provider_timeout_disclosure(&initial_plan));
+        eprintln!("{}", cook_review_form_timeout_disclosure(&initial_plan));
     }
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
@@ -5399,6 +5452,20 @@ fn resolve_cook_execution_budget(
         },
         "truncated": {
             "max_provider_rotations": resolved.truncated_provider_rotations,
+        },
+        "timeouts": {
+            "provider_timeout_ms": homeboy::agents::agent_task_timeout::effective_provider_timeout_ms(
+                plan.tasks.first().and_then(|task| task.limits.timeout_ms).or(plan.options.timeout_ms),
+                plan.tasks.first().and_then(|task| task.limits.max_runtime_ms),
+            ),
+            "review_form_timeout_ms": plan
+                .tasks
+                .first()
+                .map(homeboy::agents::agent_task_service::review_form_timeout_ms)
+                .unwrap_or(homeboy::agents::agent_task_service::DEFAULT_REVIEW_FORM_TIMEOUT_MS),
+            "review_form_timeout_cap_ms": homeboy::agents::agent_task_service::MAX_REVIEW_FORM_TIMEOUT_MS,
+            "review_form_provider_budget_scope": "fresh_cook_review",
+            "review_form_provider_budget_is_distinct": true,
         },
     });
     Ok(())
@@ -8097,6 +8164,7 @@ where
                     rearm: false,
                     artifact_id: None,
                     timeout_ms: None,
+                    review_form_timeout_ms: None,
                     full: false,
                 },
                 executor,
@@ -8117,8 +8185,9 @@ mod tests {
     use super::{
         cook_attached_local_placement_disclosure, cook_continuation_status,
         cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, detached_cook_route_less_warning,
-        durable_cook_identity_lines, preflight_continue_cook, project_preview_dirty_admission,
+        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
+        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
+        project_preview_dirty_admission,
     };
     use crate::commands::agent_task::args::CookContinueArgs;
 
@@ -8215,6 +8284,20 @@ mod tests {
         assert_eq!(
             cook_provider_timeout_disclosure(&plan),
             "cook: provider timeout: 2700s per provider execution (override with --timeout-ms)"
+        );
+    }
+
+    #[test]
+    fn review_form_timeout_disclosure_reports_the_bounded_deadline() {
+        let plan = homeboy::agents::agent_task_scheduler::AgentTaskPlan::new("plan", vec![]);
+
+        assert_eq!(
+            cook_review_form_timeout_disclosure(&plan),
+            format!(
+                "cook: review-form timeout: {}s for the optional read-only review form (cap {}s; uses the bounded fresh-review provider budget)",
+                homeboy::agents::agent_task_service::DEFAULT_REVIEW_FORM_TIMEOUT_MS / 1_000,
+                homeboy::agents::agent_task_service::MAX_REVIEW_FORM_TIMEOUT_MS / 1_000
+            )
         );
     }
 
@@ -8394,6 +8477,7 @@ mod tests {
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: false,
             })
             .expect("preflight returns a machine-readable rejection");
