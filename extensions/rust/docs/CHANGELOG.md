@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.5] - 2026-08-29
+
+### Changed
+- Single-source the settings helper on Homeboy core
+
 ## [1.37.4] - 2026-08-25
 
 ### Fixed
