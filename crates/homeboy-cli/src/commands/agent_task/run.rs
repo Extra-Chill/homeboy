@@ -2166,8 +2166,15 @@ mod preview_tests {
                 ["path"]
                 .as_str()
                 .expect("projected evidence path");
-            assert!(evidence_path.starts_with(workspace.to_str().expect("UTF-8 workspace")));
+            assert!(
+                !evidence_path.starts_with(workspace.to_str().expect("UTF-8 workspace")),
+                "preview must not stage evidence inside the candidate: {evidence_path}"
+            );
             assert!(!evidence_path.contains(&source.path().display().to_string()));
+            assert!(
+                !workspace.join(".homeboy").exists(),
+                "preview must not create candidate evidence dirt"
+            );
             let phases = preview["progress"].as_array().expect("preview phases");
             assert!(phases.iter().any(|phase| phase["phase"] == "prompt_input"));
             assert!(phases
@@ -2231,7 +2238,8 @@ mod preview_tests {
     }
 
     #[test]
-    fn read_only_evidence_projection_uses_the_resolved_workspace_path() {
+    fn read_only_evidence_projection_uses_the_controller_store() {
+        crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         let source = tempfile::NamedTempFile::new().expect("evidence");
         std::fs::write(source.path(), "evidence").expect("write evidence");
@@ -2243,10 +2251,11 @@ mod preview_tests {
             .expect("validate evidence");
         let projected = projected_provider_evidence(&evidence, workspace.path().to_str())
             .expect("project read-only evidence path");
-        assert!(projected[0]["path"]
+        let path = projected[0]["path"]
             .as_str()
-            .expect("projection path")
-            .starts_with(workspace.path().to_str().expect("workspace path")));
+            .expect("projection path");
+        assert!(!path.starts_with(workspace.path().to_str().expect("workspace path")));
+        assert!(path.contains("provider-evidence"));
         assert!(projected[0]["read_only"].as_bool().expect("read-only flag"));
 
         let bounded = redact_preview_replay_argv(
@@ -2257,6 +2266,7 @@ mod preview_tests {
             .requires
             .iter()
             .any(|item| item.contains("safety budget")));
+        });
     }
 
     #[test]
@@ -6353,8 +6363,7 @@ pub(crate) fn project_admitted_provider_evidence_inputs(
     inputs: &[AgentTaskProviderEvidenceInput],
     admitted: &[AdmittedProviderEvidenceSource],
 ) -> homeboy::core::Result<Vec<Value>> {
-    let store = homeboy::core::artifact_root()?.join("provider-evidence");
-    project_admitted_provider_evidence_inputs_at(inputs, admitted, &store)
+    project_admitted_provider_evidence_inputs_at(inputs, admitted, &provider_evidence_store()?)
 }
 
 fn project_admitted_provider_evidence_inputs_at(
@@ -6368,11 +6377,18 @@ fn project_admitted_provider_evidence_inputs_at(
         let staging = store
             .join("staging")
             .join(format!("evidence-{}", uuid::Uuid::new_v4()));
-        let (bytes, digest) = secure_provider_evidence_copy(source, &staging)?;
-        let destination = store
-            .join("blobs")
-            .join(digest.trim_start_matches("sha256:"));
-        publish_provider_evidence_blob(&staging, &destination, bytes, &digest)?;
+        let (bytes, digest) = match secure_provider_evidence_copy(source, &staging) {
+            Ok(copied) => copied,
+            Err(error) => {
+                let _ = std::fs::remove_file(&staging);
+                return Err(error);
+            }
+        };
+        let destination = provider_evidence_blob_path(store, &digest);
+        if let Err(error) = publish_provider_evidence_blob(&staging, &destination, bytes, &digest) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(error);
+        }
         let mut projection = serde_json::json!({
             "id": input.id,
             "path": destination,
@@ -7182,26 +7198,23 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
         ));
         let admitted = admit_provider_evidence_inputs(&[input.clone()])
             .expect("admit declared path spellings");
-        let projected = projected_provider_evidence(&[input.clone()], workspace.to_str())
-            .expect("derive projected path");
-        let projected_paths = projected_provider_evidence_paths(&projected);
-        rewrite_provider_evidence_prompt(
-            &mut prompt,
-            &[input],
-            &admitted,
-            &projected,
-            &projected_paths,
-        )
-        .expect("rewrite declared paths");
-        let rewritten = prompt.expect("rewritten prompt");
-        let destination = workspace.join(".homeboy/evidence/source/source.json");
-        assert!(!rewritten.contains(&source.display().to_string()));
-        assert_eq!(
-            rewritten
-                .matches(&destination.display().to_string())
-                .count(),
-            4
-        );
+        crate::test_support::with_isolated_home(|_| {
+            let projected = projected_provider_evidence(&[input.clone()], workspace.to_str())
+                .expect("derive projected path");
+            let projected_paths = projected_provider_evidence_paths(&projected);
+            rewrite_provider_evidence_prompt(
+                &mut prompt,
+                &[input],
+                &admitted,
+                &projected,
+                &projected_paths,
+            )
+            .expect("rewrite declared paths");
+            let rewritten = prompt.expect("rewritten prompt");
+            let destination = projected[0]["path"].as_str().expect("projected path");
+            assert!(!rewritten.contains(&source.display().to_string()));
+            assert_eq!(rewritten.matches(destination).count(), 4);
+        });
     }
 
     #[test]
@@ -7628,19 +7641,21 @@ let path = "/private/fenced-code.json";
             admit_provider_evidence_inputs(&[input.clone()]).expect("validate and admit source");
         std::fs::rename(&replacement, &source).expect("replace admitted source");
 
-        let projected = projected_provider_evidence(&[input.clone()], workspace.to_str())
-            .expect("derive projected path");
-        let projected_paths = projected_provider_evidence_paths(&projected);
-        let error = rewrite_provider_evidence_prompt(
-            &mut prompt,
-            &[input],
-            &admitted,
-            &projected,
-            &projected_paths,
-        )
-        .expect_err("replaced source aborts rewrite");
-        assert!(error.message.contains("identity changed after validation"));
-        assert_eq!(prompt, Some(format!("Read {}", source.display())));
+        crate::test_support::with_isolated_home(|_| {
+            let projected = projected_provider_evidence(&[input.clone()], workspace.to_str())
+                .expect("derive projected path");
+            let projected_paths = projected_provider_evidence_paths(&projected);
+            let error = rewrite_provider_evidence_prompt(
+                &mut prompt,
+                &[input],
+                &admitted,
+                &projected,
+                &projected_paths,
+            )
+            .expect_err("replaced source aborts rewrite");
+            assert!(error.message.contains("identity changed after validation"));
+            assert_eq!(prompt, Some(format!("Read {}", source.display())));
+        });
     }
 
     #[test]
