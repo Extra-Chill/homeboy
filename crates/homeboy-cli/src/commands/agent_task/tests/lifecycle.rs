@@ -3004,11 +3004,11 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
         assert_eq!(
-            status_value["diagnostic_summary"]["class"],
+            status_value["outcome"]["blocker"]["class"],
             "agent_runtime.task_run_failed"
         );
         assert_eq!(
-            status_value["diagnostic_summary"]["message"],
+            status_value["outcome"]["blocker"]["message"],
             "RecipeValidationError: configured provider runtime path does not exist"
         );
     });
@@ -3317,19 +3317,19 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
 
         assert_eq!(status_exit_code, 0);
         assert_eq!(
-            status_value["diagnostic_summary"]["class"],
+            status_value["outcome"]["blocker"]["class"],
             "agent_tool.command_denied"
         );
         assert_eq!(
-            status_value["diagnostic_summary"]["details"]["tool"],
+            status_value["outcome"]["blocker"]["details"]["tool"],
             "grep"
         );
         assert_eq!(
-            status_value["diagnostic_summary"]["details"]["permission"],
+            status_value["outcome"]["blocker"]["details"]["permission"],
             "external_directory_read"
         );
         assert_eq!(
-            status_value["diagnostic_summary"]["details"]["canonical_path"],
+            status_value["outcome"]["blocker"]["details"]["canonical_path"],
             "/Users/chubes/Developer/homeboy@fix-11827-diagnose-policy-root-cause"
         );
     });
@@ -3408,11 +3408,11 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
         })
         .expect("status loaded");
         assert_eq!(
-            status_value["diagnostic_summary"]["class"],
+            status_value["outcome"]["blocker"]["class"],
             "provider.runtime_unavailable"
         );
         assert_eq!(
-            status_value["diagnostic_summary"]["source"],
+            status_value["outcome"]["blocker"]["source"],
             "hydrated_process_stream"
         );
     });
@@ -3881,7 +3881,7 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
         assert_eq!(
-            status_value["diagnostic_summary"]["class"],
+            status_value["outcome"]["blocker"]["class"],
             "runtime.import_failed"
         );
         assert_eq!(
