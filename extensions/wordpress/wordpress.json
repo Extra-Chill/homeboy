@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.38.17",
+  "version": "3.39.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -1494,6 +1494,13 @@
       "type": "array",
       "default": [],
       "description": "Additional rsync exclude patterns applied with .buildignore/default excludes before Homeboy mandatory safety exclusions. Strings are required. Component-root rsync patterns such as /playground-runtime/ are supported; traversal and filesystem-absolute paths are rejected."
+    },
+    {
+      "id": "package_profile",
+      "label": "WordPress package profile",
+      "type": "object",
+      "default": {},
+      "description": "Optional component-relative JSON manifest and named profile that selects exact production package files after dependency preparation. Empty object keeps default rsync staging. Set {\"manifest\":\"path.json\",\"profile\":\"name\"}. The named profile must provide selectors with type file or prefix and path, plus optional required_files. Manifest/profile names and all paths fail closed against absolute paths, traversal, malformed selectors, missing explicit files, and missing required files. Homeboy mandatory safety exclusions still apply."
     },
     {
       "id": "local_workspace_dependencies",
