@@ -1170,6 +1170,30 @@ fn controller_local_record_owns_lifecycle_reads_before_default_lab_selection() {
                 };
             assert_eq!(route_runner, None, "{args:?} must not use homeboy-lab");
         }
+
+        let plan_only_retry =
+            Cli::try_parse_from(["homeboy", "agent-task", "retry", OWNER_LOCAL_RUN_ID])
+                .expect("plan-only retry parses");
+        assert!(
+            controller_owns_agent_task_lifecycle_command(&plan_only_retry)
+                .expect("plan-only retry owner resolves")
+        );
+
+        let executable_retry = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "retry",
+            OWNER_LOCAL_RUN_ID,
+            "--run",
+            "--runner",
+            "homeboy-lab",
+        ])
+        .expect("executable retry parses");
+        assert!(
+            !controller_owns_agent_task_lifecycle_command(&executable_retry)
+                .expect("executable retry owner resolves"),
+            "retry --run must reach controller preflight and Lab handoff materialization"
+        );
     });
 }
 
