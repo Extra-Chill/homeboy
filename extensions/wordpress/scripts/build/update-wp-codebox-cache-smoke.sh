@@ -23,7 +23,13 @@ NPM
 cat > "${FAKE_BIN}/node" <<'NODE'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${1:-}" = '-e' ] || [ "${1:-}" = '-' ] || [[ "${1:-}" = *.cjs ]]; then
+if [ "${1:-}" = '-' ]; then
+    for argument in "$@"; do
+        [ "${#argument}" -lt 65536 ] || { echo "oversized node argument" >&2; exit 97; }
+    done
+    exec "$REAL_NODE" "$@"
+fi
+if [ "${1:-}" = '-e' ] || [[ "${1:-}" = *.cjs ]]; then
     exec "$REAL_NODE" "$@"
 fi
 if [[ "${1:-}" = */packages/cli/dist/index.js ]]; then
@@ -35,10 +41,10 @@ if [[ "${1:-}" = */packages/cli/dist/index.js ]]; then
         descriptor='{}'
     elif [ -f "${source_root}/minimum-compatible" ]; then
         version='0.21.0'
-        descriptor='{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"unavailable","browserRuntime":{"status":"unavailable"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+        descriptor="$("$REAL_NODE" -e 'process.stdout.write(JSON.stringify({ schema: "wp-codebox/runtime-descriptor/v1", readiness: { status: "unavailable", browserRuntime: { status: "unavailable" } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: "wp-codebox/browser-contained-site-open/v1" } } }, padding: "x".repeat(200000) }))')"
     else
         version='0.23.4'
-        descriptor='{"schema":"wp-codebox/runtime-descriptor/v1","readiness":{"status":"unavailable","browserRuntime":{"status":"unavailable"}},"contractManifest":{"schemas":{"runtimeBoundary":{"browserContainedSiteOpen":"wp-codebox/browser-contained-site-open/v1"}}}}'
+        descriptor="$("$REAL_NODE" -e 'process.stdout.write(JSON.stringify({ schema: "wp-codebox/runtime-descriptor/v1", readiness: { status: "unavailable", browserRuntime: { status: "unavailable" } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: "wp-codebox/browser-contained-site-open/v1" } } }, padding: "x".repeat(200000) }))')"
     fi
     case "${*}" in
         --version) printf '%s\n' "$version" ;;

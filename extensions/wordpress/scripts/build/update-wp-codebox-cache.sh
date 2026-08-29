@@ -160,8 +160,9 @@ CLI="$CANDIDATE_DIR/packages/cli/dist/index.js"
 [ -x "$CLI" ] || fail "WP Codebox build did not produce executable CLI: $CLI"
 VERSION="$($CLI --version 2>&1)" || fail "built WP Codebox CLI version probe failed: $CLI. Rebuild the requested ref with a compatible WP Codebox CLI."
 DESCRIPTOR="$($CLI runtime descriptor --json 2>&1)" || fail "built WP Codebox CLI runtime descriptor probe failed: $CLI. Rebuild the requested ref with browser preview support."
-PREFLIGHT_OUTPUT="$(node - "$VERSION" "$DESCRIPTOR" <<'NODE'
-const [versionOutput, descriptorOutput] = process.argv.slice(2);
+PREFLIGHT_OUTPUT="$(node - "$VERSION" 3<<<"$DESCRIPTOR" <<'NODE'
+const versionOutput = process.argv[2];
+const descriptorOutput = require('node:fs').readFileSync(3, 'utf8');
 const versionMatch = versionOutput.match(/\bv?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\b/);
 const version = versionMatch ? `${versionMatch[1]}.${versionMatch[2]}.${versionMatch[3]}${versionMatch[4] ? `-${versionMatch[4]}` : ''}` : '';
 const minimum = [0, 21, 0];
