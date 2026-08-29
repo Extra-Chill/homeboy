@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'wp-codebox-canonical-adapter-'));
-const component = path.join(root, 'canonical-plugin');
+const component = path.join(root, 'canonical-plugin@managed-worktree');
 const dependency = path.join(root, 'db-touching-dependency');
 const observed = path.join(root, 'observed.jsonl');
 const cli = path.join(root, 'wp-codebox');
@@ -44,7 +44,7 @@ await chmod(cli, 0o755);
 try {
   const base = {
     HOMEBOY_COMPONENT_PATH: component,
-    COMPONENT_ID: 'canonical-plugin',
+    HOMEBOY_COMPONENT_ID: 'canonical-plugin',
     HOMEBOY_WP_CODEBOX_BIN: cli,
     OBSERVED: observed,
     HOMEBOY_SETTINGS_JSON: JSON.stringify({
