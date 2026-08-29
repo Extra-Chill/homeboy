@@ -687,6 +687,7 @@ fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCook
             "max_attempts": options.max_attempts,
             "execution_budget": options.initial_plan.options.execution_budget,
             "policy": options.initial_plan.metadata["cook_retry_policy"],
+            "timeouts": cook_recipe_timeout_disclosure(&options.initial_plan),
         }),
         finalization: serde_json::json!({
             "no_finalize": options.no_finalize,
@@ -1084,12 +1085,37 @@ fn retry_budgets_match(left: &Value, right: &Value) -> bool {
     let mut right = right.clone();
     for budget in [&mut left, &mut right] {
         if let Some(policy) = budget.get_mut("policy").and_then(Value::as_object_mut) {
-            for field in ["requested", "effective", "truncated"] {
+            for field in ["requested", "effective", "truncated", "timeouts"] {
                 policy.remove(field);
             }
         }
+        if let Some(budget) = budget.as_object_mut() {
+            budget.remove("timeouts");
+        }
     }
     left == right
+}
+
+fn cook_recipe_timeout_disclosure(plan: &AgentTaskPlan) -> Value {
+    let limits = plan.tasks.first().map(|task| &task.limits);
+    let provider_timeout_ms = crate::agent_task_timeout::effective_provider_timeout_ms(
+        limits
+            .and_then(|limits| limits.timeout_ms)
+            .or(plan.options.timeout_ms),
+        limits.and_then(|limits| limits.max_runtime_ms),
+    );
+    let review_form_timeout_ms = plan
+        .tasks
+        .first()
+        .map(crate::agent_task_cook_loop::review_form_timeout_ms)
+        .unwrap_or(crate::agent_task_cook_loop::DEFAULT_REVIEW_FORM_TIMEOUT_MS);
+    serde_json::json!({
+        "provider_timeout_ms": provider_timeout_ms,
+        "review_form_timeout_ms": review_form_timeout_ms,
+        "review_form_timeout_cap_ms": crate::agent_task_cook_loop::MAX_REVIEW_FORM_TIMEOUT_MS,
+        "review_form_provider_budget_scope": "fresh_cook_review",
+        "review_form_provider_budget_is_distinct": true,
+    })
 }
 
 fn attempt_inputs_match(

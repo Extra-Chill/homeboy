@@ -5132,6 +5132,12 @@ pub fn cook_failure_context(
                 .to_string(),
             Some(diagnostic),
         )
+    } else if matches!(status, "review_form_timeout") {
+        (
+            "review_form".to_string(),
+            "review_form_timeout".to_string(),
+            None,
+        )
     } else {
         (
             "provider".to_string(),

@@ -806,6 +806,160 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
     );
 }
 
+#[test]
+fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
+    let mut plan = compile_options("review-form-timeout-report").initial_plan;
+    plan.options.timeout_ms = Some(3_600_000);
+    plan.tasks[0].limits.timeout_ms = Some(300_000);
+    plan.tasks[0].inputs["cook_loop"]["review_form_required"] = serde_json::json!(true);
+    plan.tasks[0].metadata = serde_json::json!({
+        "cook_loop": {
+            "kind": "review_form_only",
+            "review_form_timeout_ms": 300_000,
+        }
+    });
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_timeout".to_string(),
+        message: "provider exceeded timeout_ms=300000".to_string(),
+        data: serde_json::json!({ "timeout_ms": 300_000 }),
+    }];
+    let selected_run_id = "review-form-timeout-report-attempt-1";
+    let mut report = AgentTaskRunResult {
+        value: AgentTaskCookReport {
+            schema: "homeboy/agent-task-cook/v1",
+            cook_id: "review-form-timeout-report".to_string(),
+            latest_run_id: Some("review-form-timeout-report-attempt-2".to_string()),
+            history_run_ids: vec![
+                selected_run_id.to_string(),
+                "review-form-timeout-report-attempt-2".to_string(),
+            ],
+            invocation_run_ids: vec![
+                selected_run_id.to_string(),
+                "review-form-timeout-report-attempt-2".to_string(),
+            ],
+            status: "provider_failure".to_string(),
+            disposition: CookDisposition::Terminal,
+            attempts: vec![
+                AgentTaskCookAttemptReport {
+                    attempt: 1,
+                    run_id: selected_run_id.to_string(),
+                    run_state: "PartialRecoverable".to_string(),
+                    aggregate_path: None,
+                    promotion: None,
+                    feedback: None,
+                },
+                AgentTaskCookAttemptReport {
+                    attempt: 2,
+                    run_id: "review-form-timeout-report-attempt-2".to_string(),
+                    run_state: "Failed".to_string(),
+                    aggregate_path: None,
+                    promotion: None,
+                    feedback: None,
+                },
+            ],
+            finalization: None,
+            intentional_no_change: None,
+            selected_candidate: Some(serde_json::json!({
+                "run_id": selected_run_id,
+                "incomplete": false,
+                "selected_task_id": "provider",
+                "selected_artifact_id": "candidate",
+            })),
+            stop_reason: None,
+            terminal_phase: None,
+            terminal_failure_classification: None,
+            primary_failure: None,
+            moving_base_recovery: None,
+            failure_context: Some(AgentTaskCookFailureContext {
+                cook_id: "review-form-timeout-report".to_string(),
+                latest_run_id: "review-form-timeout-report-attempt-2".to_string(),
+                selected_run_id: Some(selected_run_id.to_string()),
+                selected_task_id: Some("provider".to_string()),
+                selected_artifact_id: Some("candidate".to_string()),
+                promotion_provenance: None,
+                durable_recipe_ref: "homeboy://agent-task/cooks/review-form-timeout-report/recipe"
+                    .to_string(),
+                lifecycle_state: "Failed".to_string(),
+                phase: "provider".to_string(),
+                reason_code: "failed".to_string(),
+                diagnostic: None,
+                continuation_admission: None,
+                blocking_claim: None,
+                provider_budget_consumed: true,
+                provider_executions_consumed: 2,
+                recovery_legal: false,
+                recovery_reason: "generic".to_string(),
+                legal_actions: Vec::new(),
+                next_actions: Vec::new(),
+            }),
+        },
+        exit_code: 1,
+    };
+
+    make_provider_timeout_actionable(
+        &mut report,
+        &aggregate,
+        &plan,
+        "review-form-timeout-report-attempt-2",
+        Some(AgentTaskExecutionBudget::new(1, 1, 0)),
+        false,
+    );
+
+    assert_eq!(report.value.status, "review_form_timeout");
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("review_form_timeout")
+    );
+    assert_eq!(report.value.terminal_phase.as_deref(), Some("review_form"));
+    let stop_reason = report.value.stop_reason.as_deref().expect("stop reason");
+    assert!(
+        stop_reason.contains("review_form_timeout_ms=300000"),
+        "{stop_reason}"
+    );
+    assert!(stop_reason.contains("selected candidate"), "{stop_reason}");
+    assert!(
+        !stop_reason.contains("without a successful candidate"),
+        "{stop_reason}"
+    );
+    assert_eq!(
+        report.value.selected_candidate.as_ref().unwrap()["run_id"],
+        selected_run_id
+    );
+    let context = report.value.failure_context.expect("failure context");
+    assert_eq!(context.phase, "review_form");
+    assert_eq!(context.reason_code, "review_form_timeout");
+    assert_eq!(context.selected_run_id.as_deref(), Some(selected_run_id));
+    let diagnostic = context.diagnostic.expect("diagnostic");
+    assert_eq!(diagnostic["class"], "agent_task.review_form_timeout");
+    assert_eq!(diagnostic["data"]["timeout_ms"], 300_000);
+    assert_eq!(
+        diagnostic["data"]["review_form_provider_budget_is_distinct"],
+        true
+    );
+    assert_eq!(
+        diagnostic["data"]["provider_budget_scope"],
+        "fresh_cook_review"
+    );
+    assert_eq!(
+        diagnostic["data"]["review_form_provider_executions_consumed"],
+        1
+    );
+    assert!(
+        context.recovery_reason.contains("review-form"),
+        "{}",
+        context.recovery_reason
+    );
+    assert_eq!(
+        context.legal_actions[0].command,
+        "homeboy agent-task cook-continue review-form-timeout-report-attempt-2 --review-form-timeout-ms 600000"
+    );
+}
+
 fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{

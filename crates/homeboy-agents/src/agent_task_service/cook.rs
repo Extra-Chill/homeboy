@@ -12,8 +12,13 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::agent_task_cook_loop::{
-    evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
-    AgentTaskIntentionalNoChange,
+    evaluate_cook_loop, request_is_review_form_only, AgentTaskCookLoopOptions,
+    AgentTaskCookLoopReport, AgentTaskCookLoopStatus, AgentTaskIntentionalNoChange,
+};
+
+pub use crate::agent_task_cook_loop::{
+    request_is_review_form_only as cook_request_is_review_form_only, review_form_timeout_ms,
+    DEFAULT_REVIEW_FORM_TIMEOUT_MS, MAX_REVIEW_FORM_TIMEOUT_MS,
 };
 use crate::agent_task_dispatch_plan::validate_single_cook_prompt_source;
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
@@ -1062,6 +1067,15 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
                 "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), optional structured `verification` entries (exact command plus total/passed/failed/ignored counts), and `used_for` (a concise reflection of the process used). Homeboy links verification entries to durable candidate gate evidence. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
             );
         }
+        let form_timeout_ms = review_form_timeout_ms(request);
+        if !request.metadata.is_object() {
+            request.metadata = serde_json::json!({});
+        }
+        if !request.metadata["cook_loop"].is_object() {
+            request.metadata["cook_loop"] = serde_json::json!({});
+        }
+        request.metadata["cook_loop"]["review_form_timeout_ms"] =
+            serde_json::json!(form_timeout_ms);
         if !request
             .instructions
             .contains("controller-owned publication")
@@ -3842,10 +3856,24 @@ fn retryable_review_form_terminal_failure(
         || retryable_provider_discovery_failure(&record.run_id)
         || aggregate.outcomes.iter().any(|outcome| {
             outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
-                || outcome
-                    .diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+                || outcome.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.class == "agent_task.provider_timeout"
+                        || diagnostic.class == "agent_task.review_form_timeout"
+                })
+        })
+}
+
+pub(crate) fn plan_is_review_form_only(plan: &AgentTaskPlan) -> bool {
+    plan.tasks.iter().any(request_is_review_form_only)
+}
+
+fn outcome_is_timeout(outcome: &crate::agent_task::AgentTaskOutcome) -> bool {
+    outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
+        || outcome.failure_classification
+            == Some(crate::agent_task::AgentTaskFailureClassification::Timeout)
+        || outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.provider_timeout"
+                || diagnostic.class == "agent_task.review_form_timeout"
         })
 }
 
@@ -3853,15 +3881,10 @@ fn provider_timeout_ms(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
     plan: &AgentTaskPlan,
 ) -> Option<u64> {
-    let timeout = aggregate.outcomes.iter().find(|outcome| {
-        outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
-            || outcome.failure_classification
-                == Some(crate::agent_task::AgentTaskFailureClassification::Timeout)
-            || outcome
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
-    })?;
+    let timeout = aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| outcome_is_timeout(outcome))?;
     timeout
         .diagnostics
         .iter()
@@ -3889,6 +3912,17 @@ fn make_provider_timeout_actionable(
     remaining_budget: Option<AgentTaskExecutionBudget>,
     provider_execution_active: bool,
 ) {
+    if plan_is_review_form_only(plan) {
+        make_review_form_timeout_actionable(
+            report,
+            aggregate,
+            plan,
+            run_id,
+            remaining_budget,
+            provider_execution_active,
+        );
+        return;
+    }
     let Some(timeout_ms) = provider_timeout_ms(aggregate, plan) else {
         return;
     };
@@ -3989,10 +4023,155 @@ fn make_provider_timeout_actionable(
     }
 }
 
+fn make_review_form_timeout_actionable(
+    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    plan: &AgentTaskPlan,
+    run_id: &str,
+    remaining_budget: Option<AgentTaskExecutionBudget>,
+    provider_execution_active: bool,
+) {
+    let Some(timeout_ms) = provider_timeout_ms(aggregate, plan) else {
+        return;
+    };
+    let remaining_executions = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_provider_executions)
+        .unwrap_or(0);
+    let remaining_retries = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_same_provider_retries)
+        .unwrap_or(0);
+    let remaining_rotations = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_provider_rotations)
+        .unwrap_or(0);
+    let next_timeout_ms = timeout_ms
+        .saturating_add(timeout_ms.max(1))
+        .min(MAX_REVIEW_FORM_TIMEOUT_MS);
+    let remaining_deadline_ms = remaining_budget
+        .as_ref()
+        .and_then(|budget| budget.remaining_deadline_ms(crate::agent_task_timeout::now_unix_ms()));
+    let deadline_expired = remaining_deadline_ms == Some(0);
+    let can_retry = remaining_executions > 0
+        && remaining_retries > 0
+        && next_timeout_ms > timeout_ms
+        && !deadline_expired;
+    let command = can_retry.then(|| {
+        format!(
+            "{} --review-form-timeout-ms {next_timeout_ms}",
+            cook_continue_command(None, run_id, false, None)
+        )
+    });
+    let recovery_guidance = if deadline_expired {
+        "The durable provider execution deadline is exhausted.".to_string()
+    } else {
+        command
+            .as_deref()
+            .map(|command| {
+                format!(
+                    "After any deferred cleanup completes, retry the review form with `{command}`."
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "No review-form timeout retry remains (deadline {timeout_ms}ms, cap {}ms).",
+                    MAX_REVIEW_FORM_TIMEOUT_MS
+                )
+            })
+    };
+    let deferred_cleanup_pending = provider_execution_active
+        || aggregate.outcomes.iter().any(|outcome| {
+            outcome.metadata["deferred_cleanup_pending"] == Value::Bool(true)
+                && !super::execution::deferred_cleanup_receipt_is_terminal(outcome, run_id)
+        });
+    let selected_candidate_retained =
+        report
+            .value
+            .selected_candidate
+            .as_ref()
+            .is_some_and(|candidate| {
+                candidate["incomplete"] != true
+                    && candidate["run_id"]
+                        .as_str()
+                        .is_some_and(|run_id| !run_id.is_empty())
+            });
+
+    report.value.status = CookStatus::ReviewFormTimeout.as_str().to_string();
+    report.value.terminal_phase = Some("review_form".to_string());
+    report.value.terminal_failure_classification = Some("review_form_timeout".to_string());
+    report.value.stop_reason = Some(if selected_candidate_retained {
+        format!(
+            "optional review form exceeded review_form_timeout_ms={timeout_ms}; the selected candidate and passed gates remain. Finalization still needs a valid review form. Review-form executions use the bounded fresh-review provider budget because they still invoke a provider. Remaining fresh-review budget: provider_executions={remaining_executions}, same_provider_retries={remaining_retries}, provider_rotations={remaining_rotations}. {recovery_guidance}"
+        )
+    } else {
+        format!(
+            "optional review form exceeded review_form_timeout_ms={timeout_ms} before a review form was produced. Review-form executions use the bounded fresh-review provider budget because they still invoke a provider. Remaining fresh-review budget: provider_executions={remaining_executions}, same_provider_retries={remaining_retries}, provider_rotations={remaining_rotations}. {recovery_guidance}"
+        )
+    });
+    if let Some(context) = report.value.failure_context.as_mut() {
+        context.phase = "review_form".to_string();
+        context.reason_code = "review_form_timeout".to_string();
+        context.diagnostic = Some(serde_json::json!({
+            "class": "agent_task.review_form_timeout",
+            "message": format!("review form exceeded review_form_timeout_ms={timeout_ms}"),
+            "data": {
+                "timeout_ms": timeout_ms,
+                "review_form_timeout_ms": timeout_ms,
+                "review_form_timeout_cap_ms": MAX_REVIEW_FORM_TIMEOUT_MS,
+                "default_review_form_timeout_ms": DEFAULT_REVIEW_FORM_TIMEOUT_MS,
+                "provider_budget_scope": "fresh_cook_review",
+                "review_form_provider_budget_is_distinct": true,
+                "review_form_provider_executions_consumed": 1,
+                "selected_candidate_retained": selected_candidate_retained,
+                "finalization_reached": false,
+                "finalization_not_reached_reason": "the optional review form timed out after the selected candidate passed gates",
+                "remaining_provider_executions": remaining_executions,
+                "remaining_same_provider_retries": remaining_retries,
+                "remaining_provider_rotations": remaining_rotations,
+                "remaining_execution_deadline_ms": remaining_deadline_ms,
+                "deferred_cleanup_pending": deferred_cleanup_pending,
+            }
+        }));
+        context.recovery_legal = can_retry && !deferred_cleanup_pending;
+        context.recovery_reason = if deadline_expired {
+            "the durable provider execution deadline is exhausted".to_string()
+        } else if !can_retry {
+            "review-form timeout retry budget is exhausted".to_string()
+        } else if deferred_cleanup_pending {
+            "review-form timeout retry is blocked until deferred cleanup is terminal".to_string()
+        } else {
+            "an explicit review-form timeout increase can consume the remaining retry budget"
+                .to_string()
+        };
+        context.legal_actions.clear();
+        context.next_actions.clear();
+        if deferred_cleanup_pending {
+            context.next_actions.push(AgentTaskCookRecoveryAction {
+                action: "status".to_string(),
+                command: format!("homeboy agent-task status {run_id} --exact --full"),
+            });
+        }
+        if let Some(command) = command {
+            let action = AgentTaskCookRecoveryAction {
+                action: "resume".to_string(),
+                command,
+            };
+            if deferred_cleanup_pending {
+                context.next_actions.push(action);
+            } else {
+                context.legal_actions.push(action.clone());
+                context.next_actions.push(action);
+            }
+        }
+    }
+}
+
 /// Whether a terminal review-form attempt may re-enter Cook's historical
 /// continuation path. This is intentionally narrower than terminality: only
-/// authenticated form-only continuations with a provider timeout or an
-/// existing retryable provider/pre-execution signal may execute again.
+/// authenticated form-only continuations with a review-form timeout, a
+/// provider timeout, or an existing retryable provider/pre-execution signal
+/// may execute again.
 pub fn terminal_review_form_continuation_is_eligible(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
