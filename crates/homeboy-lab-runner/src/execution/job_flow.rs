@@ -162,6 +162,15 @@ where
     let deadline = Instant::now() + runner_exec_wait_timeout();
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
+        if let Some(status) = flow.run_id.as_deref().and_then(|run_id| {
+            observed_agent_task_terminal_job_status(run_id, flow.run_id_owns_generic_exec)
+        }) {
+            // The agent-task lifecycle owns provider terminality. A stale runner
+            // job projection must not hold Cook in dispatch after its aggregate
+            // and artifacts are already durable on the controller.
+            job.status = status;
+            break;
+        }
         let job_id = job.id.to_string();
         if Instant::now() >= deadline {
             let events = events(&job)
@@ -383,4 +392,64 @@ where
         append_runner_exec_diagnostic_hint(&mut output, Some(hint.to_string()));
     }
     Ok((output, exit_code))
+}
+
+fn observed_agent_task_terminal_job_status(
+    run_id: &str,
+    run_id_owns_generic_exec: bool,
+) -> Option<JobStatus> {
+    if run_id_owns_generic_exec {
+        return None;
+    }
+    let state = homeboy_agents::agent_task_lifecycle::persisted_status(run_id)
+        .ok()?
+        .state;
+    agent_task_terminal_job_status(state)
+}
+
+fn agent_task_terminal_job_status(
+    state: homeboy_agents::agent_task_lifecycle::AgentTaskRunState,
+) -> Option<JobStatus> {
+    use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
+    match state {
+        AgentTaskRunState::Succeeded
+        | AgentTaskRunState::CandidateRecoverable
+        | AgentTaskRunState::PartialRecoverable => Some(JobStatus::Succeeded),
+        AgentTaskRunState::PartialFailure | AgentTaskRunState::Failed => Some(JobStatus::Failed),
+        AgentTaskRunState::Cancelled => Some(JobStatus::Cancelled),
+        AgentTaskRunState::Queued | AgentTaskRunState::Running => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
+
+    #[test]
+    fn agent_task_terminal_state_bounds_stale_runner_job_polling() {
+        for state in [
+            AgentTaskRunState::Succeeded,
+            AgentTaskRunState::CandidateRecoverable,
+            AgentTaskRunState::PartialRecoverable,
+        ] {
+            assert_eq!(
+                agent_task_terminal_job_status(state),
+                Some(JobStatus::Succeeded)
+            );
+        }
+        for state in [AgentTaskRunState::PartialFailure, AgentTaskRunState::Failed] {
+            assert_eq!(
+                agent_task_terminal_job_status(state),
+                Some(JobStatus::Failed)
+            );
+        }
+        assert_eq!(
+            agent_task_terminal_job_status(AgentTaskRunState::Cancelled),
+            Some(JobStatus::Cancelled)
+        );
+        for state in [AgentTaskRunState::Queued, AgentTaskRunState::Running] {
+            assert_eq!(agent_task_terminal_job_status(state), None);
+        }
+    }
 }

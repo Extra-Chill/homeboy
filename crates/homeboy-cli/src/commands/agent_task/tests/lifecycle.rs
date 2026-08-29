@@ -1022,6 +1022,15 @@ fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
         .status()
         .expect("configure fixture remote");
     assert!(remote.success());
+    homeboy::core::component::write_standalone_component_config(
+        &homeboy::core::component::Component {
+            id: "fixture".to_string(),
+            local_path: primary.display().to_string(),
+            remote_url: Some("https://github.com/example/fixture.git".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("register fixture primary");
     let worktree = Command::new("git")
         .args(["worktree", "add", "-b", "fixture-recovery"])
         .arg(&source)
@@ -1164,6 +1173,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1259,6 +1269,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             rearm: false,
             artifact_id: Some("retained-patch".to_string()),
             timeout_ms: None,
+            review_form_timeout_ms: None,
             full: false,
         })
         .expect("preflight reports provenance rejection");
@@ -1403,6 +1414,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
             rearm: false,
             artifact_id: None,
             timeout_ms: None,
+            review_form_timeout_ms: None,
             full: false,
         })
         .expect("preflight evaluates pre-execution retry");
@@ -1688,6 +1700,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1752,6 +1765,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: false,
             },
             executor.clone(),
@@ -1963,6 +1977,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1981,6 +1996,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 rearm: true,
                 artifact_id: Some("mime-shaped".to_string()),
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1995,6 +2011,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 rearm: true,
                 artifact_id: Some("selected".to_string()),
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -4615,6 +4632,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                             rearm: false,
                             artifact_id: None,
                             timeout_ms: None,
+                            review_form_timeout_ms: None,
                             full: false,
                         },
                         Arc::new(CountingCookExecutor::default()),

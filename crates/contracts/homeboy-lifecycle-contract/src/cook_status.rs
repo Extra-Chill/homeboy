@@ -107,6 +107,8 @@ pub enum CookStatus {
     Cancelled,
     /// Exceeded its wall-clock budget.
     TimedOut,
+    /// The optional read-only review form exceeded its distinct deadline.
+    ReviewFormTimeout,
     /// Ran out of retries.
     RetriesExhausted,
     /// Ran out of execution budget.
@@ -155,6 +157,7 @@ impl CookStatus {
             "blocked" => Self::Blocked,
             "cancelled" => Self::Cancelled,
             "timed_out" => Self::TimedOut,
+            "review_form_timeout" => Self::ReviewFormTimeout,
             "retries_exhausted" => Self::RetriesExhausted,
             "execution_budget_exhausted" => Self::ExecutionBudgetExhausted,
             "policy_failure" => Self::PolicyFailure,
@@ -188,6 +191,7 @@ impl CookStatus {
             Self::Blocked => "blocked",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::ReviewFormTimeout => "review_form_timeout",
             Self::RetriesExhausted => "retries_exhausted",
             Self::ExecutionBudgetExhausted => "execution_budget_exhausted",
             Self::PolicyFailure => "policy_failure",
@@ -318,6 +322,7 @@ mod tests {
             "awaiting_acceptance",
             "cancelled",
             "timed_out",
+            "review_form_timeout",
             "durable_failure",
             "selection_required",
         ] {
@@ -390,6 +395,7 @@ mod tests {
             CookStatus::Blocked,
             CookStatus::Cancelled,
             CookStatus::TimedOut,
+            CookStatus::ReviewFormTimeout,
             CookStatus::RetriesExhausted,
             CookStatus::ExecutionBudgetExhausted,
             CookStatus::PolicyFailure,
