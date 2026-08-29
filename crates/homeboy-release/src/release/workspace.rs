@@ -60,12 +60,13 @@ impl ReleaseWorkspace {
             owner_run_ref: owner_run_ref.clone(),
             cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
         };
-        let handle = format!("release-{}-{}", component.id, &source_sha[..12]);
+        let branch = format!("release-{}-{}", component.id, &source_sha[..12]);
+        let handle = homeboy_core::worktree::handle_for_branch(&component.id, &branch);
         let mut intent = WorktreeProviderCreateIntent {
             handle: handle.clone(),
             repo: component.id.clone(),
             base: source_sha.clone(),
-            head: handle,
+            head: branch,
             task_url: owner_run_ref,
         };
         let planned =
@@ -698,6 +699,11 @@ mod tests {
 
             assert_eq!(workspace.output.kind, "provider_owned");
             assert_eq!(workspace.output.provider_id.as_deref(), Some("native"));
+            assert!(workspace
+                .output
+                .handle
+                .as_deref()
+                .is_some_and(|handle| handle.starts_with("fixture@release-fixture-")));
             assert_ne!(workspace.component.local_path, component.local_path);
             assert_eq!(
                 git::head_sha(Path::new(&workspace.component.local_path)),
