@@ -236,6 +236,17 @@ pub(super) fn is_lab_offloadable_fanout_coordinator(command: &Commands) -> bool 
     )
 }
 
+/// Executable retries use the generic Lab route, which first materializes the
+/// persisted controller plan and then hands that replay to the selected runner.
+pub(super) fn is_executable_agent_task_retry(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Retry(retry),
+        }) if retry.run
+    )
+}
+
 pub(super) fn is_plan_only_command(command: &Commands) -> bool {
     matches!(
         command,

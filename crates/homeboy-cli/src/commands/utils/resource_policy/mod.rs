@@ -12,7 +12,8 @@ use serde::Serialize;
 
 use classification::{
     is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
-    is_lab_offloadable_fanout_coordinator, is_local_registry_management, is_plan_only_command,
+    is_executable_agent_task_retry, is_lab_offloadable_fanout_coordinator,
+    is_local_registry_management, is_plan_only_command,
 };
 use messages::{
     append_local_placement, lab_routed_controller_notice, primary_action, severity_str,
@@ -67,8 +68,8 @@ pub(crate) fn parsed_command_preflight_input(
         || is_local_registry_management(&cli.command)
     {
         ControllerExecution::ControllerOnly
-    } else if hot_command(&cli.command)
-        .is_some_and(|command| command.allows_warm_runner_coordination)
+    } else if !is_executable_agent_task_retry(&cli.command)
+        && hot_command(&cli.command).is_some_and(|command| command.allows_warm_runner_coordination)
     {
         ControllerExecution::SplitPlacementCoordinator
     } else {
@@ -894,6 +895,31 @@ mod tests {
     use crate::commands::resources::{LoadSummary, MemorySummary, ProcessSummary, RigLeaseSummary};
     use crate::test_support::with_isolated_home;
     use clap::Parser;
+
+    #[test]
+    fn executable_agent_task_retry_uses_generic_lab_routing() {
+        use crate::core::parsed_command_preflight::ControllerExecution;
+
+        let args = [
+            "homeboy",
+            "agent-task",
+            "retry",
+            "persisted-lab-run",
+            "--run",
+            "--runner",
+            "homeboy-lab",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let cli = Cli::parse_from(&args);
+
+        assert_eq!(
+            parsed_command_preflight_input(&cli, &args).controller_execution,
+            ControllerExecution::Ordinary
+        );
+    }
+
     fn resources(recommendation: ResourceRecommendation) -> DoctorOutput {
         DoctorOutput {
             command: "self.resources",
