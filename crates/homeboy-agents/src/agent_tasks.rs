@@ -429,10 +429,10 @@ pub mod provider {
         default_backend, default_backend_for_component, dependency_failure_patterns,
         provider_capability_contract, provider_requires_cwd_git_checkout,
         provider_runner_readiness_contracts, provider_runner_secret_env_for_plan,
-        provider_runner_source_contracts, provider_secret_sources_for_backend,
-        provider_secret_sources_for_plan, provider_secret_sources_for_providers,
-        required_extension_ids_for_plan, resolve_provider_for_backend,
-        validate_provider_runner_readiness_for_backend,
+        provider_runner_source_contracts, provider_secret_env_scopes,
+        provider_secret_sources_for_backend, provider_secret_sources_for_plan,
+        provider_secret_sources_for_providers, required_extension_ids_for_plan,
+        resolve_provider_for_backend, validate_provider_runner_readiness_for_backend,
         validate_provider_runner_readiness_for_backend_with_catalog, AgentTaskExecutorProvider,
         AgentTaskProviderCapabilityContract, AgentTaskProviderCatalog,
         AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
@@ -493,8 +493,9 @@ pub mod secrets {
     pub use super::super::agent_task_secrets::{
         legacy_secrets_file, map_secret_to_env, map_secret_to_keychain_bundle,
         remove_secret_mapping, resolve_secret_env, resolve_secret_env_with_fallbacks,
-        secret_env_status, secret_env_status_for_scope, secret_env_status_with_fallbacks,
-        set_config_secret, set_keychain_bundle, set_keychain_secret, validate_secret_env,
+        secret_env_status, secret_env_status_for_scope, secret_env_status_for_scopes,
+        secret_env_status_with_fallbacks, set_config_secret, set_keychain_bundle,
+        set_keychain_secret, validate_secret_env, AgentTaskSecretEnvScope,
         AgentTaskSecretEnvStatus, AgentTaskSecretResolutionError,
     };
 }

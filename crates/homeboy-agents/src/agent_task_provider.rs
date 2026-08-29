@@ -80,8 +80,8 @@ pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
 pub use credential_readiness::{
     preflight_discovered_provider_credentials_for_backend, preflight_provider_credentials,
     preflight_provider_credentials_for_backend, provider_credential_readiness,
-    AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
-    AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
+    provider_required_secret_env_names, AgentTaskProviderCredentialReadiness,
+    AgentTaskProviderCredentialRequirement, AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
 };
 pub use dispatchability::{
     evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
