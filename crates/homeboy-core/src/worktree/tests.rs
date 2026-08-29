@@ -277,6 +277,40 @@ fn task_worktree_identity_is_path_independent_and_rejects_conflicts() {
     assert!(conflicting.effective_workspace_identity().is_err());
 }
 
+#[test]
+fn ownership_probe_names_the_live_holder_for_a_nested_checkout_path() {
+    let data_root = tempfile::tempdir().expect("data root");
+    let checkout = tempfile::tempdir().expect("checkout");
+    let nested = checkout.path().join("crates/component");
+    fs::create_dir_all(&nested).expect("nested component");
+    let mut record = fixture_record(checkout.path(), checkout.path());
+    record.run_id = Some("ses_live_holder".to_string());
+    write_record(&metadata_dir_in_root(data_root.path()), &record).expect("record worktree");
+    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root
+            .path()
+            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    );
+    claims
+        .register_owner(
+            record.effective_workspace_identity().expect("identity"),
+            "ses_live_holder",
+            10_000,
+            1_000,
+        )
+        .expect("register holder");
+
+    let probe = ownership_probe_in_root(&nested, data_root.path(), 2_000)
+        .expect("probe succeeds")
+        .expect("managed checkout");
+
+    assert_eq!(probe.holder.as_deref(), Some("ses_live_holder"));
+    assert_eq!(probe.lifecycle_state, "active");
+    assert_eq!(probe.activity, WorktreeLeaseActivity::Live);
+    assert!(probe.heartbeat_fresh);
+    assert_eq!(probe.lease_expires_at_ms, Some(11_000));
+}
+
 fn git_repo() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     run_git(temp.path(), &["init", "-q"]);

@@ -90,7 +90,7 @@ pub struct LintArgs {
     #[arg(long)]
     pub fix: bool,
 
-    /// Allow --fix to edit the current dirty working tree for unbounded runs
+    /// Override dirty-tree and foreign live worktree-holder write protection
     #[arg(long)]
     pub force: bool,
 

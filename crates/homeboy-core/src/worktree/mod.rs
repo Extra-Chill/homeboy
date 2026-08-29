@@ -29,12 +29,12 @@ pub use types::{
     WorktreeCreateEvidence, WorktreeCreateOptions, WorktreeCreateOutput,
     WorktreeCreateReconciliation, WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization,
     WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence, WorktreeInventoryOptions,
-    WorktreeInventoryOutput, WorktreeInventoryRecord, WorktreeListOutput,
-    WorktreeLivenessAuthority, WorktreeQueueCreateFailure, WorktreeQueueCreateOptions,
-    WorktreeQueueCreateOutput, WorktreeQueueCreateRequest, WorktreeQueueCreateRow,
-    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeReconciliationAction,
-    WorktreeReconciliationAuthority, WorktreeReconciliationResult, WorktreeRemoveOptions,
-    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+    WorktreeInventoryOutput, WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListOutput,
+    WorktreeLivenessAuthority, WorktreeOwnershipProbe, WorktreeQueueCreateFailure,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeQueueCreateRequest,
+    WorktreeQueueCreateRow, WorktreeQueueCreateStatus, WorktreeQueueLockHolder,
+    WorktreeReconciliationAction, WorktreeReconciliationAuthority, WorktreeReconciliationResult,
+    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
     TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
@@ -57,6 +57,121 @@ pub fn adopt(options: WorktreeAdoptOptions) -> Result<WorktreeAdoptOutput> {
 
 pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
+}
+
+/// Report the live write holder for a checkout path, including component
+/// subdirectories. Unmanaged paths return `None` rather than failing closed.
+pub fn ownership_probe(path: &Path) -> Result<Option<WorktreeOwnershipProbe>> {
+    let data_root = paths::homeboy_data()?;
+    ownership_probe_in_root(path, &data_root, now_ms())
+}
+
+/// Refuse a write when a different live owner holds the managed checkout.
+/// `force` is an explicit operator override, not an authority receipt.
+pub fn enforce_write_ownership(
+    path: &Path,
+    caller_owner_id: Option<&str>,
+    force: bool,
+) -> Result<Option<WorktreeOwnershipProbe>> {
+    let probe = ownership_probe(path)?;
+    if force {
+        return Ok(probe);
+    }
+    let Some(status) = probe.as_ref() else {
+        return Ok(None);
+    };
+    let foreign = status
+        .live_holders
+        .iter()
+        .filter(|holder| Some(holder.as_str()) != caller_owner_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !foreign.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "worktree_write_ownership",
+            format!(
+                "refusing to write managed worktree {}: held by live session(s) {}; pass --force to override",
+                status.handle,
+                foreign.join(", ")
+            ),
+            Some(status.path.clone()),
+            Some(vec!["override: --force".to_string()]),
+        ));
+    }
+    Ok(probe)
+}
+
+fn ownership_probe_in_root(
+    path: &Path,
+    data_root: &Path,
+    now_ms: u64,
+) -> Result<Option<WorktreeOwnershipProbe>> {
+    let requested = normalize_existing_path(path);
+    let record = list_with_store(&metadata_dir_in_root(data_root))?
+        .worktrees
+        .into_iter()
+        .filter(|record| {
+            let root = normalize_existing_path(Path::new(&record.worktree_path));
+            requested == root || requested.starts_with(&root)
+        })
+        .max_by_key(|record| Path::new(&record.worktree_path).components().count());
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let workspace = record.effective_workspace_identity()?;
+    let owners = crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root.join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    )
+    .owner_status(&workspace, now_ms)?;
+    let live_holders = owners
+        .iter()
+        .map(|owner| owner.owner_id.clone())
+        .collect::<Vec<_>>();
+    let live_holder = record
+        .run_id
+        .as_ref()
+        .filter(|run_id| live_holders.contains(run_id))
+        .cloned()
+        .or_else(|| live_holders.first().cloned());
+    let holder = live_holder.or_else(|| record.run_id.clone());
+    let stopped =
+        record.state == TaskWorktreeState::Removed || record.terminal_disposition.is_some();
+    let activity = if stopped {
+        WorktreeLeaseActivity::Stopped
+    } else if live_holders.is_empty() {
+        WorktreeLeaseActivity::Stale
+    } else {
+        WorktreeLeaseActivity::Live
+    };
+    let lease_expires_at_ms = holder.as_ref().and_then(|holder| {
+        owners
+            .iter()
+            .find(|owner| &owner.owner_id == holder)
+            .map(|owner| owner.expires_at_ms)
+    });
+    Ok(Some(WorktreeOwnershipProbe {
+        handle: record.id,
+        path: record.worktree_path,
+        holder,
+        lifecycle_state: record
+            .terminal_disposition
+            .unwrap_or_else(|| match record.state {
+                TaskWorktreeState::Active => "active".to_string(),
+                TaskWorktreeState::Removed => "removed".to_string(),
+            }),
+        heartbeat_fresh: !owners.is_empty(),
+        activity,
+        lease_expires_at_ms,
+        live_holders,
+    }))
+}
+
+fn normalize_existing_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
 pub(crate) fn list_workspace_refs() -> Result<Vec<WorkspaceRefRecord>> {
@@ -538,8 +653,9 @@ pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput>
 /// active checkout to exercise it. Keeping the helper here means the record
 /// store layout stays owned by this module instead of being reimplemented by
 /// every caller's test fixtures.
-#[cfg(test)]
-pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn record_active_for_test(id: &str, worktree_path: &Path) {
     record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Active);
 }
 
@@ -562,7 +678,7 @@ pub(crate) fn record_removed_for_test(id: &str, worktree_path: &Path) {
     record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Removed);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn record_for_test(
     id: &str,
     source_checkout: &Path,

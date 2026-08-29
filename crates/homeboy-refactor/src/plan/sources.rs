@@ -141,6 +141,15 @@ pub fn collect_refactor_sources(
 ) -> homeboy_core::Result<RefactorSourceRun> {
     let sources = normalize_sources(&request.sources)?;
     let root_str = request.root.to_string_lossy().to_string();
+    if request.write {
+        homeboy_core::worktree::enforce_write_ownership(
+            &request.root,
+            std::env::var(homeboy_core::observation::ACTIVE_RUN_ID_ENV)
+                .ok()
+                .as_deref(),
+            request.force,
+        )?;
+    }
     let original_changes = git::get_uncommitted_changes(&root_str).ok();
 
     // Refuse to write to a dirty working tree unless --force is set.
@@ -855,6 +864,54 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_refactor_sources_refuses_a_foreign_live_worktree_holder_before_writing() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tmp_dir("foreign-held-worktree");
+            init_test_repo(&root);
+            let source = root.join("README.md");
+            let original = fs::read_to_string(&source).expect("read original source");
+            homeboy_core::worktree::record_active_for_test("fixture@foreign-held", &root);
+            let record = homeboy_core::worktree::resolve("fixture@foreign-held")
+                .expect("resolve managed worktree");
+            let claims = homeboy_core::workspace_claim::WorkspaceClaimStore::new(
+                homeboy_core::paths::homeboy_data()
+                    .expect("data root")
+                    .join(homeboy_core::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+            );
+            claims
+                .register_owner(
+                    record.effective_workspace_identity().expect("identity"),
+                    "ses_foreign_13748",
+                    300_000,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("current time")
+                        .as_millis() as u64,
+                )
+                .expect("register foreign holder");
+
+            let err = collect_refactor_sources(lint_refactor_request(
+                test_component(&root),
+                root.clone(),
+                Vec::new(),
+                LintSourceOptions::default(),
+                true,
+            ))
+            .expect_err("foreign live holder must protect the checkout");
+
+            let message = err.to_string();
+            assert!(message.contains("ses_foreign_13748"), "{message}");
+            assert!(message.contains("--force"), "{message}");
+            assert_eq!(
+                fs::read_to_string(&source).expect("read protected source"),
+                original,
+                "the mutating pipeline must leave the held checkout untouched"
+            );
+            let _ = fs::remove_dir_all(&root);
+        });
     }
 
     fn init_test_repo(path: &Path) {

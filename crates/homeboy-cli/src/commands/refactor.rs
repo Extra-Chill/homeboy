@@ -62,7 +62,7 @@ pub struct RefactorArgs {
     #[command(flatten)]
     baseline_args: BaselineArgs,
 
-    /// Skip the clean working tree check (for CI or when you know what you're doing)
+    /// Override dirty-tree and foreign live worktree-holder write protection
     #[arg(long)]
     force: bool,
 
