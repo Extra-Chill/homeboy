@@ -5,7 +5,9 @@ use super::super::apply::{
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
     ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
 };
-use super::super::promote::{normalize_promotion_patch, promote_with_provider};
+use super::super::promote::{
+    normalize_promotion_patch, promote_with_provider, promote_with_provider_in_observation_store,
+};
 use super::super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
     AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
@@ -26,6 +28,8 @@ use std::path::{Path, PathBuf};
 #[test]
 fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_sources() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let observation_store =
+            homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let run_id = "recovered-lab-run";
         let task_id = "implement";
         let artifact_id = "patch";
@@ -48,7 +52,7 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
                 ..Default::default()
             };
 
-            let report = promote_with_provider(
+            let report = promote_with_provider_in_observation_store(
                 AgentTaskPromotionOptions {
                     source: source.clone(),
                     source_run_id: Some(run_id.to_string()),
@@ -66,6 +70,7 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
                     provider_invocation: None,
                 },
                 &mut provider,
+                &observation_store,
             )
             .expect("recovered aggregate promotes from controller projection");
 
@@ -382,6 +387,8 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
 #[test]
 fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let observation_store =
+            homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         std::fs::create_dir(&repo).expect("create repo");
@@ -401,7 +408,7 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
             ..Default::default()
         };
 
-        let report = promote_with_provider(
+        let report = promote_with_provider_in_observation_store(
             AgentTaskPromotionOptions {
                 source,
                 source_run_id: Some("baseline-run".to_string()),
@@ -419,6 +426,7 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
                 provider_invocation: None,
             },
             &mut provider,
+            &observation_store,
         )
         .expect("committed changes promote");
         let original_path = temp.path().join(format!(

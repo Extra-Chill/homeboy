@@ -7,7 +7,8 @@ use super::super::apply::{
 };
 use super::super::promote::{
     normalize_promotion_patch, promote_with_provider, promote_with_provider_and_checkpoint,
-    resume_promoted_patch, select_patch_artifact, validate_artifact_content,
+    promote_with_provider_in_observation_store, resume_promoted_patch, select_patch_artifact,
+    validate_artifact_content,
 };
 use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
 use super::*;
@@ -228,7 +229,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             workspace_path: Some(temp.path().join("target")),
             ..Default::default()
         };
-        let report = promote_with_provider(
+        let report = promote_with_provider_in_observation_store(
             AgentTaskPromotionOptions {
                 source: serde_json::to_string(&aggregate).expect("aggregate json"),
                 source_run_id: Some(run_id.to_string()),
@@ -246,6 +247,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                 provider_invocation: None,
             },
             &mut provider,
+            &store,
         )
         .expect("promote recovered controller projection");
         assert_ne!(report.patch_artifact.path, patch.path);
@@ -260,6 +262,8 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
 #[test]
 fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let observation_store =
+            homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let temp = tempfile::tempdir().expect("tempdir");
         let patch_path = temp.path().join("remediation.patch");
         std::fs::write(&patch_path, VALID_PATCH).expect("write remediation patch");
@@ -326,7 +330,7 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
             workspace_path: Some(temp.path().to_path_buf()),
             ..Default::default()
         };
-        promote_with_provider(
+        promote_with_provider_in_observation_store(
             AgentTaskPromotionOptions {
                 source,
                 source_run_id: Some("follow-up-run".to_string()),
@@ -344,6 +348,7 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
                 provider_invocation: None,
             },
             &mut provider,
+            &observation_store,
         )
         .expect("aggregate promotion");
         let forwarded = provider.apply_calls[0]

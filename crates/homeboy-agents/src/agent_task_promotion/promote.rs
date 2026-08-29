@@ -341,6 +341,7 @@ fn resume_promoted_patch_internal<'a>(
         target_path,
         expected_candidate.as_ref(),
         gate_workspace,
+        observation_store,
     )?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
@@ -651,11 +652,25 @@ pub(super) fn promote_with_provider_and_checkpoint(
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
-    // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
-    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let observation_store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
+        &context.path_roots(),
+    )?;
     promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, &observation_store)
+}
+
+#[cfg(test)]
+pub(super) fn promote_with_provider_in_observation_store(
+    options: AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskPromotionReport> {
+    promote_with_provider_and_checkpoint_internal(
+        options,
+        provider,
+        &mut |_| Ok(()),
+        observation_store,
+    )
 }
 
 #[cfg(test)]
@@ -835,7 +850,14 @@ fn promote_with_provider_and_checkpoint_internal(
         let target =
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), worktree_path);
         let gates = if let Some(worktree_path) = worktree_path {
-            run_promotion_gates(&options, provider, worktree_path, None, None)?
+            run_promotion_gates(
+                &options,
+                provider,
+                worktree_path,
+                None,
+                None,
+                observation_store,
+            )?
         } else {
             PromotionGateRun::without_gates(options.dry_run)
         };
@@ -1028,6 +1050,7 @@ fn promote_with_provider_and_checkpoint_internal(
                     })?
                     .as_ref(),
                 None,
+                observation_store,
             )?,
             verified_base,
         )
@@ -1729,6 +1752,7 @@ fn promote_committed_changes(
                     })?
                     .as_ref(),
                 None,
+                observation_store,
             )?,
             verified_base,
         )
@@ -1866,6 +1890,7 @@ fn run_promotion_gates(
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
     gate_workspace: Option<&Path>,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PromotionGateRun> {
     emit_promotion_progress(
         "hydration",
@@ -1891,6 +1916,7 @@ fn run_promotion_gates(
             .as_deref()
             .unwrap_or("unrecorded-promotion"),
         expected_candidate,
+        observation_store,
     )?;
     // The immutable candidate establishes source identity only. Dependency
     // setup is intentionally destination-only: gates must consume the exact
@@ -1988,6 +2014,7 @@ fn run_promotion_gates(
                 command,
                 visibility,
                 reveal_policy,
+                observation_store,
             )?
         };
         if gate.status == AgentTaskGateStatus::Failed
@@ -2108,6 +2135,7 @@ impl ImmutableCandidateCheckout {
         source_root: &Path,
         run_id: &str,
         expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+        observation_store: &homeboy_core::observation::ObservationStore,
     ) -> Result<Option<Self>> {
         if !source_root.is_dir() {
             // An external provider can report an opaque or not-yet-mounted
@@ -2156,7 +2184,11 @@ impl ImmutableCandidateCheckout {
                 "homeboy: immutable promotion candidate",
             ],
         )?;
-        let allocation = crate::controller_scratch::allocate_attempt(
+        let data_root = observation_store.data_root().ok_or_else(|| {
+            Error::internal_unexpected("promotion observation store has no data root")
+        })?;
+        let allocation = crate::controller_scratch::allocate_attempt_at(
+            data_root,
             run_id,
             "promotion-candidate-checkout",
             "candidate",
@@ -2246,12 +2278,17 @@ fn run_promotion_gate(
     command: &str,
     visibility: AgentTaskGateVisibility,
     reveal_policy: AgentTaskGateRevealPolicy,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<crate::agent_task_gate::AgentTaskGateReport> {
     let run_id = options
         .source_run_id
         .as_deref()
         .unwrap_or("unrecorded-promotion");
-    let allocation = crate::controller_scratch::allocate_attempt(
+    let data_root = observation_store.data_root().ok_or_else(|| {
+        Error::internal_unexpected("promotion observation store has no data root")
+    })?;
+    let allocation = crate::controller_scratch::allocate_attempt_at(
+        data_root,
         run_id,
         "promotion-verification",
         &format!("gate-{index}"),
