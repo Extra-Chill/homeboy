@@ -2610,16 +2610,11 @@ fn normalize_static_cook_batch_repo_with_placement(
     args: &mut AgentTaskFanoutCookBatchArgs,
     placement: Placement,
 ) -> Result<()> {
-    let expanded = shellexpand::tilde(&args.repo);
-    let path = std::path::Path::new(expanded.as_ref());
-    if !path.is_absolute() && !args.repo.contains(std::path::MAIN_SEPARATOR) && !path.exists() {
-        return normalize_named_cook_batch_repo(args);
-    }
-    let resolution = homeboy::core::component::resolve_registered_primary_path(&args.repo)?;
+    let resolution = homeboy::core::component::resolve_registered_primary_identity(&args.repo)?;
     match resolution {
         homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
             args.repo = id;
-            normalize_named_cook_batch_repo(args)
+            normalize_registered_cook_batch_repo(args)
         }
         resolution => Err(invalid_cook_batch_repo_path(args, resolution, placement)),
     }
@@ -2651,20 +2646,17 @@ fn normalize_cook_batch_repo_with_placement(
     args: &mut AgentTaskFanoutCookBatchArgs,
     placement: Placement,
 ) -> Result<()> {
+    let handle_like = args.repo.contains('@');
     let path_like = std::path::Path::new(&args.repo).is_absolute()
         || args.repo.contains(std::path::MAIN_SEPARATOR)
         || std::path::Path::new(&args.repo).exists();
-    let handle_like = args.repo.contains('@');
-    if !path_like && !handle_like {
-        return normalize_named_cook_batch_repo(args);
-    }
 
     if handle_like && !path_like {
         let candidates = args
             .repo
             .split_once('@')
             .and_then(|(id, _)| {
-                homeboy::core::component::registered()
+                homeboy::core::component::inventory::registered_base()
                     .ok()
                     .and_then(|components| {
                         components
@@ -2677,19 +2669,19 @@ fn normalize_cook_batch_repo_with_placement(
         return Err(invalid_cook_batch_repo(args, candidates, placement));
     }
 
-    let resolution = homeboy::core::component::resolve_registered_primary_path(&args.repo)?;
+    let resolution = homeboy::core::component::resolve_registered_primary_identity(&args.repo)?;
     match resolution {
         homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
             args.repo = id;
-            normalize_named_cook_batch_repo(args)
+            normalize_registered_cook_batch_repo(args)
         }
         resolution => Err(invalid_cook_batch_repo_path(args, resolution, placement)),
     }
 }
 
-fn normalize_named_cook_batch_repo(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
-    let (repository, component, _) =
-        super::run::cook_repository_identity_for_selection(&args.repo, args.component.as_deref())?;
+fn normalize_registered_cook_batch_repo(args: &mut AgentTaskFanoutCookBatchArgs) -> Result<()> {
+    let (repository, component) =
+        super::run::cook_repository_names_for_selection(&args.repo, args.component.as_deref())?;
     args.repo = repository;
     args.component = Some(component);
     Ok(())
@@ -7883,8 +7875,63 @@ fi
 
             let mut path = cook_batch_args();
             path.repo = primary.to_string_lossy().to_string();
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&bin).expect("fake Git bin");
+            let fake_git = bin.join("git");
+            let git_invoked = home.path().join("git-invoked");
+            std::fs::write(
+                &fake_git,
+                format!("#!/bin/sh\n: > '{}'\nsleep 5\n", git_invoked.display()),
+            )
+            .expect("sleeping Git");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
+                    .expect("executable fake Git");
+            }
+            let previous_path = std::env::var_os("PATH");
+            let mut search_path = std::ffi::OsString::from(bin.as_os_str());
+            search_path.push(":");
+            search_path.push(previous_path.unwrap_or_default());
+            let _path = homeboy::core::test_support::EnvVarGuard::set("PATH", search_path);
+
+            let started = Instant::now();
             normalize_cook_batch_repo(&mut path).expect("primary path resolves");
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "exact primary identity must resolve before a planner deadline"
+            );
             assert_eq!(path.repo, "fixture");
+            assert!(!git_invoked.exists(), "identity normalization invoked Git");
+        });
+    }
+
+    #[test]
+    fn cook_batch_repo_normalization_rejects_unknown_slug_with_immediate_candidates() {
+        with_isolated_home(|home| {
+            for index in (0..64).rev() {
+                let id = format!("candidate-{index:02}");
+                let primary = home.path().join(&id);
+                write_component_registration(home.path(), &id, &primary);
+            }
+            let mut args = cook_batch_args();
+            args.repo = "unknown-repository".to_string();
+
+            let started = Instant::now();
+            let error = normalize_cook_batch_repo(&mut args).expect_err("unknown slug");
+
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert_eq!(
+                error.details["identity_classification"],
+                "unregistered_repository"
+            );
+            let candidates = error.details["component_candidates"]
+                .as_array()
+                .expect("component candidates");
+            assert_eq!(candidates.len(), 64);
+            assert_eq!(candidates[0], "candidate-00");
+            assert_eq!(candidates[63], "candidate-63");
         });
     }
 
