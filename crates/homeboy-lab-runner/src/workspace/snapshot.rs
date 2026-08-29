@@ -2271,7 +2271,30 @@ pub(super) fn materialize_snapshot_stage(
     })?;
     for entry in &manifest.entries {
         let output = stage.path().join(&entry.staging_output);
-        if !output.exists() && !entry.source.exists() {
+        if output.exists() {
+            continue;
+        }
+        let metadata = fs::metadata(&entry.source).map_err(|error| {
+            snapshot_construction_failure(
+                &entry.declaration_id,
+                &entry.source,
+                Some(&output),
+                &error.to_string(),
+            )
+        })?;
+        if metadata.is_dir() {
+            // Tar may omit an admitted root directory when every child is
+            // excluded. Preserve the empty directory represented by the source
+            // manifest so pre-transport stability compares equivalent trees.
+            fs::create_dir_all(&output).map_err(|error| {
+                snapshot_construction_failure(
+                    &entry.declaration_id,
+                    &entry.source,
+                    Some(&output),
+                    &error.to_string(),
+                )
+            })?;
+        } else {
             return Err(snapshot_construction_failure(
                 &entry.declaration_id,
                 &entry.source,

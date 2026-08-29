@@ -1976,6 +1976,28 @@ fn snapshot_stability_rejects_a_mixed_staged_tree_even_if_source_is_restored() {
 }
 
 #[test]
+fn snapshot_staging_preserves_an_admitted_root_when_every_child_is_excluded() {
+    let source = tempfile::tempdir().expect("source");
+    let overlays = source.path().join("runtime-overlays/php-wasm");
+    fs::create_dir_all(&overlays).expect("runtime overlay directory");
+    fs::write(overlays.join("runtime.wasm"), b"\0asm").expect("runtime artifact");
+    let excludes = vec!["runtime-overlays/*".to_string()];
+
+    let before = snapshot_stable_manifest(source.path(), &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(source.path(), &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(source.path(), &excludes, &manifest, None)
+        .expect("snapshot stage");
+    let staged_source = stage.path().join("source");
+    let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
+    let after = snapshot_stable_manifest(source.path(), &excludes).expect("current manifest");
+
+    validate_snapshot_stability(&before, &staged, &after, source.path(), &staged_source)
+        .expect("the excluded children retain their admitted empty root");
+    assert!(staged_source.join("runtime-overlays").is_dir());
+    assert!(!staged_source.join("runtime-overlays/php-wasm").exists());
+}
+
+#[test]
 fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let workspace_root = tempfile::tempdir().expect("workspace root");
