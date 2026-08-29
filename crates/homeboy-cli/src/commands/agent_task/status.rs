@@ -309,6 +309,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         // can also change what a later `activity show` returns. Say so (#W3-15).
         let bridge_status = agent_task_service::run_status(&target.run_id, args.since_cursor)?;
         let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
+        attach_control_plane_identities(&mut value, &target.run_id)?;
         attach_reconciled(&mut value, true);
         if let Some(selection) = target.selection {
             value["candidate_selection"] = selection;
@@ -363,6 +364,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         Err(_) => None,
     };
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
+    attach_control_plane_identities_from_record(&mut value, &record)?;
     value["action_eligibility"] = serde_json::to_value(
         agent_task_lifecycle::lifecycle_action_eligibility(&record, eligibility_plan.as_ref()),
     )
@@ -914,6 +916,44 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
 /// other (on `--bridge`) is a reconciling read. That is by design and is not
 /// changed here; it is only made visible, so a consumer can tell which kind of
 /// answer it received without inferring it from the command name (#W3-15).
+fn attach_control_plane_identities(value: &mut Value, run_id: &str) -> homeboy::core::Result<()> {
+    let recorded_attempt = value
+        .pointer("/metadata/cook_attempt")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    attach_resolved_control_plane(value, run_id, recorded_attempt)
+}
+
+fn attach_control_plane_identities_from_record(
+    value: &mut Value,
+    record: &AgentTaskRunRecord,
+) -> homeboy::core::Result<()> {
+    match agent_task_lifecycle::canonical_control_plane_identities(record)? {
+        Some(identities) => {
+            value["control_plane"] = serde_json::to_value(identities).unwrap_or(Value::Null);
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn attach_resolved_control_plane(
+    value: &mut Value,
+    run_id: &str,
+    recorded_attempt: Option<u32>,
+) -> homeboy::core::Result<()> {
+    match agent_task_lifecycle::canonical_control_plane_identities_for_run(
+        run_id,
+        recorded_attempt,
+    )? {
+        Some(identities) => {
+            value["control_plane"] = serde_json::to_value(identities).unwrap_or(Value::Null);
+        }
+        None => {}
+    }
+    Ok(())
+}
+
 fn attach_reconciled(value: &mut Value, reconciled: bool) {
     if let Value::Object(fields) = value {
         fields.insert("reconciled".to_string(), Value::Bool(reconciled));
@@ -5910,6 +5950,11 @@ fn compact_status_summary_with_aggregate(
         "liveness": liveness_summary(record, run_id, canonical_candidate.state()),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });
+    if let Some(control_plane) = record.get("control_plane") {
+        if !control_plane.is_null() {
+            summary["control_plane"] = control_plane.clone();
+        }
+    }
 
     if let Some(diagnostic) = record.get("diagnostic_summary") {
         if !diagnostic.is_null() {
@@ -8092,6 +8137,28 @@ fn diagnose_next_commands(
 mod tests {
     use super::*;
     use homeboy::core::Error;
+
+    #[test]
+    fn status_attaches_canonical_control_plane_identities() {
+        const RUN: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+        let mut value = json!({
+            "metadata": {
+                "cook_attempt": 1
+            }
+        });
+
+        attach_control_plane_identities(&mut value, RUN).expect("attach identities");
+
+        assert_eq!(
+            value["control_plane"],
+            json!({
+                "mission": "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e",
+                "run": RUN,
+                "attempt": RUN,
+                "attempt_number": 1
+            })
+        );
+    }
 
     #[test]
     fn stale_generic_lab_replay_status_has_no_executable_action() {

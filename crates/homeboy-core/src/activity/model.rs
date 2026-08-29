@@ -2,7 +2,7 @@
 //! report, plus the small state predicates over them. Extracted from the
 //! `activity` module to keep each file within one responsibility (#9794).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::run_lifecycle_status::RunLifecycleStatus;
@@ -69,21 +69,39 @@ pub struct ActivityRunnerRefs {
     pub transport: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ActivityCrossRefs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_task_run_id: Option<String>,
+    /// Runner-job / execution reference. Not a run-id alias.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_job_id: Option<String>,
 }
 
-/// Stable task identity carried by sources that know the submitted work.
+impl<'de> Deserialize<'de> for ActivityCrossRefs {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            run_id: Option<String>,
+            #[serde(default)]
+            agent_task_run_id: Option<String>,
+            #[serde(default)]
+            runner_job_id: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            run_id: raw.run_id.or(raw.agent_task_run_id),
+            runner_job_id: raw.runner_job_id,
+        })
+    }
+}
+
+/// Task context carried by sources that know the submitted work.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityContext {
-    /// Legacy single-task identity. Retained for existing persisted activity
-    /// consumers; new agent-task projections populate `identities`.
+    /// Operator-facing task reference — a link to follow, not a task identity.
+    /// [`Self::identities`] is the identity surface.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,6 +115,7 @@ pub struct ActivityContext {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityTaskIdentity {
+    /// Operator-facing task reference attached to this identity, not the identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,7 +133,10 @@ impl ActivityContext {
     }
 }
 
-/// Exact identity selectors for a bounded unified activity lookup.
+/// Selectors for a bounded unified activity lookup.
+///
+/// `repository` and `worktree` match [`ActivityContext::identities`].
+/// `task_url` matches the operator task reference, not a distinct identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityFilter {
     pub task_url: Option<String>,

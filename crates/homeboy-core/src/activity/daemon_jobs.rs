@@ -43,7 +43,7 @@ pub(super) fn collect(collector: &mut ActivityCollector, filter: &ActivityFilter
 pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<ActivityItem> {
     let state = ActivityState::from(job.status);
     let job_id = job.id.to_string();
-    let (durable_run_id, agent_task_run_id) = job_run_refs(store, &job);
+    let durable_run_id = job_run_id(store, &job);
     Ok(ActivityItem {
         id: job_id.clone(),
         kind: job.operation.clone(),
@@ -64,7 +64,6 @@ pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<Acti
         },
         refs: ActivityCrossRefs {
             run_id: durable_run_id,
-            agent_task_run_id,
             runner_job_id: Some(job_id.clone()),
         },
         context: ActivityContext::default(),
@@ -87,16 +86,16 @@ pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<Acti
     })
 }
 
-fn job_run_refs(store: &api_jobs::JobStore, job: &Job) -> (Option<String>, Option<String>) {
-    store.events(job.id).unwrap_or_default().iter().fold(
-        (None, None),
-        |(durable, agent_task), event| {
-            (
-                durable.or_else(|| event_metadata_string(event, &["durable_run_id", "run_id"])),
-                agent_task.or_else(|| event_metadata_string(event, &["agent_task_run_id"])),
-            )
-        },
-    )
+fn job_run_id(store: &api_jobs::JobStore, job: &Job) -> Option<String> {
+    store
+        .events(job.id)
+        .unwrap_or_default()
+        .iter()
+        .fold(None, |durable, event| {
+            durable.or_else(|| {
+                event_metadata_string(event, &["durable_run_id", "run_id", "agent_task_run_id"])
+            })
+        })
 }
 
 fn event_metadata_string(event: &JobEvent, keys: &[&str]) -> Option<String> {

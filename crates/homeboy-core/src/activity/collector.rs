@@ -59,9 +59,6 @@ fn canonical_identity(item: &ActivityItem) -> String {
     if item.source_store == "agent-task.lifecycle" {
         return format!("run:{}", item.id);
     }
-    if let Some(agent_task_run_id) = &item.refs.agent_task_run_id {
-        return format!("run:{agent_task_run_id}");
-    }
     if let Some(run_id) = &item.refs.run_id {
         return format!("run:{run_id}");
     }
@@ -153,9 +150,6 @@ fn finalize_item(item: &mut ActivityItem) {
 fn merge_refs(existing: &mut ActivityItem, incoming: &ActivityItem) {
     if existing.refs.run_id.is_none() {
         existing.refs.run_id = incoming.refs.run_id.clone();
-    }
-    if existing.refs.agent_task_run_id.is_none() {
-        existing.refs.agent_task_run_id = incoming.refs.agent_task_run_id.clone();
     }
     if existing.refs.runner_job_id.is_none() {
         existing.refs.runner_job_id = incoming.refs.runner_job_id.clone();

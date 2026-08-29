@@ -125,9 +125,6 @@ fn item_from_active_runner_job(job: ActiveRunnerJobSummary) -> ActivityItem {
     // agent-task run. Publishing it in the agent-task id space is what lets the
     // collector merge it with the controller-local projection once the run
     // reports back, instead of listing the same work twice.
-    let agent_task_run_id = is_agent_task_job(&job)
-        .then(|| job.durable_run_id.clone())
-        .flatten();
     ActivityItem {
         id: job
             .durable_run_id
@@ -148,7 +145,6 @@ fn item_from_active_runner_job(job: ActiveRunnerJobSummary) -> ActivityItem {
         },
         refs: ActivityCrossRefs {
             run_id: job.durable_run_id,
-            agent_task_run_id,
             runner_job_id: Some(job.job_id.clone()),
         },
         context: ActivityContext {
@@ -161,15 +157,6 @@ fn item_from_active_runner_job(job: ActiveRunnerJobSummary) -> ActivityItem {
         state_conflicts: Vec::new(),
         next_actions: actions_for_runner_job(&job.runner_id, &job.job_id, state),
     }
-}
-
-fn is_agent_task_job(job: &ActiveRunnerJobSummary) -> bool {
-    job.kind == "agent-task"
-        || job
-            .lifecycle
-            .as_ref()
-            .and_then(|lifecycle| lifecycle.kind.as_deref())
-            == Some("agent-task")
 }
 
 fn actions_for_runner_job(
@@ -315,10 +302,7 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "agent-task-run-1");
         assert_eq!(items[0].source_store, "runner.session");
-        assert_eq!(
-            items[0].refs.agent_task_run_id.as_deref(),
-            Some("agent-task-run-1")
-        );
+        assert_eq!(items[0].refs.run_id.as_deref(), Some("agent-task-run-1"));
         assert_eq!(items[0].refs.runner_job_id.as_deref(), Some("job-1"));
         assert_eq!(items[0].runner.runner_id.as_deref(), Some("lab-a"));
     }
