@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { rigWorkloadInputs, selectedScenarioIds } from './wp-codebox-bench-selection.mjs';
 
 const requireFromHere = createRequire(import.meta.url);
 const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, wpCodeboxCommand } = requireFromHere('../../lib/wp-codebox-runtime-selection.js');
@@ -18,6 +19,8 @@ const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
 const artifacts = process.env.HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR || path.join(directory, 'artifacts');
 const outputPath = path.join(directory, 'result.json');
+const scenarioIds = selectedScenarioIds(process.env.HOMEBOY_BENCH_SCENARIOS);
+const rigInputs = rigWorkloadInputs(process.env.HOMEBOY_BENCH_EXTRA_WORKLOADS, scenarioIds, slug);
 const options = clean({
   wordpressVersion: settings.wordpress_runtime_version,
   blueprint: settings.wordpress_runtime_blueprint,
@@ -28,8 +31,9 @@ const options = clean({
   warmupIterations: integer(process.env.HOMEBOY_BENCH_WARMUP_ITERATIONS, 1),
   env: settings.bench_env,
   wpConfigDefines: settings.wp_config_defines,
-  mounts: settings.wp_codebox_bench_mounts,
-  workloads: settings.wordpress_runtime_workloads,
+  mounts: [...(settings.wp_codebox_bench_mounts || []), ...rigInputs.mounts],
+  workloads: [...(settings.wordpress_runtime_workloads || []), ...rigInputs.workloads],
+  scenarioIds,
   prepareSteps: settings.wordpress_runtime_prepare_steps,
   postSteps: settings.wordpress_runtime_post_steps,
 });
