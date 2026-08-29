@@ -1147,10 +1147,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_manifest(
             dir.path(),
-            r#"{"validation_dependencies": ["data-machine-events"]}"#,
+            r#"{"validation_dependencies": ["workspace-events"]}"#,
         );
         let ids = validation_dependency_ids(dir.path()).expect("ids");
-        assert_eq!(ids, vec!["data-machine-events".to_string()]);
+        assert_eq!(ids, vec!["workspace-events".to_string()]);
     }
 
     #[test]
@@ -1170,17 +1170,14 @@ mod tests {
         write_manifest(
             dir.path(),
             r#"{
-                "validation_dependencies": ["data-machine-events", "shared-runtime"],
+                "validation_dependencies": ["workspace-events", "shared-runtime"],
                 "extensions": {"wp": {"validation_dependencies": ["shared-runtime"]}}
             }"#,
         );
         let ids = validation_dependency_ids(dir.path()).expect("ids");
         assert_eq!(
             ids,
-            vec![
-                "data-machine-events".to_string(),
-                "shared-runtime".to_string()
-            ]
+            vec!["workspace-events".to_string(), "shared-runtime".to_string()]
         );
     }
 

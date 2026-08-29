@@ -1214,7 +1214,7 @@ mod tests {
         let config: HomeboyConfig = serde_json::from_value(serde_json::json!({
             "worktree_providers": {"fixture": {"mutation_timeout_ms": 540_000}}
         }))
-        .expect("DMC's 540-second ensure budget is valid");
+        .expect("a 540-second ensure budget is valid");
         assert_eq!(
             config.worktree_providers["fixture"].mutation_timeout_ms,
             540_000
