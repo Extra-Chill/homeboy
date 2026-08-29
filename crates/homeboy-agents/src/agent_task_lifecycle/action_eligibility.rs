@@ -16,6 +16,14 @@ pub enum AgentTaskLifecycleAction {
     Reconcile,
 }
 
+impl AgentTaskLifecycleAction {
+    /// Review is a non-mutating read. Every other lifecycle action mutates the
+    /// durable run or a related resource.
+    pub const fn is_mutating(self) -> bool {
+        !matches!(self, Self::Review)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskActionConfirmation {
