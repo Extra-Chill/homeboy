@@ -4097,6 +4097,32 @@ fn run_provider_cleanup(
     }
 }
 
+/// Largest configured cleanup timeout across the providers that can actually
+/// run in `mode`.
+///
+/// The cleanup aggregate uses this to size the `worktree_providers` category
+/// budget. Without it the enclosing category constant silently truncates every
+/// configured provider timeout, making the documented configuration range
+/// unreachable and terminating slow providers mid-inventory.
+///
+/// Returns `None` when no provider is eligible, so the caller keeps its own
+/// default rather than inventing a budget for work that will not run.
+#[must_use]
+pub fn max_configured_provider_cleanup_timeout(
+    providers: &std::collections::HashMap<String, WorktreeProviderConfig>,
+    mode: &WorktreeProviderCleanupMode,
+) -> Option<Duration> {
+    providers
+        .values()
+        .filter(|provider| provider.enabled)
+        .filter(|provider| match mode {
+            WorktreeProviderCleanupMode::Preview => true,
+            WorktreeProviderCleanupMode::Apply => provider.apply_enabled,
+        })
+        .filter_map(|provider| provider_cleanup_timeout(provider, mode, None).ok())
+        .max()
+}
+
 fn provider_cleanup_timeout(
     provider: &WorktreeProviderConfig,
     mode: &WorktreeProviderCleanupMode,
@@ -5778,6 +5804,68 @@ mod tests {
             Some(json!({ "mode": "preview" }))
         );
         assert_eq!(output.providers[0].timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn max_configured_cleanup_timeout_reports_the_budget_the_aggregate_must_reserve() {
+        let slow = WorktreeProviderConfig {
+            apply_enabled: true,
+            commands: WorktreeProviderCommands {
+                cleanup_preview_timeout_ms: 180_000,
+                cleanup_apply_timeout_ms: 240_000,
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+        let fast = WorktreeProviderConfig {
+            apply_enabled: false,
+            commands: WorktreeProviderCommands {
+                cleanup_preview_timeout_ms: 5_000,
+                cleanup_apply_timeout_ms: 5_000,
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+        let disabled = WorktreeProviderConfig {
+            enabled: false,
+            commands: WorktreeProviderCommands {
+                cleanup_preview_timeout_ms: 300_000,
+                cleanup_apply_timeout_ms: 300_000,
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+
+        let providers = std::collections::HashMap::from([
+            ("slow".to_string(), slow),
+            ("fast".to_string(), fast.clone()),
+            ("disabled".to_string(), disabled),
+        ]);
+
+        // A disabled provider must never inflate the reserved budget.
+        assert_eq!(
+            max_configured_provider_cleanup_timeout(
+                &providers,
+                &WorktreeProviderCleanupMode::Preview
+            ),
+            Some(Duration::from_millis(180_000))
+        );
+        // `fast` cannot apply, so apply mode reserves only the apply-capable provider.
+        assert_eq!(
+            max_configured_provider_cleanup_timeout(
+                &providers,
+                &WorktreeProviderCleanupMode::Apply
+            ),
+            Some(Duration::from_millis(240_000))
+        );
+        // No apply-capable provider means no budget to reserve at all.
+        assert_eq!(
+            max_configured_provider_cleanup_timeout(
+                &std::collections::HashMap::from([("fast".to_string(), fast)]),
+                &WorktreeProviderCleanupMode::Apply
+            ),
+            None
+        );
     }
 
     #[test]
