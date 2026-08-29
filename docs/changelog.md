@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.12] - 2026-08-29
+
+### Changed
+- Name the unmet Lab staging requirement
+- Add the control-plane identity contract
+- Root reverse Cook runtime fixture
+- Root controller runtime pins in lifecycle stores
+
 ## [0.364.11] - 2026-08-29
 
 ### Changed
