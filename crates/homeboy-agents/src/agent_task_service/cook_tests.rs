@@ -1758,7 +1758,7 @@ fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
         Arc::new(UnusedExecutor),
         &mut SelectionRequiredSideEffects,
         None,
-        false,
+        CookMode::Resume,
     )
     .expect("Cook reports selection-required promotion failure");
 
@@ -2203,7 +2203,7 @@ fn cook_spine_materializes_into_the_injected_stores_across_split_recipe_and_life
         Arc::new(UnusedExecutor),
         &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
         None,
-        false,
+        CookMode::Resume,
     )
     .expect_err("the spine stops at its candidate-group preflight");
     assert_eq!(error.details["field"], "group_key");
@@ -7490,7 +7490,7 @@ fn deferred_ensure_only_failure_uses_injected_recipe_and_lifecycle_stores() {
             Arc::new(UnusedExecutor),
             &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
-            false,
+            CookMode::Resume,
         )
         .expect("Cook reports the injected-store postcondition failure");
 
@@ -9888,7 +9888,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             Arc::new(UnusedExecutor),
             &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
-            false,
+            CookMode::Resume,
         )
         .expect("continuation repairs and dispatches recipe-bound retry");
         assert_eq!(
@@ -9905,7 +9905,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             Arc::new(UnusedExecutor),
             &mut DefaultCookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
             None,
-            false,
+            CookMode::Resume,
         )
         .expect("captured continuation does not require origin");
 
@@ -10046,7 +10046,7 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
                     Arc::new(UnusedExecutor),
                     &mut side_effects,
                     None,
-                    false,
+                    CookMode::Resume,
                 )
             });
             let loser = scope.spawn(|| {
@@ -10060,7 +10060,7 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
                     Arc::new(UnusedExecutor),
                     &mut side_effects,
                     None,
-                    false,
+                    CookMode::Resume,
                 )
             });
             (
@@ -16064,7 +16064,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
                 Ok(serde_json::json!({}))
             }))),
-            allow_historical_terminal: true,
+            mode: CookMode::ContinueTerminal,
             ..CookContext::new(historical.clone(), executor.clone())
         })
         .expect("candidate drift returns durable failure evidence before local dispatch");
@@ -16101,7 +16101,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
                 Ok(serde_json::json!({}))
             }))),
-            allow_historical_terminal: true,
+            mode: CookMode::ContinueTerminal,
             ..CookContext::new(historical.clone(), executor.clone())
         })
         .expect("cancelled attempt returns durable failure evidence before local dispatch");
@@ -16137,7 +16137,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             side_effects: Some(Box::new(DefaultCookSideEffects::new(|_, _, _, _| {
                 Ok(serde_json::json!({}))
             }))),
-            allow_historical_terminal: true,
+            mode: CookMode::ContinueTerminal,
             ..CookContext::new(historical.clone(), executor.clone())
         })
         .expect("malformed evidence returns durable failure evidence before local dispatch");
