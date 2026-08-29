@@ -3033,13 +3033,6 @@ fn materialize_agent_task_cook_plan(
     let cook = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(&cook)?;
-    if let Some(workspace) = provision.get("path").and_then(serde_json::Value::as_str) {
-        crate::commands::agent_task::run::project_provider_evidence_inputs(
-            &cook.provider_evidence_inputs,
-            std::path::Path::new(workspace),
-            None,
-        )?;
-    }
     let mut plan = crate::commands::agent_task::run::compile_cook_plan(&cook, provision)?;
     if let Some(provenance) = provenance {
         crate::commands::agent_task::run::record_cook_argument_provenance(&mut plan, provenance);

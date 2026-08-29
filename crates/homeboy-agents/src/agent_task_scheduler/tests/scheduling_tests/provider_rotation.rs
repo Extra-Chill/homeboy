@@ -14,6 +14,10 @@ mod provider_rotation_tests {
         calls: AtomicUsize,
     }
 
+    struct ExternalEvidenceRetryExecutor {
+        observed: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
     struct DirtyCandidateThenTerminalExecutor {
         calls: Arc<AtomicUsize>,
         terminal: AgentTaskOutcomeStatus,
@@ -90,6 +94,43 @@ mod provider_rotation_tests {
                 result.failure_classification = Some(AgentTaskFailureClassification::Provider);
             } else {
                 result.metadata = json!({ "model": "openai/gpt-5.6-actual" });
+            }
+            result
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for ExternalEvidenceRetryExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let evidence = request.executor.config["evidence_inputs"][0]["path"]
+                .as_str()
+                .expect("evidence path")
+                .to_string();
+            assert_eq!(
+                std::fs::read_to_string(&evidence).expect("read evidence"),
+                "evidence\n"
+            );
+            let workspace = request
+                .workspace
+                .root
+                .as_deref()
+                .expect("attempt workspace");
+            assert!(!std::path::Path::new(&evidence).starts_with(workspace));
+            let mut observed = self.observed.lock().expect("observed attempts");
+            observed.push((evidence, workspace.to_string()));
+            let mut result = outcome(
+                request.task_id,
+                if observed.len() == 1 {
+                    AgentTaskOutcomeStatus::ProviderError
+                } else {
+                    AgentTaskOutcomeStatus::Succeeded
+                },
+            );
+            if observed.len() == 1 {
+                result.failure_classification = Some(AgentTaskFailureClassification::Provider);
             }
             result
         }
@@ -523,6 +564,51 @@ mod provider_rotation_tests {
                 .as_array()
                 .map(Vec::len),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn external_provider_evidence_survives_start_and_retry_without_dirtying_candidate() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
+        let evidence = temp.path().join("provider-evidence/blobs/fixture");
+        std::fs::create_dir_all(evidence.parent().expect("evidence parent"))
+            .expect("evidence store");
+        std::fs::write(&evidence, "evidence\n").expect("evidence blob");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[0].executor.config = json!({
+            "evidence_inputs": [{
+                "path": evidence,
+                "ownership": {"owner": "controller-artifact-store"}
+            }]
+        });
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(ExternalEvidenceRetryExecutor {
+            observed: Arc::clone(&observed),
+        }))
+        .run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed attempts");
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].0, observed[1].0, "retry reuses one blob");
+        assert_ne!(observed[0].1, observed[1].1, "retry owns a fresh attempt");
+        let status = Command::new("git")
+            .args(["status", "--porcelain=v1"])
+            .current_dir(&workspace)
+            .output()
+            .expect("candidate status");
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty(), "candidate remains clean");
+        assert!(
+            evidence.is_file(),
+            "attempt cleanup does not own controller blob"
         );
     }
 

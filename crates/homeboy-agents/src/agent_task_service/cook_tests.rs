@@ -4400,6 +4400,183 @@ fn workspace_snapshot_fence_invalidation_is_retryable_without_provider_execution
     });
 }
 
+fn behind_explicit_cwd_destination() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
+    let remote = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let git = |path: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(remote.path(), &["init", "--bare"]);
+    let output = Command::new("git")
+        .args([
+            "clone",
+            remote.path().to_str().unwrap(),
+            source.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    git(source.path(), &["config", "user.email", "test@example.com"]);
+    git(source.path(), &["config", "user.name", "Test"]);
+    git(source.path(), &["checkout", "-b", "main"]);
+    std::fs::write(source.path().join("base"), "base\n").unwrap();
+    git(source.path(), &["add", "base"]);
+    git(source.path(), &["commit", "-m", "base"]);
+    git(source.path(), &["push", "-u", "origin", "main"]);
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("candidate");
+    git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "candidate",
+            destination.to_str().unwrap(),
+            "main",
+        ],
+    );
+    std::fs::write(source.path().join("newer"), "newer\n").unwrap();
+    git(source.path(), &["add", "newer"]);
+    git(source.path(), &["commit", "-m", "advance"]);
+    git(source.path(), &["push"]);
+    (remote, source, root, destination)
+}
+
+fn porcelain_status(path: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn controller_owned_evidence_admits_clean_worktree_through_provider_start_and_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (_remote, _source, _root, destination) = behind_explicit_cwd_destination();
+        let evidence = destination
+            .parent()
+            .expect("candidate parent")
+            .join("provider-evidence/blobs/fixture");
+        std::fs::create_dir_all(evidence.parent().expect("evidence parent"))
+            .expect("evidence store");
+        std::fs::write(&evidence, "{\"issue\":13739}\n").expect("write controller evidence");
+
+        let mut options = batch_cook_options(
+            "cook-evidence-fence",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        options.to_worktree = destination.display().to_string();
+        options.source_worktree_path = Some(destination.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(destination.display().to_string());
+        options.initial_plan.tasks[0].metadata =
+            serde_json::json!({ "worktree_provision": { "kind": "explicit_cwd" } });
+        options.initial_plan.tasks[0].executor.config = serde_json::json!({
+            "evidence_inputs": [{
+                "id": "fixture",
+                "path": evidence,
+                "ownership": { "owner": "controller-artifact-store", "scope": "content-addressed" }
+            }]
+        });
+        options.attempt_dispatcher = None;
+        let provider_starts = Arc::new(AtomicUsize::new(0));
+        let report = run_cook(CookContext::new(
+            options.clone(),
+            Arc::new(RecordingImmediateSuccessExecutor {
+                starts: Arc::clone(&provider_starts),
+            }),
+        ))
+        .expect("clean destination with controller evidence reaches provider");
+        assert_ne!(report.value.status, "pre_execution_failure");
+        assert_eq!(provider_starts.load(Ordering::SeqCst), 1);
+        assert!(porcelain_status(&destination).is_empty());
+        assert!(!destination.join(".homeboy").exists());
+        assert!(evidence.is_file());
+
+        let mut retry = options;
+        retry.cook_id = "cook-evidence-fence-retry".to_string();
+        retry.initial_run_id = "cook-evidence-fence-retry-run".to_string();
+        let retry_starts = Arc::new(AtomicUsize::new(0));
+        let retry_report = run_cook(CookContext::new(
+            retry,
+            Arc::new(RecordingImmediateSuccessExecutor {
+                starts: Arc::clone(&retry_starts),
+            }),
+        ))
+        .expect("retry reuses controller-owned evidence");
+        assert_ne!(retry_report.value.status, "pre_execution_failure");
+        assert_eq!(retry_starts.load(Ordering::SeqCst), 1);
+        assert!(porcelain_status(&destination).is_empty());
+        assert!(!destination.join(".homeboy").exists());
+        assert!(evidence.is_file());
+    });
+}
+
+#[test]
+fn failed_pre_provider_run_does_not_leave_unattributed_evidence_dirt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (_remote, _source, _root, destination) = behind_explicit_cwd_destination();
+        let evidence = destination
+            .parent()
+            .expect("candidate parent")
+            .join("provider-evidence/blobs/fixture");
+        std::fs::create_dir_all(evidence.parent().expect("evidence parent"))
+            .expect("evidence store");
+        std::fs::write(&evidence, "{\"issue\":13739}\n").expect("write controller evidence");
+
+        let mut options = batch_cook_options(
+            "cook-evidence-fence-failure",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        options.to_worktree = destination.display().to_string();
+        options.source_worktree_path = Some(destination.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(destination.display().to_string());
+        options.initial_plan.tasks[0].metadata =
+            serde_json::json!({ "worktree_provision": { "kind": "explicit_cwd" } });
+        options.initial_plan.tasks[0].executor.config = serde_json::json!({
+            "evidence_inputs": [{
+                "id": "fixture",
+                "path": evidence,
+                "ownership": { "owner": "controller-artifact-store", "scope": "content-addressed" }
+            }]
+        });
+        options.attempt_dispatcher = None;
+        let drift = destination.clone();
+        crate::agent_task_scheduler::set_snapshot_fence_test_hook(move || {
+            std::fs::write(drift.join("fence-drift"), "drift\n").unwrap();
+        });
+        let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor))).unwrap();
+        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(porcelain_status(&destination), "?? fence-drift");
+        assert!(!destination.join(".homeboy").exists());
+        assert!(
+            evidence.is_file(),
+            "pre-provider failure does not delete controller-owned evidence"
+        );
+    });
+}
+
 #[test]
 fn non_ancestry_workspace_validation_retains_the_generic_pre_execution_phase() {
     homeboy_core::test_support::with_isolated_home(|_| {
