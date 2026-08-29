@@ -2006,7 +2006,7 @@ fn compile_batch_cooks(
         .collect()
 }
 
-fn enforce_fanout_placement(options: &AgentTaskCookServiceOptions) -> Result<()> {
+fn enforce_fanout_placement(options: &CookRequest) -> Result<()> {
     if options.attempt_dispatcher.is_some() {
         return Ok(());
     }
@@ -2032,7 +2032,7 @@ fn enforce_fanout_placement(options: &AgentTaskCookServiceOptions) -> Result<()>
 
 fn attach_fanout_placement_decision(
     plan: &BatchCookFanoutPlan,
-    options: &mut AgentTaskCookServiceOptions,
+    options: &mut CookRequest,
 ) -> Result<()> {
     let Some(directive) = plan.placement.as_ref() else {
         return Ok(());
@@ -7566,7 +7566,7 @@ fi
         }
     }
 
-    fn materialize_test_child(options: &mut AgentTaskCookServiceOptions) {
+    fn materialize_test_child(options: &mut CookRequest) {
         options.initial_plan.tasks = vec![serde_json::from_value(serde_json::json!({
             "task_id": options.cook_id,
             "executor": { "backend": "test" },
@@ -10085,7 +10085,7 @@ fi
         assert!(error.details["replay_command"]
             .as_str()
             .expect("replay command")
-            .contains("--dry-run"));
+            .contains("--preview"));
     }
 
     #[test]
@@ -10150,7 +10150,7 @@ fi
             assert!(error.details["replay_command"]
                 .as_str()
                 .expect("replay command")
-                .contains("--dry-run"));
+                .contains("--preview"));
             assert!(
                 !home
                     .path()
