@@ -36,9 +36,7 @@ use homeboy::agents::agent_tasks::gate::{
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider::{self, AgentTaskProviderCatalog};
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskPlan, SharedAgentTaskExecutor};
-use homeboy::agents::agent_tasks::service::{
-    self as agent_task_service, AgentTaskCookServiceOptions,
-};
+use homeboy::agents::agent_tasks::service::{self as agent_task_service, CookRequest};
 use homeboy::agents::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
@@ -111,7 +109,7 @@ pub(crate) fn fanout_with_placement(
 }
 
 type CookAttemptDispatcherFactory = dyn Fn(
-        &AgentTaskCookServiceOptions,
+        &CookRequest,
     ) -> std::sync::Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
     + Send
     + Sync;
@@ -1708,10 +1706,7 @@ fn validate_batch_gate_contracts(
     )
 }
 
-fn record_gate_contract_validation(
-    options: &mut AgentTaskCookServiceOptions,
-    validation: &GateContractValidation,
-) {
+fn record_gate_contract_validation(options: &mut CookRequest, validation: &GateContractValidation) {
     options.initial_plan.metadata["gate_contract_validation"] =
         serde_json::to_value(validation).expect("gate contract validation serializes");
 }
@@ -1841,7 +1836,7 @@ fn notify_batch_wave_complete(
 /// without reconstructing mutable operator input or re-planning a branch.
 fn persist_batch_cook_recipes(
     plan: &BatchCookFanoutPlan,
-    configure: impl Fn(&mut AgentTaskCookServiceOptions),
+    configure: impl Fn(&mut CookRequest),
 ) -> Result<()> {
     for options in compile_batch_cooks(plan, configure)? {
         agent_task_service::persist_initial_recipe(&options)?;
@@ -1875,8 +1870,8 @@ fn batch_harvest_context() -> Result<homeboy::agents::agent_task_scheduler::Harv
 
 fn compile_batch_cooks(
     plan: &BatchCookFanoutPlan,
-    configure: impl Fn(&mut AgentTaskCookServiceOptions),
-) -> Result<Vec<AgentTaskCookServiceOptions>> {
+    configure: impl Fn(&mut CookRequest),
+) -> Result<Vec<CookRequest>> {
     let harvest_context = batch_harvest_context()?;
     let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
     plan.cooks
@@ -1921,7 +1916,7 @@ fn compile_batch_cooks(
 /// scheduler apply one rule rather than two.
 fn batch_concurrency(
     plan: &BatchCookFanoutPlan,
-    cooks: &[AgentTaskCookServiceOptions],
+    cooks: &[CookRequest],
 ) -> BatchConcurrencyDecision {
     // A batch coordinator commits nothing before it starts, so the budget is
     // read at zero active units. The budget itself is the children's own, taken
@@ -3943,7 +3938,7 @@ struct BatchCookWorkspaceMaterialization {
 #[derive(Debug, Clone)]
 struct BatchCookInvocation {
     dispatch: AgentTaskDispatchCommand,
-    options: AgentTaskCookServiceOptions,
+    options: CookRequest,
 }
 
 impl BatchCookSpec {
@@ -4071,7 +4066,7 @@ impl BatchCookSpec {
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
         Ok(BatchCookInvocation {
             dispatch,
-            options: AgentTaskCookServiceOptions {
+            options: CookRequest {
                 cook_id: self.run_id(),
                 initial_run_id: self.run_id(),
                 initial_plan: AgentTaskPlan::new(self.run_id(), Vec::new()),
@@ -8537,7 +8532,7 @@ fi
         with_isolated_home(|home| {
             install_fanout_agent_task_providers(home.path());
             let plan = test_batch_plan();
-            let dispatcher = |_: &AgentTaskCookServiceOptions| {
+            let dispatcher = |_: &CookRequest| {
                 std::sync::Arc::new(LabRecipeDispatcher)
                     as std::sync::Arc<
                         dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher,

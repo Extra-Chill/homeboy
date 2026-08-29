@@ -777,25 +777,31 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                         )
                     })?;
                 options.initial_run_id = run_id;
-                let mut result = super::cook::run_cook(super::cook::CookContext {
-                    store: Some(recipe_store),
-                    side_effects: Some(Box::new(super::cook::DefaultCookSideEffects::new(
-                        |_lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-                         options: &_,
-                         run_id: &_,
-                         promotion: &_| {
-                            finalize_or_load_cook_pr_with_backend_with_stores(
-                                recipe_store,
-                                lifecycle_store,
-                                options,
-                                run_id,
-                                promotion,
-                                backend,
-                            )
-                        },
-                    ))),
-                    ..super::cook::CookContext::new(options, executor)
-                })?;
+                let mut result = super::cook::CookService::run(
+                    options,
+                    super::cook::CookRuntime::new(
+                        executor,
+                        recipe_store,
+                        lifecycle_store,
+                        Box::new(super::cook::DefaultCookSideEffects::new(
+                            |_lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+                             options: &_,
+                             run_id: &_,
+                             promotion: &_| {
+                                finalize_or_load_cook_pr_with_backend_with_stores(
+                                    recipe_store,
+                                    lifecycle_store,
+                                    options,
+                                    run_id,
+                                    promotion,
+                                    backend,
+                                )
+                            },
+                        )),
+                        &|_| Ok(()),
+                    ),
+                    super::cook::CookMode::Adopt,
+                )?;
                 result.value.attempts.insert(0, attempt);
                 Ok(result)
             }

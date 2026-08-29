@@ -2144,36 +2144,34 @@ fn run_split_placement_fanout(
     let allow_dirty_lab_workspace = cli.allow_dirty_lab_workspace;
     let skip_deps_hydration = cli.skip_deps_hydration;
     let detach_after_handoff = cli.detach_after_handoff;
-    let attempt_dispatcher =
-        move |options: &crate::agents::agent_task_service::AgentTaskCookServiceOptions| {
-            // Fanout compiles each child worktree before this factory runs. Bind
-            // its decision here, not at coordinator startup, so the decision
-            // names the child candidate/base that will actually be dispatched.
-            let source_path = options
-                .initial_plan
-                .tasks
-                .first()
-                .and_then(|task| task.workspace.root.as_ref())
-                .map(PathBuf::from);
-            let task = options
-                .initial_plan
-                .tasks
-                .first()
-                .map(|task| task.task_id.as_str())
-                .unwrap_or("fanout-provider-attempt");
-            Arc::new(LabCookAttemptDispatcher {
-                runner_id: runner_id.clone(),
-                placement_decision: finalize_placement(&directive, task, source_path.as_deref()),
-                allow_local_fallback: false,
-                allow_dirty_lab_workspace,
-                skip_deps_hydration,
-                detach_after_handoff,
-                source_path,
-                job_overrides: job_overrides.clone(),
-                progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
-            })
-                as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
-        };
+    let attempt_dispatcher = move |options: &crate::agents::agent_task_service::CookRequest| {
+        // Fanout compiles each child worktree before this factory runs. Bind
+        // its decision here, not at coordinator startup, so the decision
+        // names the child candidate/base that will actually be dispatched.
+        let source_path = options
+            .initial_plan
+            .tasks
+            .first()
+            .and_then(|task| task.workspace.root.as_ref())
+            .map(PathBuf::from);
+        let task = options
+            .initial_plan
+            .tasks
+            .first()
+            .map(|task| task.task_id.as_str())
+            .unwrap_or("fanout-provider-attempt");
+        Arc::new(LabCookAttemptDispatcher {
+            runner_id: runner_id.clone(),
+            placement_decision: finalize_placement(&directive, task, source_path.as_deref()),
+            allow_local_fallback: false,
+            allow_dirty_lab_workspace,
+            skip_deps_hydration,
+            detach_after_handoff,
+            source_path,
+            job_overrides: job_overrides.clone(),
+            progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
+        }) as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
+    };
     let (value, exit_code) = match &cli.command {
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command:

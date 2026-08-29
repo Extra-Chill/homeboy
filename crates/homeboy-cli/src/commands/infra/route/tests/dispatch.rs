@@ -2157,7 +2157,7 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
             }))
             .expect("task")],
         );
-        let options = crate::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = crate::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
