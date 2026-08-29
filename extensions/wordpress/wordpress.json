@@ -1412,6 +1412,13 @@
       "description": "Generic WP Codebox recipe steps to run during pluginRuntime.setup after dependency activation and before measured bench workloads. Use this for dependency setup that must be prepared outside workload timing."
     },
     {
+      "id": "wp_codebox_bench_mounts",
+      "label": "WP Codebox bench mounts",
+      "type": "array",
+      "default": [],
+      "description": "Additional host-to-sandbox mounts for wordpress.bench. Each entry is {source,target,mode?}; source and target must be absolute paths. Use pre-bootstrap WordPress targets such as /wordpress/wp-content/db.php for component-owned runtime files."
+    },
+    {
       "id": "wp_codebox_prepare_steps",
       "label": "WP Codebox prepare steps",
       "type": "array",

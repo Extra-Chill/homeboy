@@ -53,6 +53,7 @@ try {
       validation_dependencies: [component, dependency, dependency],
       wordpress_runtime_workloads: [{ id: 'canonical-workload', run: [] }],
       wordpress_runtime_blueprint: { steps: [] },
+      wp_codebox_bench_mounts: [{ source: path.join(component, 'db.php'), target: '/wordpress/wp-content/db.php', mode: 'readonly' }],
       wordpress_runtime_prepare_steps: [{ command: 'wordpress.wp-cli', args: ['command=option get home'] }],
       wordpress_runtime_post_steps: [{ command: 'wordpress.browser-probe', args: ['url=/'] }],
     }),
@@ -70,6 +71,9 @@ try {
   const options = entries.filter((entry) => entry.options).map((entry) => entry.options);
   assert.deepEqual(options[0].extra_plugins, [
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: false },
+  ]);
+  assert.deepEqual(options[0].mounts, [
+    { source: path.join(component, 'db.php'), target: '/wordpress/wp-content/db.php', mode: 'readonly' },
   ]);
   // The PHPUnit recipe activates declared validation dependencies first and
   // never leaves the plugin under review inactive: an inactive target is
