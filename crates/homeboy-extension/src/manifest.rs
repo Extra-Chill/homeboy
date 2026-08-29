@@ -72,40 +72,14 @@ pub use homeboy_extension_contract::notification_transport_config::{
 
 pub use homeboy_extension_contract::ExtensionManifest;
 
-/// Generic provider metadata owned by an extension manifest.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct DeploymentProviderManifest {
-    pub id: String,
-    pub command: String,
-    #[serde(default)]
-    pub dry_run_command: Option<String>,
-    #[serde(default)]
-    pub layered_input: Option<DeploymentProviderLayeredInputManifest>,
-}
+pub use homeboy_extension_contract::{
+    DeploymentProviderLayeredInputManifest, DeploymentProviderManifest,
+    DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA,
+};
 
-/// Opt-in capability for providers that receive a versioned layered payload.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct DeploymentProviderLayeredInputManifest {
-    pub schema: String,
-    #[serde(default)]
-    pub target_required: bool,
-    /// Schema for provider-produced structured evidence. Providers declaring this
-    /// contract are responsible for emitting already-redacted JSON.
-    #[serde(default)]
-    pub result_schema: Option<String>,
-}
-
-pub const DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA: &str = "homeboy/deployment-provider-payload/v1";
-
-/// Extension manifests retain provider descriptors as extension-owned data until
-/// the shared manifest contract publishes this capability.
-pub fn deployment_providers(manifest: &ExtensionManifest) -> Vec<DeploymentProviderManifest> {
-    manifest
-        .extra
-        .get("deployment_providers")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+/// Deployment providers declared by an extension manifest.
+pub fn deployment_providers(manifest: &ExtensionManifest) -> &[DeploymentProviderManifest] {
+    &manifest.deployment_providers
 }
 
 pub fn deployment_provider_layered_input(
@@ -114,7 +88,7 @@ pub fn deployment_provider_layered_input(
 ) -> Result<Option<DeploymentProviderLayeredInputManifest>> {
     let extension = super::load_extension(extension_id)?;
     let provider = deployment_providers(&extension)
-        .into_iter()
+        .iter()
         .find(|provider| provider.id == provider_id)
         .ok_or_else(|| Error::validation_invalid_argument(
             "deployment_provider.provider",
@@ -122,7 +96,7 @@ pub fn deployment_provider_layered_input(
             None,
             None,
         ))?;
-    Ok(provider.layered_input)
+    Ok(provider.layered_input.clone())
 }
 
 #[cfg(test)]
@@ -163,6 +137,27 @@ mod deployment_provider_tests {
                 .as_ref()
                 .expect("layered input")
                 .target_required
+        );
+    }
+
+    /// While `deployment_providers` rode in `ExtensionManifest::extra`, a
+    /// malformed descriptor was `.ok()`-discarded and reported as "extension
+    /// declares no providers" — indistinguishable from a correct manifest that
+    /// declares none. As a typed field it is a named deserialization error.
+    #[test]
+    fn malformed_provider_descriptor_is_an_error_not_an_empty_list() {
+        let result: std::result::Result<ExtensionManifest, _> =
+            serde_json::from_value(serde_json::json!({
+                "name": "fixture", "version": "1.0.0",
+                "deployment_providers": [
+                    { "id": "fixture.alpha" }
+                ]
+            }));
+
+        let error = result.expect_err("a provider missing `command` must not deserialize");
+        assert!(
+            error.to_string().contains("command"),
+            "error should name the missing field: {error}"
         );
     }
 }

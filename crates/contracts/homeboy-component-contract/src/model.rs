@@ -397,6 +397,13 @@ impl Component {
         &self,
         capability: homeboy_extension_contract::ExtensionCapability,
     ) -> &[String] {
+        // Audit reference setup is extension-owned: it resolves the extension's
+        // own dependency directories, so there is no component-level
+        // `scripts.audit` override to fall back to.
+        if capability == homeboy_extension_contract::ExtensionCapability::Audit {
+            return &[];
+        }
+
         if let Some(scripts) = self.scripts.as_ref() {
             let commands = match capability {
                 homeboy_extension_contract::ExtensionCapability::Lint => &scripts.lint,
@@ -406,6 +413,9 @@ impl Component {
                 homeboy_extension_contract::ExtensionCapability::Fuzz => &scripts.fuzz,
                 homeboy_extension_contract::ExtensionCapability::Trace => &scripts.trace,
                 homeboy_extension_contract::ExtensionCapability::Deps => &scripts.deps,
+                homeboy_extension_contract::ExtensionCapability::Audit => unreachable!(
+                    "Audit returns early: no component-level scripts.audit override exists"
+                ),
             };
             if !commands.is_empty() {
                 return commands;
