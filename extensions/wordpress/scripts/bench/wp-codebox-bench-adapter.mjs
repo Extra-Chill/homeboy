@@ -28,6 +28,7 @@ const options = clean({
   warmupIterations: integer(process.env.HOMEBOY_BENCH_WARMUP_ITERATIONS, 1),
   env: settings.bench_env,
   wpConfigDefines: settings.wp_config_defines,
+  mounts: settings.wp_codebox_bench_mounts,
   workloads: settings.wordpress_runtime_workloads,
   prepareSteps: settings.wordpress_runtime_prepare_steps,
   postSteps: settings.wordpress_runtime_post_steps,
