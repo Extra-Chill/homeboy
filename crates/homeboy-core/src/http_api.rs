@@ -191,12 +191,23 @@ pub fn handle_with_jobs_and_runner<R>(
 where
     R: AnalysisJobRunner,
 {
-    // Boundary: one HTTP request is one unit of work, so the observation store
-    // is opened exactly once here. The endpoint arms and the helpers below used
-    // to open their own, which made a single request several independently
-    // resolved stores (#7505).
-    let store = ObservationStore::open_initialized()?;
     let endpoint = route(request.method, &request.path)?;
+    match &endpoint {
+        HttpEndpoint::AgentTaskRun { id } => {
+            return legacy_agent_task_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRun { id } => {
+            return control_plane_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneCapabilities => {
+            return control_plane_capabilities_response();
+        }
+        _ => {}
+    }
+    // Boundary: one observation-backed HTTP request is one unit of work, so
+    // the store is opened exactly once. Control-plane reads return above and
+    // never open this unrelated store.
+    let store = ObservationStore::open_initialized()?;
     let body = match &endpoint {
         HttpEndpoint::Components => json!({
             "command": "api.components.list",
@@ -350,15 +361,9 @@ where
                 },
             )?,
         }),
-        HttpEndpoint::AgentTaskRun { id } => {
-            return legacy_agent_task_run_response(endpoint.clone(), id);
-        }
-        HttpEndpoint::ControlPlaneRun { id } => {
-            return control_plane_run_response(endpoint.clone(), id);
-        }
-        HttpEndpoint::ControlPlaneCapabilities => {
-            return control_plane_capabilities_response();
-        }
+        HttpEndpoint::AgentTaskRun { .. }
+        | HttpEndpoint::ControlPlaneRun { .. }
+        | HttpEndpoint::ControlPlaneCapabilities => unreachable!("returned before store open"),
         HttpEndpoint::Jobs => {
             let active_runner_jobs = job_store.active_runner_jobs();
             let stale_runner_jobs = job_store.stale_runner_jobs();

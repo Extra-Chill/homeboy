@@ -9,8 +9,8 @@ use crate::observation::{
 };
 use homeboy_control_plane_contract::{
     ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneOperation,
-    ControlPlaneRef, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, MissionId, RunId,
-    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, MissionId,
+    RunId, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 
 use crate::test_support::with_isolated_home;
@@ -284,11 +284,7 @@ const CONTROL_PLANE_FIXTURE_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21
 
 fn fixture_control_plane_run() -> ControlPlaneRun {
     let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
-    let mut resource = ControlPlaneRun::new(
-        run.clone(),
-        ControlPlaneRef::Mission(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission")),
-        ControlPlaneRef::Run(run.clone()),
-    );
+    let mut resource = ControlPlaneRun::new(run.clone());
     resource.mission = Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"));
     resource.state = ControlPlaneRunState::Succeeded;
     resource.created_at = "2026-01-01T00:00:00Z".to_string();
@@ -298,6 +294,16 @@ fn fixture_control_plane_run() -> ControlPlaneRun {
 struct FixtureControlPlaneProvider;
 
 impl ControlPlaneProvider for FixtureControlPlaneProvider {
+    fn capabilities(&self) -> ControlPlaneCapabilities {
+        ControlPlaneCapabilities::new(
+            vec![ControlPlaneResource::Run],
+            vec![
+                ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::GetRun,
+            ],
+        )
+    }
+
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
         if requested_id.as_str() == CONTROL_PLANE_FIXTURE_RUN
             || requested_id.as_str() == CONTROL_PLANE_FIXTURE_COOK
@@ -336,6 +342,7 @@ fn routes_versioned_control_plane_endpoints() {
 
 #[test]
 fn control_plane_capabilities_advertise_only_wired_operations() {
+    register_fixture_control_plane_provider();
     let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
         path: "/v1/control-plane/capabilities".to_string(),
@@ -376,11 +383,7 @@ fn control_plane_http_run_matches_the_service_fixture() {
     let resource = result.resource.expect("resource");
     assert_eq!(resource, expected);
     assert_eq!(resource.schema, CONTROL_PLANE_RUN_SCHEMA);
-    assert!(!resource.reconciles);
-    assert_eq!(
-        resource.requested,
-        ControlPlaneRef::Mission(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"))
-    );
+    assert_eq!(resource.run.as_str(), CONTROL_PLANE_FIXTURE_RUN);
 }
 
 #[test]

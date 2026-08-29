@@ -7,7 +7,8 @@
 
 use homeboy_control_plane_contract::{
     ControlPlaneCapabilities, ControlPlaneError, ControlPlaneEvidenceRef, ControlPlaneLocation,
-    ControlPlaneRef, ControlPlaneRun, ControlPlaneRunState, ExecutionId, MissionId, RunId,
+    ControlPlaneOperation, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunState,
+    ExecutionId, RunId,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 
@@ -65,8 +66,14 @@ impl<L: RunLookup> OrchestrationService<L> {
     }
 
     /// Operations actually wired in this build. Mutations are not advertised.
-    pub fn capabilities(&self) -> ControlPlaneCapabilities {
-        ControlPlaneCapabilities::this_build()
+    pub fn capabilities() -> ControlPlaneCapabilities {
+        ControlPlaneCapabilities::new(
+            vec![ControlPlaneResource::Run],
+            vec![
+                ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::GetRun,
+            ],
+        )
     }
 
     /// Pure, bounded, non-reconciling run read.
@@ -89,21 +96,16 @@ impl<L: RunLookup> OrchestrationService<L> {
                 })?
             }
         };
-        project_record(&record, requested_id)
+        project_record(&record)
     }
 }
 
 /// Project a durable record the status CLI already loaded. No store lookup.
-pub fn project_record(
-    record: &AgentTaskRunRecord,
-    requested_id: &RunId,
-) -> Result<ControlPlaneRun, ControlPlaneError> {
+pub fn project_record(record: &AgentTaskRunRecord) -> Result<ControlPlaneRun, ControlPlaneError> {
     let run = RunId::new(&record.run_id)
         .map_err(|error| ControlPlaneError::invalid_argument(format!("durable run id: {error}")))?;
-    let requested = requested_ref(requested_id, &record.run_id)?;
-    let resolved = ControlPlaneRef::Run(run.clone());
     let identities = identities_for_record(record)?;
-    let mut resource = ControlPlaneRun::new(run, requested, resolved);
+    let mut resource = ControlPlaneRun::new(run);
     if let Some(identities) = identities {
         resource.mission = Some(identities.mission);
         resource.attempt = Some(identities.attempt);
@@ -119,52 +121,7 @@ pub fn project_record(
     }
     resource.evidence = evidence_refs(record);
     resource.artifacts = artifact_refs(record);
-    resource.reconciles = false;
     Ok(resource)
-}
-
-/// Status-compatible identity projection. Preserves the existing CLI
-/// `control_plane` object while routing through the orchestration service.
-pub fn status_identities_for_run(
-    run_id: &str,
-    recorded_attempt: Option<u32>,
-) -> homeboy_core::Result<Option<CanonicalControlPlaneIdentities>> {
-    crate::agent_task_lifecycle::canonical_control_plane_identities_for_run(
-        run_id,
-        recorded_attempt,
-    )
-}
-
-pub fn status_identities_for_record(
-    record: &AgentTaskRunRecord,
-) -> homeboy_core::Result<Option<CanonicalControlPlaneIdentities>> {
-    let requested = RunId::new(&record.run_id).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(record.run_id.clone()),
-            None,
-        )
-    })?;
-    let resource = project_record(record, &requested).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.message,
-            Some(record.run_id.clone()),
-            None,
-        )
-    })?;
-    let (Some(mission), Some(attempt), Some(attempt_number)) =
-        (resource.mission, resource.attempt, resource.attempt_number)
-    else {
-        return Ok(None);
-    };
-    Ok(Some(CanonicalControlPlaneIdentities {
-        mission,
-        run: resource.run,
-        attempt,
-        attempt_number,
-    }))
 }
 
 fn identities_for_record(
@@ -172,19 +129,6 @@ fn identities_for_record(
 ) -> Result<Option<CanonicalControlPlaneIdentities>, ControlPlaneError> {
     canonical_control_plane_identities(record)
         .map_err(|error| ControlPlaneError::invalid_argument(error.message))
-}
-
-fn requested_ref(
-    requested_id: &RunId,
-    resolved_run_id: &str,
-) -> Result<ControlPlaneRef, ControlPlaneError> {
-    if requested_id.as_str() == resolved_run_id {
-        return Ok(ControlPlaneRef::Run(requested_id.clone()));
-    }
-    Ok(ControlPlaneRef::Mission(
-        MissionId::new(requested_id.as_str())
-            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
-    ))
 }
 
 fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
@@ -269,7 +213,7 @@ struct RegisteredProvider;
 
 impl ControlPlaneProvider for RegisteredProvider {
     fn capabilities(&self) -> ControlPlaneCapabilities {
-        ControlPlaneCapabilities::this_build()
+        OrchestrationService::<LifecycleStoreLookup>::capabilities()
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
@@ -290,8 +234,8 @@ mod tests {
     use super::{project_record, OrchestrationService, RunLookup};
     use crate::agent_task_lifecycle::AgentTaskRunRecord;
     use homeboy_control_plane_contract::{
-        ControlPlaneErrorClass, ControlPlaneOperation, ControlPlaneRef, ControlPlaneRunState,
-        RunId, CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneErrorClass, ControlPlaneOperation, ControlPlaneRunState, RunId,
+        CONTROL_PLANE_RUN_SCHEMA,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -367,7 +311,7 @@ mod tests {
 
     #[test]
     fn capabilities_advertise_only_wired_reads() {
-        let capabilities = service().capabilities();
+        let capabilities = OrchestrationService::<MapLookup>::capabilities();
         assert_eq!(
             capabilities.operations,
             vec![
@@ -384,12 +328,6 @@ mod tests {
             .run(&RunId::new(AGENT_TASK_RUN).expect("run id"))
             .expect("run");
         assert_eq!(resource.schema, CONTROL_PLANE_RUN_SCHEMA);
-        assert_eq!(
-            resource.requested,
-            ControlPlaneRef::Run(
-                homeboy_control_plane_contract::RunId::new(AGENT_TASK_RUN).expect("run")
-            )
-        );
         assert_eq!(resource.run.as_str(), AGENT_TASK_RUN);
         assert_eq!(
             resource.mission.as_ref().map(|id| id.as_str()),
@@ -397,7 +335,6 @@ mod tests {
         );
         assert_eq!(resource.attempt_number, Some(1));
         assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
-        assert_eq!(resource.reconciles, false);
         assert_eq!(
             resource.execution.as_ref().map(|id| id.as_str()),
             Some("job-1")
@@ -421,23 +358,15 @@ mod tests {
     }
 
     #[test]
-    fn cook_alias_reports_requested_mission_and_resolved_run() {
+    fn cook_alias_resolves_to_the_canonical_run_resource() {
         let resource = service()
             .run(&RunId::new(AGENT_TASK_COOK).expect("Cook alias"))
             .expect("alias");
-        assert_eq!(
-            resource.requested,
-            ControlPlaneRef::Mission(
-                homeboy_control_plane_contract::MissionId::new(AGENT_TASK_COOK).expect("mission")
-            )
-        );
-        assert_eq!(
-            resource.resolved,
-            ControlPlaneRef::Run(
-                homeboy_control_plane_contract::RunId::new(AGENT_TASK_RUN).expect("run")
-            )
-        );
         assert_eq!(resource.run.as_str(), AGENT_TASK_RUN);
+        assert_eq!(
+            resource.mission.as_ref().map(|id| id.as_str()),
+            Some(AGENT_TASK_COOK)
+        );
     }
 
     #[test]
@@ -457,7 +386,7 @@ mod tests {
     fn project_record_matches_service_run() {
         let seeded = record(AGENT_TASK_RUN);
         let requested = RunId::new(AGENT_TASK_RUN).expect("run id");
-        let from_record = project_record(&seeded, &requested).expect("project");
+        let from_record = project_record(&seeded).expect("project");
         let from_service = service().run(&requested).expect("run");
         assert_eq!(from_record, from_service);
     }

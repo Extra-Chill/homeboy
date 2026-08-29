@@ -46,14 +46,16 @@ pub enum ControlPlaneResource {
 }
 
 impl ControlPlaneCapabilities {
-    pub fn this_build() -> Self {
+    /// Describe the operations wired by a runtime. The contract does not infer
+    /// build capabilities itself.
+    pub fn new(
+        resources: Vec<ControlPlaneResource>,
+        operations: Vec<ControlPlaneOperation>,
+    ) -> Self {
         Self {
             schema: CONTROL_PLANE_CAPABILITIES_SCHEMA.to_string(),
-            resources: vec![ControlPlaneResource::Run],
-            operations: vec![
-                ControlPlaneOperation::GetCapabilities,
-                ControlPlaneOperation::GetRun,
-            ],
+            resources,
+            operations,
             compatibility: CompatibilityWindow {
                 legacy_minor_versions: LEGACY_COMPATIBILITY_MINOR_VERSIONS,
             },
@@ -70,7 +72,13 @@ mod tests {
 
     #[test]
     fn capabilities_document_serializes_schema_and_compatibility_window() {
-        let document = ControlPlaneCapabilities::this_build();
+        let document = ControlPlaneCapabilities::new(
+            vec![ControlPlaneResource::Run],
+            vec![
+                ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::GetRun,
+            ],
+        );
         let value = serde_json::to_value(&document).expect("serialize");
         assert_eq!(value["schema"], CONTROL_PLANE_CAPABILITIES_SCHEMA);
         assert_eq!(value["compatibility"]["legacy_minor_versions"], 1);

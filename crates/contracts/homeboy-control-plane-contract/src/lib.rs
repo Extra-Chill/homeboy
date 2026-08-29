@@ -24,6 +24,6 @@ pub use identity::{
 pub use resolve::{resolve, IdentityKind, ResolveError, ResolvedIdentities};
 pub use resource::{
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation,
-    ControlPlanePage, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunRequest,
-    ControlPlaneRunState, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, CONTROL_PLANE_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_SCHEMA,
 };

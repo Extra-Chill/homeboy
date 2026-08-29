@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::control_plane_ref::ControlPlaneRef;
 use crate::identity::{AttemptId, ExecutionId, MissionId, RunId};
 
 pub const CONTROL_PLANE_RESULT_SCHEMA: &str = "homeboy/control-plane-result/v1";
@@ -83,20 +82,11 @@ impl ControlPlaneError {
         }
     }
 
-    pub fn transport(message: impl Into<String>, next_action: impl Into<String>) -> Self {
-        Self {
-            class: ControlPlaneErrorClass::Transport,
-            retryable: true,
-            next_action: Some(next_action.into()),
-            message: message.into(),
-        }
-    }
-
     pub fn http_status(&self) -> u16 {
         match self.class {
             ControlPlaneErrorClass::NotFound => 404,
             ControlPlaneErrorClass::InvalidArgument => 400,
-            ControlPlaneErrorClass::Unavailable | ControlPlaneErrorClass::Transport => 503,
+            ControlPlaneErrorClass::Unavailable => 503,
         }
     }
 }
@@ -115,27 +105,6 @@ pub enum ControlPlaneErrorClass {
     NotFound,
     InvalidArgument,
     Unavailable,
-    Transport,
-}
-
-/// Request identity for a run read. The id may be a run id or a Cook alias.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ControlPlaneRunRequest {
-    pub id: RunId,
-}
-
-/// Bounded page of control-plane resources. Listing is not served in this
-/// slice; the type exists so later pages reuse the same envelope.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ControlPlanePage<T> {
-    pub items: Vec<T>,
-    pub total: usize,
-    pub limit: usize,
-    pub offset: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_offset: Option<usize>,
 }
 
 /// Canonical run resource. Pure, redacted, and non-reconciling.
@@ -143,8 +112,6 @@ pub struct ControlPlanePage<T> {
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneRun {
     pub schema: String,
-    pub requested: ControlPlaneRef,
-    pub resolved: ControlPlaneRef,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mission: Option<MissionId>,
     pub run: RunId,
@@ -166,15 +133,12 @@ pub struct ControlPlaneRun {
     pub evidence: Vec<ControlPlaneEvidenceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ControlPlaneEvidenceRef>,
-    pub reconciles: bool,
 }
 
 impl ControlPlaneRun {
-    pub fn new(run: RunId, requested: ControlPlaneRef, resolved: ControlPlaneRef) -> Self {
+    pub fn new(run: RunId) -> Self {
         Self {
             schema: CONTROL_PLANE_RUN_SCHEMA.to_string(),
-            requested,
-            resolved,
             mission: None,
             run,
             attempt: None,
@@ -187,7 +151,6 @@ impl ControlPlaneRun {
             finished_at: None,
             evidence: Vec::new(),
             artifacts: Vec::new(),
-            reconciles: false,
         }
     }
 }
@@ -238,10 +201,10 @@ pub struct ControlPlaneEvidenceRef {
 mod tests {
     use super::{
         ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation,
-        ControlPlanePage, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunRequest,
-        ControlPlaneRunState, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, CONTROL_PLANE_RESULT_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA,
     };
-    use crate::{AttemptId, ControlPlaneRef, ExecutionId, MissionId, RunId};
+    use crate::{AttemptId, ExecutionId, MissionId, RunId};
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
@@ -249,11 +212,7 @@ mod tests {
 
     fn sample_run() -> ControlPlaneRun {
         let run = RunId::new(AGENT_TASK_RUN).expect("run");
-        let mut resource = ControlPlaneRun::new(
-            run.clone(),
-            ControlPlaneRef::Mission(MissionId::new(AGENT_TASK_COOK).expect("mission")),
-            ControlPlaneRef::Run(run.clone()),
-        );
+        let mut resource = ControlPlaneRun::new(run.clone());
         resource.mission = Some(MissionId::new(AGENT_TASK_COOK).expect("mission"));
         resource.attempt = Some(AttemptId::new(AGENT_TASK_RUN).expect("attempt"));
         resource.attempt_number = Some(1);
@@ -284,14 +243,11 @@ mod tests {
         let resource = sample_run();
         let value = serde_json::to_value(&resource).expect("serialize");
         assert_eq!(value["schema"], CONTROL_PLANE_RUN_SCHEMA);
-        assert_eq!(value["requested"], format!("mission/{AGENT_TASK_COOK}"));
-        assert_eq!(value["resolved"], format!("run/{AGENT_TASK_RUN}"));
         assert_eq!(value["mission"], AGENT_TASK_COOK);
         assert_eq!(value["run"], AGENT_TASK_RUN);
         assert_eq!(value["attempt"], AGENT_TASK_RUN);
         assert_eq!(value["attempt_number"], 1);
         assert_eq!(value["state"], "succeeded");
-        assert_eq!(value["reconciles"], false);
         assert!(value.get("metadata").is_none());
         assert!(value.get("cwd").is_none());
         assert!(value.get("prompt").is_none());
@@ -326,27 +282,5 @@ mod tests {
             decoded.error.as_ref().unwrap().class,
             ControlPlaneErrorClass::NotFound
         );
-    }
-
-    #[test]
-    fn request_and_page_types_round_trip() {
-        let request = ControlPlaneRunRequest {
-            id: RunId::new(AGENT_TASK_RUN).expect("run id"),
-        };
-        let value = serde_json::to_value(&request).expect("serialize");
-        let decoded: ControlPlaneRunRequest = serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, request);
-
-        let page = ControlPlanePage {
-            items: vec![sample_run()],
-            total: 1,
-            limit: 20,
-            offset: 0,
-            next_offset: None,
-        };
-        let value = serde_json::to_value(&page).expect("serialize");
-        let decoded: ControlPlanePage<ControlPlaneRun> =
-            serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, page);
     }
 }

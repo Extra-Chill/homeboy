@@ -19,6 +19,30 @@ use homeboy_control_plane_contract::{
 };
 use homeboy_lab_runner_contract::RunnerSession;
 
+#[derive(Debug)]
+pub enum ControlPlaneClientError {
+    Api(ControlPlaneError),
+    Transport(String),
+    Protocol(String),
+}
+
+impl std::fmt::Display for ControlPlaneClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Api(error) => error.fmt(formatter),
+            Self::Transport(message) | Self::Protocol(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ControlPlaneClientError {}
+
+impl From<ControlPlaneError> for ControlPlaneClientError {
+    fn from(error: ControlPlaneError) -> Self {
+        Self::Api(error)
+    }
+}
+
 /// HTTP client for control-plane capabilities and run reads.
 pub struct ControlPlaneClient {
     http: Client,
@@ -33,15 +57,14 @@ impl ControlPlaneClient {
     pub fn from_connected_session(
         session: &RunnerSession,
         http: Client,
-    ) -> Result<Self, ControlPlaneError> {
+    ) -> Result<Self, ControlPlaneClientError> {
         let base_url = session
             .local_url
             .as_deref()
             .or(session.broker_url.as_deref())
             .ok_or_else(|| {
-                ControlPlaneError::unavailable(
-                    "connected session has no HTTP endpoint",
-                    "homeboy runner connect",
+                ControlPlaneClientError::Transport(
+                    "connected session has no HTTP endpoint".to_string(),
                 )
             })?;
         Ok(Self {
@@ -50,28 +73,24 @@ impl ControlPlaneClient {
         })
     }
 
-    pub fn capabilities(&self) -> Result<ControlPlaneCapabilities, ControlPlaneError> {
+    pub fn capabilities(&self) -> Result<ControlPlaneCapabilities, ControlPlaneClientError> {
         self.get("/v1/control-plane/capabilities")
     }
 
-    pub fn run(&self, id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
+    pub fn run(&self, id: &RunId) -> Result<ControlPlaneRun, ControlPlaneClientError> {
         self.get(&format!("/v1/control-plane/runs/{}", id.as_str()))
     }
 
-    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ControlPlaneError> {
+    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ControlPlaneClientError> {
         let url = format!("{}{path}", self.base_url);
         let response = self.http.get(&url).send().map_err(|error| {
-            ControlPlaneError::transport(
-                format!("control-plane GET {path}: {error}"),
-                "homeboy runner connect",
-            )
+            ControlPlaneClientError::Transport(format!("control-plane GET {path}: {error}"))
         })?;
         let status = response.status().as_u16();
         let body = response.text().map_err(|error| {
-            ControlPlaneError::transport(
-                format!("read control-plane response {path}: {error}"),
-                "homeboy runner connect",
-            )
+            ControlPlaneClientError::Transport(format!(
+                "read control-plane response {path}: {error}"
+            ))
         })?;
         parse_control_plane_body(&body, status, path)
     }
@@ -81,61 +100,53 @@ fn parse_control_plane_body<T: DeserializeOwned>(
     body: &str,
     status: u16,
     path: &str,
-) -> Result<T, ControlPlaneError> {
+) -> Result<T, ControlPlaneClientError> {
     let envelope: Value = serde_json::from_str(body).map_err(|error| {
-        ControlPlaneError::transport(
-            format!("malformed control-plane JSON for {path}: {error}"),
-            "homeboy runner connect",
-        )
+        ControlPlaneClientError::Protocol(format!(
+            "malformed control-plane JSON for {path}: {error}"
+        ))
     })?;
-    let payload = envelope
-        .get("data")
-        .cloned()
-        .or_else(|| envelope.get("error").cloned())
-        .unwrap_or(envelope);
-    let result_value = payload.get("body").cloned().unwrap_or(payload);
-    let result: ControlPlaneResult<T> = serde_json::from_value(result_value).map_err(|error| {
-        ControlPlaneError::transport(
-            format!("malformed control-plane result for {path}: {error}"),
-            "homeboy runner connect",
-        )
+    let payload = envelope.pointer("/data/body").cloned().ok_or_else(|| {
+        ControlPlaneClientError::Protocol(format!(
+            "control-plane response for {path} omitted /data/body"
+        ))
+    })?;
+    let result: ControlPlaneResult<T> = serde_json::from_value(payload).map_err(|error| {
+        ControlPlaneClientError::Protocol(format!(
+            "malformed control-plane result for {path}: {error}"
+        ))
     })?;
     if result.ok {
         result.resource.ok_or_else(|| {
-            ControlPlaneError::unavailable(
-                format!("control-plane response for {path} omitted the resource"),
-                "homeboy runner connect",
-            )
+            ControlPlaneClientError::Protocol(format!(
+                "control-plane response for {path} omitted the resource"
+            ))
         })
     } else {
-        Err(result.error.unwrap_or_else(|| {
-            ControlPlaneError::unavailable(
-                format!("control-plane request {path} failed ({status})"),
-                "homeboy runner connect",
-            )
+        Err(result.error.map(Into::into).unwrap_or_else(|| {
+            ControlPlaneClientError::Protocol(format!(
+                "control-plane request {path} failed ({status}) without a typed error"
+            ))
         }))
     }
 }
 
-pub fn default_http_client() -> Result<Client, ControlPlaneError> {
+pub fn default_http_client() -> Result<Client, ControlPlaneClientError> {
     Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| {
-            ControlPlaneError::transport(
-                format!("build control-plane HTTP client: {error}"),
-                "homeboy runner connect",
-            )
+            ControlPlaneClientError::Transport(format!("build control-plane HTTP client: {error}"))
         })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ControlPlaneClient;
+    use super::{parse_control_plane_body, ControlPlaneClient, ControlPlaneClientError};
     use homeboy_control_plane_contract::{
-        ControlPlaneCapabilities, ControlPlaneErrorClass, ControlPlaneOperation, ControlPlaneRef,
-        ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, MissionId, RunId,
-        CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneCapabilities, ControlPlaneErrorClass, ControlPlaneOperation,
+        ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, MissionId,
+        RunId, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_lab_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
     use serde_json::json;
@@ -149,15 +160,21 @@ mod tests {
 
     fn sample_run() -> ControlPlaneRun {
         let run = RunId::new(AGENT_TASK_RUN).expect("run");
-        let mut resource = ControlPlaneRun::new(
-            run.clone(),
-            ControlPlaneRef::Mission(MissionId::new(AGENT_TASK_COOK).expect("mission")),
-            ControlPlaneRef::Run(run.clone()),
-        );
+        let mut resource = ControlPlaneRun::new(run.clone());
         resource.mission = Some(MissionId::new(AGENT_TASK_COOK).expect("mission"));
         resource.state = ControlPlaneRunState::Succeeded;
         resource.created_at = "2026-01-01T00:00:00Z".to_string();
         resource
+    }
+
+    fn capabilities() -> ControlPlaneCapabilities {
+        ControlPlaneCapabilities::new(
+            vec![ControlPlaneResource::Run],
+            vec![
+                ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::GetRun,
+            ],
+        )
     }
 
     fn connected_session(local_url: &str) -> RunnerSession {
@@ -279,7 +296,7 @@ mod tests {
 
     #[test]
     fn connected_session_control_plane_reads_use_http_without_cli_or_ssh() {
-        let capabilities = ControlPlaneCapabilities::this_build();
+        let capabilities = capabilities();
         let run = sample_run();
         let (url, server) = spawn_control_plane_http(capabilities.clone(), run.clone(), None, 2);
         let session = connected_session(&url);
@@ -305,14 +322,13 @@ mod tests {
             .expect("run");
         assert_eq!(fetched_run, run);
         assert_eq!(fetched_run.schema, CONTROL_PLANE_RUN_SCHEMA);
-        assert!(!fetched_run.reconciles);
 
         server.join().expect("server");
     }
 
     #[test]
     fn reverse_session_uses_the_broker_http_endpoint() {
-        let capabilities = ControlPlaneCapabilities::this_build();
+        let capabilities = capabilities();
         let (url, server) = spawn_control_plane_http(capabilities.clone(), sample_run(), None, 1);
         let session = reverse_session(&url);
         let http = reqwest::blocking::Client::builder()
@@ -329,7 +345,7 @@ mod tests {
     #[test]
     fn control_plane_http_failures_preserve_class_retryability_and_next_action() {
         let (url, server) = spawn_control_plane_http(
-            ControlPlaneCapabilities::this_build(),
+            capabilities(),
             sample_run(),
             Some("/v1/control-plane/runs/missing"),
             1,
@@ -344,6 +360,9 @@ mod tests {
         let error = client
             .run(&RunId::new("missing").expect("id"))
             .expect_err("typed failure");
+        let ControlPlaneClientError::Api(error) = error else {
+            panic!("expected typed API error");
+        };
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
         assert!(!error.retryable);
         assert_eq!(
@@ -351,5 +370,18 @@ mod tests {
             Some("homeboy agent-task active")
         );
         server.join().expect("server");
+    }
+
+    #[test]
+    fn control_plane_client_rejects_noncanonical_daemon_envelopes() {
+        let direct = serde_json::to_string(&ControlPlaneResult::ok(capabilities()))
+            .expect("serialize direct result");
+        let error = parse_control_plane_body::<ControlPlaneCapabilities>(
+            &direct,
+            200,
+            "/v1/control-plane/capabilities",
+        )
+        .expect_err("direct result must not bypass the daemon envelope");
+        assert!(matches!(error, ControlPlaneClientError::Protocol(_)));
     }
 }

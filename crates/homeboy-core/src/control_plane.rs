@@ -5,13 +5,13 @@
 //! here so core stays agent-task-agnostic.
 
 use homeboy_control_plane_contract::{
-    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneRun, RunId,
+    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneOperation, ControlPlaneRun, RunId,
 };
 
 /// Supplies control-plane capabilities and run reads to the HTTP adapter.
 pub trait ControlPlaneProvider: Send + Sync {
     fn capabilities(&self) -> ControlPlaneCapabilities {
-        ControlPlaneCapabilities::this_build()
+        ControlPlaneCapabilities::new(Vec::new(), vec![ControlPlaneOperation::GetCapabilities])
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
@@ -43,4 +43,20 @@ pub fn capabilities() -> ControlPlaneCapabilities {
 
 pub fn run(requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
     with_provider(|provider| provider.run(requested_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ControlPlaneProvider, NoopProvider};
+    use homeboy_control_plane_contract::ControlPlaneOperation;
+
+    #[test]
+    fn noop_provider_advertises_discovery_without_run_reads() {
+        let capabilities = NoopProvider.capabilities();
+        assert!(capabilities.resources.is_empty());
+        assert_eq!(
+            capabilities.operations,
+            vec![ControlPlaneOperation::GetCapabilities]
+        );
+    }
 }
