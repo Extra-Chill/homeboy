@@ -834,6 +834,24 @@ impl AgentTaskLifecycleStore {
         runtime: Value,
     ) -> Result<AgentTaskRunRecord> {
         homeboy_core::controller_runtime::validate(&runtime)?;
+        self.rearm_pre_execution_record_inner(record, Some(runtime))
+    }
+
+    /// Rearm a retryable zero-provider record without changing controller
+    /// runtime ownership. Runner-bound retries execute under a separate runner
+    /// runtime while the original controller pin remains authoritative.
+    pub(crate) fn rearm_pre_execution_record(
+        &self,
+        record: &AgentTaskRunRecord,
+    ) -> Result<AgentTaskRunRecord> {
+        self.rearm_pre_execution_record_inner(record, None)
+    }
+
+    fn rearm_pre_execution_record_inner(
+        &self,
+        record: &AgentTaskRunRecord,
+        runtime: Option<Value>,
+    ) -> Result<AgentTaskRunRecord> {
         self.with_config_lock(|| {
             let existing = self.read_record(&record.run_id)?;
             if !existing.state.is_terminal()
@@ -865,29 +883,55 @@ impl AgentTaskLifecycleStore {
             }
 
             let mut rebound = record.clone();
-            let previous = existing
-                .metadata
-                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-                .cloned()
-                .unwrap_or(Value::Null);
-            rebound.metadata["controller_runtime_recovery"] = serde_json::json!({
-                "schema": "homeboy/controller-runtime-pre-execution-recovery/v1",
-                "reason": "retryable_pre_execution_failure",
-                "previous": previous,
-                "current": runtime.clone(),
-                "provider_executions_consumed": 0,
-                "recovered_at": super::now_timestamp(),
-            });
-            rebound.metadata
-                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = runtime;
+            if let Some(runtime) = runtime {
+                let previous = existing
+                    .metadata
+                    .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                rebound.metadata["controller_runtime_recovery"] = serde_json::json!({
+                    "schema": "homeboy/controller-runtime-pre-execution-recovery/v1",
+                    "reason": "retryable_pre_execution_failure",
+                    "previous": previous,
+                    "current": runtime.clone(),
+                    "provider_executions_consumed": 0,
+                    "recovered_at": super::now_timestamp(),
+                });
+                rebound.metadata
+                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = runtime;
+            } else {
+                rebound.metadata["pre_execution_recovery"] = serde_json::json!({
+                    "schema": "homeboy/pre-execution-recovery/v1",
+                    "reason": "retryable_pre_execution_failure",
+                    "provider_executions_consumed": 0,
+                    "recovered_at": super::now_timestamp(),
+                });
+            }
             rebound.metadata["controller_identity"] =
                 serde_json::json!(homeboy_core::build_identity::current().display);
-            write_record_with_aggregate_without_workspace_authority_mode(
+            let committed = write_record_with_aggregate_without_workspace_authority_mode(
                 self,
                 &rebound,
                 read_mirrored_aggregate_in_store(self, &rebound.run_id)?,
                 false,
-            )
+            )?;
+            // A pre-execution failure writes a synthetic failed aggregate for
+            // durable diagnostics. Once the zero-provider attempt is rearmed,
+            // that file is no longer an execution result. Leaving it behind
+            // lets the next detached-handoff write mirror the stale failure
+            // back into the now-queued record (#13552).
+            let aggregate_path = self.aggregate_path(&rebound.run_id);
+            match fs::remove_file(&aggregate_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Error::internal_io(
+                        format!("remove rearmed pre-execution aggregate: {error}"),
+                        Some(aggregate_path.display().to_string()),
+                    ));
+                }
+            }
+            Ok(committed)
         })
     }
 

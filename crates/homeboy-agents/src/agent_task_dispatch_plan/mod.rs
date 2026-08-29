@@ -2115,6 +2115,7 @@ mod tests {
 
     #[test]
     fn dispatch_plan_promotes_runtime_component_contracts_from_client_context_inputs() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let component = tempfile::tempdir().expect("agents-api component");
         init_git_repo(component.path());
         let component_path = component.path().display().to_string();
@@ -2175,6 +2176,7 @@ mod tests {
 
     #[test]
     fn dispatch_plan_accepts_component_contracts_from_provider_config() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let component = tempfile::tempdir().expect("runtime-helper component");
         init_git_repo(component.path());
         let component_path = component.path().display().to_string();

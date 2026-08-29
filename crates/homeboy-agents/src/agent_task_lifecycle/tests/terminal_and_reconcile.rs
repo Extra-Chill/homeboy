@@ -3002,6 +3002,11 @@ fn cancel_run_reclaims_stale_running_record() {
     record.state = AgentTaskRunState::Running;
     record.tasks[0].state = AgentTaskState::Running;
     record.metadata["runner_pid"] = json!(u32::MAX);
+    // Reserving provider execution records the libtest process as its owner.
+    // Leaving that live PID in this stale-owner fixture makes cancellation
+    // terminate every subprocess owned by parallel peer tests (#11897).
+    record.metadata["provider_executions"][0]["owner_pid"] = json!(u32::MAX);
+    record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
     lifecycle_store
         .write_record(&record)
         .expect("stored stale record");
@@ -3611,6 +3616,22 @@ fn provider_terminalization_observes_cancellation_that_won_the_race() {
             1,
         )
         .expect("reserved");
+        rewrite_record_for_test("provider-terminal-cancel-race", |record| {
+            let execution = record.metadata["provider_executions"][0]
+                .as_object_mut()
+                .expect("provider execution object");
+            // The test covers durable ordering, not process signalling. Remove
+            // the reservation's libtest PID so cancelling this fixture cannot
+            // kill subprocesses belonging to parallel tests (#11897).
+            execution.remove("owner_pid");
+            execution.remove("owner_linux_starttime_ticks");
+            execution.remove("owner_identity");
+            record.ensure_metadata_object().remove("runner_pid");
+            record
+                .ensure_metadata_object()
+                .remove("runner_process_start_identity");
+        })
+        .expect("remove ambient test-harness owner");
         cancel_run("provider-terminal-cancel-race", Some("stale owner"))
             .expect("cancellation recorded");
 

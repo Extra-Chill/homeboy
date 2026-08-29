@@ -2640,12 +2640,14 @@ where
         metadata,
     };
     let mut preserved_controller_runtime = None;
+    let mut pre_execution_recovery = false;
     let mut pre_execution_runtime_recovery = false;
     if let Ok(existing) = lifecycle_store.read_record(&run_id) {
-        pre_execution_runtime_recovery = execution_runner_id.is_none()
-            && crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
+        pre_execution_recovery =
+            crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                 &existing,
             );
+        pre_execution_runtime_recovery = execution_runner_id.is_none() && pre_execution_recovery;
         // A runner may re-submit the plan after the controller reserved a
         // side-effect claim. Claims are durable exactly-once ownership, not
         // plan-derived state, so replacing the record must retain them.
@@ -2665,6 +2667,21 @@ where
         ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();
+            }
+        }
+        if pre_execution_recovery {
+            // Placement transition is durable continuation authority, not
+            // plan-derived decoration. Re-submitting the original semantic
+            // attempt must not restore its exhausted route over an operator's
+            // explicit local recovery decision (#11897).
+            for key in [
+                "execution_placement_decision",
+                "execution_placement_transition",
+                "transport_admission_reset",
+            ] {
+                if let Some(value) = existing.metadata.get(key) {
+                    record.metadata[key] = value.clone();
+                }
             }
         }
         // A runner re-submitting a retry must not erase the predecessor identity
@@ -2754,6 +2771,11 @@ where
             if pre_execution_runtime_recovery {
                 record = lifecycle_store
                     .rearm_pre_execution_record_with_runtime(&record, admission.runtime())?;
+            } else if pre_execution_recovery {
+                // Runner execution has its own runtime provenance. Clear the
+                // terminal pre-provider projection without rebinding the
+                // controller pin to the runner's executable (#13552).
+                record = lifecycle_store.rearm_pre_execution_record(&record)?;
             } else {
                 lifecycle_store.write_record(&record)?;
             }
