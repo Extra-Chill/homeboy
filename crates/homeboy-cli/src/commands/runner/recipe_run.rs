@@ -25,10 +25,13 @@ pub(super) fn recipe_run(
         ));
     }
     let descriptor = homeboy_extension::resolve_recipe_run_provider(provider_id)?;
-    let command = descriptor.render(&homeboy_extension::RecipeRunRequest {
-        recipe_path: recipe,
-        artifact_path: artifacts.clone(),
-    })?;
+    let command = homeboy_extension::render_recipe_run_command(
+        &descriptor,
+        &homeboy_extension::RecipeRunRequest {
+            recipe_path: recipe,
+            artifact_path: artifacts.clone(),
+        },
+    )?;
     let (output, exit_code) = exec_with_hydration(
         runner_id,
         None,

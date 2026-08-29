@@ -61,6 +61,13 @@ pub struct ExtensionManifest {
     // Capability groups
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy: Option<DeployCapability>,
+    /// Recipe-run providers this extension publishes.
+    ///
+    /// Typed since #13724. Malformed entries are retained rather than rejected
+    /// so `runner recipe-providers` can name the broken declaration instead of
+    /// reporting the whole manifest as unreadable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recipe_run_providers: Vec<RecipeRunProviderDeclaration>,
     /// Deployment providers this extension publishes.
     ///
     /// Typed since #13723. While this rode in `extra`, a malformed descriptor
@@ -192,11 +199,13 @@ pub struct ExtensionManifest {
     /// extension published against a newer or older core still deserializes.
     ///
     /// This is a *forward-compatibility buffer*, not an extension point. Core
-    /// reads exactly two keys out of it — the legacy camelCase `sourceUrl`
-    /// (`lifecycle::source_metadata`) and `recipe_run_providers`
-    /// (`recipe_run::recipe_run_providers`, tracked for promotion in #13724) —
-    /// and nothing else in here has a reader. `deployment_providers` was the
-    /// third and became a typed field in #13723.
+    /// reads exactly one key out of it — the legacy camelCase `sourceUrl`
+    /// (`lifecycle::source_metadata`) — and nothing else in here has a reader.
+    /// `deployment_providers` (#13723) and `recipe_run_providers` (#13724) were
+    /// the other two and are now typed fields.
+    ///
+    /// With only a legacy alias left, a key appearing here is a key nothing
+    /// will ever act on.
     ///
     /// Landing anything else here makes it inert *silently*, which is how
     /// shipped manifests accumulated `required_output_declarations` (26 lines),

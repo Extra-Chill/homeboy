@@ -7,13 +7,7 @@ use crate::DiscoveredExtension;
 
 const AVAILABLE_ID_LIMIT: usize = 20;
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
-pub struct RecipeRunProviderDescriptor {
-    pub id: String,
-    pub version: String,
-    pub executable: String,
-    pub command: Vec<String>,
-}
+pub use homeboy_extension_contract::{RecipeRunProviderDeclaration, RecipeRunProviderDescriptor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeRunRequest {
@@ -53,16 +47,6 @@ pub enum RecipeRunProviderValidation {
 struct DiscoveredProvider {
     entry: RecipeRunProviderInventoryEntry,
     descriptor: Option<RecipeRunProviderDescriptor>,
-}
-
-/// Read recipe-run descriptors from an installed extension manifest.
-pub fn recipe_run_providers(manifest: &ExtensionManifest) -> Vec<RecipeRunProviderDescriptor> {
-    manifest
-        .extra
-        .get("recipe_run_providers")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
 }
 
 /// List every installed recipe-run declaration, including malformed entries.
@@ -166,25 +150,21 @@ fn discover_recipe_run_providers() -> Vec<DiscoveredProvider> {
 }
 
 fn declarations_from_manifest(manifest: &ExtensionManifest) -> Vec<DiscoveredProvider> {
-    let Some(value) = manifest.extra.get("recipe_run_providers") else {
-        return Vec::new();
-    };
     let source_ref = manifest.extension_path.clone();
-    let declarations = value
-        .as_array()
-        .cloned()
-        .unwrap_or_else(|| vec![value.clone()]);
-    declarations
-        .into_iter()
-        .map(|value| {
-            let id = value.get("id").and_then(serde_json::Value::as_str).map(str::to_string);
-            let version = value.get("version").and_then(serde_json::Value::as_str).map(str::to_string);
-            let executable = value.get("executable").and_then(serde_json::Value::as_str).map(str::to_string);
-            let descriptor = serde_json::from_value::<RecipeRunProviderDescriptor>(value);
-            match descriptor
-                .ok()
-                .and_then(|descriptor| validate_descriptor(descriptor).ok())
-            {
+    manifest
+        .recipe_run_providers
+        .iter()
+        .map(|declaration| {
+            let id = declaration.declared_str("id");
+            let version = declaration.declared_str("version");
+            let executable = declaration.declared_str("executable");
+            let descriptor = match declaration {
+                RecipeRunProviderDeclaration::Descriptor(descriptor) => {
+                    Some((**descriptor).clone())
+                }
+                RecipeRunProviderDeclaration::Malformed(_) => None,
+            };
+            match descriptor.and_then(|descriptor| validate_descriptor(descriptor).ok()) {
                 Some(descriptor) => DiscoveredProvider {
                     entry: RecipeRunProviderInventoryEntry { id, version, owning_extension: manifest.id.clone(), source_ref: source_ref.clone(), executable, resolvable: true, validation: RecipeRunProviderValidation::Valid, diagnostic: None },
                     descriptor: Some(descriptor),
@@ -222,20 +202,25 @@ fn unknown_provider_hints(inventory: &[RecipeRunProviderInventoryEntry]) -> Vec<
     hints
 }
 
-impl RecipeRunProviderDescriptor {
-    /// Render the extension-declared argv without introducing shell parsing.
-    pub fn render(&self, request: &RecipeRunRequest) -> Result<Vec<String>> {
-        validate_descriptor(self.clone())?;
-        Ok(self
-            .command
-            .iter()
-            .map(|argument| {
-                argument
-                    .replace("{recipe}", &request.recipe_path)
-                    .replace("{artifacts}", &request.artifact_path)
-            })
-            .collect())
-    }
+/// Render an extension-declared argv without introducing shell parsing.
+///
+/// A free function rather than an inherent method: the descriptor is owned by
+/// `homeboy-extension-contract` (#13724) while validation and the request type
+/// stay here, and the orphan rule forbids the method form.
+pub fn render_recipe_run_command(
+    descriptor: &RecipeRunProviderDescriptor,
+    request: &RecipeRunRequest,
+) -> Result<Vec<String>> {
+    validate_descriptor(descriptor.clone())?;
+    Ok(descriptor
+        .command
+        .iter()
+        .map(|argument| {
+            argument
+                .replace("{recipe}", &request.recipe_path)
+                .replace("{artifacts}", &request.artifact_path)
+        })
+        .collect())
 }
 
 fn validate_descriptor(
@@ -275,12 +260,14 @@ mod tests {
             ],
         };
         assert_eq!(
-            provider
-                .render(&RecipeRunRequest {
+            render_recipe_run_command(
+                &provider,
+                &RecipeRunRequest {
                     recipe_path: "recipe.json".to_string(),
                     artifact_path: "artifacts".to_string(),
-                })
-                .expect("render"),
+                }
+            )
+            .expect("render"),
             vec![
                 "fixture-run",
                 "--recipe",
@@ -315,12 +302,14 @@ mod tests {
             let provider = resolve_recipe_run_provider("fixture.recipe-run").expect("discover");
             assert_eq!(provider.version, "1.0.0");
             assert_eq!(
-                provider
-                    .render(&RecipeRunRequest {
+                render_recipe_run_command(
+                    &provider,
+                    &RecipeRunRequest {
                         recipe_path: "recipe.json".to_string(),
                         artifact_path: "artifacts".to_string(),
-                    })
-                    .expect("render"),
+                    }
+                )
+                .expect("render"),
                 vec![
                     "fixture-run",
                     "--recipe",
@@ -329,6 +318,59 @@ mod tests {
                     "artifacts"
                 ]
             );
+        });
+    }
+
+    /// The existing inventory test covers a *shape-valid* entry that fails
+    /// semantic validation. This covers the case typing the field could have
+    /// regressed: an entry that does not satisfy the descriptor shape at all.
+    ///
+    /// Rejecting it at deserialization would fail the whole manifest, turning a
+    /// precise per-provider diagnostic into "this extension is unreadable" and
+    /// hiding every sibling provider the extension declares. The manifest must
+    /// still load, the valid sibling must remain resolvable, and the broken
+    /// entry must still be named.
+    #[test]
+    fn structurally_malformed_declaration_stays_reportable() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("extension source");
+            std::fs::write(
+                source.path().join("fixture.json"),
+                serde_json::json!({
+                    "name": "Recipe fixture",
+                    "version": "1.0.0",
+                    "recipe_run_providers": [
+                        { "id": "fixture.valid", "version": "1.0.0", "executable": "fixture-run", "command": ["fixture-run"] },
+                        { "id": "fixture.no-version", "executable": "fixture-run", "command": ["fixture-run"] }
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("manifest");
+            crate::install(&source.path().display().to_string(), Some("fixture"))
+                .expect("a malformed provider must not make the manifest unreadable");
+
+            let inventory = recipe_run_provider_inventory();
+            assert_eq!(inventory.len(), 2, "both declarations must be surfaced");
+
+            assert!(
+                inventory
+                    .iter()
+                    .any(|provider| provider.id.as_deref() == Some("fixture.valid")
+                        && provider.resolvable),
+                "a sibling of a malformed entry must stay resolvable"
+            );
+
+            let malformed = inventory
+                .iter()
+                .find(|provider| provider.id.as_deref() == Some("fixture.no-version"))
+                .expect("the malformed declaration must be named, not dropped");
+            assert_eq!(malformed.validation, RecipeRunProviderValidation::Invalid);
+            assert!(!malformed.resolvable);
+            assert!(malformed.diagnostic.is_some(), "must carry a diagnostic");
+
+            assert!(resolve_recipe_run_provider("fixture.no-version").is_err());
+            assert!(resolve_recipe_run_provider("fixture.valid").is_ok());
         });
     }
 
