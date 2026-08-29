@@ -815,6 +815,7 @@ dependencies = [
  "homeboy-release",
  "homeboy-review",
  "homeboy-rig",
+ "homeboy-serde-pin",
  "homeboy-stack",
  "homeboy-tunnel",
  "homeboy-upgrade",
@@ -913,6 +914,7 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor-contract",
  "homeboy-release-contract",
+ "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
  "keyring",
  "libc",
@@ -1244,6 +1246,14 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
+]
+
+[[package]]
+name = "homeboy-serde-pin"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
