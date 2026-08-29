@@ -1,5 +1,4 @@
 use super::super::*;
-use homeboy::runner::ExtensionParityProbe;
 use types::RunnerDoctorStatus;
 
 #[test]
@@ -98,70 +97,6 @@ fn extension_parity_check_reports_copied_extension_as_actionable_ok() {
         .remediation
         .as_deref()
         .is_some_and(|value| value.contains("extension diff-installed rust")));
-}
-
-#[test]
-fn stale_extension_parity_skips_provider_readiness() {
-    let mut checks = Vec::new();
-    let mut readiness_ran = false;
-    let stale = extension_parity::check_from_parity_probe(
-        "remote",
-        "homeboy",
-        None,
-        "fixture-extension",
-        ExtensionParityProbe::NeedsMaterialization {
-            error: homeboy::core::Error::validation_invalid_argument(
-                "runner_extension",
-                "Runner 'lab' has stale extension parity for 'fixture-extension' before command execution",
-                Some("fixture-extension".to_string()),
-                Some(vec![
-                    "Local extension source_revision: abc123".to_string(),
-                    "Relink or update the extension on the runner before dispatch: homeboy extension relink fixture-extension <source>".to_string(),
-                ]),
-            ),
-        },
-    );
-
-    extension_parity::append_after_extension_parity(&mut checks, vec![stale], || {
-        readiness_ran = true;
-        vec![checks::ok(
-            "provider.readiness",
-            "should not run".to_string(),
-            None,
-        )]
-    });
-
-    assert!(!readiness_ran);
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].id, "extension.parity");
-    assert_eq!(checks[0].status, RunnerDoctorStatus::Error);
-    assert!(checks[0]
-        .remediation
-        .as_deref()
-        .is_some_and(|value| value.contains("extension relink fixture-extension")));
-}
-
-#[test]
-fn current_extension_parity_runs_provider_readiness() {
-    let mut checks = Vec::new();
-    let mut readiness_ran = false;
-    let current = extension_parity::check_from_parity_probe(
-        "remote",
-        "homeboy",
-        None,
-        "fixture-extension",
-        ExtensionParityProbe::Current,
-    );
-
-    extension_parity::append_after_extension_parity(&mut checks, vec![current], || {
-        readiness_ran = true;
-        vec![checks::ok("provider.readiness", "ready".to_string(), None)]
-    });
-
-    assert!(readiness_ran);
-    assert_eq!(checks[0].id, "extension.parity");
-    assert_eq!(checks[0].status, RunnerDoctorStatus::Ok);
-    assert_eq!(checks[1].id, "provider.readiness");
 }
 
 #[test]

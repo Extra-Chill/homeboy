@@ -6,7 +6,7 @@ use homeboy::runner::{
     probe_extension_parity_from_show, ExtensionParityProbe, ExtensionShowOutput, Runner,
 };
 
-use super::types::{RunnerCheck, RunnerDoctorStatus};
+use super::types::RunnerCheck;
 use super::{checks, common};
 
 pub(crate) fn local_check(
@@ -39,20 +39,6 @@ pub(crate) fn local_check(
             &err.to_string(),
             "",
         ),
-    }
-}
-
-pub(crate) fn append_after_extension_parity(
-    checks: &mut Vec<RunnerCheck>,
-    parity_checks: Vec<RunnerCheck>,
-    next: impl FnOnce() -> Vec<RunnerCheck>,
-) {
-    let blocked = parity_checks
-        .iter()
-        .any(|check| check.status == RunnerDoctorStatus::Error);
-    checks.extend(parity_checks);
-    if !blocked {
-        checks.extend(next());
     }
 }
 

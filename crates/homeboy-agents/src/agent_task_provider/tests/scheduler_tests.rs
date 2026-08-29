@@ -1263,6 +1263,7 @@ fn provider_command_receives_canonical_secret_env_plan_without_values() {
     provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "test.provider.auth".to_string(),
         label: "Test provider auth".to_string(),
+        required_extensions: Vec::new(),
         invocation: None,
         secret_env: vec![secret_name.clone()],
         env_path: None,
