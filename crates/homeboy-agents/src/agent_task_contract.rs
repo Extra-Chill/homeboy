@@ -479,6 +479,7 @@ fn agent_task_failure_classifications() -> Vec<String> {
         AgentTaskFailureClassification::Timeout,
         AgentTaskFailureClassification::Stalled,
         AgentTaskFailureClassification::RateLimited,
+        AgentTaskFailureClassification::ProviderAccountBlocked,
         AgentTaskFailureClassification::PolicyDenied,
         AgentTaskFailureClassification::CapabilityMissing,
         AgentTaskFailureClassification::InvalidInput,

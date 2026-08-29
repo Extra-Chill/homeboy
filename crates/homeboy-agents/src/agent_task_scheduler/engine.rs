@@ -250,12 +250,31 @@ impl AgentTaskScheduler {
                         );
                     }
                 }
+                let rotation_index = plan_rotation
+                    .as_ref()
+                    .and_then(|policy| policy.entries.first())
+                    .is_some_and(|entry| {
+                        entry
+                            .backend
+                            .as_deref()
+                            .is_none_or(|backend| backend == request.executor.backend)
+                            && entry.selector.as_deref().is_none_or(|selector| {
+                                request.executor.selector.as_deref() == Some(selector)
+                            })
+                            && entry
+                                .model
+                                .as_deref()
+                                .is_none_or(|model| request.executor.model() == Some(model))
+                    }) as usize;
                 ScheduledTask {
                     workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                     request,
                     resource_wait: None,
                     attempt: 1,
-                    rotation_index: 0,
+                    // The first matching entry describes this initial attempt,
+                    // so a failure must advance to the next entry rather than
+                    // immediately repeat the exhausted provider route.
+                    rotation_index,
                     rotation_attempts: Vec::new(),
                     candidate_artifacts: Vec::new(),
                     retry_attempts: Vec::new(),
@@ -1327,6 +1346,10 @@ impl AgentTaskScheduler {
                             running_task.rotation_index,
                         ));
                         AgentTaskScheduleSupport::attach_rotation_evidence(
+                            &mut outcome,
+                            &rotation_attempts,
+                        );
+                        AgentTaskScheduleSupport::attach_rotation_exhaustion_diagnostic(
                             &mut outcome,
                             &rotation_attempts,
                         );

@@ -1237,7 +1237,8 @@ impl AgentTaskScheduleSupport {
     }
 
     /// Rotation triggers only on provider capacity failures (`provider`,
-    /// `transient`, `timeout`, `stalled`, `rate_limited` classifications).
+    /// `transient`, `timeout`, `stalled`, `rate_limited`, and
+    /// `provider_account_blocked` classifications).
     /// Task-level failures (`execution_failed`, `policy_denied`,
     /// `invalid_input`, `capability_missing`, `unknown`) never rotate so a
     /// provider swap cannot mask a real task failure or policy denial (#6978).
@@ -1268,6 +1269,7 @@ impl AgentTaskScheduleSupport {
                         | AgentTaskFailureClassification::Timeout
                         | AgentTaskFailureClassification::Stalled
                         | AgentTaskFailureClassification::RateLimited
+                        | AgentTaskFailureClassification::ProviderAccountBlocked
                 )
             )
     }
@@ -1483,6 +1485,34 @@ impl AgentTaskScheduleSupport {
             );
     }
 
+    /// Make an exhausted rotation actionable without requiring an operator to
+    /// decode its metadata: name every attempted route and its rejection.
+    pub(super) fn attach_rotation_exhaustion_diagnostic(
+        outcome: &mut AgentTaskOutcome,
+        attempts: &[AgentTaskProviderRotationAttempt],
+    ) {
+        if attempts.len() < 2 {
+            return;
+        }
+        let rejections = attempts
+            .iter()
+            .map(|attempt| {
+                let model = attempt.model.as_deref().unwrap_or("default model");
+                let reason = attempt
+                    .failure_classification
+                    .map(|classification| format!("{classification:?}").to_ascii_lowercase())
+                    .unwrap_or_else(|| "unclassified failure".to_string());
+                format!("{}/{}: {reason}", attempt.backend, model)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.provider_rotation_exhausted".to_string(),
+            message: format!("all configured provider routes were rejected: {rejections}"),
+            data: serde_json::json!({ "attempts": attempts }),
+        });
+    }
+
     /// Record the configured budget and the terminal constraint that stopped
     /// additional provider execution. This makes a timeout distinguishable from
     /// an exhausted same-provider, rotation, or total-execution budget.
@@ -1590,6 +1620,8 @@ impl AgentTaskScheduleSupport {
                 .map(|budget| retry_budget_used < budget)
                 .unwrap_or(true)
             && outcome.failure_classification != Some(AgentTaskFailureClassification::PolicyDenied)
+            && outcome.failure_classification
+                != Some(AgentTaskFailureClassification::ProviderAccountBlocked)
             && (retryable_failure_classifications.is_empty()
                 || outcome
                     .failure_classification

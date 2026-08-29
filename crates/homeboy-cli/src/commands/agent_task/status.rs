@@ -3287,6 +3287,17 @@ fn classification_next_actions(
             actions.extend(retry);
             actions
         }
+        // This account cannot satisfy another request until its quota, billing,
+        // or credentials are repaired. Show alternative providers rather than
+        // offering a same-provider retry.
+        AgentTaskFailureClassification::ProviderAccountBlocked => vec![
+            failure_evidence,
+            CommandNextAction::new(
+                "list registered providers to rotate to",
+                "homeboy agent-task providers".to_string(),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        ],
         // Policy refused this request. Retrying an identical request is denied
         // identically, so no retry action is emitted.
         AgentTaskFailureClassification::PolicyDenied => vec![
