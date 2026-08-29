@@ -559,8 +559,8 @@ pub(crate) fn resolve_audit_reference_paths(
             continue;
         }
 
-        let execution_context = homeboy::core::extension_execution::
-            resolve_execution_context_for_extension(
+        let execution_context =
+            homeboy::core::extension_execution::resolve_execution_context_for_extension(
                 &source_ctx.component,
                 ExtensionCapability::Audit,
                 ext_id,
