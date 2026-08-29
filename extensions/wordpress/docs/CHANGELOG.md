@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.39.2] - 2026-08-29
+
+### Changed
+- Single-source the settings helper on Homeboy core
+
 ## [3.39.1] - 2026-08-29
 
 ### Fixed
