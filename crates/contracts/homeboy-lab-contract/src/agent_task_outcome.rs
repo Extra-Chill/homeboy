@@ -47,10 +47,11 @@ pub enum AgentTaskFailureClassification {
         alias = "rate_limit"
     )]
     RateLimited,
-    /// The provider rejected the request because its account, credentials, or
-    /// spending quota cannot serve it. Rotation policy is intentionally owned
-    /// by the caller rather than implied by this classification.
-    ProviderAccountQuotaRejected,
+    /// The configured provider account rejected the request because its quota,
+    /// billing, credentials, or account standing needs operator attention.
+    /// Unlike a normal execution failure, another configured provider can
+    /// satisfy the request, so this classification is eligible for rotation.
+    ProviderAccountBlocked,
     PolicyDenied,
     CapabilityMissing,
     InvalidInput,

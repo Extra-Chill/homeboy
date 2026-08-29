@@ -3062,7 +3062,7 @@ fn diagnose_hydrates_and_redacts_structured_provider_runtime_errors() {
         assert_eq!(value["root_cause"]["details"]["retryable"], false);
         assert_eq!(
             value["root_cause"]["details"]["failure_classification"],
-            "provider_account_quota_rejected"
+            "provider_account_blocked"
         );
         assert!(value["hydrated_evidence"][0]["summary"]["stdout_excerpt"]
             .as_str()

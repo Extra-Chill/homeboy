@@ -3288,12 +3288,13 @@ fn classification_next_actions(
             actions.extend(retry);
             actions
         }
-        // The provider rejected this account or quota. Diagnose makes the
-        // distinction visible, but #13691 owns whether a rotation is legal.
-        AgentTaskFailureClassification::ProviderAccountQuotaRejected => vec![
+        // This account cannot satisfy another request until its quota, billing,
+        // or credentials are repaired. Show alternative providers rather than
+        // offering a same-provider retry.
+        AgentTaskFailureClassification::ProviderAccountBlocked => vec![
             failure_evidence,
             CommandNextAction::new(
-                "list registered providers for a possible rotation",
+                "list registered providers to rotate to",
                 "homeboy agent-task providers".to_string(),
             )
             .with_kind(CommandNextActionKind::Show),

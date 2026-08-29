@@ -3,6 +3,7 @@
 mod command;
 mod cook;
 mod fanout;
+mod help_audit;
 mod lifecycle;
 
 pub use command::*;

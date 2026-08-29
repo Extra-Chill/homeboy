@@ -15,10 +15,9 @@
 //!   [`PROVIDER_STRUCTURED_ERROR_SCHEMA`] shape, never a vendor payload.
 //!
 //! The normalized error also carries a projection-level
-//! `failure_classification` that separates a provider *account/quota*
-//! rejection (`provider_account_quota_rejected`) from a code-level execution
-//! failure. Rotation policy on top of that distinction is owned by #13691;
-//! this module only makes the classification observable.
+//! `failure_classification` that separates a provider account block from a
+//! code-level execution failure. Rotation policy on top of that distinction is
+//! owned by #13691; this module only makes the classification observable.
 
 use serde_json::{json, Value};
 use std::fs;
@@ -26,6 +25,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use homeboy_core::redaction::RedactionPolicy;
+
+use crate::agent_task::AgentTaskFailureClassification;
 
 /// Schema of the normalized structured error consumed by generic diagnose and
 /// status code. Vendor payloads are always converted to this shape first.
@@ -38,7 +39,7 @@ pub const RUNTIME_STREAM_TAIL_BYTES: usize = 8 * 1024;
 
 /// The provider account or spending quota rejected the request. Permanent
 /// until the account changes: retrying the same provider cannot succeed.
-pub const PROVIDER_ACCOUNT_QUOTA_REJECTED: &str = "provider_account_quota_rejected";
+pub const PROVIDER_ACCOUNT_BLOCKED: &str = "provider_account_blocked";
 
 /// The provider throttled the request (HTTP 429 or an explicit retryable
 /// flag). Retrying — possibly on another provider route — can succeed.
@@ -96,7 +97,7 @@ pub fn structured_error_failure_classification(
         return PROVIDER_RATE_LIMITED;
     }
     if account_quota_rejected(message, status_code, retryable) {
-        return PROVIDER_ACCOUNT_QUOTA_REJECTED;
+        return PROVIDER_ACCOUNT_BLOCKED;
     }
     PROVIDER_ERROR
 }
@@ -213,6 +214,62 @@ fn structured_error_from_opencode_event(event: &Value) -> Option<Value> {
     ))
 }
 
+/// Normalize a provider error already captured in a provider result. This is
+/// the same adapter path used for runtime streams, so generic outcome code
+/// never inspects OpenCode's vendor payload.
+pub fn normalize_provider_error(backend: &str, value: &Value) -> Option<Value> {
+    let normalized = match backend {
+        "opencode" => normalize_opencode_error_value(value),
+        _ => None,
+    }?;
+    Some(RedactionPolicy::default().redact_json(&normalized))
+}
+
+fn normalize_opencode_error_value(value: &Value) -> Option<Value> {
+    if let Some(error) = structured_error_from_opencode_event(value) {
+        return Some(error);
+    }
+    match value {
+        Value::Object(object) => {
+            let payload = object.get("data").unwrap_or(value);
+            let message = payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|message| !message.is_empty());
+            if let Some(message) = message {
+                let status_code = payload
+                    .get("statusCode")
+                    .or_else(|| payload.get("status_code"))
+                    .and_then(Value::as_i64);
+                let retryable = payload
+                    .get("isRetryable")
+                    .or_else(|| payload.get("is_retryable"))
+                    .or_else(|| payload.get("retryable"))
+                    .and_then(Value::as_bool);
+                return Some(normalized_error(
+                    message,
+                    status_code,
+                    retryable,
+                    object.get("name").and_then(Value::as_str),
+                ));
+            }
+            object.values().find_map(normalize_opencode_error_value)
+        }
+        Value::Array(values) => values.iter().find_map(normalize_opencode_error_value),
+        _ => None,
+    }
+}
+
+/// Convert a normalized provider error into the generic failure type used by
+/// scheduling. Unknown adapter failures remain ordinary execution failures.
+pub fn normalized_error_failure_classification(
+    value: &Value,
+) -> Option<AgentTaskFailureClassification> {
+    (value.get("failure_classification").and_then(Value::as_str) == Some(PROVIDER_ACCOUNT_BLOCKED))
+        .then_some(AgentTaskFailureClassification::ProviderAccountBlocked)
+}
+
 /// The bounded tail of a provider runtime stream.
 pub struct RuntimeStreamTail {
     /// Raw tail text. Only the adapter normalization consumes it, and that
@@ -284,7 +341,7 @@ mod tests {
         assert_eq!(normalized["retryable"], false);
         assert_eq!(
             normalized["failure_classification"],
-            PROVIDER_ACCOUNT_QUOTA_REJECTED
+            PROVIDER_ACCOUNT_BLOCKED
         );
         assert_eq!(normalized["error_name"], "APIError");
     }

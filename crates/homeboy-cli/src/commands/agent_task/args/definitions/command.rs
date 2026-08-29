@@ -226,12 +226,15 @@ pub enum AgentTaskCommand {
 
 #[derive(Args, Debug)]
 pub struct AcceptArgs {
+    /// Durable run ID whose candidate receives the verdict.
     pub run_id: String,
+    /// Acceptance decision: `accepted` permits finalization; `rejected` records a failure.
     #[arg(long, value_parser = ["accepted", "rejected"])]
     pub verdict: String,
     /// Opaque credential consumed by the configured acceptance verifier.
     #[arg(long)]
     pub token: String,
+    /// Durable evidence reference supporting the verdict. Repeatable.
     #[arg(long = "evidence-ref")]
     pub evidence_refs: Vec<String>,
     /// Bounded reviewer remediation feedback retained with a rejected Cook
@@ -270,25 +273,31 @@ pub struct CookContinueArgs {
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
+    /// Maximum matching durable runs to return.
     #[arg(long = "limit", value_name = "N", conflicts_with = "full")]
     pub limit: Option<usize>,
     /// Continue at this zero-based offset. Reuse every filter from the prior page.
     #[arg(long, value_name = "N", conflicts_with = "full")]
     pub cursor: Option<usize>,
+    /// Restrict results to this repository identity.
     #[arg(long)]
     pub repo: Option<String>,
+    /// Restrict results to this workspace handle or path.
     #[arg(long)]
     pub worktree: Option<String>,
+    /// Restrict results to this task URL.
     #[arg(long = "task-url")]
     pub task_url: Option<String>,
     /// RFC3339 submission timestamp; excludes older records.
     #[arg(long = "submitted-after", value_name = "RFC3339")]
     pub submitted_after: Option<String>,
+    /// Restrict results to this durable lifecycle state.
     #[arg(long, value_parser = ["queued", "running", "succeeded", "failed", "cancelled"])]
     pub state: Option<String>,
     /// Filter by recorded execution placement, not the global routing policy.
     #[arg(long = "run-placement", value_parser = ["local", "remote", "runner"])]
     pub run_placement: Option<String>,
+    /// Restrict results to records owned by this parent run or group.
     #[arg(long = "parent-id")]
     pub parent_id: Option<String>,
     /// Return every matching record. This is intentionally explicit because
@@ -319,15 +328,19 @@ pub struct ActiveArgs {
     /// fleet-wide `--reconcile`.
     #[arg(long, conflicts_with = "reconcile")]
     pub full: bool,
+    /// Preview reconciliation for every active record in the selected scope.
     #[arg(long = "reconcile")]
     pub reconcile: bool,
+    /// Explicitly retain preview-only reconciliation mode.
     #[arg(long = "dry-run", requires = "reconcile", conflicts_with = "apply")]
     pub dry_run: bool,
+    /// Apply reconciliation to every selected active record.
     #[arg(long = "apply", requires = "reconcile", conflicts_with = "dry_run")]
     pub apply: bool,
 }
 #[derive(Args, Debug)]
 pub struct ReconcileArgs {
+    /// Durable run ID or Cook group ID to reconcile.
     pub run_id: String,
     /// Preview the selected durable run/group without persisted mutation. This
     /// is the default when `--apply` is omitted.
@@ -339,11 +352,13 @@ pub struct ReconcileArgs {
 }
 #[derive(Args, Debug)]
 pub struct ReconcileRecordsArgs {
+    /// Preview record reconciliation without persisting changes.
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 }
 #[derive(Args, Debug)]
 pub struct LatestArgs {
+    /// Number of newest durable runs to inspect before selecting the latest.
     #[arg(long = "limit", value_name = "N")]
     pub limit: Option<usize>,
 }
@@ -399,9 +414,13 @@ pub struct RetainedArtifactsArgs {
 #[derive(Subcommand, Debug)]
 pub enum RetainedArtifactsCommand {
     /// Resolve the retained workspace and print bounded, run-ID-only attach guidance.
-    Discover { run_id: String },
+    Discover {
+        /// Terminal Lab Cook run ID whose retained workspace is discovered.
+        run_id: String,
+    },
     /// Attach one repository-relative file or directory from the retained workspace.
     Attach {
+        /// Terminal Lab Cook run ID that owns the retained workspace.
         run_id: String,
         /// Repository-relative path below the retained workspace.
         #[arg(long)]
@@ -413,8 +432,10 @@ pub enum RetainedArtifactsCommand {
 }
 #[derive(Args, Debug)]
 pub struct ProvidersArgs {
+    /// Restrict results to this executor backend.
     #[arg(long = "backend", value_name = "BACKEND")]
     pub backend: Option<String>,
+    /// Restrict results to this backend-specific provider selector.
     #[arg(
         long = "selector",
         visible_alias = "provider-id",
@@ -434,10 +455,13 @@ pub struct ProvidersArgs {
     /// credential (#11479).
     #[arg(long = "status", value_name = "STATUS")]
     pub status: Option<String>,
+    /// Declare a secret environment variable available for readiness checks. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
+    /// Live-probe matching providers and report their readiness.
     #[arg(long = "validate-readiness")]
     pub validate_readiness: bool,
+    /// Refresh cached provider discovery before listing results.
     #[arg(long = "refresh")]
     pub refresh: bool,
     /// Return the full multi-backend catalog even when `--backend` is set.
@@ -473,25 +497,34 @@ pub struct ProvidersArgs {
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskDoctorArgs {
+    /// Runner to diagnose and optionally repair.
     #[arg(long, value_name = "RUNNER")]
     pub runner: String,
+    /// Restrict diagnostics to this executor backend.
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
+    /// Restrict diagnostics to this backend-specific provider selector.
     #[arg(long, visible_alias = "provider-id", value_name = "PROVIDER_ID")]
     pub selector: Option<String>,
+    /// Add this directory to the runner diagnostic path search.
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
+    /// Require this extension to be available on the runner. Repeatable.
     #[arg(long = "extension", value_name = "EXTENSION")]
     pub extensions: Vec<String>,
+    /// Require this executable to be available on the runner. Repeatable.
     #[arg(long = "require-tool", value_name = "TOOL")]
     pub required_tools: Vec<String>,
+    /// Declare a secret environment variable available for readiness checks. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
+    /// Repair remediable runner readiness failures.
     #[arg(long)]
     pub repair: bool,
 }
 #[derive(Args, Debug)]
 pub struct ContractArgs {
+    /// Serialization format for the exported contract metadata.
     #[arg(long, default_value = "json", value_enum)]
     pub format: ContractFormat,
 }
@@ -501,6 +534,7 @@ pub enum ContractFormat {
 }
 #[derive(Args, Debug)]
 pub struct CompileLoopArgs {
+    /// Declarative loop definition to compile into an agent-task plan.
     #[arg(long, value_name = "SPEC")]
     pub definition: String,
 }

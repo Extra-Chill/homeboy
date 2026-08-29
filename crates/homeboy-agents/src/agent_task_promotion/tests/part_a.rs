@@ -10,7 +10,8 @@ use super::super::apply::{
 use super::super::promote::{
     normalize_promotion_patch, promote, promote_with_provider,
     promote_with_provider_and_checkpoint,
-    promote_with_provider_and_checkpoint_in_observation_store, resume_promoted_patch,
+    promote_with_provider_and_checkpoint_in_observation_store,
+    promote_with_provider_in_observation_store, resume_promoted_patch,
     retain_committed_changes_artifact,
 };
 use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
@@ -166,6 +167,8 @@ fn adopted_workspace_wins_over_a_rejecting_configured_provider() {
 #[test]
 fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let observation_store =
+            homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let run_id = "recovered-lab-run";
         let task_id = "implement";
         let artifact_id = "patch";
@@ -197,15 +200,23 @@ fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
             provider_invocation: None,
         };
 
-        let missing = promote_with_provider(options(), &mut provider)
-            .expect_err("missing projection rejected");
+        let missing = promote_with_provider_in_observation_store(
+            options(),
+            &mut provider,
+            &observation_store,
+        )
+        .expect_err("missing projection rejected");
         assert!(missing
             .message
             .contains("verified controller-side artifact projection"));
 
         record_controller_projection(run_id, task_id, artifact_id, "different patch bytes");
-        let mismatched = promote_with_provider(options(), &mut provider)
-            .expect_err("mismatched projection rejected");
+        let mismatched = promote_with_provider_in_observation_store(
+            options(),
+            &mut provider,
+            &observation_store,
+        )
+        .expect_err("mismatched projection rejected");
         assert!(mismatched
             .message
             .contains("does not match the aggregate SHA-256 and size"));
@@ -216,6 +227,8 @@ fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
 #[test]
 fn promotion_uses_recovered_controller_projection_without_public_artifact_path() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let observation_store =
+            homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let run_id = "recovered-lab-run";
         let task_id = "implement";
         let artifact_id = "patch";
@@ -237,7 +250,7 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
             ..Default::default()
         };
 
-        let result = promote_with_provider(
+        let result = promote_with_provider_in_observation_store(
             AgentTaskPromotionOptions {
                 source: source.to_string(),
                 source_run_id: Some(run_id.to_string()),
@@ -255,6 +268,7 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
                 provider_invocation: None,
             },
             &mut provider,
+            &observation_store,
         )
         .expect("controller projection is promoted without a public artifact path");
 

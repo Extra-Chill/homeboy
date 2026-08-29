@@ -255,6 +255,7 @@ fn scheduler_dispatches_extension_provider_command() {
 fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let roots = context.path_roots();
+    let lifecycle_store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
     let runner_root = roots.artifacts().to_path_buf();
     let controller_root = tempfile::tempdir().expect("controller root");
     let command = format!(
@@ -270,10 +271,9 @@ fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests()
     editing.task_id = "task-editing".to_string();
     editing.executor.config["no_op"] = json!(false);
     let scheduler = AgentTaskScheduler::new(Arc::new(
-        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
-            .with_path_roots(roots.clone()),
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
     ))
-    .with_scratch_root(roots.data().to_path_buf());
+    .with_lifecycle_store(lifecycle_store);
 
     let aggregate = scheduler.run(AgentTaskPlan::new(
         "runner-local-artifact-plan",
@@ -593,10 +593,9 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
     let plan = AgentTaskPlan::new("plan-empty-stdout-recorded", vec![request]);
     let run_id = "run-empty-provider-output";
     let scheduler = AgentTaskScheduler::new(Arc::new(
-        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
-            .with_path_roots(roots.clone()),
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
     ))
-    .with_scratch_root(roots.data().to_path_buf());
+    .with_lifecycle_store(lifecycle_store.clone());
 
     lifecycle_store
         .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
@@ -1145,6 +1144,7 @@ fn provider_command_receives_executor_config_env() {
 fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let roots = context.path_roots();
+    let lifecycle_store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
     let state = unique_state_path("scratch-attempts");
     let state_path = state.to_string_lossy().replace('\\', "\\\\");
     let command = format!(
@@ -1161,10 +1161,9 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
         vec![AgentTaskFailureClassification::ExecutionFailed];
 
     let aggregate = AgentTaskScheduler::new(Arc::new(
-        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider])
-            .with_path_roots(roots.clone()),
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
     ))
-    .with_scratch_root(roots.data().to_path_buf())
+    .with_lifecycle_store(lifecycle_store)
     .run(plan);
 
     assert_eq!(aggregate.totals.succeeded, 1);
@@ -1182,22 +1181,12 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
     let first_tmpdir = PathBuf::from(attempts[0]["tmp"].as_str().expect("TMPDIR"));
     let scratch_root =
         fs::canonicalize(roots.data().join("controller-scratch/attempts")).expect("scratch root");
-    let scratch_run_id = first_tmpdir
+    first_tmpdir
         .strip_prefix(scratch_root)
-        .expect("scratch root")
-        .components()
-        .next()
-        .expect("scratch run id")
-        .as_os_str();
+        .expect("scratch root");
     let index: Value = serde_json::from_str(
-        &fs::read_to_string(
-            roots
-                .data()
-                .join("controller-scratch/test-indexes")
-                .join(scratch_run_id)
-                .join("resources.json"),
-        )
-        .expect("scratch index"),
+        &fs::read_to_string(roots.data().join("controller-scratch/resources.json"))
+            .expect("scratch index"),
     )
     .expect("scratch index JSON");
     let resources = index["resources"].as_array().expect("scratch resources");

@@ -117,8 +117,9 @@ pub use secrets::{
     provider_secret_sources_for_plan_with_providers,
 };
 pub use structured_error::{
-    normalize_runtime_stream_error, normalized_structured_error,
-    structured_error_failure_classification, PROVIDER_ACCOUNT_QUOTA_REJECTED, PROVIDER_ERROR,
+    normalize_provider_error, normalize_runtime_stream_error,
+    normalized_error_failure_classification, normalized_structured_error,
+    structured_error_failure_classification, PROVIDER_ACCOUNT_BLOCKED, PROVIDER_ERROR,
     PROVIDER_RATE_LIMITED, PROVIDER_STRUCTURED_ERROR_SCHEMA,
 };
 pub(crate) use types::wildcard_match;
