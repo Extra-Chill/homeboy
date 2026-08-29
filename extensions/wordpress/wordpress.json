@@ -1090,7 +1090,10 @@
         "names_path": ["wp_codebox_database_service", "secret_env"]
       }
     ],
-    "extension_script": "scripts/test/test-runner.sh"
+    "extension_script": "scripts/test/test-runner.sh",
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ]
   },
   "bench": {
     "extension_script": "scripts/bench/bench-runner.sh"

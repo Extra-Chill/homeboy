@@ -102,6 +102,9 @@
   },
   "test": {
     "extension_script": "scripts/test-runner.sh",
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ],
     "portable_env": {
       "keys": [
         "HOMEBOY_TEST_INVENTORY_ONLY",
@@ -124,7 +127,10 @@
     }
   },
   "bench": {
-    "extension_script": "scripts/bench/bench-runner.sh"
+    "extension_script": "scripts/bench/bench-runner.sh",
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ]
   },
   "settings": [
     {
