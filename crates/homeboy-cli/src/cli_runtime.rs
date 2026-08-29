@@ -515,6 +515,9 @@ fn register_startup_providers_after_reconcile(
     // includes durable agent-task records and their health summary without
     // depending on the agent-task subsystem.
     crate::agents::agent_task_lifecycle::activity_provider::register();
+    // Register the orchestration service so daemon HTTP control-plane routes
+    // call the same typed run/capabilities implementation as in-process reads.
+    crate::agents::orchestration::register();
     // Register the bench agent-task matrix provider so core's cross-rig
     // bench comparison can project rig entries into an agent-task matrix
     // without depending on the agent-task subsystem.

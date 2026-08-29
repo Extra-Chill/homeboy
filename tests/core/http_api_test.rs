@@ -1,10 +1,16 @@
 use crate::api_jobs::{JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
+use crate::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use crate::http_api::{
     self, AnalysisJobRunOutput, AnalysisJobRunner, HttpApiRequest, HttpEndpoint, HttpMethod,
     JobReadyRunKind,
 };
 use crate::observation::{
     ArtifactRecord, NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
+};
+use homeboy_control_plane_contract::{
+    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneOperation,
+    ControlPlaneRef, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, MissionId, RunId,
+    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 
 use crate::test_support::with_isolated_home;
@@ -272,43 +278,171 @@ fn agent_task_run_route_is_read_only_and_exact() {
         .expect_err("retry is out of scope for this change");
 }
 
+const CONTROL_PLANE_FIXTURE_RUN: &str =
+    "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+const CONTROL_PLANE_FIXTURE_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
+
+fn fixture_control_plane_run() -> ControlPlaneRun {
+    let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
+    let mut resource = ControlPlaneRun::new(
+        run.clone(),
+        ControlPlaneRef::Mission(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission")),
+        ControlPlaneRef::Run(run.clone()),
+    );
+    resource.mission = Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"));
+    resource.state = ControlPlaneRunState::Succeeded;
+    resource.created_at = "2026-01-01T00:00:00Z".to_string();
+    resource
+}
+
+struct FixtureControlPlaneProvider;
+
+impl ControlPlaneProvider for FixtureControlPlaneProvider {
+    fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
+        if requested_id.as_str() == CONTROL_PLANE_FIXTURE_RUN
+            || requested_id.as_str() == CONTROL_PLANE_FIXTURE_COOK
+        {
+            Ok(fixture_control_plane_run())
+        } else {
+            Err(ControlPlaneError::not_found(
+                format!("agent-task run not found: {requested_id}"),
+                "homeboy agent-task active",
+            ))
+        }
+    }
+}
+
+fn register_fixture_control_plane_provider() {
+    register_control_plane_provider(Box::new(FixtureControlPlaneProvider));
+}
+
 #[test]
-fn agent_task_run_lookup_miss_is_a_structured_not_found() {
-    // No agent-task provider is registered in this process, so the probe is the
-    // no-op and every id misses. That is the 404 path, and it must carry the
-    // same structured validation error shape as its neighbours rather than an
-    // opaque failure.
-    let error = http_api::handle(HttpApiRequest {
+fn routes_versioned_control_plane_endpoints() {
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/v1/control-plane/capabilities").expect("route"),
+        HttpEndpoint::ControlPlaneCapabilities
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/v1/control-plane/runs/cook-abc").expect("route"),
+        HttpEndpoint::ControlPlaneRun {
+            id: "cook-abc".to_string()
+        }
+    );
+    http_api::route(HttpMethod::Post, "/v1/control-plane/runs/cook-abc")
+        .expect_err("control-plane mutations are not wired");
+    http_api::route(HttpMethod::Get, "/v1/control-plane/missions")
+        .expect_err("no extra resource family");
+}
+
+#[test]
+fn control_plane_capabilities_advertise_only_wired_operations() {
+    let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
-        path: "/agent-task/runs/no-such-agent-task-run".to_string(),
+        path: "/v1/control-plane/capabilities".to_string(),
         body: None,
     })
-    .expect_err("an unknown agent-task run is not found");
+    .expect("capabilities");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.capabilities");
+    let result: ControlPlaneResult<ControlPlaneCapabilities> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(result.ok);
+    assert_eq!(result.schema, CONTROL_PLANE_RESULT_SCHEMA);
+    let capabilities = result.resource.expect("resource");
+    assert_eq!(
+        capabilities.operations,
+        vec![
+            ControlPlaneOperation::GetCapabilities,
+            ControlPlaneOperation::GetRun
+        ]
+    );
+    assert_eq!(capabilities.compatibility.legacy_minor_versions, 1);
+}
 
-    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-    assert_eq!(error.details["field"], "run_id");
-    assert!(
-        error.message.contains("no-such-agent-task-run"),
-        "the caller's own id is echoed back: {}",
-        error.message
+#[test]
+fn control_plane_http_run_matches_the_service_fixture() {
+    register_fixture_control_plane_provider();
+    let expected = fixture_control_plane_run();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_COOK}"),
+        body: None,
+    })
+    .expect("run");
+    assert_eq!(response.status, 200);
+    let result: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(result.ok);
+    let resource = result.resource.expect("resource");
+    assert_eq!(resource, expected);
+    assert_eq!(resource.schema, CONTROL_PLANE_RUN_SCHEMA);
+    assert!(!resource.reconciles);
+    assert_eq!(
+        resource.requested,
+        ControlPlaneRef::Mission(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"))
     );
 }
 
 #[test]
+fn legacy_agent_task_run_route_delegates_to_the_same_control_plane_run() {
+    register_fixture_control_plane_provider();
+    let versioned = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}"),
+        body: None,
+    })
+    .expect("v1");
+    let legacy = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/agent-task/runs/{CONTROL_PLANE_FIXTURE_RUN}"),
+        body: None,
+    })
+    .expect("legacy");
+    let versioned: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(versioned.body).expect("v1 result");
+    let legacy: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(legacy.body).expect("legacy result");
+    assert_eq!(versioned, legacy);
+}
+
+#[test]
+fn agent_task_run_lookup_miss_is_a_structured_not_found() {
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: "/agent-task/runs/no-such-agent-task-run".to_string(),
+        body: None,
+    })
+    .expect("typed not-found envelope");
+    assert_eq!(response.status, 404);
+    let result: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(!result.ok);
+    let error = result.error.expect("error");
+    assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
+    assert!(!error.retryable);
+    assert_eq!(
+        error.next_action.as_deref(),
+        Some("homeboy agent-task active")
+    );
+    assert!(error.message.contains("no-such-agent-task-run"));
+}
+
+#[test]
 fn agent_task_run_id_is_bounded_before_the_record_lookup() {
-    // The id is a raw URL path segment handed to a durable-store lookup. An
-    // oversized segment is rejected by length alone, before the probe runs, and
-    // the rejection must not echo the oversized value back into the response.
     let oversized = "a".repeat(4096);
-    let error = http_api::handle(HttpApiRequest {
+    let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
         path: format!("/agent-task/runs/{oversized}"),
         body: None,
     })
-    .expect_err("an oversized agent-task run id is rejected");
-
-    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-    assert_eq!(error.details["field"], "run_id");
+    .expect("typed invalid-argument envelope");
+    assert_eq!(response.status, 400);
+    let result: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(!result.ok);
+    let error = result.error.expect("error");
+    assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+    assert!(!error.retryable);
     assert!(
         !error.message.contains(&oversized),
         "an oversized id must not be reflected into the error message",
