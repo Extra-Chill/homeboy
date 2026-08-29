@@ -2257,32 +2257,30 @@ mod preview_tests {
     #[test]
     fn read_only_evidence_projection_uses_the_controller_store() {
         crate::test_support::with_isolated_home(|_| {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let source = tempfile::NamedTempFile::new().expect("evidence");
-        std::fs::write(source.path(), "evidence").expect("write evidence");
-        let evidence = vec![AgentTaskProviderEvidenceInput {
-            id: "issue".to_string(),
-            source: source.path().display().to_string(),
-        }];
-        validate_provider_evidence_inputs(&evidence, Some("Read the evidence."))
-            .expect("validate evidence");
-        let projected = projected_provider_evidence(&evidence, workspace.path().to_str())
-            .expect("project read-only evidence path");
-        let path = projected[0]["path"]
-            .as_str()
-            .expect("projection path");
-        assert!(!path.starts_with(workspace.path().to_str().expect("workspace path")));
-        assert!(path.contains("provider-evidence"));
-        assert!(projected[0]["read_only"].as_bool().expect("read-only flag"));
+            let workspace = tempfile::tempdir().expect("workspace");
+            let source = tempfile::NamedTempFile::new().expect("evidence");
+            std::fs::write(source.path(), "evidence").expect("write evidence");
+            let evidence = vec![AgentTaskProviderEvidenceInput {
+                id: "issue".to_string(),
+                source: source.path().display().to_string(),
+            }];
+            validate_provider_evidence_inputs(&evidence, Some("Read the evidence."))
+                .expect("validate evidence");
+            let projected = projected_provider_evidence(&evidence, workspace.path().to_str())
+                .expect("project read-only evidence path");
+            let path = projected[0]["path"].as_str().expect("projection path");
+            assert!(!path.starts_with(workspace.path().to_str().expect("workspace path")));
+            assert!(path.contains("provider-evidence"));
+            assert!(projected[0]["read_only"].as_bool().expect("read-only flag"));
 
-        let bounded = redact_preview_replay_argv(
-            (0..MAX_PREVIEW_REPLAY_ARGS + 1).map(|index| format!("arg-{index}")),
-        );
-        assert_eq!(bounded.argv.len(), MAX_PREVIEW_REPLAY_ARGS);
-        assert!(bounded
-            .requires
-            .iter()
-            .any(|item| item.contains("safety budget")));
+            let bounded = redact_preview_replay_argv(
+                (0..MAX_PREVIEW_REPLAY_ARGS + 1).map(|index| format!("arg-{index}")),
+            );
+            assert_eq!(bounded.argv.len(), MAX_PREVIEW_REPLAY_ARGS);
+            assert!(bounded
+                .requires
+                .iter()
+                .any(|item| item.contains("safety budget")));
         });
     }
 
