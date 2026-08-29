@@ -3218,7 +3218,8 @@ pub fn pin_current_controller_runtime(
 }
 
 /// Prune immutable controller pins through the durable lifecycle ownership
-/// boundary so nonterminal records remain authoritative retention roots.
+/// boundary so in-flight and pending-mutation records remain authoritative
+/// retention roots.
 ///
 /// Retention policy is resolved by core from the operator's configuration; this
 /// boundary only forwards the overrides an operator typed.
