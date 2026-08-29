@@ -52,10 +52,14 @@ NC='\033[0m'
 
 # Resolve execution context.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && pwd)}"
 # shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context --component-alias PLUGIN_PATH
+source "${SHARED_LIB_DIR}/runner-harness.sh"
+homeboy_runner_harness_init --component-alias PLUGIN_PATH
 
 # Generic local-workspace-dependency override helper. The mechanism (build a
 # local sibling package, pack it, install the built tarball so peer deps dedupe)

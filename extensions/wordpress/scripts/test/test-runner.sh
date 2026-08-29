@@ -14,29 +14,17 @@ if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${H
 fi
 SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && pwd)}"
 
-# Resolve the runner prelude the same way every other runtime helper is
-# resolved: explicit override, then HOMEBOY_CORE_DIR, then a sibling checkout.
-# Hard-requiring the environment variable made this runner unrunnable outside a
-# Homeboy-launched invocation, which is why its own self-check had to be skipped.
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-}"
-if [ -z "$RUNNER_PRELUDE" ]; then
-    # shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
-    source "${SHARED_LIB_DIR}/runtime-helper-resolver.sh"
-    RUNNER_PRELUDE="$(homeboy_runtime_helper "${SHARED_LIB_DIR%/scripts/lib}" HOMEBOY_RUNTIME_RUNNER_PRELUDE runner-prelude.sh)" || exit 1
-fi
+# shellcheck source=/dev/null
+source "${SHARED_LIB_DIR}/runner-harness.sh"
+homeboy_runner_harness_init --bash 4 --component-alias PLUGIN_PATH
 
 SMOKE_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP:-${SCRIPT_DIR}/test-runner-host-smoke-wp.sh}"
 WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-wp-codebox.sh}"
 CORE_WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_CORE_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-core-dev-wp-codebox.sh}"
 WORDPRESS_TEST_RUNTIME_BACKEND="${HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND:-wp-codebox}"
 
-# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
-source "${SHARED_LIB_DIR}/runtime-helper-resolver.sh"
-SETTINGS_HELPER="$(homeboy_runtime_helper "${SHARED_LIB_DIR%/scripts/lib}" HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || exit 1
+SETTINGS_HELPER="$(homeboy_runner_harness_resolve_helper HOMEBOY_RUNTIME_SETTINGS_HELPER settings.sh)" || exit 1
 PROJECT_SCRIPTS_HELPER="${HOMEBOY_RUNTIME_PROJECT_SCRIPTS_HELPER:-${SHARED_LIB_DIR}/project-scripts.sh}"
-# shellcheck source=/dev/null
-source "$RUNNER_PRELUDE"
-homeboy_runner_init --bash 4 --component-alias PLUGIN_PATH
 # shellcheck source=/dev/null
 source "$SETTINGS_HELPER"
 if [ -f "$PROJECT_SCRIPTS_HELPER" ]; then
