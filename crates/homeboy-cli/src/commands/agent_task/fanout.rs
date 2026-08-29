@@ -404,9 +404,13 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
             report.status = state.outcome_status().to_string();
         }
     }
-    let exit_code = report.batch.state.exit_code();
-    // `status` is a read-only projection. Durable reconciliation and any child
-    // continuation are intentionally limited to the explicit `resume` command.
+    // `status` is a read. The operation either returned the requested batch
+    // projection (exit 0) or failed and names its cause through `Err`
+    // (#13702). The batch's own aggregate state — including `failed` — is
+    // subject state: it stays in `data.batch`, never in the transport
+    // envelope's success/exit_code.
+    // The mutating `resume` command keeps the aggregate exit policy, and
+    // durable reconciliation / child continuation stay limited to it.
     let portfolio = reconcile_portfolio(&report.batch)?;
     Ok((
         serde_json::json!({
@@ -415,7 +419,7 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
             "portfolio": portfolio,
             "commands": batch_commands(&args.batch_id, placement),
         }),
-        exit_code,
+        0,
     ))
 }
 
@@ -9511,27 +9515,78 @@ fi
             batch::AgentTaskBatchState::Cancelled,
             batch::AgentTaskBatchState::TimedOut,
         ] {
-            let exit_code = state.exit_code();
+            // `fanout status` is a read: it exits 0 and reports `succeeded`
+            // whenever the projection returned, regardless of the batch's own
+            // terminal state (#13702). The subject state stays in `data`.
             let envelope =
-                crate::commands::utils::response::cli_response_for_json_result_for_command(
+                crate::commands::utils::response::cli_response_for_json_result_for_identity(
                     &Ok(json!({
-                        "status": state.outcome_status(),
-                        "batch": { "state": state.outcome_status() }
+                        "schema": "homeboy/agent-task-fanout-status/v2",
+                        "batch": { "status": state.outcome_status(), "batch": { "state": state.outcome_status() } }
                     })),
-                    exit_code,
-                    "agent-task fanout status",
+                    0,
+                    &crate::commands::utils::response::CommandIdentity::with_operation(
+                        "agent-task",
+                        "fanout status",
+                    ),
                     None,
                 );
 
-            assert_eq!(envelope.success, exit_code == 0, "{state:?}");
-            assert_eq!(envelope.exit_code, exit_code, "{state:?}");
-            assert_eq!(envelope.status, state.outcome_status(), "{state:?}");
+            assert!(envelope.success, "{state:?}");
+            assert_eq!(envelope.exit_code, 0, "{state:?}");
+            assert_eq!(envelope.status, "succeeded", "{state:?}");
             assert_eq!(
-                envelope.data.expect("durable status")["batch"]["state"],
+                envelope.data.expect("durable status")["batch"]["batch"]["state"],
                 state.outcome_status(),
                 "{state:?}"
             );
         }
+    }
+
+    /// #13702 direction 2 regression: reading a FAILED batch is a successful
+    /// read. The documented recovery path (`next_actions` prints exactly this
+    /// command) must survive `set -e`.
+    #[test]
+    fn batch_status_read_of_a_failed_batch_is_a_successful_operation() {
+        with_isolated_home(|_| {
+            let batch_id = "read-of-failed-batch";
+            batch::persist_fanout_run_batch(
+                batch_id,
+                batch_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id: "child".to_string(),
+                    run_id: "missing-child-record".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist fanout batch");
+            let claim_id = batch::claim_fanout_run_batch(batch_id)
+                .expect("claim batch")
+                .expect("coordinator claim");
+            batch::record_fanout_run_batch_failure(
+                batch_id,
+                &claim_id,
+                "worktree_preflight",
+                json!({ "message": "fixture failure before first child" }),
+            )
+            .expect("persist coordinator failure");
+
+            let (value, exit_code) = batch_status(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: batch_id.to_string(),
+                },
+                Placement::Auto,
+            )
+            .expect("reading a failed batch must still return its projection");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["batch"]["status"], "failed");
+            assert_eq!(value["batch"]["batch"]["state"], "failed");
+            assert_eq!(
+                value["batch"]["admission_blocker"]["stage"],
+                "worktree_preflight"
+            );
+        });
     }
 
     #[test]
