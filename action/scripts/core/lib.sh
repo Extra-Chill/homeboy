@@ -50,6 +50,31 @@ pr_is_active() {
   esac
 }
 
+pr_state_raw() {
+  local pr_number="${1:-${PR_NUMBER:-}}"
+  local repo="${GITHUB_REPOSITORY:-}"
+
+  [ -n "${pr_number}" ] && [ -n "${repo}" ] || return 0
+
+  local state=""
+  if command -v gh >/dev/null 2>&1; then
+    state=$(gh pr view "${pr_number}" --repo "${repo}" --json state -q '.state' 2>/dev/null || true)
+  fi
+
+  if [ -z "${state}" ]; then
+    local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [ -n "${token}" ]; then
+      state=$(curl -sfL \
+        -H "Authorization: Bearer ${token}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${repo}/pulls/${pr_number}" 2>/dev/null \
+        | jq -r '.state // empty' 2>/dev/null || true)
+    fi
+  fi
+
+  printf '%s' "${state}"
+}
+
 write_multiline_output() {
   local key="$1"
   local value="${2:-}"

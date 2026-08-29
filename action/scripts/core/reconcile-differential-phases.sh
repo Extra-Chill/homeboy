@@ -121,10 +121,37 @@ validate_manifest() {
     "(.results | type == \"object\") and (if .execution_state == \"pr_closed\" then (.results | length == 0) else (.[\"results\"][\"${command}\"] == \"pass\" or .[\"results\"][\"${command}\"] == \"fail\" or .[\"results\"][\"${command}\"] == \"timeout\") end)"
 }
 
+# Only a pull request that is still reported active can contradict recorded
+# pr_closed evidence.
+#
+# Two cases were previously conflated into a hard failure that asserted the PR
+# was active without ever checking:
+#   * PR_ACTIVE unset/empty (the final-state probe never ran, e.g. a non-PR
+#     event) - nothing was observed, so nothing can be contradicted.
+#   * PR_ACTIVE=true that `pr_is_active` *assumed* after an unreadable probe,
+#     or that went stale because the PR merged mid-run.
+# Re-read the real state before failing three quality gates on it.
+assert_pr_not_active() {
+  local phase="$1"
+  [ "${PR_ACTIVE:-}" = true ] || return 0
+
+  local observed
+  observed="$(pr_state_raw || true)"
+  case "${observed}" in
+    CLOSED|closed|MERGED|merged)
+      echo "::warning::Final PR state was reported active but the pull request is ${observed} (pr=${PR_NUMBER:-unknown}); accepting the recorded ${phase} pr_closed evidence."
+      ;;
+    *)
+      fail_closed "$(printf '%s command execution was skipped as pr_closed while the pull request is still active. pr=%s observed_state=%s reported_pr_active=%s' \
+        "${phase}" "${PR_NUMBER:-unknown}" "${observed:-<undetermined>}" "${PR_ACTIVE:-<unset>}")"
+      ;;
+  esac
+}
+
 validate_manifest candidate "${candidate_artifact_name}" "${candidate_manifest}" "${CANDIDATE_SHA}"
 candidate_execution_state="$(jq -r '.execution_state // "completed"' "${candidate_manifest}")"
 if [ "${candidate_execution_state}" = pr_closed ]; then
-  [ "${PR_ACTIVE:-}" = false ] || fail_closed "Candidate command execution was skipped as pr_closed, but the final PR state is active."
+  assert_pr_not_active Candidate
   printf 'results={}\ncomponent=%s\noutput-dir=%s\nlifecycle-state=pr_closed\n' \
     "$(jq -r '.component' "${candidate_manifest}")" "${candidate_dir}/homeboy-ci-results" >> "${GITHUB_OUTPUT}"
   echo "PR closed before candidate command execution; recording a neutral pr_closed lifecycle verdict."
@@ -153,7 +180,7 @@ if [ "${require_baseline}" = "true" ]; then
   validate_manifest baseline "${baseline_artifact_name}" "${baseline_manifest}" "${BASE_SHA}"
   baseline_execution_state="$(jq -r '.execution_state // "completed"' "${baseline_manifest}")"
   if [ "${baseline_execution_state}" = pr_closed ]; then
-    [ "${PR_ACTIVE:-}" = false ] || fail_closed "Baseline command execution was skipped as pr_closed, but the final PR state is active."
+    assert_pr_not_active Baseline
     printf 'results={}\ncomponent=%s\noutput-dir=%s\nlifecycle-state=pr_closed\n' \
       "$(jq -r '.component' "${candidate_manifest}")" "${candidate_output}" >> "${GITHUB_OUTPUT}"
     echo "PR closed before baseline command execution; recording a neutral pr_closed lifecycle verdict."
