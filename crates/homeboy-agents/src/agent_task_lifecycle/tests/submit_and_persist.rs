@@ -22,6 +22,111 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
     AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
 }
 
+fn supervising_submission_metadata(run_id: &str) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([(
+        "local_cook_supervisor".to_string(),
+        json!({
+            "state": "supervising",
+            "job_id": uuid::Uuid::new_v4(),
+            "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+            "pinned_run_id": run_id,
+        }),
+    )])
+}
+
+#[test]
+fn parallel_local_cook_submissions_publish_their_runner_pid_atomically() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let runs = ["parallel-local-cook-a", "parallel-local-cook-b"];
+
+    std::thread::scope(|scope| {
+        let handles = runs.map(|run_id| {
+            let store = Arc::clone(&store);
+            scope.spawn(move || {
+                submit_plan_with_runtime_admission_in_store(
+                    &store,
+                    &test_plan(),
+                    Some(run_id),
+                    None,
+                    Some(supervising_submission_metadata(run_id)),
+                    None,
+                    |_| Ok(json!({ "build": "test" })),
+                )
+                .expect("submit supervised local Cook")
+            })
+        });
+        for handle in handles {
+            let record = handle.join().expect("submission thread");
+            assert_eq!(record.metadata["runner_pid"], std::process::id());
+            assert!(record.owner_process_is_running());
+        }
+    });
+
+    for run_id in runs {
+        let persisted = store.read_record(run_id).expect("persisted local Cook");
+        assert_eq!(persisted.metadata["runner_pid"], std::process::id());
+        assert!(persisted.owner_process_is_running());
+    }
+}
+
+#[test]
+fn persisted_plan_retry_keeps_supervisor_ownership_until_runner_pid_is_published() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "persisted-plan-local-retry";
+    let cook_id = "persisted-plan-cook";
+    let plan = test_plan();
+    let now = chrono::Utc::now();
+    let mut metadata = supervising_submission_metadata(run_id);
+    metadata.insert("cook_id".to_string(), json!(cook_id));
+    metadata["local_cook_supervisor"]["state"] = json!("pending");
+    metadata["local_cook_supervisor"]["lease_started_at"] = json!(now.to_rfc3339());
+    metadata["local_cook_supervisor"]["lease_expires_at"] =
+        json!((now + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339());
+    submit_plan_with_runtime_admission_in_store(
+        &store,
+        &plan,
+        Some(run_id),
+        None,
+        Some(metadata),
+        None,
+        |_| Ok(json!({ "build": "test" })),
+    )
+    .expect("persist retry plan");
+
+    record_local_cook_retry_supervisor_in_store(
+        &store,
+        run_id,
+        cook_id,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .expect("project retry supervisor");
+    let supervised = store.read_record(run_id).expect("supervised retry");
+    assert!(supervised.has_live_pending_local_cook_supervisor(now));
+    assert!(supervised.metadata.get("runner_pid").is_none());
+
+    let persisted_plan = store
+        .read_controller_plan(run_id)
+        .expect("persisted retry plan");
+    let resumed = submit_plan_with_runtime_admission_in_store(
+        &store,
+        &persisted_plan,
+        Some(run_id),
+        None,
+        None,
+        None,
+        |_| Ok(json!({ "build": "test" })),
+    )
+    .expect("resume persisted retry plan");
+    assert_eq!(resumed.metadata["runner_pid"], std::process::id());
+    assert!(resumed.owner_process_is_running());
+    assert_eq!(
+        resumed.metadata["local_cook_supervisor"]["state"],
+        "supervising"
+    );
+}
+
 fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id: &str) {
     store
         .submit_plan_with_runtime_admission(&test_plan(), cook_id, |_| Ok(json!({})))

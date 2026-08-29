@@ -1208,13 +1208,13 @@ pub fn record_local_cook_retry_supervisor_in_store(
         {
             return false;
         }
-        record.metadata["local_cook_supervisor"] = json!({
-            "state": "supervising",
-            "job_id": job_id,
-            "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
-            "pinned_run_id": run_id,
-            "reattach_command": format!("homeboy agent-task status {run_id} --full"),
-        });
+        let supervisor = &mut record.ensure_metadata_object()["local_cook_supervisor"];
+        supervisor["state"] = json!("supervising");
+        supervisor["job_id"] = json!(job_id);
+        supervisor["job_type"] = json!(crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE);
+        supervisor["pinned_run_id"] = json!(run_id);
+        supervisor["reattach_command"] =
+            json!(format!("homeboy agent-task status {run_id} --full"));
         true
     })?;
     if updated.is_none() {
@@ -2734,6 +2734,14 @@ where
         {
             record.workspace_owner_lease = existing.workspace_owner_lease;
         }
+    }
+    if record.metadata["local_cook_supervisor"]["state"] == "supervising"
+        && record.metadata["local_cook_supervisor"]["pinned_run_id"] == run_id
+    {
+        // This process is the daemon-supervised local executor. Publish its
+        // identity in the first visible record rather than leaving a queued or
+        // re-submitted plan temporarily ownerless until `mark_running`.
+        record.record_runner_metadata(false);
     }
     require_record_workspace_owner_in_store(&workspace_claim_store, &record)?;
     lifecycle_store.write_record(&record)?;
