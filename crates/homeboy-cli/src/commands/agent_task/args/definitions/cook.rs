@@ -1025,6 +1025,7 @@ pub struct AgentTaskCookArgs {
     /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
+    /// Read-only workspace evidence supplied to the provider. Repeatable.
     #[arg(long = "provider-evidence", value_name = "JSON", help = PROVIDER_EVIDENCE_DECLARATION, value_parser = parse_provider_evidence_input)]
     pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle
@@ -1051,6 +1052,7 @@ pub struct AgentTaskCookArgs {
     /// provider must declare its repository under
     /// settings.worktree_provider_self_repair; normal Cook gates, review, PR
     /// finalization, and durable provenance remain active.
+    /// Deprecated shell command for the promotion apply-provider.
     #[arg(
         long,
         value_name = "PROVIDER_ID",
@@ -1058,12 +1060,15 @@ pub struct AgentTaskCookArgs {
         conflicts_with_all = ["workspace", "to_worktree", "no_finalize"]
     )]
     pub worktree_provider_self_repair: Option<String>,
+    /// Exact argv element for the promotion apply-provider. Repeat once per element.
     #[arg(
         long,
         value_name = "COMMAND",
         long_help = "Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`."
     )]
     pub provider_command: Option<String>,
+    /// Exact argv element for the promotion apply-provider. Repeat once per
+    /// element; values are never shell-split.
     #[arg(
         long = "provider-argv",
         value_name = "ARG",
@@ -1175,6 +1180,7 @@ pub(crate) fn parse_provider_evidence_input(
 
 #[derive(Args, Clone, Debug)]
 pub struct PromotionProviderArgs {
+    /// Workspace path supplied to the promotion apply-provider.
     #[arg(long, value_name = "PATH")]
     pub workspace: String,
 }
@@ -1200,48 +1206,64 @@ pub enum AgentTaskLoopCommand {
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskLoopDefineArgs {
+    /// Loop specification file or inline definition.
     #[arg(value_name = "SPEC")]
     pub spec: String,
+    /// Start the defined loop immediately.
     #[arg(long, conflicts_with = "off")]
     pub on: bool,
+    /// Save the defined loop in the stopped state.
     #[arg(long, conflicts_with = "on")]
     pub off: bool,
+    /// Maximum revolutions before the loop stops automatically.
     #[arg(long = "revolution-limit", value_name = "N")]
     pub revolution_limit: Option<u32>,
+    /// Continue an existing loop definition from its recorded state.
     #[arg(long)]
     pub resume: bool,
+    /// Backend used when the loop dispatches provider work.
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
+    /// Backend-specific provider selector used for loop dispatch.
     #[arg(
         long = "dispatch-selector",
         visible_alias = "dispatch-provider-id",
         value_name = "PROVIDER_ID"
     )]
     pub dispatch_selector: Option<String>,
+    /// Model used for loop dispatch.
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
+    /// Backend-specific JSON configuration used for loop dispatch.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskLoopStatusArgs {
+    /// Durable loop ID to inspect or stop.
     pub loop_id: String,
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskLoopResumeArgs {
+    /// Durable loop ID to resume.
     pub loop_id: String,
+    /// New maximum revolutions before the loop stops automatically.
     #[arg(long = "revolution-limit", value_name = "N")]
     pub revolution_limit: Option<u32>,
+    /// Backend used for resumed loop dispatches.
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
+    /// Backend-specific provider selector used for resumed loop dispatches.
     #[arg(
         long = "dispatch-selector",
         visible_alias = "dispatch-provider-id",
         value_name = "PROVIDER_ID"
     )]
     pub dispatch_selector: Option<String>,
+    /// Model used for resumed loop dispatches.
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
+    /// Backend-specific JSON configuration used for resumed loop dispatches.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }

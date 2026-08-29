@@ -15,6 +15,10 @@ use std::os::unix::process::CommandExt;
 
 pub(super) const REMOTE_DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// SSH in this module is bootstrap, daemon install, forwarding, emergency
+/// recovery, and host diagnostics. Routine control-plane resource operations
+/// after a session is connected use HTTP (`crate::control_plane`).
+
 pub(super) fn resolve_ssh_runner(runner: &Runner) -> Result<Option<(String, Server, SshClient)>> {
     if runner.kind != RunnerKind::Ssh {
         return Ok(None);

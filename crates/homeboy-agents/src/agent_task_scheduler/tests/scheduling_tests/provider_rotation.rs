@@ -14,6 +14,10 @@ mod provider_rotation_tests {
         calls: AtomicUsize,
     }
 
+    struct ExternalEvidenceRetryExecutor {
+        observed: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
     struct DirtyCandidateThenTerminalExecutor {
         calls: Arc<AtomicUsize>,
         terminal: AgentTaskOutcomeStatus,
@@ -90,6 +94,43 @@ mod provider_rotation_tests {
                 result.failure_classification = Some(AgentTaskFailureClassification::Provider);
             } else {
                 result.metadata = json!({ "model": "openai/gpt-5.6-actual" });
+            }
+            result
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for ExternalEvidenceRetryExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let evidence = request.executor.config["evidence_inputs"][0]["path"]
+                .as_str()
+                .expect("evidence path")
+                .to_string();
+            assert_eq!(
+                std::fs::read_to_string(&evidence).expect("read evidence"),
+                "evidence\n"
+            );
+            let workspace = request
+                .workspace
+                .root
+                .as_deref()
+                .expect("attempt workspace");
+            assert!(!std::path::Path::new(&evidence).starts_with(workspace));
+            let mut observed = self.observed.lock().expect("observed attempts");
+            observed.push((evidence, workspace.to_string()));
+            let mut result = outcome(
+                request.task_id,
+                if observed.len() == 1 {
+                    AgentTaskOutcomeStatus::ProviderError
+                } else {
+                    AgentTaskOutcomeStatus::Succeeded
+                },
+            );
+            if observed.len() == 1 {
+                result.failure_classification = Some(AgentTaskFailureClassification::Provider);
             }
             result
         }
@@ -527,6 +568,51 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn external_provider_evidence_survives_start_and_retry_without_dirtying_candidate() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
+        let evidence = temp.path().join("provider-evidence/blobs/fixture");
+        std::fs::create_dir_all(evidence.parent().expect("evidence parent"))
+            .expect("evidence store");
+        std::fs::write(&evidence, "evidence\n").expect("evidence blob");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[0].executor.config = json!({
+            "evidence_inputs": [{
+                "path": evidence,
+                "ownership": {"owner": "controller-artifact-store"}
+            }]
+        });
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(ExternalEvidenceRetryExecutor {
+            observed: Arc::clone(&observed),
+        }))
+        .run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed attempts");
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].0, observed[1].0, "retry reuses one blob");
+        assert_ne!(observed[0].1, observed[1].1, "retry owns a fresh attempt");
+        let status = Command::new("git")
+            .args(["status", "--porcelain=v1"])
+            .current_dir(&workspace)
+            .output()
+            .expect("candidate status");
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty(), "candidate remains clean");
+        assert!(
+            evidence.is_file(),
+            "attempt cleanup does not own controller blob"
+        );
+    }
+
+    #[test]
     fn missing_review_form_with_a_valid_patch_converges_without_rotation() {
         let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -822,6 +908,72 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn account_block_rotates_to_the_next_configured_entry_without_retrying_it() {
+        let executor = RotationScriptedExecutor::new(vec![
+            (
+                AgentTaskOutcomeStatus::ProviderError,
+                Some(AgentTaskFailureClassification::ProviderAccountBlocked),
+            ),
+            success(),
+        ]);
+        let observed = Arc::clone(&executor.observed);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("xai/grok-4.6".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("zai-coding-plan/glm-5.3".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("opencode-go/kimi-k3".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("anthropic/claude-sonnet-5".to_string()),
+                    ..Default::default()
+                },
+            ],
+            max_attempts: Some(4),
+            ..Default::default()
+        });
+        plan.options.execution_budget = AgentTaskExecutionBudget {
+            version: AgentTaskExecutionBudget::VERSION,
+            deadline_unix_ms: None,
+            max_provider_executions: 4,
+            max_same_provider_retries: 1,
+            max_provider_rotations: 3,
+        };
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(
+            observed
+                .iter()
+                .map(|request| request.executor.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("xai/grok-4.6"), Some("zai-coding-plan/glm-5.3")]
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["same_provider_retries_used"], 0,
+            "an explicitly non-retryable account rejection must rotate immediately"
+        );
+    }
+
+    #[test]
     fn timed_out_attempt_rotates_after_recovering_a_malformed_scratch_index() {
         struct TimeoutThenSuccessExecutor {
             calls: AtomicUsize,
@@ -866,9 +1018,7 @@ mod provider_rotation_tests {
         let run_id = "timeout-rotation-scratch-recovery";
         let scratch_index = homeboy_core::paths::homeboy_data()
             .expect("homeboy data")
-            .join("controller-scratch/test-indexes")
-            .join(run_id)
-            .join("resources.json");
+            .join("controller-scratch/resources.json");
         let scratch_roots = Arc::new(Mutex::new(Vec::new()));
         let (cancellation, cancellation_receiver) = std::sync::mpsc::channel();
         let cancel_calls = Arc::new(AtomicUsize::new(0));
@@ -992,6 +1142,15 @@ mod provider_rotation_tests {
         assert!(attempts
             .iter()
             .all(|attempt| attempt["failure_classification"] == "provider"));
+        let diagnostic = aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.provider_rotation_exhausted")
+            .expect("rotation exhaustion diagnostic");
+        assert_eq!(
+            diagnostic.message,
+            "all configured provider routes were rejected: test/default model: provider; fallback-backend-a/default model: provider; fallback-backend-b/default model: provider"
+        );
     }
 
     #[test]

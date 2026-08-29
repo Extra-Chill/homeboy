@@ -12,6 +12,36 @@ pub(super) fn normalize_provider_outcome_roles(
     if result_contract_valid {
         surface_provider_run_result_diagnostics(outcome);
     }
+    normalize_provider_account_block(outcome, provider);
+}
+
+/// Normalize a provider result error through its adapter before assigning the
+/// generic classification consumed by the scheduler.
+fn normalize_provider_account_block(
+    outcome: &mut AgentTaskOutcome,
+    provider: &AgentTaskExecutorProvider,
+) {
+    if outcome.failure_classification != Some(AgentTaskFailureClassification::ExecutionFailed) {
+        return;
+    }
+    let Some(error) = outcome.metadata.get("provider_error") else {
+        return;
+    };
+    let Some(error) = super::normalize_provider_error(&provider.backend, error) else {
+        return;
+    };
+    let Some(classification) = super::normalized_error_failure_classification(&error) else {
+        return;
+    };
+
+    outcome.failure_classification = Some(classification);
+    push_unique_diagnostic(
+        &mut outcome.diagnostics,
+        "provider.account_blocked".to_string(),
+        "Provider account rejected the request; retrying this account is disabled and the scheduler may rotate to the next configured provider."
+            .to_string(),
+        error,
+    );
 }
 
 const HOMEBOY_ARTIFACT_PROVENANCE_KEY: &str = "artifact_provenance";

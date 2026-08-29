@@ -2361,10 +2361,10 @@ mod tests {
                 "the registered primary still represents its own revision"
             );
 
-            let dmc_worktree = dir.path().join("fixture@dmc-worktree");
+            let configured_worktree = dir.path().join("fixture@configured-worktree");
             let task_worktree = dir.path().join("fixture@task-worktree");
             for (worktree, branch) in [
-                (&dmc_worktree, "dmc-worktree"),
+                (&configured_worktree, "configured-worktree"),
                 (&task_worktree, "task-worktree"),
             ] {
                 add_worktree(&primary, worktree, branch);
@@ -2373,19 +2373,21 @@ mod tests {
                 git(worktree, &["commit", "-m", "fresh manifest"]);
             }
 
-            with_cwd(&dmc_worktree, || {
+            with_cwd(&configured_worktree, || {
                 let component = resolve_effective(Some("fixture"), None, None)
-                    .expect("DMC-style worktree resolves");
+                    .expect("configured worktree resolves");
                 assert_eq!(
                     Path::new(&component.local_path)
                         .canonicalize()
                         .expect("canonical resolved worktree"),
-                    dmc_worktree.canonicalize().expect("canonical DMC worktree")
+                    configured_worktree
+                        .canonicalize()
+                        .expect("canonical configured worktree")
                 );
                 assert_eq!(
                     component.env.get("REPO_RELATIVE_CACHE").map(String::as_str),
                     Some("cache"),
-                    "DMC-style worktrees inherit canonical configuration absent an explicit override"
+                    "configured worktrees inherit canonical configuration absent an explicit override"
                 );
             });
 
@@ -2411,13 +2413,19 @@ mod tests {
 
             let path_component = resolve_effective(
                 None,
-                Some(dmc_worktree.to_str().expect("DMC worktree path")),
+                Some(
+                    configured_worktree
+                        .to_str()
+                        .expect("configured worktree path"),
+                ),
                 None,
             )
             .expect("path-only target resolves");
             assert_eq!(
                 Path::new(&path_component.local_path),
-                dmc_worktree.canonicalize().expect("canonical DMC worktree")
+                configured_worktree
+                    .canonicalize()
+                    .expect("canonical configured worktree")
             );
             assert_eq!(
                 path_component

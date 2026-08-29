@@ -206,11 +206,8 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
     let runtime_identity = std::env::var("HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY")
         .expect("fixture controller runtime identity");
     // The daemon, submitting CLI, and detached worker all pin the same
-    // immutable controller binary while retaining independent mutable state.
-    std::env::set_var(
-        "HOMEBOY_TEST_CONTROLLER_RUNTIME_STORE",
-        homeboy_core::test_support::shared_controller_runtime_store(),
-    );
+    // immutable controller binary under this context's data root.
+    std::env::set_var("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV", "1");
     ledger.mark("hermetic_context");
     let broker = ReverseBrokerFixture::start("lab");
     let (_checkout_guard, checkout) =

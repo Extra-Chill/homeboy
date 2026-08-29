@@ -550,16 +550,32 @@ lists the exact worktree rows and retry commands, and exits non-zero before any
 provider process starts.
 
 Completed cook batches use one aggregate outcome across the result payload, the
-`homeboy/command-result/v3` envelope, and the shell exit code: `succeeded` exits
-zero; `partial_failure` means at least one child succeeded and at least one failed,
-and exits non-zero; `failed` means every child failed and exits non-zero. Child
-results and durable evidence remain available for `fanout status`, `artifacts`,
-and `resume`. This changes prior behavior where a failed `cook-batch --run-plan`
-could report a zero exit code; callers must treat nonzero as an unsuccessful batch.
-`fanout status` and `fanout resume` use the same aggregate state and exit policy.
-Active child cooks remain `queued` or `running` (including detached `in_flight`
-handoffs) with exit zero; a resume retains active children until their durable
-lifecycle reaches a terminal state.
+`homeboy/command-result/v3` envelope, and the shell exit code for the
+*executing* commands (`cook-batch --run-plan`, `fanout run-plan`, `fanout
+resume`): `succeeded` exits zero; `partial_failure` means at least one child
+succeeded and at least one failed, and exits non-zero; `failed` means every
+child failed and exits non-zero. Child results and durable evidence remain
+available for `fanout status`, `artifacts`, and `resume`. This changes prior
+behavior where a failed `cook-batch --run-plan` could report a zero exit code;
+callers must treat nonzero as an unsuccessful batch. Active child cooks remain
+`queued` or `running` (including detached `in_flight` handoffs) with exit zero;
+a resume retains active children until their durable lifecycle reaches a
+terminal state.
+
+`fanout status` is a read (#13702): it exits zero and reports
+`success: true` / `status: "succeeded"` whenever it returns the requested
+batch projection, regardless of the batch's own state. The batch's aggregate
+state — including `failed` — lives in `data.batch`, and failed batches still
+get a human summary in `presentation.stdout`. Previously the status command exited non-zero for
+failed batches, which broke the documented recovery path under `set -e`;
+scripts that branched on that exit code must branch on `subject_state` or
+`data.batch.status` instead.
+
+Planning-only cook-batch invocations (`cook-batch` without `--run-plan`, and
+`--dry-run`) report envelope status `planned`, not `succeeded` (#13702): no
+agent ran and no PR opened, even though worktrees may have been provisioned.
+A blocked worktree preflight remains a failed operation: it exits non-zero and
+lifts the primary blocked row into the envelope's failure summary.
 
 The generated plan uses the existing
 `homeboy/agent-task-batch-cook-fanout-plan/v1` contract. That means operators can

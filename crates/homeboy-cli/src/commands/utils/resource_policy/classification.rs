@@ -243,7 +243,7 @@ pub(super) fn is_plan_only_command(command: &Commands) -> bool {
             command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
                 command: agent_task::AgentTaskFanoutCommand::CookBatch(args),
             }),
-        }) if args.dry_run
+        }) if args.preview
     )
 }
 

@@ -1151,7 +1151,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
             }))
             .expect("provider task")],
         );
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan,
@@ -1210,6 +1210,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1239,7 +1240,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             }))
             .expect("provider task")],
         );
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -1305,6 +1306,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             rearm: false,
             artifact_id: Some("retained-patch".to_string()),
             timeout_ms: None,
+            review_form_timeout_ms: None,
             full: false,
         })
         .expect("preflight reports provenance rejection");
@@ -1372,7 +1374,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
         let cook_id = "cook-pre-execution-null-model";
         let run_id = "cook-pre-execution-null-model-attempt-1";
         let plan = test_plan();
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -1449,6 +1451,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
             rearm: false,
             artifact_id: None,
             timeout_ms: None,
+            review_form_timeout_ms: None,
             full: false,
         })
         .expect("preflight evaluates pre-execution retry");
@@ -1513,7 +1516,7 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
             }))
             .expect("provider task")],
         );
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -1687,7 +1690,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
             }))
             .expect("provider task")],
         );
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -1734,6 +1737,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1798,6 +1802,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: false,
             },
             executor.clone(),
@@ -1828,6 +1833,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -1852,6 +1858,7 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 rearm: true,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -2021,7 +2028,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
         let cook_id = "cook-recoverable-selection";
         let run_id = "cook-recoverable-selection-attempt-1";
         let plan = AgentTaskPlan::new("cook-recoverable-selection-plan", vec![serde_json::from_value(json!({"task_id":"provider","executor":{"backend":"fixture","model":"fixture-model"},"instructions":"recover candidate","workspace":{"root":workspace.path()}})).unwrap()]);
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(), initial_run_id: run_id.to_string(), initial_plan: plan.clone(), to_worktree: "fixture@recoverable".to_string(), source_worktree_path: Some(workspace.path().to_path_buf()), provider_command: None,
             provider_invocation: Some(homeboy::core::command_invocation::CommandInvocation { argv: vec!["sh".to_string(), promotion_provider.display().to_string()], ..Default::default() }), gates: Default::default(), max_attempts: 1, no_finalize: true, draft_pr: false, base: "main".to_string(), task_base_sha: None, head: None, title: "recoverable".to_string(), commit_message: "recoverable".to_string(), source_refs: Vec::new(), protected_branches: Vec::new(), ai_tool: "fixture".to_string(), ai_model: Some("fixture-model".to_string()), ai_used_for: "test".to_string(), attempt_dispatcher: None, harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process().unwrap(),
         };
@@ -2112,6 +2119,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -2130,6 +2138,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 rearm: true,
                 artifact_id: Some("mime-shaped".to_string()),
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -2144,6 +2153,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 rearm: true,
                 artifact_id: Some("selected".to_string()),
                 timeout_ms: None,
+                review_form_timeout_ms: None,
                 full: true,
             },
             executor.clone(),
@@ -2221,7 +2231,7 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
     with_temp_home(|| {
         let cook_id = "cook-diagnose-current-gate";
         let run_id = "run-cli-diagnose-current-gate";
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: test_plan(),
@@ -3015,6 +3025,66 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 }
 
 #[test]
+fn diagnose_hydrates_and_redacts_structured_provider_runtime_errors() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let runtime_stdout = evidence_dir
+            .path()
+            .join("cook-homeboy-opencode-runtime-stdout.log");
+        std::fs::write(
+            &runtime_stdout,
+            concat!(
+                "set-cookie: session=fixture-secret\n",
+                r#"{"type":"error","error":{"name":"APIError","data":{"message":"personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription.","statusCode":403,"isRetryable":false}}}"#,
+                "\n"
+            ),
+        )
+        .expect("write runtime stdout");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            r#"{"status":"failed","exit_code":1,"diagnostics":[{"class":"provider.process_exit","message":"OpenCode CLI exited with status 1."}]}"#,
+        )
+        .expect("write executor result");
+
+        let run_id = "run-cli-diagnose-structured-provider-error";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            }),
+        )
+        .expect("run completed with failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["root_cause"]["message"],
+            "provider rejected the request (HTTP 403, not retryable): personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription."
+        );
+        assert_eq!(value["root_cause"]["details"]["status_code"], 403);
+        assert_eq!(value["root_cause"]["details"]["retryable"], false);
+        assert_eq!(
+            value["root_cause"]["details"]["failure_classification"],
+            "provider_account_blocked"
+        );
+        assert!(value["hydrated_evidence"][0]["summary"]["stdout_excerpt"]
+            .as_str()
+            .expect("stdout excerpt")
+            .contains("personal-team-blocked:spending-limit"));
+        let output = value.to_string();
+        assert!(!output.contains("fixture-secret"));
+        assert!(output.contains("[REDACTED]"));
+    });
+}
+
+#[test]
 fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() {
     with_temp_home(|| {
         let cook_id = "cook-diagnose-review-form";
@@ -3030,7 +3100,7 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
                 }
             }
         });
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: plan.clone(),
@@ -4728,7 +4798,7 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
         let cook_id = "cook-retry-run";
         let source_run_id = "cook-retry-run-attempt-1";
         let plan = test_plan();
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: source_run_id.to_string(),
             initial_plan: plan.clone(),
@@ -4815,7 +4885,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
         let cook_id = "cook-retry-run-competing";
         let source_run_id = "cook-retry-run-competing-attempt-1";
         let plan = test_plan();
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: cook_id.to_string(),
             initial_run_id: source_run_id.to_string(),
             initial_plan: plan.clone(),
@@ -4877,6 +4947,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                             rearm: false,
                             artifact_id: None,
                             timeout_ms: None,
+                            review_form_timeout_ms: None,
                             full: false,
                         },
                         Arc::new(CountingCookExecutor::default()),

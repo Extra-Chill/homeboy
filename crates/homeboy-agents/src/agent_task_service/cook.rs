@@ -12,8 +12,13 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::agent_task_cook_loop::{
-    evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
-    AgentTaskIntentionalNoChange,
+    evaluate_cook_loop, request_is_review_form_only, AgentTaskCookLoopOptions,
+    AgentTaskCookLoopReport, AgentTaskCookLoopStatus, AgentTaskIntentionalNoChange,
+};
+
+pub use crate::agent_task_cook_loop::{
+    request_is_review_form_only as cook_request_is_review_form_only, review_form_timeout_ms,
+    DEFAULT_REVIEW_FORM_TIMEOUT_MS, MAX_REVIEW_FORM_TIMEOUT_MS,
 };
 use crate::agent_task_dispatch_plan::validate_single_cook_prompt_source;
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
@@ -1062,6 +1067,15 @@ fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookSe
                 "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), optional structured `verification` entries (exact command plus total/passed/failed/ignored counts), and `used_for` (a concise reflection of the process used). Homeboy links verification entries to durable candidate gate evidence. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
             );
         }
+        let form_timeout_ms = review_form_timeout_ms(request);
+        if !request.metadata.is_object() {
+            request.metadata = serde_json::json!({});
+        }
+        if !request.metadata["cook_loop"].is_object() {
+            request.metadata["cook_loop"] = serde_json::json!({});
+        }
+        request.metadata["cook_loop"]["review_form_timeout_ms"] =
+            serde_json::json!(form_timeout_ms);
         if !request
             .instructions
             .contains("controller-owned publication")
@@ -1150,8 +1164,10 @@ pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
     ) -> Result<()>;
 }
 
+/// Durable input compiled before Cook starts. This is the only production
+/// request accepted by [`CookService`].
 #[derive(Debug, Clone)]
-pub struct AgentTaskCookServiceOptions {
+pub struct CookRequest {
     pub cook_id: String,
     pub initial_run_id: String,
     /// Controller-compiled first attempt. The cook service owns dispatching it
@@ -1182,6 +1198,10 @@ pub struct AgentTaskCookServiceOptions {
     pub attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
     pub harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
 }
+
+// Internal transition spelling. This alias is not exported from the crate's
+// public service API.
+pub(crate) type AgentTaskCookServiceOptions = CookRequest;
 
 const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route/v1";
 
@@ -2768,10 +2788,21 @@ pub fn run_cook_batch_with_control(
                         // join their own metadata onto.
                         let cell = match claim_disposition(&batch_id, &cook, control) {
                             ClaimDisposition::Run => {
-                                let cell = match run_cook(CookContext::new(
-                                    cook.clone(),
-                                    executor.clone(),
-                                )) {
+                                let result = (|| {
+                                    let store = CookRecipeStore::from_current_data_root()?;
+                                    let lifecycle_store =
+                                        AgentTaskLifecycleStore::from_current_environment()?;
+                                    CookService::run(
+                                        cook.clone(),
+                                        CookRuntime::production(
+                                            executor.clone(),
+                                            &store,
+                                            &lifecycle_store,
+                                        ),
+                                        CookMode::Start,
+                                    )
+                                })();
+                                let cell = match result {
                                     Ok(result) => AgentTaskCookBatchCellReport {
                                         cook_id: cook.cook_id.clone(),
                                         initial_run_id: cook.initial_run_id.clone(),
@@ -3249,10 +3280,19 @@ where
     let side_effects = DefaultCookSideEffects::new(|_, options, run_id, promotion| {
         finalize(options, run_id, promotion)
     });
-    Ok(run_cook(CookContext {
-        side_effects: Some(Box::new(side_effects)),
-        ..CookContext::new(options, executor)
-    })?
+    let store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    Ok(CookService::run(
+        options,
+        CookRuntime::new(
+            executor,
+            &store,
+            &lifecycle_store,
+            Box::new(side_effects),
+            &noop_cook_progress_observer,
+        ),
+        CookMode::Resume,
+    )?
     .value)
 }
 
@@ -3823,10 +3863,24 @@ fn retryable_review_form_terminal_failure(
         || retryable_provider_discovery_failure(&record.run_id)
         || aggregate.outcomes.iter().any(|outcome| {
             outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
-                || outcome
-                    .diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+                || outcome.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.class == "agent_task.provider_timeout"
+                        || diagnostic.class == "agent_task.review_form_timeout"
+                })
+        })
+}
+
+pub(crate) fn plan_is_review_form_only(plan: &AgentTaskPlan) -> bool {
+    plan.tasks.iter().any(request_is_review_form_only)
+}
+
+fn outcome_is_timeout(outcome: &crate::agent_task::AgentTaskOutcome) -> bool {
+    outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
+        || outcome.failure_classification
+            == Some(crate::agent_task::AgentTaskFailureClassification::Timeout)
+        || outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.provider_timeout"
+                || diagnostic.class == "agent_task.review_form_timeout"
         })
 }
 
@@ -3834,15 +3888,10 @@ fn provider_timeout_ms(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
     plan: &AgentTaskPlan,
 ) -> Option<u64> {
-    let timeout = aggregate.outcomes.iter().find(|outcome| {
-        outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
-            || outcome.failure_classification
-                == Some(crate::agent_task::AgentTaskFailureClassification::Timeout)
-            || outcome
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
-    })?;
+    let timeout = aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| outcome_is_timeout(outcome))?;
     timeout
         .diagnostics
         .iter()
@@ -3870,6 +3919,17 @@ fn make_provider_timeout_actionable(
     remaining_budget: Option<AgentTaskExecutionBudget>,
     provider_execution_active: bool,
 ) {
+    if plan_is_review_form_only(plan) {
+        make_review_form_timeout_actionable(
+            report,
+            aggregate,
+            plan,
+            run_id,
+            remaining_budget,
+            provider_execution_active,
+        );
+        return;
+    }
     let Some(timeout_ms) = provider_timeout_ms(aggregate, plan) else {
         return;
     };
@@ -3970,10 +4030,155 @@ fn make_provider_timeout_actionable(
     }
 }
 
+fn make_review_form_timeout_actionable(
+    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    plan: &AgentTaskPlan,
+    run_id: &str,
+    remaining_budget: Option<AgentTaskExecutionBudget>,
+    provider_execution_active: bool,
+) {
+    let Some(timeout_ms) = provider_timeout_ms(aggregate, plan) else {
+        return;
+    };
+    let remaining_executions = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_provider_executions)
+        .unwrap_or(0);
+    let remaining_retries = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_same_provider_retries)
+        .unwrap_or(0);
+    let remaining_rotations = remaining_budget
+        .as_ref()
+        .map(|budget| budget.max_provider_rotations)
+        .unwrap_or(0);
+    let next_timeout_ms = timeout_ms
+        .saturating_add(timeout_ms.max(1))
+        .min(MAX_REVIEW_FORM_TIMEOUT_MS);
+    let remaining_deadline_ms = remaining_budget
+        .as_ref()
+        .and_then(|budget| budget.remaining_deadline_ms(crate::agent_task_timeout::now_unix_ms()));
+    let deadline_expired = remaining_deadline_ms == Some(0);
+    let can_retry = remaining_executions > 0
+        && remaining_retries > 0
+        && next_timeout_ms > timeout_ms
+        && !deadline_expired;
+    let command = can_retry.then(|| {
+        format!(
+            "{} --review-form-timeout-ms {next_timeout_ms}",
+            cook_continue_command(None, run_id, false, None)
+        )
+    });
+    let recovery_guidance = if deadline_expired {
+        "The durable provider execution deadline is exhausted.".to_string()
+    } else {
+        command
+            .as_deref()
+            .map(|command| {
+                format!(
+                    "After any deferred cleanup completes, retry the review form with `{command}`."
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "No review-form timeout retry remains (deadline {timeout_ms}ms, cap {}ms).",
+                    MAX_REVIEW_FORM_TIMEOUT_MS
+                )
+            })
+    };
+    let deferred_cleanup_pending = provider_execution_active
+        || aggregate.outcomes.iter().any(|outcome| {
+            outcome.metadata["deferred_cleanup_pending"] == Value::Bool(true)
+                && !super::execution::deferred_cleanup_receipt_is_terminal(outcome, run_id)
+        });
+    let selected_candidate_retained =
+        report
+            .value
+            .selected_candidate
+            .as_ref()
+            .is_some_and(|candidate| {
+                candidate["incomplete"] != true
+                    && candidate["run_id"]
+                        .as_str()
+                        .is_some_and(|run_id| !run_id.is_empty())
+            });
+
+    report.value.status = CookStatus::ReviewFormTimeout.as_str().to_string();
+    report.value.terminal_phase = Some("review_form".to_string());
+    report.value.terminal_failure_classification = Some("review_form_timeout".to_string());
+    report.value.stop_reason = Some(if selected_candidate_retained {
+        format!(
+            "optional review form exceeded review_form_timeout_ms={timeout_ms}; the selected candidate and passed gates remain. Finalization still needs a valid review form. Review-form executions use the bounded fresh-review provider budget because they still invoke a provider. Remaining fresh-review budget: provider_executions={remaining_executions}, same_provider_retries={remaining_retries}, provider_rotations={remaining_rotations}. {recovery_guidance}"
+        )
+    } else {
+        format!(
+            "optional review form exceeded review_form_timeout_ms={timeout_ms} before a review form was produced. Review-form executions use the bounded fresh-review provider budget because they still invoke a provider. Remaining fresh-review budget: provider_executions={remaining_executions}, same_provider_retries={remaining_retries}, provider_rotations={remaining_rotations}. {recovery_guidance}"
+        )
+    });
+    if let Some(context) = report.value.failure_context.as_mut() {
+        context.phase = "review_form".to_string();
+        context.reason_code = "review_form_timeout".to_string();
+        context.diagnostic = Some(serde_json::json!({
+            "class": "agent_task.review_form_timeout",
+            "message": format!("review form exceeded review_form_timeout_ms={timeout_ms}"),
+            "data": {
+                "timeout_ms": timeout_ms,
+                "review_form_timeout_ms": timeout_ms,
+                "review_form_timeout_cap_ms": MAX_REVIEW_FORM_TIMEOUT_MS,
+                "default_review_form_timeout_ms": DEFAULT_REVIEW_FORM_TIMEOUT_MS,
+                "provider_budget_scope": "fresh_cook_review",
+                "review_form_provider_budget_is_distinct": true,
+                "review_form_provider_executions_consumed": 1,
+                "selected_candidate_retained": selected_candidate_retained,
+                "finalization_reached": false,
+                "finalization_not_reached_reason": "the optional review form timed out after the selected candidate passed gates",
+                "remaining_provider_executions": remaining_executions,
+                "remaining_same_provider_retries": remaining_retries,
+                "remaining_provider_rotations": remaining_rotations,
+                "remaining_execution_deadline_ms": remaining_deadline_ms,
+                "deferred_cleanup_pending": deferred_cleanup_pending,
+            }
+        }));
+        context.recovery_legal = can_retry && !deferred_cleanup_pending;
+        context.recovery_reason = if deadline_expired {
+            "the durable provider execution deadline is exhausted".to_string()
+        } else if !can_retry {
+            "review-form timeout retry budget is exhausted".to_string()
+        } else if deferred_cleanup_pending {
+            "review-form timeout retry is blocked until deferred cleanup is terminal".to_string()
+        } else {
+            "an explicit review-form timeout increase can consume the remaining retry budget"
+                .to_string()
+        };
+        context.legal_actions.clear();
+        context.next_actions.clear();
+        if deferred_cleanup_pending {
+            context.next_actions.push(AgentTaskCookRecoveryAction {
+                action: "status".to_string(),
+                command: format!("homeboy agent-task status {run_id} --exact --full"),
+            });
+        }
+        if let Some(command) = command {
+            let action = AgentTaskCookRecoveryAction {
+                action: "resume".to_string(),
+                command,
+            };
+            if deferred_cleanup_pending {
+                context.next_actions.push(action);
+            } else {
+                context.legal_actions.push(action.clone());
+                context.next_actions.push(action);
+            }
+        }
+    }
+}
+
 /// Whether a terminal review-form attempt may re-enter Cook's historical
 /// continuation path. This is intentionally narrower than terminality: only
-/// authenticated form-only continuations with a provider timeout or an
-/// existing retryable provider/pre-execution signal may execute again.
+/// authenticated form-only continuations with a review-form timeout, a
+/// provider timeout, or an existing retryable provider/pre-execution signal
+/// may execute again.
 pub fn terminal_review_form_continuation_is_eligible(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -4106,34 +4311,114 @@ fn reconstruct_existing_cook_options(
     }
 }
 
-/// Everything one Cook run needs. Replaces the 15-variant `run_cook*` family:
-/// each variant was this struct with a different subset of fields defaulted,
-/// spelled out as a name because Rust has no default arguments.
-pub struct CookContext<'a> {
-    pub options: AgentTaskCookServiceOptions,
-    pub executor: SharedAgentTaskExecutor,
-    /// `None` resolves `CookRecipeStore::from_current_data_root()`. This is the
-    /// last ambient fallback in the cook surface and is scheduled for removal
-    /// (see #7505) — it is `Option` here only to keep this change reviewable.
-    pub store: Option<&'a CookRecipeStore>,
-    /// `None` resolves `AgentTaskLifecycleStore::from_current_environment()`.
-    /// A failure to resolve is reported through
-    /// `durable_cook_error_report_with_store`, exactly where the former
-    /// `run_cook_with_boundaries_reported` routed it, so an unresolvable
-    /// environment still returns the durable report for an already-created Cook
-    /// rather than a bare error.
-    pub lifecycle_store: Option<&'a AgentTaskLifecycleStore>,
-    /// `None` installs the production [`DefaultCookSideEffects`] wired to
-    /// `finalize_or_load_cook_pr_with_stores` against the resolved recipe store.
-    pub side_effects: Option<Box<dyn CookSideEffectService + 'a>>,
-    pub durable_observer: Option<&'a CookProgressObserver<'a>>,
-    /// Admit an authenticated historical terminal recipe as a continuation
-    /// target. Only the terminal-continuation entry point sets this.
-    pub allow_historical_terminal: bool,
+/// Typed execution intent. Continuation authorization is no longer encoded by
+/// selecting a different public runner.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum CookMode {
+    #[default]
+    Start,
+    Resume,
+    Adopt,
+    ContinueTerminal,
+    RecoverPreExecution,
 }
 
+impl CookMode {
+    fn allows_historical_terminal(self) -> bool {
+        matches!(self, Self::ContinueTerminal)
+    }
+}
+
+/// Process-local dependencies for one Cook invocation. Production callers must
+/// bind every dependency explicitly; there are no environment-derived stores or
+/// optional side-effect/observer fallbacks in the execution API.
+pub struct CookRuntime<'a> {
+    pub executor: SharedAgentTaskExecutor,
+    pub store: &'a CookRecipeStore,
+    pub lifecycle_store: &'a AgentTaskLifecycleStore,
+    pub side_effects: Box<dyn CookSideEffectService + 'a>,
+    pub durable_observer: &'a CookProgressObserver<'a>,
+}
+
+impl<'a> CookRuntime<'a> {
+    pub fn new(
+        executor: SharedAgentTaskExecutor,
+        store: &'a CookRecipeStore,
+        lifecycle_store: &'a AgentTaskLifecycleStore,
+        side_effects: Box<dyn CookSideEffectService + 'a>,
+        durable_observer: &'a CookProgressObserver<'a>,
+    ) -> Self {
+        Self {
+            executor,
+            store,
+            lifecycle_store,
+            side_effects,
+            durable_observer,
+        }
+    }
+
+    /// Explicit production wiring with the standard side-effect boundary and a
+    /// no-op foreground observer. Store selection remains the caller's job.
+    pub fn production(
+        executor: SharedAgentTaskExecutor,
+        store: &'a CookRecipeStore,
+        lifecycle_store: &'a AgentTaskLifecycleStore,
+    ) -> Self {
+        Self::production_with_observer(
+            executor,
+            store,
+            lifecycle_store,
+            &noop_cook_progress_observer,
+        )
+    }
+
+    pub fn production_with_observer(
+        executor: SharedAgentTaskExecutor,
+        store: &'a CookRecipeStore,
+        lifecycle_store: &'a AgentTaskLifecycleStore,
+        durable_observer: &'a CookProgressObserver<'a>,
+    ) -> Self {
+        Self::new(
+            executor,
+            store,
+            lifecycle_store,
+            Box::new(DefaultCookSideEffects::new(
+                move |lifecycle_store, options, run_id, promotion| {
+                    finalize_or_load_cook_pr_with_stores(
+                        store,
+                        lifecycle_store,
+                        options,
+                        run_id,
+                        promotion,
+                    )
+                },
+            )),
+            durable_observer,
+        )
+    }
+}
+
+fn noop_cook_progress_observer(_: &CookProgressEvent<'_>) -> Result<()> {
+    Ok(())
+}
+
+// Tests may use a compact builder while asserting legacy durability cases. It
+// is deliberately unavailable to production callers, which must supply a
+// CookRuntime to CookService::run.
+#[cfg(test)]
+pub(crate) struct CookContext<'a> {
+    pub options: CookRequest,
+    pub executor: SharedAgentTaskExecutor,
+    pub store: Option<&'a CookRecipeStore>,
+    pub lifecycle_store: Option<&'a AgentTaskLifecycleStore>,
+    pub side_effects: Option<Box<dyn CookSideEffectService + 'a>>,
+    pub durable_observer: Option<&'a CookProgressObserver<'a>>,
+    pub mode: CookMode,
+}
+
+#[cfg(test)]
 impl<'a> CookContext<'a> {
-    pub fn new(options: AgentTaskCookServiceOptions, executor: SharedAgentTaskExecutor) -> Self {
+    pub(crate) fn new(options: CookRequest, executor: SharedAgentTaskExecutor) -> Self {
         Self {
             options,
             executor,
@@ -4141,82 +4426,92 @@ impl<'a> CookContext<'a> {
             lifecycle_store: None,
             side_effects: None,
             durable_observer: None,
-            allow_historical_terminal: false,
+            mode: CookMode::Start,
         }
     }
 }
 
-/// Run one Cook.
-///
-/// The env-resolving entry point: it resolves whatever roots and side-effect
-/// boundary the caller did not supply, then hands the spine explicit ones. Every
-/// exit funnels through one notification point — including the durable-failure
-/// report built from a controller error — so the failure path is not the one
-/// that stays silent.
-pub fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let CookContext {
-        options,
-        executor,
-        store,
-        lifecycle_store,
-        side_effects,
-        durable_observer,
-        allow_historical_terminal,
-    } = ctx;
-
-    let resolved_store;
-    let store = match store {
-        Some(store) => store,
-        None => {
-            resolved_store = CookRecipeStore::from_current_data_root()?;
-            &resolved_store
-        }
+#[cfg(test)]
+pub(crate) fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let store = match ctx.store {
+        Some(store) => store.clone(),
+        None => CookRecipeStore::from_current_data_root()?,
     };
-
-    // The spine used to resolve this store itself. Resolve it here instead and
-    // keep the failure routed exactly where the spine's own resolution error
-    // used to land, so an unresolvable environment still returns the durable
-    // report for an already-created Cook rather than a bare error.
-    let resolved_lifecycle_store;
-    let lifecycle_store = match lifecycle_store {
-        Some(lifecycle_store) => lifecycle_store,
-        None => match AgentTaskLifecycleStore::from_current_environment() {
-            Ok(lifecycle_store) => {
-                resolved_lifecycle_store = lifecycle_store;
-                &resolved_lifecycle_store
-            }
-            // No lifecycle store exists to inject: resolving one is what just
-            // failed. The report still names the recipe roots the caller owns.
-            Err(error) => {
-                return durable_cook_error_report_with_store(store, None, &options, error)
-            }
-        },
+    let lifecycle_store = match ctx.lifecycle_store {
+        Some(store) => store.clone(),
+        None => AgentTaskLifecycleStore::from_current_environment()?,
     };
-
-    let mut side_effects: Box<dyn CookSideEffectService + '_> = match side_effects {
-        Some(side_effects) => side_effects,
-        None => Box::new(DefaultCookSideEffects::new(
+    let mut side_effects = ctx.side_effects.unwrap_or_else(|| {
+        Box::new(DefaultCookSideEffects::new(
             |lifecycle_store, options, run_id, promotion| {
                 finalize_or_load_cook_pr_with_stores(
-                    store,
+                    &store,
                     lifecycle_store,
                     options,
                     run_id,
                     promotion,
                 )
             },
-        )),
-    };
+        ))
+    });
+    let observer = ctx.durable_observer.unwrap_or(&noop_cook_progress_observer);
+    run_cook_with_runtime(
+        ctx.options,
+        ctx.executor,
+        &store,
+        &lifecycle_store,
+        side_effects.as_mut(),
+        observer,
+        ctx.mode,
+    )
+}
 
+/// Sole public Cook execution entrypoint.
+pub struct CookService;
+
+impl CookService {
+    pub fn run(
+        request: CookRequest,
+        runtime: CookRuntime<'_>,
+        mode: CookMode,
+    ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+        let CookRuntime {
+            executor,
+            store,
+            lifecycle_store,
+            mut side_effects,
+            durable_observer,
+        } = runtime;
+        run_cook_with_runtime(
+            request,
+            executor,
+            store,
+            lifecycle_store,
+            side_effects.as_mut(),
+            durable_observer,
+            mode,
+        )
+    }
+}
+
+fn run_cook_with_runtime(
+    options: CookRequest,
+    executor: SharedAgentTaskExecutor,
+    store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    side_effects: &mut dyn CookSideEffectService,
+    durable_observer: &CookProgressObserver<'_>,
+    mode: CookMode,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let notification_options = options.clone();
     let result = run_cook_reported(
         store,
         lifecycle_store,
         options,
         executor,
-        side_effects.as_mut(),
-        durable_observer,
-        allow_historical_terminal,
+        side_effects,
+        Some(durable_observer),
+        mode,
     );
     if let Ok(result) = &result {
         if result.value.disposition.is_terminal() {
@@ -4228,29 +4523,6 @@ pub fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentTaskCook
         }
     }
     result
-}
-
-pub fn run_terminal_cook_continuation(
-    options: AgentTaskCookServiceOptions,
-    executor: SharedAgentTaskExecutor,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let store = CookRecipeStore::from_current_data_root()?;
-    let side_effects =
-        DefaultCookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
-            finalize_or_load_cook_pr_with_stores(
-                &store,
-                lifecycle_store,
-                options,
-                run_id,
-                promotion,
-            )
-        });
-    run_cook(CookContext {
-        store: Some(&store),
-        side_effects: Some(Box::new(side_effects)),
-        allow_historical_terminal: true,
-        ..CookContext::new(options, executor)
-    })
 }
 
 /// The component a cook is working on, for notification attribution.
@@ -4305,7 +4577,7 @@ fn run_cook_reported(
     executor: SharedAgentTaskExecutor,
     side_effects: &mut dyn CookSideEffectService,
     durable_observer: Option<&CookProgressObserver<'_>>,
-    allow_historical_terminal: bool,
+    mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let mut failure_options = options.clone();
     let result = match run_cook_spine(
@@ -4315,7 +4587,7 @@ fn run_cook_reported(
         executor,
         side_effects,
         durable_observer,
-        allow_historical_terminal,
+        mode,
     ) {
         Ok(result) => result,
         Err(mut error) => {
@@ -4624,7 +4896,7 @@ fn run_cook_spine(
     executor: SharedAgentTaskExecutor,
     side_effects: &mut dyn CookSideEffectService,
     durable_observer: Option<&CookProgressObserver<'_>>,
-    allow_historical_terminal: bool,
+    mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     canonicalize_cook_provider_workspace(&mut options)?;
     // The local detached launcher persists this fence before spawn. Recheck it
@@ -4669,7 +4941,7 @@ fn run_cook_spine(
                     .and_then(Value::as_str)
                     == Some("verification_pending")
         });
-    let authenticated_historical_review_continuation = if allow_historical_terminal {
+    let authenticated_historical_review_continuation = if mode.allows_historical_terminal() {
         authenticated_historical_review_form_workspace(&options)?
     } else {
         false
@@ -4733,7 +5005,7 @@ fn run_cook_spine(
         let mut reconstructed = reconstruct_existing_cook_options(
             &recipe,
             options.attempt_dispatcher,
-            adopted_model.is_some() || allow_historical_terminal,
+            adopted_model.is_some() || matches!(mode, CookMode::Adopt | CookMode::ContinueTerminal),
             pre_execution_runtime_recovery,
             local_placement_override,
         )?;
@@ -5968,7 +6240,7 @@ fn run_cook_spine(
         validate_cook_candidate_group(&plan)?;
 
         let adopted_continuation = adopted_attempt_is_ready_for_cook_continuation(&record)?;
-        let review_form_continuation = allow_historical_terminal
+        let review_form_continuation = mode.allows_historical_terminal()
             && review_form_attempt_is_ready_for_cook_continuation(&plan, &record)?
             && retryable_review_form_terminal_failure(&record, &aggregate);
         if !matches!(

@@ -670,12 +670,10 @@ fn classify_liveness(
     if record.lab_handoff_validation_error().is_some() {
         return AgentTaskLiveness::Unreconciled;
     }
-    // Retry reservation publishes a short, exact-run lease before its daemon
-    // job id can be projected. Honor only that bounded, well-formed window so
-    // discovery cannot cancel the queued successor between those two writes.
-    if record.state == agent_task_lifecycle::AgentTaskRunState::Queued
-        && record.has_live_pending_local_cook_supervisor(now)
-    {
+    // A bounded local Cook supervisor lease is ownership for both initial
+    // submissions and retries until runner identity is published. Honor it
+    // regardless of queued/running so discovery cannot cancel a live lease.
+    if record.has_live_pending_local_cook_supervisor(now) {
         return AgentTaskLiveness::Active;
     }
     // A local Cook retry owns a queued lifecycle reservation before its child

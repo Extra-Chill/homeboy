@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.364.2"
+version = "0.364.14"
 dependencies = [
  "base64",
  "chrono",
@@ -732,6 +732,7 @@ dependencies = [
  "fs4",
  "hmac",
  "homeboy-agents",
+ "homeboy-control-plane-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-error",
@@ -815,6 +816,7 @@ dependencies = [
  "homeboy-release",
  "homeboy-review",
  "homeboy-rig",
+ "homeboy-serde-pin",
  "homeboy-stack",
  "homeboy-tunnel",
  "homeboy-upgrade",
@@ -881,6 +883,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-control-plane-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-core"
 version = "0.1.0"
 dependencies = [
@@ -899,6 +909,7 @@ dependencies = [
  "homeboy-code-audit",
  "homeboy-command-contract",
  "homeboy-component-contract",
+ "homeboy-control-plane-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-extension",
@@ -913,6 +924,7 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor-contract",
  "homeboy-release-contract",
+ "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
  "keyring",
  "libc",
@@ -924,6 +936,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_path",
+ "serde_path_to_error",
  "serde_yml",
  "sha2",
  "shellexpand",
@@ -1084,6 +1097,7 @@ dependencies = [
  "glob-match",
  "homeboy-agents",
  "homeboy-artifact-ref-contract",
+ "homeboy-control-plane-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension",
@@ -1244,6 +1258,14 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
+]
+
+[[package]]
+name = "homeboy-serde-pin"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

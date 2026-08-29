@@ -54,3 +54,33 @@ impl TryFrom<DeployRequiredHeaderConfig> for DeployRequiredHeader {
 fn default_staging_path() -> String {
     "/tmp/homeboy-staging".to_string()
 }
+
+/// Generic deployment provider descriptor owned by an extension manifest.
+///
+/// This was carried in `ExtensionManifest::extra` until #13723. A malformed
+/// descriptor there deserialized to `None`, was discarded, and presented as
+/// zero declared providers with no diagnostic; as a typed field it is a named
+/// deserialization error instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeploymentProviderManifest {
+    pub id: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layered_input: Option<DeploymentProviderLayeredInputManifest>,
+}
+
+/// Opt-in capability for providers that receive a versioned layered payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeploymentProviderLayeredInputManifest {
+    pub schema: String,
+    #[serde(default)]
+    pub target_required: bool,
+    /// Schema for provider-produced structured evidence. Providers declaring this
+    /// contract are responsible for emitting already-redacted JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_schema: Option<String>,
+}
+
+pub const DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA: &str = "homeboy/deployment-provider-payload/v1";

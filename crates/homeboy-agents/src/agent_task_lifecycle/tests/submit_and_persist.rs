@@ -22,6 +22,111 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
     AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
 }
 
+fn supervising_submission_metadata(run_id: &str) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([(
+        "local_cook_supervisor".to_string(),
+        json!({
+            "state": "supervising",
+            "job_id": uuid::Uuid::new_v4(),
+            "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+            "pinned_run_id": run_id,
+        }),
+    )])
+}
+
+#[test]
+fn parallel_local_cook_submissions_publish_their_runner_pid_atomically() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let runs = ["parallel-local-cook-a", "parallel-local-cook-b"];
+
+    std::thread::scope(|scope| {
+        let handles = runs.map(|run_id| {
+            let store = Arc::clone(&store);
+            scope.spawn(move || {
+                submit_plan_with_runtime_admission_in_store(
+                    &store,
+                    &test_plan(),
+                    Some(run_id),
+                    None,
+                    Some(supervising_submission_metadata(run_id)),
+                    None,
+                    |_| Ok(json!({ "build": "test" })),
+                )
+                .expect("submit supervised local Cook")
+            })
+        });
+        for handle in handles {
+            let record = handle.join().expect("submission thread");
+            assert_eq!(record.metadata["runner_pid"], std::process::id());
+            assert!(record.owner_process_is_running());
+        }
+    });
+
+    for run_id in runs {
+        let persisted = store.read_record(run_id).expect("persisted local Cook");
+        assert_eq!(persisted.metadata["runner_pid"], std::process::id());
+        assert!(persisted.owner_process_is_running());
+    }
+}
+
+#[test]
+fn persisted_plan_retry_keeps_supervisor_ownership_until_runner_pid_is_published() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "persisted-plan-local-retry";
+    let cook_id = "persisted-plan-cook";
+    let plan = test_plan();
+    let now = chrono::Utc::now();
+    let mut metadata = supervising_submission_metadata(run_id);
+    metadata.insert("cook_id".to_string(), json!(cook_id));
+    metadata["local_cook_supervisor"]["state"] = json!("pending");
+    metadata["local_cook_supervisor"]["lease_started_at"] = json!(now.to_rfc3339());
+    metadata["local_cook_supervisor"]["lease_expires_at"] =
+        json!((now + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339());
+    submit_plan_with_runtime_admission_in_store(
+        &store,
+        &plan,
+        Some(run_id),
+        None,
+        Some(metadata),
+        None,
+        |_| Ok(json!({ "build": "test" })),
+    )
+    .expect("persist retry plan");
+
+    record_local_cook_retry_supervisor_in_store(
+        &store,
+        run_id,
+        cook_id,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .expect("project retry supervisor");
+    let supervised = store.read_record(run_id).expect("supervised retry");
+    assert!(supervised.has_live_pending_local_cook_supervisor(now));
+    assert!(supervised.metadata.get("runner_pid").is_none());
+
+    let persisted_plan = store
+        .read_controller_plan(run_id)
+        .expect("persisted retry plan");
+    let resumed = submit_plan_with_runtime_admission_in_store(
+        &store,
+        &persisted_plan,
+        Some(run_id),
+        None,
+        None,
+        None,
+        |_| Ok(json!({ "build": "test" })),
+    )
+    .expect("resume persisted retry plan");
+    assert_eq!(resumed.metadata["runner_pid"], std::process::id());
+    assert!(resumed.owner_process_is_running());
+    assert_eq!(
+        resumed.metadata["local_cook_supervisor"]["state"],
+        "supervising"
+    );
+}
+
 fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id: &str) {
     store
         .submit_plan_with_runtime_admission(&test_plan(), cook_id, |_| Ok(json!({})))
@@ -409,11 +514,9 @@ fn accepted_daemon_context_keeps_a_pidless_runner_submission_live() {
     assert!(status.metadata.get("stale_running_reason").is_none());
 }
 
-/// Stays on `with_isolated_home` (#7505). `store::fail_next_record_write_for_test`
-/// arms a process-global `AtomicBool` in `lifecycle_store`, not a per-store
-/// flag. The hermetic home's global mutex is the only thing serializing that
-/// fault injection against every peer test, so rooting this would arm a
-/// one-shot write failure that some *other* test could consume.
+/// Stays on `with_isolated_home` because the retry API still resolves its store
+/// from the ambient test home. The injected failure itself is thread-scoped, so
+/// parallel explicit-store tests cannot consume it (#11897).
 #[test]
 fn retry_first_visible_record_always_has_indexed_predecessor_identity() {
     with_isolated_home(|_| {
@@ -897,11 +1000,8 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
             // Remove the admission-supplied runtime pin rather than leaving a
             // malformed one. An invalid *present* pin sends
             // `validate_controller_runtime_in_store` through
-            // `migrate_legacy_pin_and_persist`, which creates and locks the
-            // process-global controller-runtime store — the one root that is
-            // deliberately not a lifecycle root, and the one this test must not
-            // touch. With no pin at all the preflight fails on the record
-            // itself, entirely inside the injected store.
+            // `migrate_legacy_pin_and_persist`. With no pin at all the preflight
+            // fails on the record itself without materializing runtime state.
             lifecycle_store
                 .mutate_record(run_id, |record| {
                     record
@@ -4555,9 +4655,9 @@ fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
     assert!(cancelled.metadata.get("live_cancellation").is_none());
 }
 
-/// Stays on `with_isolated_home` (#7505). `store::fail_next_record_write_for_test`
-/// arms a process-global `AtomicBool`; see
-/// `retry_first_visible_record_always_has_indexed_predecessor_identity`.
+/// Stays on `with_isolated_home` because record-health reconciliation still
+/// resolves its store from the ambient test home. Fault injection is scoped to
+/// this thread, independently of that legacy path (#11897).
 #[test]
 fn record_health_recovers_after_interrupted_migration_without_changing_terminal_status() {
     with_isolated_home(|_| {

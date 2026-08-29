@@ -98,7 +98,15 @@ export TMP TEMP
 # here would never fire, and an accumulating per-test directory under `target/`
 # would be a disk leak. Set HOMEBOY_TEST_KEEP_TMPDIR=1 to retain it for
 # debugging.
-exec perl -MPOSIX=setsid,WNOHANG -e '
+exec perl -MPOSIX=setsid,WNOHANG -MTime::HiRes=time -e '
+    my $timeout_value = $ENV{HOMEBOY_TEST_TIMEOUT_SECONDS};
+    my $unbounded = defined($timeout_value) && $timeout_value eq "unbounded"
+        && ($ENV{HOMEBOY_TEST_ALLOW_UNBOUNDED} // "") eq "1";
+    if (!$unbounded && defined($timeout_value) && $timeout_value !~ /^[1-9][0-9]*$/) {
+        print STDERR "hermetic test environment: HOMEBOY_TEST_TIMEOUT_SECONDS must be a positive integer; unbounded execution requires HOMEBOY_TEST_ALLOW_UNBOUNDED=1 and HOMEBOY_TEST_TIMEOUT_SECONDS=unbounded\n";
+        exit 2;
+    }
+    my $timeout_seconds = $unbounded ? undef : (defined($timeout_value) ? $timeout_value : 1500);
     # Adopt descendants of a completed test group long enough to reap them.
     # CI containers commonly run a PID 1 that does not reap orphaned children.
     syscall(157, 36, 1, 0, 0, 0) if $^O eq "linux";
@@ -136,8 +144,18 @@ exec perl -MPOSIX=setsid,WNOHANG -e '
         $discard_tmpdir->();
         exit 143;
     };
+    my $started = time;
     my $status;
-    while (($status = waitpid $child, WNOHANG) == 0) { select undef, undef, undef, 0.05; }
+    while (($status = waitpid $child, WNOHANG) == 0) {
+        if (defined($timeout_seconds) && time - $started >= $timeout_seconds) {
+            my $binary = $ARGV[0] // "test binary";
+            print STDERR "hermetic test environment: test binary $binary exceeded suite deadline ${timeout_seconds}s; terminating its process group\n";
+            $cleanup->();
+            $discard_tmpdir->();
+            exit 124;
+        }
+        select undef, undef, undef, 0.05;
+    }
     my $exit = $?;
     $cleanup->();
     $discard_tmpdir->();

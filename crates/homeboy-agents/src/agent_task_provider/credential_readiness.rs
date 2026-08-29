@@ -144,6 +144,14 @@ fn push_declared_credential(
     });
 }
 
+/// Env names this provider unconditionally requires, in declaration order.
+pub fn provider_required_secret_env_names(provider: &AgentTaskExecutorProvider) -> Vec<String> {
+    declared_credentials(provider)
+        .into_iter()
+        .map(|entry| entry.env)
+        .collect()
+}
+
 /// Every unconditionally-required credential a provider declares.
 ///
 /// Order is declaration order, deduplicated on the env name so a credential

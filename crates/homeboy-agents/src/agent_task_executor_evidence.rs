@@ -70,7 +70,7 @@ pub(crate) fn link_latest_executor_evidence(
     run_id: Option<&str>,
 ) {
     let policy = RedactionPolicy::default();
-    let dir = executor_evidence_dir(run_id, &request.task_id);
+    let dir = executor_evidence_dir(&request.artifact_store_root, run_id, &request.task_id);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -124,12 +124,28 @@ fn link_runtime_evidence(
         hydrate_structured_runtime_evidence(outcome, &runtime_files, policy);
     }
     let sessions = provider_session_metadata(outcome);
+    let structured_error = runtime_files
+        .get(RUNTIME_STDOUT_EVIDENCE_KIND)
+        .and_then(|paths| {
+            structured_error_from_runtime_files(&request.request.executor.backend, paths)
+        });
+    if let Some(classification) = structured_error
+        .as_ref()
+        .and_then(crate::agent_task_provider::normalized_error_failure_classification)
+    {
+        // This is a provider-side account rejection, not a code-level failure.
+        // Rotation remains an explicit scheduler policy decision (#13691).
+        outcome.failure_classification = Some(classification);
+    }
     let index = json!({
         "artifact_root": artifact_root.as_ref().map(|path| format!("file://{}", path.display())),
         "provider_runtime_identities": sessions,
         "runtime_stdout": runtime_files.get(RUNTIME_STDOUT_EVIDENCE_KIND),
         "runtime_stderr": runtime_files.get(RUNTIME_STDERR_EVIDENCE_KIND),
         "runtime_progress": runtime_files.get(RUNTIME_PROGRESS_EVIDENCE_KIND),
+        // Adapter-normalized terminal provider error, redacted. Persisted at
+        // execution time so read paths never need vendor knowledge (#13703).
+        "structured_error": structured_error,
     });
     let Some(index_uri) = persist_evidence_file(
         &evidence_dir.join(RUNTIME_EVIDENCE_FILE),
@@ -267,6 +283,29 @@ fn structured_session_id(event: &Value) -> Option<&str> {
         .filter(|id| !id.trim().is_empty())
 }
 
+/// Normalize a terminal structured provider error out of the runtime stdout
+/// capture files, backend-aware through the provider adapter registry. The
+/// latest capture file wins: it belongs to the final attempt. Only the
+/// adapter's normalized, redacted output is persisted.
+fn structured_error_from_runtime_files(backend: &str, paths: &[PathBuf]) -> Option<Value> {
+    for path in paths.iter().rev() {
+        let Some(tail) =
+            crate::agent_task_provider::structured_error::read_runtime_stream_tail(path)
+        else {
+            continue;
+        };
+        if let Some(error) =
+            crate::agent_task_provider::structured_error::normalize_runtime_stream_error(
+                Some(backend),
+                &tail.raw,
+            )
+        {
+            return Some(error);
+        }
+    }
+    None
+}
+
 fn structured_progress_event(event: &Value) -> Option<Value> {
     let event_type = structured_event_type(event)?;
     let part = event.get("part")?;
@@ -350,21 +389,16 @@ fn discover_runtime_files(root: &Path) -> BTreeMap<String, Vec<PathBuf>> {
     files
 }
 
-fn executor_evidence_dir(run_id: Option<&str>, task_id: &str) -> PathBuf {
-    durable_executor_evidence_root()
-        .join(sanitize_task_id(run_id.unwrap_or("unrecorded-run")))
-        .join(sanitize_task_id(task_id))
-}
-
-fn durable_executor_evidence_root() -> PathBuf {
-    homeboy_core::artifacts::root()
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".homeboy-artifacts")
-        })
+fn executor_evidence_dir(
+    artifact_store_root: &Path,
+    run_id: Option<&str>,
+    task_id: &str,
+) -> PathBuf {
+    artifact_store_root
         .join("agent-task")
         .join("executor-evidence")
+        .join(sanitize_task_id(run_id.unwrap_or("unrecorded-run")))
+        .join(sanitize_task_id(task_id))
 }
 
 fn sanitize_task_id(task_id: &str) -> String {
@@ -463,13 +497,11 @@ fn push_unique_evidence_ref(outcome: &mut AgentTaskOutcome, evidence_ref: AgentT
 mod tests {
     use super::*;
     use crate::agent_task::{
-        AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcomeStatus,
-        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskComponentContract, AgentTaskExecutor, AgentTaskFailureClassification,
+        AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
+        AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
     };
     use serde_json::Map;
-    use std::sync::Mutex;
-
-    static ARTIFACT_ROOT_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_request() -> AgentTaskRequest {
         AgentTaskRequest {
@@ -517,38 +549,8 @@ mod tests {
         }
     }
 
-    /// Scopes the process-global artifact-root override to one test.
-    ///
-    /// Two properties matter, and both exist so that a panicking `#[test]`
-    /// cannot fail an unrelated later test on something other than its own
-    /// merits:
-    ///
-    /// 1. The lock is poison-tolerant. A panic inside `test` poisons
-    ///    `ARTIFACT_ROOT_LOCK`, and a plain `.expect(...)` then reports every
-    ///    subsequent test in this module as a `PoisonError` rather than its
-    ///    real result. `homeboy_core::test_support::env_lock` already ignores
-    ///    poison for exactly this reason; match it here.
-    /// 2. The override is cleared from `Drop`, not on the straight-line return
-    ///    path. A panic used to skip the reset and leave the override pointing
-    ///    at an already-deleted `TempDir`, so the next test resolved artifacts
-    ///    under a missing directory.
     fn with_artifact_root<R>(test: impl FnOnce(&Path) -> R) -> R {
-        struct ClearArtifactRootOverride;
-
-        impl Drop for ClearArtifactRootOverride {
-            fn drop(&mut self) {
-                homeboy_core::set_artifact_root_override(None);
-            }
-        }
-
-        let _lock = ARTIFACT_ROOT_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let guard = tempfile::tempdir().expect("artifact root");
-        homeboy_core::set_artifact_root_override(Some(guard.path().to_path_buf()));
-        // Declared after `guard` so the override is cleared before the
-        // directory it points at is removed, and before the lock is released.
-        let _clear_override = ClearArtifactRootOverride;
         test(guard.path())
     }
 
@@ -594,8 +596,9 @@ mod tests {
         let artifacts_path = root.join("runner").join("artifacts").join("task");
         std::fs::create_dir_all(&artifacts_path).expect("create isolated artifacts path");
         AgentTaskExecutorRequest {
-            artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("artifact root identity"),
+            artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture_with_finalized_root(&artifacts_path, root.join("executor-finalized")).expect("artifact root identity"),
             artifacts_path,
+            artifact_store_root: root,
             artifacts_path_provenance: crate::agent_task::AgentTaskArtifactsPathProvenance {
                 owner: "homeboy".to_string(),
                 locality: "runner".to_string(),
@@ -734,6 +737,28 @@ mod tests {
             assert!(!fs::read_to_string(&progress_path)
                 .expect("read progress")
                 .contains("private transcript content"));
+        });
+    }
+
+    #[test]
+    fn classifies_a_structured_opencode_account_rejection() {
+        with_artifact_root(|_| {
+            let mut request = executor_test_request();
+            request.request.executor.backend = "opencode".to_string();
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout.log"),
+                r#"{"type":"error","error":{"name":"APIError","data":{"message":"spending-limit: You have run out of credits.","statusCode":403,"isRetryable":false}}}"#,
+            )
+            .expect("write stdout");
+            let mut outcome = test_outcome();
+            outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            assert_eq!(
+                outcome.failure_classification,
+                Some(AgentTaskFailureClassification::ProviderAccountBlocked)
+            );
         });
     }
 
@@ -884,9 +909,10 @@ mod tests {
 
     #[test]
     fn evidence_dir_is_stable_for_a_run_and_task_id() {
-        with_artifact_root(|_| {
-            let first = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
-            let second = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
+        with_artifact_root(|root| {
+            let first = executor_evidence_dir(root, Some("run/attempt:1"), "task/with weird:chars");
+            let second =
+                executor_evidence_dir(root, Some("run/attempt:1"), "task/with weird:chars");
             assert_eq!(first, second);
             assert!(first
                 .to_string_lossy()
@@ -897,7 +923,7 @@ mod tests {
     #[test]
     fn evidence_dir_is_under_durable_artifact_root() {
         with_artifact_root(|artifact_root| {
-            let path = executor_evidence_dir(Some("run-1"), "task-1");
+            let path = executor_evidence_dir(artifact_root, Some("run-1"), "task-1");
             assert!(path.starts_with(artifact_root));
             assert!(!path
                 .to_string_lossy()

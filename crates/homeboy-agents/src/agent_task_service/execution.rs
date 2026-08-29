@@ -921,10 +921,13 @@ fn consume_claimed_continuation(
         claim,
         |recipe| dispatcher(recipe),
         |options| {
-            super::run_cook(super::cook::CookContext {
-                store: Some(&store),
-                ..super::cook::CookContext::new(options, executor.clone())
-            })
+            let lifecycle_store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            super::CookService::run(
+                options,
+                super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
+                super::CookMode::Resume,
+            )
             .map(|result| result.exit_code)
         },
     )?;
@@ -1414,18 +1417,32 @@ fn apply_cook_timeout_override(
     timeout_ms: u64,
 ) -> Result<()> {
     let aggregate = lifecycle_store.read_aggregate(&source.run_id)?;
+    let review_form_only = retry
+        .plan
+        .tasks
+        .iter()
+        .any(crate::agent_task_cook_loop::request_is_review_form_only);
+    let timeout_field = if review_form_only {
+        "review-form-timeout-ms"
+    } else {
+        "timeout-ms"
+    };
     let timeout_outcome = aggregate.outcomes.iter().find(|outcome| {
         outcome.status == AgentTaskOutcomeStatus::Timeout
             || outcome.failure_classification == Some(AgentTaskFailureClassification::Timeout)
-            || outcome
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+            || outcome.diagnostics.iter().any(|diagnostic| {
+                diagnostic.class == "agent_task.provider_timeout"
+                    || diagnostic.class == "agent_task.review_form_timeout"
+            })
     });
     let Some(timeout_outcome) = timeout_outcome else {
         return Err(Error::validation_invalid_argument(
-            "timeout-ms",
-            "Cook timeout override requires a terminal provider timeout",
+            timeout_field,
+            if review_form_only {
+                "Cook review-form timeout override requires a terminal review-form timeout"
+            } else {
+                "Cook timeout override requires a terminal provider timeout"
+            },
             Some(source.run_id.clone()),
             None,
         ));
@@ -1498,9 +1515,26 @@ fn apply_cook_timeout_override(
         .unwrap_or(crate::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS);
     if timeout_ms <= previous_timeout_ms {
         return Err(Error::validation_invalid_argument(
-            "timeout-ms",
+            timeout_field,
+            if review_form_only {
+                format!(
+                    "Cook review-form timeout override must increase the prior review-form timeout of {previous_timeout_ms}ms"
+                )
+            } else {
+                format!(
+                    "Cook timeout override must increase the prior provider timeout of {previous_timeout_ms}ms"
+                )
+            },
+            Some(timeout_ms.to_string()),
+            None,
+        ));
+    }
+    if review_form_only && timeout_ms > crate::agent_task_cook_loop::MAX_REVIEW_FORM_TIMEOUT_MS {
+        return Err(Error::validation_invalid_argument(
+            timeout_field,
             format!(
-                "Cook timeout override must increase the prior provider timeout of {previous_timeout_ms}ms"
+                "Cook review-form timeout cannot exceed {}ms",
+                crate::agent_task_cook_loop::MAX_REVIEW_FORM_TIMEOUT_MS
             ),
             Some(timeout_ms.to_string()),
             None,
@@ -1590,6 +1624,7 @@ fn apply_cook_timeout_override(
         remaining_executions,
         remaining_retries,
         remaining_rotations,
+        review_form_only,
     )?;
     Ok(())
 }
@@ -1602,6 +1637,7 @@ fn apply_timeout_override_to_plan(
     remaining_executions: u32,
     remaining_retries: u32,
     remaining_rotations: u32,
+    review_form_only: bool,
 ) -> Result<()> {
     if !plan.metadata.is_null() && !plan.metadata.is_object() {
         return Err(Error::validation_invalid_argument(
@@ -1627,19 +1663,38 @@ fn apply_timeout_override_to_plan(
     plan.options.execution_budget.max_provider_rotations = remaining_rotations;
     for task in &mut plan.tasks {
         task.limits.timeout_ms = Some(timeout_ms);
+        if review_form_only {
+            if !task.metadata.is_object() {
+                task.metadata = json!({});
+            }
+            if !task.metadata["cook_loop"].is_object() {
+                task.metadata["cook_loop"] = json!({});
+            }
+            task.metadata["cook_loop"]["review_form_timeout_ms"] = json!(timeout_ms);
+        }
     }
     let timeout_override = json!({
         "schema": "homeboy/agent-task-cook-timeout-override/v1",
         "source_run_id": source_run_id,
         "previous_timeout_ms": previous_timeout_ms,
         "timeout_ms": timeout_ms,
-        "authority": "operator --timeout-ms",
+        "authority": if review_form_only {
+            "operator --review-form-timeout-ms"
+        } else {
+            "operator --timeout-ms"
+        },
         "remaining_provider_executions": remaining_executions,
         "remaining_same_provider_retries_after_reservation": remaining_retries.saturating_sub(1),
         "remaining_provider_rotations": remaining_rotations,
     });
     if plan.metadata.is_null() {
         plan.metadata = json!({});
+    }
+    if review_form_only {
+        if !plan.metadata["cook_loop"].is_object() {
+            plan.metadata["cook_loop"] = json!({});
+        }
+        plan.metadata["cook_loop"]["review_form_timeout_ms"] = json!(timeout_ms);
     }
     plan.metadata
         .as_object_mut()
@@ -2722,7 +2777,7 @@ mod tests {
         }]);
         let original_budget = plan.options.execution_budget.clone();
 
-        apply_timeout_override_to_plan(&mut plan, "timed-out-run", 200, 400, 3, 2, 1)
+        apply_timeout_override_to_plan(&mut plan, "timed-out-run", 200, 400, 3, 2, 1, false)
             .expect("apply timeout override");
 
         assert_eq!(plan.options.timeout_ms, Some(400));
@@ -2753,6 +2808,49 @@ mod tests {
             plan.homeboy_plan,
             plan.clone().canonicalize().homeboy_plan,
             "the portable plan projection is rebuilt with the override"
+        );
+    }
+
+    #[test]
+    fn review_form_timeout_override_updates_the_distinct_deadline_and_authority() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut plan = one_task_plan("review-form-timeout-override", workspace.path());
+        plan.tasks[0].metadata = json!({
+            "cook_loop": {
+                "kind": "review_form_only",
+                "review_form_timeout_ms": 300_000,
+            }
+        });
+
+        apply_timeout_override_to_plan(
+            &mut plan,
+            "timed-out-review-form",
+            300_000,
+            600_000,
+            1,
+            1,
+            0,
+            true,
+        )
+        .expect("apply review-form timeout override");
+
+        assert_eq!(plan.options.timeout_ms, Some(600_000));
+        assert_eq!(plan.tasks[0].limits.timeout_ms, Some(600_000));
+        assert_eq!(
+            plan.tasks[0].metadata["cook_loop"]["review_form_timeout_ms"],
+            600_000
+        );
+        assert_eq!(
+            plan.metadata["cook_loop"]["review_form_timeout_ms"],
+            600_000
+        );
+        let override_record = plan.metadata["cook_timeout_overrides"]
+            .as_array()
+            .and_then(|history| history.last())
+            .expect("timeout override history");
+        assert_eq!(
+            override_record["authority"],
+            "operator --review-form-timeout-ms"
         );
     }
 
@@ -2917,6 +3015,53 @@ mod tests {
         assert_eq!(record.metadata["cook_id"], "local-retry-cook");
         assert!(record
             .has_live_pending_local_cook_supervisor(started_at + chrono::Duration::seconds(1)));
+    }
+
+    /// A supervisor that has begun supervising still owns its run. Admitting
+    /// only `pending` reconciled every detached local Cook as ownerless the
+    /// moment its lease advanced, cancelling a healthy attempt before it had
+    /// published an owner pid (#13692). The lease window remains the bound that
+    /// keeps an abandoned lease from protecting a dead run.
+    #[test]
+    fn supervising_local_cook_lease_still_owns_its_run() {
+        let run_id = "local-supervising-reservation";
+        let started_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("lease timestamp")
+            .with_timezone(&chrono::Utc);
+        let launcher_pid = std::process::id();
+        let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
+            .expect("inspect launcher identity")
+            .expect("launcher is live");
+        let mut metadata = local_cook_retry_reservation_metadata(
+            "local-supervising-cook",
+            run_id,
+            started_at,
+            launcher_pid,
+            launcher_start_identity,
+        );
+        metadata["local_cook_supervisor"]["state"] = json!("supervising");
+        let record: agent_task_lifecycle::AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": run_id,
+            "plan_id": "local-supervising-plan",
+            "state": "running",
+            "submitted_at": started_at.to_rfc3339(),
+            "plan_path": "plan.json",
+            "metadata": metadata,
+        }))
+        .expect("supervising record");
+
+        assert!(record
+            .has_live_pending_local_cook_supervisor(started_at + chrono::Duration::seconds(1)));
+
+        // The lease window still bounds ownership: once it expires, a
+        // supervising state no longer shields the run from reconciliation.
+        assert!(!record.has_live_pending_local_cook_supervisor(
+            started_at
+                + chrono::Duration::seconds(
+                    agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS + 1,
+                )
+        ));
     }
 
     #[test]

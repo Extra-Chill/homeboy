@@ -222,7 +222,6 @@ static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
 #[cfg(unix)]
 static SHARED_CONTROLLER_RUNTIME_VERSION_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
 static SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
-static SHARED_CONTROLLER_RUNTIME_STORE: OnceLock<TempDir> = OnceLock::new();
 /// Destinations whose controller fixture bytes this process has already
 /// published. Keeps the copy to at most once per process per fixture path —
 /// including a path inherited from a parent test process — and serializes
@@ -394,11 +393,9 @@ impl HermeticTestContext {
                 crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
                 crate::build_identity::current().display,
             )
-            // Runtime pins are immutable content-addressed files, so tests can
-            // share them without sharing mutable Homeboy state.
             .env(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_STORE_ENV,
-                shared_controller_runtime_store(),
+                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_USE_ENV,
+                "1",
             );
         command
     }
@@ -1345,11 +1342,14 @@ fn test_controller_fixture_source(binary: TestBinary) -> PathBuf {
                     .get_or_init(|| {
                         let root = SHARED_CONTROLLER_RUNTIME_FIXTURE.get_or_init(exec_capable_tempdir);
                         let source = root.path().join("homeboy-controller-version-fixture");
+                        let identity = crate::build_identity::current().display.clone();
+                        let identity_json = serde_json::json!({
+                            "data": { "display": identity }
+                        });
                         fs::write(
                             &source,
                             format!(
-                                "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 64\n",
-                                crate::build_identity::current().display
+                                "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then\n  printf '%s\\n' '{identity}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = self ] && [ \"${{2:-}}\" = identity ]; then\n  printf '%s\\n' '{identity_json}'\n  exit 0\nfi\nexit 64\n"
                             ),
                         )
                         .expect("write controller version fixture");
@@ -1479,14 +1479,6 @@ fn publish_test_controller_fixture(source: &Path, destination: &Path) {
     let _ = fs::remove_file(&staging);
 }
 
-/// Return the process-wide immutable controller-runtime pin store for tests
-/// that spawn controller subprocesses outside `controller_runtime_command`.
-pub fn shared_controller_runtime_store() -> &'static Path {
-    SHARED_CONTROLLER_RUNTIME_STORE
-        .get_or_init(exec_capable_tempdir)
-        .path()
-}
-
 fn make_test_controller_fixture_read_only(path: &Path) {
     #[cfg(unix)]
     {
@@ -1510,12 +1502,7 @@ fn make_test_controller_fixture_read_only(path: &Path) {
 /// Materializes the fixture, so callers may execute, hash, or stat the returned
 /// path exactly as they could when the copy was made eagerly.
 pub fn controller_runtime_test_executable() -> PathBuf {
-    let executable = PathBuf::from(
-        std::env::var_os(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)
-            .expect("controller runtime test executable"),
-    );
-    ensure_test_controller_fixture(&executable);
-    executable
+    test_controller_fixture_source(TestBinary::CurrentTest)
 }
 
 pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {

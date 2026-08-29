@@ -407,13 +407,17 @@ fn actionable_for_activity_item(item: &ActivityItem) -> CommandActionableMetadat
                 .map(activity_job_ref)
                 .into_iter()
                 .collect(),
-            agent_tasks: item
-                .refs
-                .agent_task_run_id
-                .as_deref()
-                .map(activity_agent_task_ref)
-                .into_iter()
-                .collect(),
+            agent_tasks: if item.kind == "agent-task" || item.source_store == "agent-task.lifecycle"
+            {
+                item.refs
+                    .run_id
+                    .as_deref()
+                    .map(activity_agent_task_ref)
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            },
         },
         next_actions: item
             .next_actions

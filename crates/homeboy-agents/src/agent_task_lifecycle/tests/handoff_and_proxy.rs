@@ -337,13 +337,59 @@ fn submit_plan_persists_safe_route_resolution_without_a_destination() {
 }
 
 #[cfg(unix)]
+fn pin_record_from_artifact(
+    run_id: &str,
+    artifact: &std::path::Path,
+    digest: &str,
+    identity: &str,
+) {
+    let temporary_legacy = artifact
+        .parent()
+        .expect("artifact parent")
+        .join(format!("{run_id}-legacy"));
+    std::fs::write(&temporary_legacy, b"corrupted legacy bytes").expect("write legacy pin");
+    rewrite_record_for_test(run_id, |record| {
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+            "originating": {
+                "build_identity": identity,
+                "pinned_executable": temporary_legacy,
+                "sha256": digest,
+            }
+        });
+    })
+    .expect("project legacy pin");
+    recover_controller_runtime_in_store(&test_lifecycle_store(), run_id, Some(artifact), None)
+        .expect("recover pin");
+}
+
+#[cfg(unix)]
+fn record_pin(run_id: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        status(run_id).expect("record").metadata
+            [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
+            ["pinned_executable"]
+            .as_str()
+            .expect("pin"),
+    )
+}
+
+#[cfg(unix)]
+fn snapshot_reasons_for(
+    snapshots: &[homeboy_core::controller_runtime::ControllerRuntimeSnapshot],
+    pin: &std::path::Path,
+) -> Vec<String> {
+    snapshots
+        .iter()
+        .find(|snapshot| snapshot.pins.iter().any(|candidate| candidate == pin))
+        .map(|snapshot| snapshot.retention_reasons.clone())
+        .expect("snapshot")
+}
+
+#[cfg(unix)]
 #[test]
-fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
+fn controller_pin_retention_keeps_in_flight_and_pending_mutation_inside_the_window() {
     super::ensure_runner_continuation_provider_reset_hook();
     with_isolated_home(|_| {
-        // Controller-runtime retention discovers referenced pins through the
-        // agent-task pin-reference provider hook; register it so the report can
-        // see this test's durable records.
         super::controller_pin_reference_provider::register();
         let temporary = tempfile::tempdir().expect("temporary fake controller directory");
         let identity = homeboy_core::build_identity::current().display;
@@ -357,75 +403,138 @@ fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
         let active = submit_plan(&test_plan(), Some("retention-active")).expect("submit active");
         let terminal =
             submit_plan(&test_plan(), Some("retention-terminal")).expect("submit terminal");
-        for (record, artifact, digest) in [
-            (&active, &active_artifact, &active_digest),
-            (&terminal, &terminal_artifact, &terminal_digest),
-        ] {
-            let legacy = temporary.path().join(format!("{}-legacy", record.run_id));
-            std::fs::write(&legacy, b"corrupted legacy bytes").expect("write legacy pin");
-            rewrite_record_for_test(&record.run_id, |record| {
-                record.metadata
-                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
-                    "originating": {
-                        "build_identity": identity,
-                        "pinned_executable": legacy,
-                        "sha256": digest,
-                    }
-                });
-            })
-            .expect("project legacy pin");
-            recover_controller_runtime_in_store(
-                &test_lifecycle_store(),
-                &record.run_id,
-                Some(artifact),
-                None,
-            )
-            .expect("recover pin");
-        }
+        pin_record_from_artifact(&active.run_id, &active_artifact, &active_digest, &identity);
+        pin_record_from_artifact(
+            &terminal.run_id,
+            &terminal_artifact,
+            &terminal_digest,
+            &identity,
+        );
         rewrite_record_for_test(&terminal.run_id, |record| {
-            // Use `set_run_state` so the run state and its lifecycle execution
-            // projection stay consistent. A raw `record.state = Succeeded` write
-            // left `lifecycle.execution.state` unchanged, so `diagnose_run`
-            // flagged the record `ConflictingProjections` and dropped it from
-            // `list_records_with_health` — the source the retention report reads —
-            // making the terminal pin silently unreferenced (#8964).
             set_run_state(record, AgentTaskRunState::Succeeded);
-            record.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
         })
         .expect("make terminal");
 
-        let active_pin = std::path::PathBuf::from(
-            status(&active.run_id).expect("active record").metadata
-                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
-                ["pinned_executable"]
-                .as_str()
-                .expect("active pin"),
-        );
-        let terminal_pin = std::path::PathBuf::from(
-            status(&terminal.run_id).expect("terminal record").metadata
-                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
-                ["pinned_executable"]
-                .as_str()
-                .expect("terminal pin"),
-        );
+        let active_pin = record_pin(&active.run_id);
+        let terminal_pin = record_pin(&terminal.run_id);
         let report =
             homeboy_core::controller_runtime::retention_report().expect("retention report");
         assert!(report.retained.contains(&active_pin));
         assert!(report.retained.contains(&terminal_pin));
-        // Opt out of the configured age/size window so this asserts reference
-        // retention specifically, not "nothing was old enough to delete".
+        assert!(snapshot_reasons_for(&report.snapshots, &active_pin)
+            .iter()
+            .any(|reason| reason == "protected_in_flight"));
+        assert!(snapshot_reasons_for(&report.snapshots, &terminal_pin)
+            .iter()
+            .any(|reason| reason == "protected_by_pending_mutation"));
         let purge = homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides {
             limit: None,
             ignore_retention: true,
         };
-        let dry_run = prune_controller_runtime_pins(false, purge).expect("plan pin pruning");
-        assert!(dry_run.retained.contains(&active_pin));
-        assert!(dry_run.retained.contains(&terminal_pin));
-        assert!(dry_run.removed.is_empty());
         let applied = prune_controller_runtime_pins(true, purge).expect("prune unreferenced pins");
         assert!(!applied.removed.contains(&terminal_pin));
         assert!(active_pin.exists());
         assert!(terminal_pin.exists());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn controller_pin_retention_reclaims_old_terminal_retained_artifacts_under_pressure() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        super::controller_pin_reference_provider::register();
+        homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+            retention: homeboy_core::defaults::RetentionConfig {
+                controller_runtime_days: 14,
+                controller_runtime_max_bytes: 0,
+                limit: 10,
+                ..homeboy_core::defaults::RetentionConfig::default()
+            },
+            ..homeboy_core::defaults::HomeboyConfig::default()
+        })
+        .expect("save retention config");
+        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
+        let identity = homeboy_core::build_identity::current().display;
+        let terminal_artifact = temporary.path().join("terminal-homeboy");
+        let terminal_digest =
+            fake_controller_artifact(&terminal_artifact, &identity, "terminal artifact");
+        let terminal =
+            submit_plan(&test_plan(), Some("retention-old-terminal")).expect("submit terminal");
+        pin_record_from_artifact(
+            &terminal.run_id,
+            &terminal_artifact,
+            &terminal_digest,
+            &identity,
+        );
+        rewrite_record_for_test(&terminal.run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Succeeded);
+            record.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
+            record.submitted_at = "2020-01-01T00:00:00Z".to_string();
+        })
+        .expect("age terminal retained record");
+
+        let terminal_pin = record_pin(&terminal.run_id);
+        let applied = prune_controller_runtime_pins(
+            true,
+            homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides::default(),
+        )
+        .expect("reclaim under pressure");
+        assert!(applied.removed.contains(&terminal_pin));
+        assert!(!terminal_pin.exists());
+        assert!(applied.snapshots.iter().any(|snapshot| {
+            snapshot.pins.contains(&terminal_pin)
+                && snapshot
+                    .retention_reasons
+                    .iter()
+                    .any(|reason| reason == "reclaimable")
+        }));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn controller_pin_retention_keeps_queued_runs_outside_the_age_window() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        super::controller_pin_reference_provider::register();
+        homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+            retention: homeboy_core::defaults::RetentionConfig {
+                controller_runtime_days: 0,
+                controller_runtime_max_bytes: 0,
+                limit: 10,
+                ..homeboy_core::defaults::RetentionConfig::default()
+            },
+            ..homeboy_core::defaults::HomeboyConfig::default()
+        })
+        .expect("save retention config");
+        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
+        let identity = homeboy_core::build_identity::current().display;
+        let queued_artifact = temporary.path().join("queued-homeboy");
+        let queued_digest =
+            fake_controller_artifact(&queued_artifact, &identity, "queued artifact");
+        let queued =
+            submit_plan(&test_plan(), Some("retention-old-queued")).expect("submit queued");
+        pin_record_from_artifact(&queued.run_id, &queued_artifact, &queued_digest, &identity);
+        rewrite_record_for_test(&queued.run_id, |record| {
+            record.submitted_at = "2020-01-01T00:00:00Z".to_string();
+        })
+        .expect("age queued record");
+
+        let queued_pin = record_pin(&queued.run_id);
+        let report =
+            homeboy_core::controller_runtime::retention_report().expect("retention report");
+        assert!(report.retained.contains(&queued_pin));
+        assert!(snapshot_reasons_for(&report.snapshots, &queued_pin)
+            .iter()
+            .any(|reason| reason == "protected_in_flight"));
+        let applied = prune_controller_runtime_pins(
+            true,
+            homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides::default(),
+        )
+        .expect("prune");
+        assert!(!applied.removed.contains(&queued_pin));
+        assert!(queued_pin.exists());
     });
 }
 

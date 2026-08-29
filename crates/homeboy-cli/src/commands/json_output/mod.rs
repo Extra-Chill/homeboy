@@ -328,6 +328,16 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
         })
     };
     let step_data = |name: &str| step(name).and_then(|step| step.get("data"));
+    // A rolled-back release still created real artifacts. The pipeline records
+    // them here, so the operator summary must read them instead of reporting
+    // null just because the owning step's data is gone.
+    let rollback = run_result.and_then(|value| value.get("rollback"));
+    let rollback_str = |key: &str| {
+        rollback
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(bounded_release_text)
+    };
     let version = step_data("version");
     let artifacts = step_data("artifacts.authority")
         .and_then(|data| data.get("artifacts"))
@@ -415,7 +425,7 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
         "phase": result.get("phase").and_then(Value::as_str).map(bounded_release_text),
         "old_version": version.and_then(|data| data.get("old_version")).and_then(Value::as_str).map(bounded_release_text),
         "new_version": result.get("new_version").and_then(Value::as_str).map(bounded_release_text),
-        "release_commit": step_data("git.commit").and_then(|data| data.get("commit").or_else(|| data.get("sha"))).or_else(|| step_data("git.tag").and_then(|data| data.get("head"))).and_then(Value::as_str).map(bounded_release_text),
+        "release_commit": step_data("git.commit").and_then(|data| data.get("commit").or_else(|| data.get("sha"))).or_else(|| step_data("git.tag").and_then(|data| data.get("head"))).and_then(Value::as_str).map(bounded_release_text).or_else(|| rollback_str("release_commit")),
         "tag": result.get("tag").and_then(Value::as_str).map(bounded_release_text),
         "push_target": step_data("git.push").and_then(|data| data.get("target").or_else(|| data.get("remote"))).and_then(Value::as_str).map(bounded_release_text),
         "artifacts": artifacts,
@@ -423,6 +433,13 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
         "gates": run_result.and_then(|value| value.get("summary")).map(|summary| serde_json::json!({
             "total": summary.get("total_steps"), "succeeded": summary.get("succeeded"),
             "failed": summary.get("failed"), "skipped": summary.get("skipped"), "missing": summary.get("missing"),
+        })),
+        "rollback": rollback.map(|_| serde_json::json!({
+            "status": rollback_str("status"),
+            "tag_state": rollback_str("tag_state"),
+            "release_commit": rollback_str("release_commit"),
+            "original_head": rollback_str("original_head"),
+            "final_head": rollback_str("final_head"),
         })),
         "warnings": warnings,
         "evidence_refs": evidence_refs,
@@ -1055,6 +1072,56 @@ fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rolled-back release must still report the commit it created.
+    ///
+    /// Regression for #13708: `release_commit` was sourced only from the
+    /// `git.commit`/`git.tag` step data. When the pipeline rolled back, that
+    /// data was gone and the summary reported `null` while the same payload
+    /// recorded the real commit under `rollback`. Operators acting on that
+    /// summary can re-release or re-tag a version that already published.
+    #[test]
+    fn rolled_back_release_summary_reports_the_commit_it_created() {
+        let payload = serde_json::json!({
+            "result": {
+                "component_id": "data-machine-code",
+                "status": "partial",
+                "phase": "publish",
+                "run": { "result": {
+                    "status": "partial_success",
+                    "steps": [{ "id": "preflight.test", "type": "preflight.test",
+                                "status": "failed", "error": "Tests failed (exit code 1)" }],
+                    "rollback": {
+                        "status": "restored",
+                        "tag_state": "not_created",
+                        "release_commit": "1e37e68ddbdb149b12c93389dd95d14da4c8082e",
+                        "original_head": "d1c8cd8e4d0ed0064c38c56c182a1fa70906533e",
+                        "final_head": "d1c8cd8e4d0ed0064c38c56c182a1fa70906533e",
+                    },
+                }},
+            }
+        });
+
+        let projection = bounded_release_projection(&payload, 1, None);
+
+        assert_eq!(
+            projection.get("release_commit").and_then(Value::as_str),
+            Some("1e37e68ddbdb149b12c93389dd95d14da4c8082e"),
+            "a rolled-back release must surface the commit it created, not null"
+        );
+        let rollback = projection
+            .get("rollback")
+            .expect("rollback evidence must reach the operator summary");
+        assert_eq!(
+            rollback.get("status").and_then(Value::as_str),
+            Some("restored")
+        );
+        assert_eq!(
+            rollback.get("tag_state").and_then(Value::as_str),
+            Some("not_created"),
+            "operators must be able to tell what happened to the tag"
+        );
+    }
     use crate::commands::agent_task::{
         AgentTaskArgs, AgentTaskCommand, AgentTaskControllerArgs, AgentTaskControllerCommand,
         AgentTaskControllerDispatchArgs, AgentTaskControllerRunFromSpecArgs, StatusArgs,

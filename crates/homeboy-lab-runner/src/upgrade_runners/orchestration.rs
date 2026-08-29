@@ -65,13 +65,17 @@ fn runner_manifest_preflight_with_executor(
     candidate_version: &str,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> Option<String> {
+    // Resolved once: every query in this preflight is read-only and must use
+    // the same transport the runner currently admits.
+    let allow_diagnostic_ssh = diagnostic_ssh_is_permitted(&runner.id);
     let inventory_command = vec![
         homeboy_path.to_string(),
         "extension".to_string(),
         "list".to_string(),
         "--skip-ready-check".to_string(),
     ];
-    let inventory_options = runner_manifest_query_options(runner, inventory_command);
+    let inventory_options =
+        runner_manifest_query_options(runner, inventory_command, allow_diagnostic_ssh);
     let (inventory_output, inventory_exit_code) = match exec(&runner.id, inventory_options) {
         Ok(result) => result,
         Err(error) => {
@@ -109,6 +113,7 @@ fn runner_manifest_preflight_with_executor(
                 extension_id.clone(),
                 "--skip-ready-check".to_string(),
             ],
+            allow_diagnostic_ssh,
         );
         let (output, exit_code) = match exec(&runner.id, options) {
             Ok(result) => result,
@@ -143,11 +148,47 @@ fn runner_manifest_preflight_with_executor(
     None
 }
 
-fn runner_manifest_query_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptions {
+fn runner_manifest_query_options(
+    runner: &Runner,
+    command: Vec<String>,
+    allow_diagnostic_ssh: bool,
+) -> RunnerExecOptions {
     let mut options = runner_exec_options(runner, command);
     options.print_handoff = false;
     options.mirror_evidence = false;
+    options.allow_diagnostic_ssh = allow_diagnostic_ssh;
+    // This preflight only reads the runner's extension inventory; it has no
+    // need for SSH specifically. `allow_diagnostic_ssh` is a *force*, not a
+    // permit, so leaving it set made the query demand the one transport a
+    // runner with a fresh connected daemon is documented to refuse — failing
+    // the preflight and aborting the whole controller upgrade (#13686).
+    //
+    // The flag cannot simply be cleared: a disconnected SSH runner has no
+    // daemon session, so transport selection would fall through to
+    // `Unavailable` and lose the path it relies on today. Mirror the runner's
+    // own admission rule instead.
     options
+}
+
+/// Whether diagnostic SSH is currently the runner's admissible transport.
+///
+/// Mirrors the execution layer's own rule: SSH is for a disconnected or
+/// non-fresh daemon, and a fresh connected daemon must be reached through
+/// normal exec so admission stays attributed to it.
+///
+/// An unreadable status preserves the historical behaviour rather than
+/// inventing a refusal: preflight then fails on the exec itself, with the
+/// transport error the operator can act on.
+fn diagnostic_ssh_is_permitted(runner_id: &str) -> bool {
+    match crate::connection::status(runner_id) {
+        Ok(status) => diagnostic_ssh_is_permitted_for(&status),
+        Err(_) => true,
+    }
+}
+
+/// The transport decision itself, over an already-resolved status.
+fn diagnostic_ssh_is_permitted_for(status: &RunnerStatusReport) -> bool {
+    !status.connected || !status.daemon_fresh_for_admission()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -329,6 +370,71 @@ mod manifest_preflight_tests {
         assert!(runner_extension_requires_homeboy(stdout, "example")
             .expect("valid undeclared compatibility")
             .is_none());
+    }
+
+    fn status_report(connected: bool) -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: "lab-a".to_string(),
+            connected,
+            state: if connected {
+                crate::session::RunnerSessionState::Connected
+            } else {
+                crate::session::RunnerSessionState::Disconnected
+            },
+            session: None,
+            stale_daemon: None,
+            configured_job_binary_build_identity: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: crate::session::RunnerActiveJobState::NotQueried,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "test".to_string(),
+        }
+    }
+
+    /// The manifest preflight must follow the runner's own admission rule.
+    ///
+    /// Forcing diagnostic SSH made this read-only query demand the one
+    /// transport a runner with a fresh connected daemon refuses, which failed
+    /// the preflight and aborted the entire controller upgrade (#13686).
+    /// Clearing the flag unconditionally is equally wrong: a disconnected SSH
+    /// runner has no daemon session, so transport selection would fall through
+    /// to `Unavailable`.
+    #[test]
+    fn manifest_preflight_prefers_the_daemon_and_keeps_ssh_when_disconnected() {
+        let connected_fresh = status_report(true);
+        assert!(
+            connected_fresh.daemon_fresh_for_admission(),
+            "fixture must model a fresh daemon"
+        );
+        assert!(
+            !diagnostic_ssh_is_permitted_for(&connected_fresh),
+            "a fresh connected daemon must be reached through normal exec"
+        );
+
+        assert!(
+            diagnostic_ssh_is_permitted_for(&status_report(false)),
+            "a disconnected runner must keep diagnostic SSH"
+        );
+
+        // The decision must actually reach the exec options. Asserting only the
+        // predicate would pass even if the result were never wired in.
+        let runner = ssh_runner();
+        let command = vec!["homeboy".to_string(), "extension".to_string()];
+        assert!(
+            !runner_manifest_query_options(&runner, command.clone(), false).allow_diagnostic_ssh,
+            "a refused diagnostic SSH decision must clear the exec flag"
+        );
+        assert!(
+            runner_manifest_query_options(&runner, command, true).allow_diagnostic_ssh,
+            "a permitted diagnostic SSH decision must keep the exec flag"
+        );
     }
 
     #[test]

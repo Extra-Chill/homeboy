@@ -2149,48 +2149,46 @@ fn run_split_placement_fanout(
     let allow_dirty_lab_workspace = cli.allow_dirty_lab_workspace;
     let skip_deps_hydration = cli.skip_deps_hydration;
     let detach_after_handoff = cli.detach_after_handoff;
-    let attempt_dispatcher =
-        move |options: &crate::agents::agent_task_service::AgentTaskCookServiceOptions| {
-            // Fanout compiles each child worktree before this factory runs. Bind
-            // its decision here, not at coordinator startup, so the decision
-            // names the child candidate/base that will actually be dispatched.
-            let source_path = options
-                .initial_plan
-                .tasks
-                .first()
-                .and_then(|task| task.workspace.root.as_ref())
-                .map(PathBuf::from);
-            let task = options
-                .initial_plan
-                .tasks
-                .first()
-                .map(|task| task.task_id.as_str())
-                .unwrap_or("fanout-provider-attempt");
-            let placement_decision = options
-                .initial_plan
-                .metadata
-                .get("execution_placement_decision")
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_else(|| finalize_placement(&directive, task, source_path.as_deref()));
-            let selected_runner_id = placement_decision
-                .runner
-                .as_ref()
-                .map(|runner| runner.runner_id.clone())
-                .unwrap_or_else(|| runner_id.clone());
-            Arc::new(LabCookAttemptDispatcher {
-                runner_id: selected_runner_id,
-                placement_decision,
-                allow_local_fallback: false,
-                allow_dirty_lab_workspace,
-                skip_deps_hydration,
-                detach_after_handoff,
-                source_path,
-                job_overrides: job_overrides.clone(),
-                progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
-            })
-                as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
-        };
+    let attempt_dispatcher = move |options: &crate::agents::agent_task_service::CookRequest| {
+        // Fanout compiles each child worktree before this factory runs. Bind
+        // its decision here, not at coordinator startup, so the decision
+        // names the child candidate/base that will actually be dispatched.
+        let source_path = options
+            .initial_plan
+            .tasks
+            .first()
+            .and_then(|task| task.workspace.root.as_ref())
+            .map(PathBuf::from);
+        let task = options
+            .initial_plan
+            .tasks
+            .first()
+            .map(|task| task.task_id.as_str())
+            .unwrap_or("fanout-provider-attempt");
+        let placement_decision = options
+            .initial_plan
+            .metadata
+            .get("execution_placement_decision")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_else(|| finalize_placement(&directive, task, source_path.as_deref()));
+        let selected_runner_id = placement_decision
+            .runner
+            .as_ref()
+            .map(|runner| runner.runner_id.clone())
+            .unwrap_or_else(|| runner_id.clone());
+        Arc::new(LabCookAttemptDispatcher {
+            runner_id: selected_runner_id,
+            placement_decision,
+            allow_local_fallback: false,
+            allow_dirty_lab_workspace,
+            skip_deps_hydration,
+            detach_after_handoff,
+            source_path,
+            job_overrides: job_overrides.clone(),
+            progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
+        }) as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
+    };
     let (value, exit_code) = match &cli.command {
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command:
@@ -3052,13 +3050,6 @@ fn materialize_agent_task_cook_plan(
     let cook = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(&cook)?;
-    if let Some(workspace) = provision.get("path").and_then(serde_json::Value::as_str) {
-        crate::commands::agent_task::run::project_provider_evidence_inputs(
-            &cook.provider_evidence_inputs,
-            std::path::Path::new(workspace),
-            None,
-        )?;
-    }
     let mut plan = crate::commands::agent_task::run::compile_cook_plan(&cook, provision)?;
     if let Some(provenance) = provenance {
         crate::commands::agent_task::run::record_cook_argument_provenance(&mut plan, provenance);
@@ -4222,7 +4213,7 @@ fn agent_task_local_fanout_warning(
                 AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
                     command: AgentTaskFanoutCommand::CookBatch(args),
                 }),
-        }) if args.run_plan && !args.dry_run => {
+        }) if args.run_plan && !args.preview => {
             if args.issues.len() <= 1 {
                 return None;
             }

@@ -4,6 +4,96 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.14] - 2026-08-29
+
+### Changed
+- Report review-form deadlines truthfully
+- Stage provider evidence outside candidate worktrees
+- Type recipe_run_providers and empty the extra buffer
+- Add a typed orchestration service and Lab HTTP vertical
+- Consolidate Cook service API
+- Provision runtime settings for extension scripts
+- Promote audit to a first-class extension capability
+
+### Fixed
+- preserve excluded snapshot directory roots
+- preserve local Cook ownership
+- resolve catalog secret_env per requiring provider
+
+## [0.364.13] - 2026-08-29
+
+### Changed
+- Make status report canonical control-plane identities
+- Report the commit a rolled-back release actually created
+
+## [0.364.12] - 2026-08-29
+
+### Changed
+- Name the unmet Lab staging requirement
+- Add the control-plane identity contract
+- Root reverse Cook runtime fixture
+- Root controller runtime pins in lifecycle stores
+
+## [0.364.11] - 2026-08-29
+
+### Changed
+- Derive controller-runtime pin retention from lifecycle mutability
+- Pin canonical enum wire labels
+- Hydrate structured provider errors in diagnose
+- Bound hermetic test execution
+- Unify fanout preview help
+- Rotate blocked provider accounts
+
+### Fixed
+- Fix worktree provider cleanup contract
+
+## [0.364.10] - 2026-08-29
+
+### Changed
+- Report truthful fanout command outcomes
+- Delete duplicate executor artifact roots
+
+### Fixed
+- key the provider catalog by the config root it came from
+
+## [0.364.9] - 2026-08-29
+
+### Changed
+- Root promotion scratch in its observation store
+- Honor configured worktree-provider cleanup timeouts
+
+## [0.364.8] - 2026-08-29
+
+### Changed
+- Isolate lifecycle test fault providers
+- Preserve repository identity during fanout provisioning
+
+## [0.364.7] - 2026-08-29
+
+### Changed
+- Stabilize retryable Cook test isolation
+
+## [0.364.6] - 2026-08-28
+
+### Changed
+- Converge a base that advanced during a Cook run
+- Allow first-cook promote when destination dirt matches the candidate
+
+## [0.364.5] - 2026-08-28
+
+### Changed
+- Treat a supervising local cook lease as ownership
+
+## [0.364.4] - 2026-08-28
+
+### Fixed
+- follow the runner's admission rule in manifest preflight
+
+## [0.364.3] - 2026-08-28
+
+### Fixed
+- install the executor providers the fixtures dispatch against
+
 ## [0.364.2] - 2026-08-28
 
 ### Fixed

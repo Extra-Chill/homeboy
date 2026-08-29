@@ -246,17 +246,61 @@ impl LabStagingRecipe {
     }
 
     fn validate_with_source_requirement(&self, require_source_path: bool) -> Result<()> {
-        if self.schema != LAB_STAGING_RECIPE_SCHEMA
-            || self.run_id.trim().is_empty()
-            || self.runner_id.trim().is_empty()
-            || !self.command.portable
-            || self.normalized_args.is_empty()
-            || (require_source_path && self.source_path.is_none())
-        {
+        // Each staging requirement fails under its own name. A caller that
+        // supplies a non-portable command and a caller that omits the
+        // controller source path have different next actions, so one shared
+        // message reciting the whole contract is not a usable report.
+        if self.schema != LAB_STAGING_RECIPE_SCHEMA {
             return Err(Error::validation_invalid_argument(
-                "lab_staging_recipe",
-                "Lab staging requires its v1 schema, bound run and runner identities, portable argv, and a controller source path when controller materialization is selected",
+                "lab_staging_recipe.schema",
+                format!(
+                    "Lab staging requires schema `{LAB_STAGING_RECIPE_SCHEMA}`, but this recipe declares `{}`",
+                    self.schema
+                ),
+                Some(self.schema.clone()),
                 None,
+            ));
+        }
+        if self.run_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.run_id",
+                "Lab staging requires a bound durable run identity",
+                None,
+                None,
+            ));
+        }
+        if self.runner_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.runner_id",
+                "Lab staging requires a bound runner identity",
+                Some(self.run_id.clone()),
+                None,
+            ));
+        }
+        if !self.command.portable {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.command",
+                format!(
+                    "Lab staging requires a portable command, but `{}` is resolved as local-only",
+                    self.command.hot_label
+                ),
+                Some(self.run_id.clone()),
+                None,
+            ));
+        }
+        if self.normalized_args.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.normalized_args",
+                "Lab staging requires portable argv, but this recipe normalized to an empty argument list",
+                Some(self.run_id.clone()),
+                None,
+            ));
+        }
+        if require_source_path && self.source_path.is_none() {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.source_path",
+                "Lab staging requires a controller source path when controller materialization is selected",
+                Some(self.run_id.clone()),
                 None,
             ));
         }
@@ -7551,6 +7595,68 @@ mod tests {
             false,
         );
         assert!(LabStagingRecipe::from_request("run", "lab", &mismatched).is_err());
+    }
+
+    #[test]
+    fn each_staging_requirement_fails_under_its_own_name() {
+        let args = vec!["agent-task".to_string(), "run-plan".to_string()];
+        let valid = || {
+            LabStagingRecipe::from_request(
+                "run",
+                "lab-1",
+                &recipe_request(Some(recipe_command()), &args, HashMap::new()),
+            )
+            .expect("recipe")
+        };
+
+        let mut wrong_schema = valid();
+        wrong_schema.schema = "homeboy/lab-staging-recipe/v99".to_string();
+        let error = wrong_schema.validate().expect_err("schema rejected");
+        assert_eq!(error.details["field"], "lab_staging_recipe.schema");
+        assert!(error.message.contains("homeboy/lab-staging-recipe/v99"));
+
+        let mut unbound_run = valid();
+        unbound_run.run_id = "   ".to_string();
+        assert_eq!(
+            unbound_run.validate().expect_err("run rejected").details["field"],
+            "lab_staging_recipe.run_id"
+        );
+
+        let mut unbound_runner = valid();
+        unbound_runner.runner_id = String::new();
+        assert_eq!(
+            unbound_runner
+                .validate()
+                .expect_err("runner rejected")
+                .details["field"],
+            "lab_staging_recipe.runner_id"
+        );
+
+        let mut local_only = valid();
+        local_only.command.portable = false;
+        let error = local_only.validate().expect_err("portability rejected");
+        assert_eq!(error.details["field"], "lab_staging_recipe.command");
+        assert!(error.message.contains(&local_only.command.hot_label));
+
+        let mut empty_argv = valid();
+        empty_argv.normalized_args.clear();
+        assert_eq!(
+            empty_argv.validate().expect_err("argv rejected").details["field"],
+            "lab_staging_recipe.normalized_args"
+        );
+
+        // Only controller materialization requires the source path, so the same
+        // recipe is rejected by `validate` and accepted by the runner-staging
+        // form that has already replaced it.
+        let mut no_source = valid();
+        no_source.source_path = None;
+        assert_eq!(
+            no_source.validate().expect_err("source rejected").details["field"],
+            "lab_staging_recipe.source_path"
+        );
+        no_source
+            .validate_for_runner_staging()
+            .expect("runner staging does not require the controller source path");
     }
 
     #[test]

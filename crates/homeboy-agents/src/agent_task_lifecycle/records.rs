@@ -694,10 +694,19 @@ impl AgentTaskRunRecord {
         else {
             return false;
         };
-        supervisor["state"] == "pending"
-            && self.metadata["cook_id"]
-                .as_str()
-                .is_some_and(|cook_id| !cook_id.trim().is_empty())
+        // A lease that has advanced to `supervising` is holding this exact run,
+        // which is stronger ownership evidence than one still requesting it.
+        // Admitting only `pending` cancelled every detached local Cook the
+        // moment its supervisor started supervising and before it published an
+        // owner pid. The lease window below is what keeps an abandoned lease
+        // from protecting a genuinely dead run, and it bounds both states
+        // identically.
+        matches!(
+            supervisor["state"].as_str(),
+            Some("pending" | "supervising")
+        ) && self.metadata["cook_id"]
+            .as_str()
+            .is_some_and(|cook_id| !cook_id.trim().is_empty())
             && supervisor["pinned_run_id"] == self.run_id
             && started_at <= now
             && now < expires_at

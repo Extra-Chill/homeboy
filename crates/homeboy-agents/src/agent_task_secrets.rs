@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -71,26 +71,135 @@ pub fn secret_env_plan_status(plan: &SecretEnvPlan) -> Vec<AgentTaskSecretEnvSta
     secret_env_status(&plan.secret_env_names())
 }
 
-/// Redacted secret-env status for a scope, defaulting to every secret that
-/// scope declares a source for when the caller names none explicitly.
+/// One provider-shaped secret-env scope: that provider's sources, plus the
+/// names it unconditionally requires even when it declares no source for them.
 ///
-/// `agent-task auth status` and `agent-task providers --secret-env` both
-/// answer "what is this scope's secret-env readiness" and must agree: a
-/// secret that reads as configured from one must read as configured from the
-/// other, since they are the same question about the same underlying state
-/// (#13629). Routing both through this one function, rather than each
-/// assembling its own default name list, makes that agreement structural
-/// instead of something each call site has to maintain by hand.
+/// Catalog `secret_env` used to merge every shown provider's sources into one
+/// map and resolve once. A backend that required a name without declaring a
+/// source then reported it missing while the flattened catalog reported the
+/// same name configured from a different provider's json-file (#13629).
+#[derive(Debug, Clone, Default)]
+pub struct AgentTaskSecretEnvScope {
+    pub fallback_sources: HashMap<String, AgentTaskSecretSource>,
+    pub required_names: Vec<String>,
+}
+
+/// Redacted secret-env status for a single source map.
+///
+/// Prefer [`secret_env_status_for_scopes`] when more than one provider is in
+/// view: a required name must resolve against the provider that requires it,
+/// not against a merged map of unrelated sources (#13629).
 pub fn secret_env_status_for_scope(
     explicit_names: &[String],
     fallback_sources: &HashMap<String, AgentTaskSecretSource>,
 ) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status_for_scopes(
+        explicit_names,
+        &[AgentTaskSecretEnvScope {
+            fallback_sources: fallback_sources.clone(),
+            required_names: Vec::new(),
+        }],
+    )
+}
+
+/// Resolve each scope against its own sources, then flatten to one row per name.
+///
+/// A name a scope requires and cannot resolve vetoes `configured=true` from any
+/// other scope. That is the single catalog answer: another provider's json-file
+/// must not make a requiring backend look configured (#13629).
+pub fn secret_env_status_for_scopes(
+    explicit_names: &[String],
+    scopes: &[AgentTaskSecretEnvScope],
+) -> Vec<AgentTaskSecretEnvStatus> {
+    let names = secret_env_names_for_scopes(explicit_names, scopes);
+    names
+        .into_iter()
+        .map(|name| secret_env_status_for_name(&name, scopes))
+        .collect()
+}
+
+fn secret_env_names_for_scopes(
+    explicit_names: &[String],
+    scopes: &[AgentTaskSecretEnvScope],
+) -> Vec<String> {
     if !explicit_names.is_empty() {
-        return secret_env_status_with_fallbacks(explicit_names, fallback_sources);
+        return explicit_names.to_vec();
     }
-    let mut names: Vec<String> = fallback_sources.keys().cloned().collect();
-    names.sort();
-    secret_env_status_with_fallbacks(&names, fallback_sources)
+    let mut names = BTreeSet::new();
+    for scope in scopes {
+        names.extend(scope.fallback_sources.keys().cloned());
+        names.extend(scope.required_names.iter().cloned());
+    }
+    names.into_iter().collect()
+}
+
+fn secret_env_status_for_name(
+    name: &str,
+    scopes: &[AgentTaskSecretEnvScope],
+) -> AgentTaskSecretEnvStatus {
+    if scopes.is_empty() {
+        return secret_env_status_with_fallbacks(
+            std::slice::from_ref(&name.to_string()),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .next()
+        .expect("status for one name");
+    }
+
+    let per_scope = scopes
+        .iter()
+        .map(|scope| {
+            secret_env_status_with_fallbacks(
+                std::slice::from_ref(&name.to_string()),
+                &scope.fallback_sources,
+            )
+            .into_iter()
+            .next()
+            .expect("status for one name")
+        })
+        .collect::<Vec<_>>();
+
+    let required_missing = scopes.iter().zip(&per_scope).any(|(scope, status)| {
+        scope.required_names.iter().any(|required| required == name) && !status.configured
+    });
+    if required_missing {
+        let mut alternatives = Vec::new();
+        for status in &per_scope {
+            if !status.configured {
+                continue;
+            }
+            if alternatives
+                .iter()
+                .any(|entry: &AgentTaskSecretEnvSourceStatus| {
+                    entry.source == status.source && entry.configured
+                })
+            {
+                continue;
+            }
+            alternatives.push(AgentTaskSecretEnvSourceStatus {
+                origin: "provider-default".to_string(),
+                source: status.source.clone(),
+                configured: true,
+            });
+        }
+        return AgentTaskSecretEnvStatus {
+            name: name.to_string(),
+            configured: false,
+            source: "missing".to_string(),
+            alternatives,
+        };
+    }
+
+    per_scope
+        .into_iter()
+        .find(|status| status.configured)
+        .unwrap_or(AgentTaskSecretEnvStatus {
+            name: name.to_string(),
+            configured: false,
+            source: "missing".to_string(),
+            alternatives: Vec::new(),
+        })
 }
 
 pub fn map_secret_to_env(
@@ -704,6 +813,75 @@ mod tests {
         );
 
         std::env::remove_var(configured);
+    }
+
+    #[test]
+    fn secret_env_status_for_scopes_does_not_let_another_scope_mark_a_required_secret_configured() {
+        let required = unique_env("SCOPE_REQUIRED");
+        let present = unique_env("SCOPE_PRESENT");
+        std::env::remove_var(&required);
+        std::env::set_var(&present, "present-value");
+        let source = |env_var: &str| AgentTaskSecretSource {
+            source: "env".to_string(),
+            env_var: Some(env_var.to_string()),
+            path: None,
+            scope: None,
+            name: None,
+            field: None,
+            value: None,
+        };
+        let requiring = AgentTaskSecretEnvScope {
+            fallback_sources: HashMap::new(),
+            required_names: vec![required.clone()],
+        };
+        let mut other_sources = HashMap::new();
+        other_sources.insert(required.clone(), source(&present));
+        let other = AgentTaskSecretEnvScope {
+            fallback_sources: other_sources,
+            required_names: Vec::new(),
+        };
+
+        let status = secret_env_status_for_scopes(&[], &[requiring, other]);
+        let entry = status
+            .iter()
+            .find(|entry| entry.name == required)
+            .expect("required name is reported even without a local source");
+        assert!(
+            !entry.configured,
+            "a required name missing from its own scope must not read as configured from another scope"
+        );
+        assert_eq!(entry.source, "missing");
+        assert!(
+            entry
+                .alternatives
+                .iter()
+                .any(|alternative| alternative.configured && alternative.source == "env"),
+            "the other scope's present source stays visible as an alternative: {:?}",
+            entry.alternatives
+        );
+
+        let explicit = secret_env_status_for_scopes(
+            std::slice::from_ref(&required),
+            &[
+                AgentTaskSecretEnvScope {
+                    fallback_sources: HashMap::new(),
+                    required_names: vec![required.clone()],
+                },
+                AgentTaskSecretEnvScope {
+                    fallback_sources: {
+                        let mut sources = HashMap::new();
+                        sources.insert(required.clone(), source(&present));
+                        sources
+                    },
+                    required_names: Vec::new(),
+                },
+            ],
+        );
+        assert_eq!(explicit.len(), 1);
+        assert!(!explicit[0].configured);
+        assert_eq!(explicit[0].source, "missing");
+
+        std::env::remove_var(present);
     }
 
     #[test]

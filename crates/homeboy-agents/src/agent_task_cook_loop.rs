@@ -23,8 +23,8 @@ const MAX_DIAGNOSTIC_FIELD_BYTES: usize = 512;
 const MAX_DIAGNOSTIC_ACTIONS: usize = 4;
 /// A review form is metadata, not a coding attempt. Callers may lower this via
 /// `metadata.cook_loop.review_form_timeout_ms`; the cap keeps it bounded.
-const DEFAULT_REVIEW_FORM_TIMEOUT_MS: u64 = 300_000;
-const MAX_REVIEW_FORM_TIMEOUT_MS: u64 = 600_000;
+pub const DEFAULT_REVIEW_FORM_TIMEOUT_MS: u64 = 300_000;
+pub const MAX_REVIEW_FORM_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopOptions {
@@ -606,12 +606,17 @@ fn build_review_form_follow_up_request(
     request
 }
 
-fn review_form_timeout_ms(source_request: &AgentTaskRequest) -> u64 {
+pub fn review_form_timeout_ms(source_request: &AgentTaskRequest) -> u64 {
     source_request.metadata["cook_loop"]["review_form_timeout_ms"]
         .as_u64()
         .filter(|timeout_ms| *timeout_ms > 0)
         .map(|timeout_ms| timeout_ms.min(MAX_REVIEW_FORM_TIMEOUT_MS))
         .unwrap_or(DEFAULT_REVIEW_FORM_TIMEOUT_MS)
+}
+
+pub fn request_is_review_form_only(request: &AgentTaskRequest) -> bool {
+    request.metadata["cook_loop"]["kind"] == "review_form_only"
+        || request.inputs["cook_loop"]["review_form_required"] == true
 }
 
 fn gate_failure(
@@ -2053,6 +2058,37 @@ mod tests {
 
         request.metadata["cook_loop"]["review_form_timeout_ms"] = json!(5_000);
         assert_eq!(review_form_timeout_ms(&request), 5_000);
+    }
+
+    #[test]
+    fn review_form_deadline_is_independent_of_the_provider_execution_timeout() {
+        let mut source_request = source_request();
+        source_request.limits.timeout_ms = Some(3_600_000);
+        let request = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request,
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-timeout-independence".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        })
+        .follow_up_request
+        .expect("missing form must nudge a follow-up attempt");
+        assert!(request_is_review_form_only(&request));
+        assert_eq!(
+            request.limits.timeout_ms,
+            Some(DEFAULT_REVIEW_FORM_TIMEOUT_MS)
+        );
+        assert_eq!(
+            request.metadata["cook_loop"]["review_form_timeout_ms"],
+            DEFAULT_REVIEW_FORM_TIMEOUT_MS
+        );
     }
 
     #[test]

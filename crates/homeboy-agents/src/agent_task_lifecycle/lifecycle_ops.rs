@@ -1208,13 +1208,13 @@ pub fn record_local_cook_retry_supervisor_in_store(
         {
             return false;
         }
-        record.metadata["local_cook_supervisor"] = json!({
-            "state": "supervising",
-            "job_id": job_id,
-            "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
-            "pinned_run_id": run_id,
-            "reattach_command": format!("homeboy agent-task status {run_id} --full"),
-        });
+        let supervisor = &mut record.ensure_metadata_object()["local_cook_supervisor"];
+        supervisor["state"] = json!("supervising");
+        supervisor["job_id"] = json!(job_id);
+        supervisor["job_type"] = json!(crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE);
+        supervisor["pinned_run_id"] = json!(run_id);
+        supervisor["reattach_command"] =
+            json!(format!("homeboy agent-task status {run_id} --full"));
         true
     })?;
     if updated.is_none() {
@@ -2640,12 +2640,14 @@ where
         metadata,
     };
     let mut preserved_controller_runtime = None;
+    let mut pre_execution_recovery = false;
     let mut pre_execution_runtime_recovery = false;
     if let Ok(existing) = lifecycle_store.read_record(&run_id) {
-        pre_execution_runtime_recovery = execution_runner_id.is_none()
-            && crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
+        pre_execution_recovery =
+            crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                 &existing,
             );
+        pre_execution_runtime_recovery = execution_runner_id.is_none() && pre_execution_recovery;
         // A runner may re-submit the plan after the controller reserved a
         // side-effect claim. Claims are durable exactly-once ownership, not
         // plan-derived state, so replacing the record must retain them.
@@ -2665,6 +2667,21 @@ where
         ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();
+            }
+        }
+        if pre_execution_recovery {
+            // Placement transition is durable continuation authority, not
+            // plan-derived decoration. Re-submitting the original semantic
+            // attempt must not restore its exhausted route over an operator's
+            // explicit local recovery decision (#11897).
+            for key in [
+                "execution_placement_decision",
+                "execution_placement_transition",
+                "transport_admission_reset",
+            ] {
+                if let Some(value) = existing.metadata.get(key) {
+                    record.metadata[key] = value.clone();
+                }
             }
         }
         // A runner re-submitting a retry must not erase the predecessor identity
@@ -2718,6 +2735,14 @@ where
             record.workspace_owner_lease = existing.workspace_owner_lease;
         }
     }
+    if record.metadata["local_cook_supervisor"]["state"] == "supervising"
+        && record.metadata["local_cook_supervisor"]["pinned_run_id"] == run_id
+    {
+        // This process is the daemon-supervised local executor. Publish its
+        // identity in the first visible record rather than leaving a queued or
+        // re-submitted plan temporarily ownerless until `mark_running`.
+        record.record_runner_metadata(false);
+    }
     require_record_workspace_owner_in_store(&workspace_claim_store, &record)?;
     lifecycle_store.write_record(&record)?;
 
@@ -2754,6 +2779,11 @@ where
             if pre_execution_runtime_recovery {
                 record = lifecycle_store
                     .rearm_pre_execution_record_with_runtime(&record, admission.runtime())?;
+            } else if pre_execution_recovery {
+                // Runner execution has its own runtime provenance. Clear the
+                // terminal pre-provider projection without rebinding the
+                // controller pin to the runner's executable (#13552).
+                record = lifecycle_store.rearm_pre_execution_record(&record)?;
             } else {
                 lifecycle_store.write_record(&record)?;
             }
@@ -3058,11 +3088,8 @@ pub fn load_plan_for_execution_in_store(
 /// Validate a queued lifecycle's pinned controller against an explicitly rooted
 /// store.
 ///
-/// The record read and the legacy-pin migration write both follow
-/// `lifecycle_store`. The immutable controller-runtime pin store that
-/// `controller_runtime::validate` consults is deliberately left process-global:
-/// it is a content-addressed executable cache shared across homes, not durable
-/// lifecycle state, so it is not one of this store's roots.
+/// The record read, legacy-pin migration, and immutable controller runtime all
+/// follow `lifecycle_store`.
 pub fn validate_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -3196,7 +3223,8 @@ pub fn pin_current_controller_runtime(
 }
 
 /// Prune immutable controller pins through the durable lifecycle ownership
-/// boundary so nonterminal records remain authoritative retention roots.
+/// boundary so in-flight and pending-mutation records remain authoritative
+/// retention roots.
 ///
 /// Retention policy is resolved by core from the operator's configuration; this
 /// boundary only forwards the overrides an operator typed.
@@ -3247,11 +3275,8 @@ fn migrate_record_controller_runtime_in_store(
 /// against one home's provenance and persisting into another leaves the run this
 /// operator is trying to re-enter still holding the broken pin.
 ///
-/// The immutable controller-runtime store that `recover_pin_and_persist`
-/// republishes into is deliberately left process-global, for the same reason
-/// `validate_controller_runtime_in_store` leaves it alone: it is a
-/// content-addressed executable cache shared across homes, not durable lifecycle
-/// state, so it is not one of this store's roots.
+/// Recovery republishes the immutable pin under this lifecycle store's runtime
+/// root before persisting the repaired reference.
 pub fn recover_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,

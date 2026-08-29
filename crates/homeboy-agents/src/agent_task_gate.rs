@@ -1634,6 +1634,18 @@ pub(crate) fn run_gate_command_with_supervision(
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
+    // Cook's persisted gate deadline is the only deadline policy here. When a
+    // shell gate starts Cargo, propagate it into the hermetic binary runner so
+    // a hung test binary gets the same bound and process-group cleanup.
+    if let Some(supervision) = supervision {
+        let plan =
+            homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                supervision.timeout,
+            )
+            .expect("Cook gate timeout is normalized to a positive duration");
+        let (name, value) = plan.suite_timeout_env();
+        process.env(name, value);
+    }
     if supervision.is_some() && !homeboy_core::engine::command::supports_process_tree_isolation() {
         return Err(Error::validation_invalid_argument(
             "gate_supervision",

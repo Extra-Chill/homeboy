@@ -15,6 +15,16 @@ pub enum ExtensionCapability {
     Fuzz,
     Trace,
     Deps,
+    /// Audit reference setup: resolves the reference dependency paths that
+    /// cross-reference analysis fingerprints but excludes from convention and
+    /// duplication detection.
+    ///
+    /// Unlike the capabilities above, Audit is *aggregating*: a component's
+    /// reference paths are the union of every linked extension's contribution,
+    /// so callers resolve one context per linked extension through
+    /// `resolve_execution_context_for_extension` rather than electing a single
+    /// owner.
+    Audit,
 }
 
 /// Static metadata for an [`ExtensionCapability`] variant.
@@ -66,6 +76,11 @@ impl ExtensionCapability {
                 label: "deps",
                 has_manifest_support: ExtensionManifest::has_deps,
                 script_path: ExtensionManifest::deps_script,
+            },
+            ExtensionCapability::Audit => ExtensionCapabilityDescriptor {
+                label: "audit",
+                has_manifest_support: ExtensionManifest::has_audit,
+                script_path: ExtensionManifest::audit_script,
             },
         }
     }

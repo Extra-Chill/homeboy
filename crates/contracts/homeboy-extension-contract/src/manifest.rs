@@ -61,6 +61,20 @@ pub struct ExtensionManifest {
     // Capability groups
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy: Option<DeployCapability>,
+    /// Recipe-run providers this extension publishes.
+    ///
+    /// Typed since #13724. Malformed entries are retained rather than rejected
+    /// so `runner recipe-providers` can name the broken declaration instead of
+    /// reporting the whole manifest as unreadable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recipe_run_providers: Vec<RecipeRunProviderDeclaration>,
+    /// Deployment providers this extension publishes.
+    ///
+    /// Typed since #13723. While this rode in `extra`, a malformed descriptor
+    /// was `.ok()`-discarded and surfaced as "extension declares no providers",
+    /// which is indistinguishable from a correct manifest that declares none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployment_providers: Vec<DeploymentProviderManifest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,9 +199,13 @@ pub struct ExtensionManifest {
     /// extension published against a newer or older core still deserializes.
     ///
     /// This is a *forward-compatibility buffer*, not an extension point. Core
-    /// reads exactly two keys out of it — `deployment_providers`
-    /// (`manifest::deployment_providers`) and the legacy camelCase `sourceUrl`
+    /// reads exactly one key out of it — the legacy camelCase `sourceUrl`
     /// (`lifecycle::source_metadata`) — and nothing else in here has a reader.
+    /// `deployment_providers` (#13723) and `recipe_run_providers` (#13724) were
+    /// the other two and are now typed fields.
+    ///
+    /// With only a legacy alias left, a key appearing here is a key nothing
+    /// will ever act on.
     ///
     /// Landing anything else here makes it inert *silently*, which is how
     /// shipped manifests accumulated `required_output_declarations` (26 lines),
@@ -333,6 +351,18 @@ impl ExtensionManifest {
             .is_some()
     }
 
+    /// Whether this extension contributes audit reference paths.
+    ///
+    /// An `audit` block that only carries detector rules, ignore patterns, or
+    /// doc targets is not an executable audit capability — only
+    /// `setup_references` is.
+    pub fn has_audit(&self) -> bool {
+        self.audit
+            .as_ref()
+            .and_then(|c| c.setup_references.as_ref())
+            .is_some()
+    }
+
     pub fn lint_script(&self) -> Option<&str> {
         self.lint
             .as_ref()
@@ -380,6 +410,12 @@ impl ExtensionManifest {
         self.trace
             .as_ref()
             .and_then(|c| c.extension_script.as_deref())
+    }
+
+    pub fn audit_script(&self) -> Option<&str> {
+        self.audit
+            .as_ref()
+            .and_then(|c| c.setup_references.as_deref())
     }
 
     pub fn trace_runner_capabilities(&self) -> &[String] {
@@ -493,13 +529,6 @@ impl ExtensionManifest {
             .as_ref()
             .map(|e| e.inputs.as_slice())
             .unwrap_or(&[])
-    }
-
-    /// Convenience: get audit reference setup script path (relative to extension dir).
-    pub fn audit_setup_references(&self) -> Option<&str> {
-        self.audit
-            .as_ref()
-            .and_then(|a| a.setup_references.as_deref())
     }
 
     /// Convenience: get audit ignore claim patterns (empty if no audit capability).

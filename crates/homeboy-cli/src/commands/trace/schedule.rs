@@ -107,6 +107,7 @@ fn plan_str_input<'a>(plan: &'a HomeboyPlan, key: &str) -> &'a str {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum TraceVariantMatrixMode {
     #[default]
     None,
@@ -115,11 +116,30 @@ pub enum TraceVariantMatrixMode {
 }
 
 impl TraceVariantMatrixMode {
+    /// This mode as its canonical wire string. Serde and this allocation-free
+    /// output helper are pinned together below (#13400).
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Single => "single",
             Self::Cumulative => "cumulative",
         }
+    }
+}
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::TraceVariantMatrixMode;
+
+    #[test]
+    fn trace_variant_matrix_mode_matches_its_serialized_form() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                TraceVariantMatrixMode::None,
+                TraceVariantMatrixMode::Single,
+                TraceVariantMatrixMode::Cumulative,
+            ]
+        );
     }
 }

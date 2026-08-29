@@ -57,6 +57,7 @@ mod runtime_tool_resolution;
 mod runtime_types;
 mod secret_types;
 mod secrets;
+pub mod structured_error;
 mod types;
 mod usage_cap;
 mod workspace_types;
@@ -79,8 +80,8 @@ pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
 pub use credential_readiness::{
     preflight_discovered_provider_credentials_for_backend, preflight_provider_credentials,
     preflight_provider_credentials_for_backend, provider_credential_readiness,
-    AgentTaskProviderCredentialReadiness, AgentTaskProviderCredentialRequirement,
-    AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
+    provider_required_secret_env_names, AgentTaskProviderCredentialReadiness,
+    AgentTaskProviderCredentialRequirement, AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
 };
 pub use dispatchability::{
     evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
@@ -115,9 +116,14 @@ pub use secrets::{
     provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers,
 };
+pub use structured_error::{
+    normalize_provider_error, normalize_runtime_stream_error,
+    normalized_error_failure_classification, normalized_structured_error,
+    structured_error_failure_classification, PROVIDER_ACCOUNT_BLOCKED, PROVIDER_ERROR,
+    PROVIDER_RATE_LIMITED, PROVIDER_STRUCTURED_ERROR_SCHEMA,
+};
 pub(crate) use types::wildcard_match;
 pub use types::*;
-use types::{default_metadata, is_empty_metadata};
 pub use usage_cap::{
     detect_usage_cap, provider_usage_cap_key, reset_at_from_outcome, ProviderUsageCapRegistry,
     AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS,

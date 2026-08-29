@@ -36,9 +36,7 @@ use homeboy::agents::agent_tasks::gate::{
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider::{self, AgentTaskProviderCatalog};
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskPlan, SharedAgentTaskExecutor};
-use homeboy::agents::agent_tasks::service::{
-    self as agent_task_service, AgentTaskCookServiceOptions,
-};
+use homeboy::agents::agent_tasks::service::{self as agent_task_service, CookRequest};
 use homeboy::agents::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
@@ -57,8 +55,9 @@ use crate::commands::utils::response::{CommandNextAction, CommandNextActionKind}
 use super::super::CmdResult;
 use super::args::{
     AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
-    AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs, AgentTaskFanoutRunPlanArgs,
-    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs, VERIFICATION_PROFILES_EXAMPLE,
+    AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs, AgentTaskFanoutPlanArgs,
+    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
+    VERIFICATION_PROFILES_EXAMPLE,
 };
 use super::command_json_value;
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
@@ -77,9 +76,32 @@ pub(crate) fn fanout_with_placement(
             cook_batch_with_placement(*cook_batch_args, placement)
         }
         AgentTaskFanoutCommand::Plan(plan_args) => {
+            // `fanout plan` accepts the same --repo plus issue-URL inputs
+            // cook-batch accepts; those route through cook-batch's fully
+            // static preview planner so both surfaces validate identically
+            // (#13704). A persisted plan input keeps the read-only
+            // normalize-and-inspect contract below.
+            if !plan_args.issues.is_empty() {
+                return cook_batch_with_placement(plan_args.into_cook_batch_preview(), placement);
+            }
+            let AgentTaskFanoutPlanArgs {
+                input,
+                fanout_id,
+                backend,
+                selector,
+                model,
+                ..
+            } = plan_args;
+            let load_args = AgentTaskFanoutInputArgs {
+                input: input.unwrap_or_default(),
+                fanout_id,
+                backend,
+                selector,
+                model,
+            };
             // A private controller artifact is accepted only from its owned path,
             // then immediately projected before this read-only response renders.
-            let plan = load_batch_cook_fanout_plan(&plan_args.input, true)?;
+            let plan = load_batch_cook_fanout_plan(&load_args, true)?;
             Ok((command_json_value(public_batch_cook_plan(&plan))?, 0))
         }
         AgentTaskFanoutCommand::Submit(submit_args) => submit_batch_cook_fanout(submit_args),
@@ -147,7 +169,7 @@ fn fanout_placement_preflight(placement: Option<&PlacementDirective>) -> Value {
 }
 
 type CookAttemptDispatcherFactory = dyn Fn(
-        &AgentTaskCookServiceOptions,
+        &CookRequest,
     ) -> std::sync::Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
     + Send
     + Sync;
@@ -461,9 +483,13 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
             report.status = state.outcome_status().to_string();
         }
     }
-    let exit_code = report.batch.state.exit_code();
-    // `status` is a read-only projection. Durable reconciliation and any child
-    // continuation are intentionally limited to the explicit `resume` command.
+    // `status` is a read. The operation either returned the requested batch
+    // projection (exit 0) or failed and names its cause through `Err`
+    // (#13702). The batch's own aggregate state — including `failed` — is
+    // subject state: it stays in `data.batch`, never in the transport
+    // envelope's success/exit_code.
+    // The mutating `resume` command keeps the aggregate exit policy, and
+    // durable reconciliation / child continuation stay limited to it.
     let portfolio = reconcile_portfolio(&report.batch)?;
     Ok((
         serde_json::json!({
@@ -472,7 +498,7 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
             "portfolio": portfolio,
             "commands": batch_commands(&args.batch_id, placement),
         }),
-        exit_code,
+        0,
     ))
 }
 
@@ -1765,10 +1791,7 @@ fn validate_batch_gate_contracts(
     )
 }
 
-fn record_gate_contract_validation(
-    options: &mut AgentTaskCookServiceOptions,
-    validation: &GateContractValidation,
-) {
+fn record_gate_contract_validation(options: &mut CookRequest, validation: &GateContractValidation) {
     options.initial_plan.metadata["gate_contract_validation"] =
         serde_json::to_value(validation).expect("gate contract validation serializes");
 }
@@ -1898,7 +1921,7 @@ fn notify_batch_wave_complete(
 /// without reconstructing mutable operator input or re-planning a branch.
 fn persist_batch_cook_recipes(
     plan: &BatchCookFanoutPlan,
-    configure: impl Fn(&mut AgentTaskCookServiceOptions),
+    configure: impl Fn(&mut CookRequest),
 ) -> Result<()> {
     for options in compile_batch_cooks(plan, configure)? {
         agent_task_service::persist_initial_recipe(&options)?;
@@ -1932,8 +1955,8 @@ fn batch_harvest_context() -> Result<homeboy::agents::agent_task_scheduler::Harv
 
 fn compile_batch_cooks(
     plan: &BatchCookFanoutPlan,
-    configure: impl Fn(&mut AgentTaskCookServiceOptions),
-) -> Result<Vec<AgentTaskCookServiceOptions>> {
+    configure: impl Fn(&mut CookRequest),
+) -> Result<Vec<CookRequest>> {
     let harvest_context = batch_harvest_context()?;
     let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
     plan.cooks
@@ -2056,7 +2079,7 @@ fn attach_fanout_placement_decision(
 /// scheduler apply one rule rather than two.
 fn batch_concurrency(
     plan: &BatchCookFanoutPlan,
-    cooks: &[AgentTaskCookServiceOptions],
+    cooks: &[CookRequest],
 ) -> BatchConcurrencyDecision {
     // A batch coordinator commits nothing before it starts, so the budget is
     // read at zero active units. The budget itself is the children's own, taken
@@ -2169,7 +2192,7 @@ fn cook_batch_inner(
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
     placement: Placement,
 ) -> CmdResult<Value> {
-    if args.dry_run {
+    if args.preview {
         return cook_batch_dry_run(args, placement);
     }
     args.gates.snapshot_file_inputs()?;
@@ -2187,7 +2210,7 @@ fn cook_batch_inner(
         .cooks
         .iter()
         .any(|cook| !cook.private_verify.is_empty());
-    let persisted = args.run_plan && !args.dry_run;
+    let persisted = args.run_plan && !args.preview;
     let claim = persisted
         .then(|| claim_fanout_run_batch_coordinator(&plan, placement))
         .transpose()?;
@@ -2249,7 +2272,7 @@ fn cook_batch_inner(
             }),
         )?;
     }
-    let can_run = !args.dry_run
+    let can_run = !args.preview
         && blocked == 0
         && worktrees
             .rows
@@ -2320,7 +2343,7 @@ fn cook_batch_inner(
             .unwrap_or("completed")
     } else if blocked > 0 {
         "blocked"
-    } else if args.dry_run {
+    } else if args.preview {
         "ready"
     } else {
         "ready"
@@ -2339,7 +2362,7 @@ fn cook_batch_inner(
                 "schema": "homeboy/agent-task-cook-batch/v1",
                 "fanout_id": plan.fanout_id,
                 "status": status,
-                "dry_run": args.dry_run,
+                "dry_run": args.preview,
                 "summary": {
                     "issues": plan.cooks.len(),
                      "worktrees_total": worktrees.rows.len(),
@@ -2350,11 +2373,11 @@ fn cook_batch_inner(
                 "causal_failures": causal_failures,
                 "preflight": {
                     "default_branch": args.base_resolution.clone(),
-                "provider_readiness_command": provider_readiness_command(&args),
-                "provider_selection": provider_selection_preflight(&args),
-                "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
-                "placement": fanout_placement_preflight(plan.placement.as_ref()),
-                "deterministic_gates": effective_batch_cook_gates(&plan)
+                    "provider_readiness_command": provider_readiness_command(&args),
+                    "provider_selection": provider_selection_preflight(&args),
+                    "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
+                    "placement": fanout_placement_preflight(plan.placement.as_ref()),
+                    "deterministic_gates": effective_batch_cook_gates(&plan)
                 },
                 "worktrees": worktrees,
                 "worktree_resolution": worktree_resolution,
@@ -2961,8 +2984,8 @@ fn cook_batch_argv_with_placement(
             value.to_string(),
         ]);
     }
-    if args.dry_run {
-        command.push("--dry-run".to_string());
+    if args.preview {
+        command.push("--preview".to_string());
     }
     if args.run_plan {
         command.push("--run-plan".to_string());
@@ -3093,9 +3116,10 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
     retry: bool,
 ) -> Result<(worktree::WorktreeQueueCreateOutput, Value)> {
     let provider_workspace_creation = configured_provider_workspace_creation()?;
+    let provision_repo = cook_batch_provision_repository(&args.repo, provider_workspace_creation)?;
     let queue_create = |cooks: Vec<&BatchCookSpec>, dry_run: bool| {
         worktree::queue_create(worktree::WorktreeQueueCreateOptions {
-            repo: args.repo.clone(),
+            repo: provision_repo.clone(),
             requests: cooks.into_iter().map(|cook| worktree::WorktreeQueueCreateRequest {
                 branch: cook.head.clone().expect("generated cooks have heads"),
                 task_url: cook.task_url.clone(),
@@ -3115,7 +3139,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
         })
     };
 
-    if args.dry_run {
+    if args.preview {
         let worktrees = static_worktrees_dry_run(args, plan);
         let states = worktrees
             .rows
@@ -3324,7 +3348,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
         plan,
         worktree::WorktreeQueueCreateOutput {
             schema: "homeboy/worktree-queue-create/v1",
-            repo: args.repo.clone(),
+            repo: provision_repo,
             base_ref: cook_batch_from(args).to_string(),
             dry_run: false,
             rows,
@@ -3426,6 +3450,7 @@ fn with_workspace_owner_repair_commands(
     }
 
     let config = homeboy::core::defaults::load_config();
+    let provision_repo = cook_batch_provision_repository(&args.repo, true)?;
     for row in &mut worktrees.rows {
         // An empty command on a created row is explicit evidence that current
         // provider authority resolved the exact destination. Do not replace it
@@ -3448,7 +3473,7 @@ fn with_workspace_owner_repair_commands(
         };
         let intent = homeboy::core::worktree_provider::WorktreeProvisionIntent {
             handle: row.handle.clone(),
-            repo: args.repo.clone(),
+            repo: provision_repo.clone(),
             base: cook_batch_from(args).to_string(),
             head: row.branch.clone(),
             task_url: cook
@@ -3468,6 +3493,20 @@ fn with_workspace_owner_repair_commands(
             )?;
     }
     Ok(worktrees)
+}
+
+fn cook_batch_provision_repository(
+    repo: &str,
+    provider_workspace_creation: bool,
+) -> Result<String> {
+    if !provider_workspace_creation {
+        return Ok(repo.to_string());
+    }
+    Ok(homeboy::core::component::registered_by_id(repo)?
+        .and_then(|component| component.remote_url)
+        .map(|remote| super::run::normalize_repository_name(&remote))
+        .filter(|repository| !repository.is_empty())
+        .unwrap_or_else(|| repo.to_string()))
 }
 
 fn configured_provider_workspace_creation() -> Result<bool> {
@@ -4194,7 +4233,7 @@ struct BatchCookWorkspaceMaterialization {
 #[derive(Debug, Clone)]
 struct BatchCookInvocation {
     dispatch: AgentTaskDispatchCommand,
-    options: AgentTaskCookServiceOptions,
+    options: CookRequest,
 }
 
 impl BatchCookSpec {
@@ -4236,15 +4275,21 @@ impl BatchCookSpec {
         let mut prompt = self.prompt.clone();
         let workspace_root = self.workspace.as_deref().or(self.cwd.as_deref());
         let mut provider_config = self.provider_config.clone();
-        if let Some(workspace) = workspace_root {
+        if workspace_root.is_some() {
             let admitted_evidence =
                 super::run::admit_provider_evidence_inputs(&self.provider_evidence_inputs)?;
             let evidence = super::run::project_admitted_provider_evidence_inputs(
                 &self.provider_evidence_inputs,
                 &admitted_evidence,
-                Path::new(workspace),
             )?;
             let projected_paths = super::run::projected_provider_evidence_paths(&evidence);
+            super::run::rewrite_provider_evidence_prompt(
+                &mut prompt,
+                &self.provider_evidence_inputs,
+                &admitted_evidence,
+                &evidence,
+                &projected_paths,
+            )?;
             if !evidence.is_empty() {
                 let raw = provider_config.as_deref().unwrap_or("{}");
                 let mut config: Value = homeboy::core::config::read_json_spec_to_string(raw)
@@ -4257,13 +4302,6 @@ impl BatchCookSpec {
                 config["evidence_inputs"] = serde_json::Value::Array(evidence);
                 provider_config = Some(config.to_string());
             }
-            super::run::rewrite_provider_evidence_prompt(
-                &mut prompt,
-                &self.provider_evidence_inputs,
-                &admitted_evidence,
-                Some(workspace),
-                &projected_paths,
-            )?;
         }
         let dispatch = AgentTaskDispatchCommand {
             prompt,
@@ -4323,7 +4361,7 @@ impl BatchCookSpec {
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
         Ok(BatchCookInvocation {
             dispatch,
-            options: AgentTaskCookServiceOptions {
+            options: CookRequest {
                 cook_id: self.run_id(),
                 initial_run_id: self.run_id(),
                 initial_plan: AgentTaskPlan::new(self.run_id(), Vec::new()),
@@ -4490,6 +4528,11 @@ fn build_cook_batch_plan_with_profiles(
 ) -> Result<BatchCookFanoutPlan> {
     let (repository, component_id, repository_identity) =
         super::run::cook_repository_identity_for_selection(&args.repo, args.component.as_deref())?;
+    // Provider-owned workspaces name handles by canonical repository, so
+    // canonicalize the identity-resolved repository rather than the raw `--repo`
+    // selector. Component selection has already been validated above.
+    let worktree_repo =
+        cook_batch_provision_repository(&repository, configured_provider_workspace_creation()?)?;
     let bindings = parse_explicit_worktree_bindings(&args.worktrees)?;
     if !bindings.is_empty()
         && bindings
@@ -4515,7 +4558,7 @@ fn build_cook_batch_plan_with_profiles(
             issue.number,
             slugify(&issue.repo)
         );
-        let worktree = format!("{}@{}", repository, slugify(&branch));
+        let worktree = format!("{}@{}", worktree_repo, slugify(&branch));
         let explicit_worktree = bindings.get(issue_url).cloned();
         let prompt = render_prompt(
             args.prompt_template.as_deref(),
@@ -5316,7 +5359,7 @@ fn worktree_create_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) ->
 
 fn cook_batch_plan_command(args: &AgentTaskFanoutCookBatchArgs, placement: Placement) -> String {
     let mut planned = args.clone();
-    planned.dry_run = true;
+    planned.preview = true;
     planned.run_plan = false;
     quote_args(&cook_batch_argv_with_placement(&planned, placement))
 }
@@ -5467,7 +5510,7 @@ fn cook_batch_run_command_with_placement(
     placement: Placement,
 ) -> String {
     let mut runnable = args.clone();
-    runnable.dry_run = false;
+    runnable.preview = false;
     runnable.run_plan = true;
     quote_args(&cook_batch_argv_with_placement(&runnable, placement))
 }
@@ -6006,7 +6049,7 @@ mod tests {
 
             let mut dry = cook_batch_args();
             dry.verification_profiles = Some(profiles.clone());
-            dry.dry_run = true;
+            dry.preview = true;
             let plan = build_cook_batch_plan(&dry).expect("profile plan");
             let public = serde_json::to_string(&public_batch_cook_plan(&plan)).unwrap();
             assert!(!public.contains(sentinel));
@@ -6022,7 +6065,7 @@ mod tests {
         with_materialized_cook_batch_worktrees(|| {
             let mut executable = cook_batch_args();
             executable.verification_profiles = Some(profiles);
-            executable.dry_run = false;
+            executable.preview = false;
             executable.run_plan = false;
             let resolved = build_cook_batch_plan(&executable).expect("resolve executable profile");
             assert!(resolved
@@ -6089,7 +6132,7 @@ mod tests {
             let sentinel = "PRIVATE_UNPERSISTED_SENTINEL";
             let mut args = cook_batch_args();
             args.gates.private_verify = vec![sentinel.to_string()];
-            args.dry_run = true;
+            args.preview = true;
             let artifact = private_batch_plan_path("issue-wave").expect("artifact path");
             assert!(!artifact.exists(), "dry-run begins without an artifact");
             let commands = cook_batch_commands(&args, true, None);
@@ -6330,7 +6373,9 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn provider_finalization_fixture() -> (tempfile::TempDir, PathBuf, BatchCookFanoutPlan) {
+    fn provider_finalization_fixture(
+        dirty: bool,
+    ) -> (tempfile::TempDir, PathBuf, BatchCookFanoutPlan) {
         let fixture = tempfile::tempdir().expect("provider fixture");
         let workspace = fixture.path().join("workspace");
         let records = fixture.path().join("records");
@@ -6345,8 +6390,9 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"{}\",\"branch\":\"fixture\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\"\nelse\n  printf '%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"{}\",\"branch\":\"fixture\",\"safety\":{{\"dirty\":{},\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\"\nelse\n  printf '%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
                 workspace.display(),
+                dirty,
                 records.display(),
             ),
         )
@@ -6405,7 +6451,7 @@ mod tests {
     #[test]
     fn dispatcher_fanout_terminalization_finalizes_success_and_failure_provider_records() {
         with_isolated_home(|_| {
-            let (_fixture, records, plan) = provider_finalization_fixture();
+            let (_fixture, records, plan) = provider_finalization_fixture(false);
             let report = agent_task_service::AgentTaskCookBatchReport {
                 schema: "homeboy/agent-task-cook-batch/v1",
                 batch_id: plan.fanout_id.clone(),
@@ -6455,10 +6501,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn dispatcher_fanout_finalizes_a_terminal_provider_owned_dirty_candidate() {
+        with_isolated_home(|_| {
+            let (_fixture, records, mut plan) = provider_finalization_fixture(true);
+            plan.cooks.truncate(1);
+            let cook = &plan.cooks[0];
+            let report = agent_task_service::AgentTaskCookBatchReport {
+                schema: "homeboy/agent-task-cook-batch/v1",
+                batch_id: plan.fanout_id.clone(),
+                status: "succeeded".to_string(),
+                total: 1,
+                queued: 0,
+                running: 0,
+                succeeded: 1,
+                failed: 0,
+                cancelled: 0,
+                timed_out: 0,
+                cooks: vec![agent_task_service::AgentTaskCookBatchCellReport {
+                    cook_id: cook.cook_id.clone(),
+                    initial_run_id: cook.run_id(),
+                    status: "succeeded".to_string(),
+                    exit_code: 0,
+                    result: None,
+                    error: None,
+                }],
+            };
+
+            finalize_provider_worktrees(&plan, &report, None)
+                .expect("terminal owner may finalize its dirty candidate");
+
+            let records = std::fs::read_to_string(records).expect("provider finalization record");
+            assert!(records.contains(&format!(
+                "homeboy@{}|agent_task_cook|{}|remove_on_success|succeeded|finalize:{}",
+                cook.cook_id,
+                cook.run_id(),
+                cook.run_id(),
+            )));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dispatcher_fanout_execution_finalizes_failed_provider_lifecycle() {
         with_isolated_home(|home| {
             install_fanout_agent_task_providers(home.path());
-            let (_fixture, records, mut plan) = provider_finalization_fixture();
+            let (_fixture, records, mut plan) = provider_finalization_fixture(false);
             plan.cooks.truncate(1);
             let dispatcher: &CookAttemptDispatcherFactory =
                 &|_| std::sync::Arc::new(FailingFanoutDispatcher);
@@ -7294,7 +7381,7 @@ fi
             verification_profiles: None,
             max_concurrency: None,
             max_duration: None,
-            dry_run: true,
+            preview: true,
             dry_run_planner_timeout_seconds: None,
             run_plan: false,
         }
@@ -7772,11 +7859,24 @@ fi
     }
 
     fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
+        write_component_registration_with_identity(home, id, local_path, None);
+    }
+
+    fn write_component_registration_with_identity(
+        home: &Path,
+        id: &str,
+        local_path: &Path,
+        remote_url: Option<&str>,
+    ) {
         let components = home.join(".config/homeboy/components");
         std::fs::create_dir_all(&components).expect("components directory");
         std::fs::write(
             components.join(format!("{id}.json")),
-            serde_json::json!({ "local_path": local_path }).to_string(),
+            serde_json::json!({
+                "local_path": local_path,
+                "remote_url": remote_url,
+            })
+            .to_string(),
         )
         .expect("component registration");
     }
@@ -7885,6 +7985,109 @@ fi
             path.repo = primary.to_string_lossy().to_string();
             normalize_cook_batch_repo(&mut path).expect("primary path resolves");
             assert_eq!(path.repo, "fixture");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fanout_keeps_component_identity_but_provisions_its_repository() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_isolated_home(|home| {
+            let primary = home.path().join("blocks-engine");
+            let component = primary.join("php-transformer");
+            std::fs::create_dir_all(&component).expect("nested component directory");
+            init_git_primary(&primary);
+            write_component_registration_with_identity(
+                home.path(),
+                "php-transformer",
+                &component,
+                Some("https://github.com/example/blocks-engine.git"),
+            );
+
+            let mut args = cook_batch_args();
+            args.repo = "php-transformer".to_string();
+            normalize_cook_batch_repo(&mut args).expect("component identity resolves");
+            assert_eq!(args.repo, "blocks-engine");
+            assert_eq!(args.component.as_deref(), Some("php-transformer"));
+            assert_eq!(
+                cook_batch_provision_repository(&args.repo, true).expect("provider repository"),
+                "blocks-engine"
+            );
+
+            let provider = home.path().join("dmc-worktree-provider");
+            std::fs::write(&provider, "#!/bin/sh\nexit 1\n").expect("provider fixture");
+            let mut permissions = std::fs::metadata(&provider)
+                .expect("provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).expect("provider executable");
+            let mut config = homeboy::core::defaults::HomeboyConfig::default();
+            config.worktree_providers.insert(
+                "dmc".to_string(),
+                homeboy::core::defaults::WorktreeProviderConfig {
+                    enabled: true,
+                    kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                    apply_enabled: true,
+                    lookup_timeout_ms: 10_000,
+                    mutation_timeout_ms: 30_000,
+                    lookup_output_limit_bytes: 64 * 1024,
+                    commands: homeboy::core::defaults::WorktreeProviderCommands {
+                        resolve: Some(vec![
+                            provider.display().to_string(),
+                            "resolve".to_string(),
+                            "{handle}".to_string(),
+                        ]),
+                        resolve_not_found_exit_codes: vec![1],
+                        ensure: Some(vec![
+                            provider.display().to_string(),
+                            "ensure".to_string(),
+                            "{repo}".to_string(),
+                            "{handle}".to_string(),
+                            "{base}".to_string(),
+                            "{head}".to_string(),
+                            "{task_url}".to_string(),
+                            "{idempotency_key}".to_string(),
+                            "{purpose}".to_string(),
+                            "{owner_run_ref}".to_string(),
+                            "{cleanup_policy}".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                    list_result_mapping: Some(
+                        homeboy::core::defaults::WorktreeProviderListResultMapping {
+                            items: "$.worktrees".to_string(),
+                            handle: "$.handle".to_string(),
+                            path: "$.path".to_string(),
+                            branch: "$.branch".to_string(),
+                            dirty: "$.safety.dirty".to_string(),
+                            unpushed: "$.safety.unpushed".to_string(),
+                            primary: "$.safety.primary".to_string(),
+                            task_url: None,
+                        },
+                    ),
+                },
+            );
+            homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+            let plan = build_cook_batch_plan(&args).expect("fanout plan");
+            assert!(plan.cooks.iter().all(|cook| {
+                cook.repo.as_deref() == Some("blocks-engine")
+                    && cook.component_id.as_deref() == Some("php-transformer")
+                    && cook.to_worktree.starts_with("blocks-engine@")
+            }));
+            args.preview = false;
+            let worktrees = queue_or_reuse_worktrees(&args, &plan).expect("provider worktrees");
+            assert_eq!(worktrees.repo, "blocks-engine");
+            assert!(worktrees
+                .rows
+                .iter()
+                .zip(&plan.cooks)
+                .all(|(row, cook)| { row.handle == cook.to_worktree }));
+            assert!(worktrees.rows.iter().all(|row| {
+                row.command.iter().any(|arg| arg == "blocks-engine")
+                    && !row.command.iter().any(|arg| arg == "php-transformer")
+            }));
         });
     }
 
@@ -8320,7 +8523,7 @@ fi
             args.issues = (6453..=6458)
                 .map(|number| format!("https://github.com/Extra-Chill/homeboy/issues/{number}"))
                 .collect();
-            args.dry_run = false;
+            args.preview = false;
             let mut plan = build_cook_batch_plan(&args).expect("fanout plan");
             let (worktrees, resolution) =
                 queue_or_reuse_worktrees_with_terminal_paths(&args, &plan, None, false)
@@ -8453,7 +8656,7 @@ fi
             homeboy::core::defaults::save_config(&config).expect("save provider config");
 
             let mut args = cook_batch_args();
-            args.dry_run = false;
+            args.preview = false;
             let plan = build_cook_batch_plan(&args).expect("immutable fanout plan");
             let original_plan = plan.clone();
             let (first_claim, retry) =
@@ -8771,7 +8974,7 @@ fi
             let sentinel = "PRIVATE_GATE_BOUND_PLAN_SENTINEL";
             let mut args = cook_batch_args();
             args.gates.private_verify = vec![sentinel.to_string()];
-            args.dry_run = false;
+            args.preview = false;
             args.run_plan = false;
 
             let (public, exit_code) = cook_batch(args).expect("prepare private batch");
@@ -8923,7 +9126,7 @@ fi
             let mut args = cook_batch_args();
             args.repo = "fixture".to_string();
             args.gates.verify = vec!["homeboy lint fixture --path .".to_string()];
-            args.dry_run = false;
+            args.preview = false;
             let error =
                 cook_batch(args).expect_err("script alias must reject before queuing worktrees");
             assert!(error.message.contains("repository script identity"));
@@ -9321,7 +9524,7 @@ fi
         with_isolated_home(|home| {
             install_fanout_agent_task_providers(home.path());
             let plan = test_batch_plan();
-            let dispatcher = |_: &AgentTaskCookServiceOptions| {
+            let dispatcher = |_: &CookRequest| {
                 std::sync::Arc::new(LabRecipeDispatcher)
                     as std::sync::Arc<
                         dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher,
@@ -9369,7 +9572,7 @@ fi
         let mut args = cook_batch_args();
         args.backend = Some("codebox-nonexistent".to_string());
         args.selector = None;
-        args.dry_run = false;
+        args.preview = false;
         args.run_plan = true;
 
         let catalog = AgentTaskProviderCatalog::default();
@@ -9412,7 +9615,7 @@ fi
         let mut args = cook_batch_args();
         args.backend = Some("opencode".to_string());
         args.selector = Some("dmc".to_string());
-        args.dry_run = false;
+        args.preview = false;
         args.run_plan = true;
         let catalog = AgentTaskProviderCatalog {
             providers: vec![serde_json::from_value(serde_json::json!({
@@ -9440,10 +9643,10 @@ fi
         let catalog = AgentTaskProviderCatalog::default();
         let mut dry_run = cook_batch_args();
         dry_run.backend = Some("sandbox".to_string());
-        dry_run.dry_run = true;
+        dry_run.preview = true;
         dry_run.run_plan = false;
         let mut live = dry_run.clone();
-        live.dry_run = false;
+        live.preview = false;
         live.run_plan = true;
 
         let dry_error = resolve_and_validate_effective_backend_with_catalog(&mut dry_run, &catalog)
@@ -9476,10 +9679,10 @@ fi
         dry_run.selector = None;
         dry_run.model = Some("openai/unsupported".to_string());
         dry_run.secret_env.clear();
-        dry_run.dry_run = true;
+        dry_run.preview = true;
         dry_run.run_plan = false;
         let mut live = dry_run.clone();
-        live.dry_run = false;
+        live.preview = false;
         live.run_plan = true;
 
         let dry_error = resolve_and_validate_effective_backend_with_catalog(&mut dry_run, &catalog)
@@ -9512,10 +9715,10 @@ fi
             dry_run.selector = None;
             dry_run.model = None;
             dry_run.secret_env = vec!["HOMEBOY_TEST_FANOUT_MISSING_CREDENTIAL_13589".to_string()];
-            dry_run.dry_run = true;
+            dry_run.preview = true;
             dry_run.run_plan = false;
             let mut live = dry_run.clone();
-            live.dry_run = false;
+            live.preview = false;
             live.run_plan = true;
 
             let dry_error =
@@ -9548,10 +9751,10 @@ fi
             let mut dry_run = cook_batch_args();
             dry_run.repo = "unregistered-provider-parity".to_string();
             dry_run.backend = None;
-            dry_run.dry_run = true;
+            dry_run.preview = true;
             dry_run.run_plan = false;
             let mut live = dry_run.clone();
-            live.dry_run = false;
+            live.preview = false;
             live.run_plan = true;
 
             let dry_error =
@@ -9590,7 +9793,7 @@ fi
         args.backend = None;
         args.selector = None;
         args.secret_env.clear();
-        args.dry_run = true;
+        args.preview = true;
         args.run_plan = false;
 
         let catalog = AgentTaskProviderCatalog {
@@ -10561,27 +10764,78 @@ fi
             batch::AgentTaskBatchState::Cancelled,
             batch::AgentTaskBatchState::TimedOut,
         ] {
-            let exit_code = state.exit_code();
+            // `fanout status` is a read: it exits 0 and reports `succeeded`
+            // whenever the projection returned, regardless of the batch's own
+            // terminal state (#13702). The subject state stays in `data`.
             let envelope =
-                crate::commands::utils::response::cli_response_for_json_result_for_command(
+                crate::commands::utils::response::cli_response_for_json_result_for_identity(
                     &Ok(json!({
-                        "status": state.outcome_status(),
-                        "batch": { "state": state.outcome_status() }
+                        "schema": "homeboy/agent-task-fanout-status/v2",
+                        "batch": { "status": state.outcome_status(), "batch": { "state": state.outcome_status() } }
                     })),
-                    exit_code,
-                    "agent-task fanout status",
+                    0,
+                    &crate::commands::utils::response::CommandIdentity::with_operation(
+                        "agent-task",
+                        "fanout status",
+                    ),
                     None,
                 );
 
-            assert_eq!(envelope.success, exit_code == 0, "{state:?}");
-            assert_eq!(envelope.exit_code, exit_code, "{state:?}");
-            assert_eq!(envelope.status, state.outcome_status(), "{state:?}");
+            assert!(envelope.success, "{state:?}");
+            assert_eq!(envelope.exit_code, 0, "{state:?}");
+            assert_eq!(envelope.status, "succeeded", "{state:?}");
             assert_eq!(
-                envelope.data.expect("durable status")["batch"]["state"],
+                envelope.data.expect("durable status")["batch"]["batch"]["state"],
                 state.outcome_status(),
                 "{state:?}"
             );
         }
+    }
+
+    /// #13702 direction 2 regression: reading a FAILED batch is a successful
+    /// read. The documented recovery path (`next_actions` prints exactly this
+    /// command) must survive `set -e`.
+    #[test]
+    fn batch_status_read_of_a_failed_batch_is_a_successful_operation() {
+        with_isolated_home(|_| {
+            let batch_id = "read-of-failed-batch";
+            batch::persist_fanout_run_batch(
+                batch_id,
+                batch_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id: "child".to_string(),
+                    run_id: "missing-child-record".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist fanout batch");
+            let claim_id = batch::claim_fanout_run_batch(batch_id)
+                .expect("claim batch")
+                .expect("coordinator claim");
+            batch::record_fanout_run_batch_failure(
+                batch_id,
+                &claim_id,
+                "worktree_preflight",
+                json!({ "message": "fixture failure before first child" }),
+            )
+            .expect("persist coordinator failure");
+
+            let (value, exit_code) = batch_status(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: batch_id.to_string(),
+                },
+                Placement::Auto,
+            )
+            .expect("reading a failed batch must still return its projection");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["batch"]["status"], "failed");
+            assert_eq!(value["batch"]["batch"]["state"], "failed");
+            assert_eq!(
+                value["batch"]["admission_blocker"]["stage"],
+                "worktree_preflight"
+            );
+        });
     }
 
     #[test]

@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::AgentTaskPlan;
 use crate::agent_task_service::cook::{
-    AgentTaskCookAttemptDispatcher, AgentTaskCookServiceOptions,
+    AgentTaskCookAttemptDispatcher, AgentTaskCookServiceOptions, CookMode,
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::{paths, Error, Result};
@@ -297,7 +297,7 @@ impl CookRecipeStore {
                 None,
             ));
         }
-        consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, false)
+        consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, CookMode::Resume)
     }
 }
 
@@ -687,6 +687,7 @@ fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCook
             "max_attempts": options.max_attempts,
             "execution_budget": options.initial_plan.options.execution_budget,
             "policy": options.initial_plan.metadata["cook_retry_policy"],
+            "timeouts": cook_recipe_timeout_disclosure(&options.initial_plan),
         }),
         finalization: serde_json::json!({
             "no_finalize": options.no_finalize,
@@ -1084,12 +1085,37 @@ fn retry_budgets_match(left: &Value, right: &Value) -> bool {
     let mut right = right.clone();
     for budget in [&mut left, &mut right] {
         if let Some(policy) = budget.get_mut("policy").and_then(Value::as_object_mut) {
-            for field in ["requested", "effective", "truncated"] {
+            for field in ["requested", "effective", "truncated", "timeouts"] {
                 policy.remove(field);
             }
         }
+        if let Some(budget) = budget.as_object_mut() {
+            budget.remove("timeouts");
+        }
     }
     left == right
+}
+
+fn cook_recipe_timeout_disclosure(plan: &AgentTaskPlan) -> Value {
+    let limits = plan.tasks.first().map(|task| &task.limits);
+    let provider_timeout_ms = crate::agent_task_timeout::effective_provider_timeout_ms(
+        limits
+            .and_then(|limits| limits.timeout_ms)
+            .or(plan.options.timeout_ms),
+        limits.and_then(|limits| limits.max_runtime_ms),
+    );
+    let review_form_timeout_ms = plan
+        .tasks
+        .first()
+        .map(crate::agent_task_cook_loop::review_form_timeout_ms)
+        .unwrap_or(crate::agent_task_cook_loop::DEFAULT_REVIEW_FORM_TIMEOUT_MS);
+    serde_json::json!({
+        "provider_timeout_ms": provider_timeout_ms,
+        "review_form_timeout_ms": review_form_timeout_ms,
+        "review_form_timeout_cap_ms": crate::agent_task_cook_loop::MAX_REVIEW_FORM_TIMEOUT_MS,
+        "review_form_provider_budget_scope": "fresh_cook_review",
+        "review_form_provider_budget_is_distinct": true,
+    })
 }
 
 fn attempt_inputs_match(
@@ -1436,7 +1462,29 @@ pub fn reconcile_recipe_attempt_for_continuation(
     recipe: &AgentTaskCookRecipe,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    let record = super::cook_pre_execution::recover_recipe_attempt(run_id)?.ok_or_else(|| {
+    let recipe_store = CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    reconcile_recipe_attempt_for_continuation_in_stores(
+        &recipe_store,
+        &lifecycle_store,
+        recipe,
+        run_id,
+    )
+}
+
+fn reconcile_recipe_attempt_for_continuation_in_stores(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let record = super::cook_pre_execution::recover_recipe_attempt_with_stores(
+        recipe_store,
+        lifecycle_store,
+        run_id,
+    )?
+    .ok_or_else(|| {
         Error::internal_unexpected(
             "Cook recipe unexpectedly disappeared during continuation recovery",
         )
@@ -1445,15 +1493,19 @@ pub fn reconcile_recipe_attempt_for_continuation(
     // Promotion has copied and verified the selected artifact into the
     // controller-owned destination. Once its gates are green, finalization no
     // longer consumes the provider aggregate's artifact transport.
-    let finalized_candidate = super::cook_promotion::persisted_promotion_for_attempt(run_id)?
-        .is_some_and(|promotion| {
-            promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-                && promotion.finalization_eligible(false)
-        });
+    let finalized_candidate =
+        super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
+            .is_some_and(|promotion| {
+                promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                    && promotion.finalization_eligible(false)
+            });
     if finalized_candidate {
         return Ok(record);
     }
-    if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(run_id)? {
+    if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness_in_store(
+        lifecycle_store,
+        run_id,
+    )? {
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
             format!(
@@ -2173,7 +2225,13 @@ pub fn consume_claimed_terminal_with_dispatcher(
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
 ) -> Result<i32> {
-    consume_claimed_with_dispatcher_policy(&default_store()?, claim, dispatcher, execute, true)
+    consume_claimed_with_dispatcher_policy(
+        &default_store()?,
+        claim,
+        dispatcher,
+        execute,
+        CookMode::ContinueTerminal,
+    )
 }
 
 fn consume_claimed_with_dispatcher_policy(
@@ -2181,8 +2239,10 @@ fn consume_claimed_with_dispatcher_policy(
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
-    allow_historical_terminal: bool,
+    mode: CookMode,
 ) -> Result<i32> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
     let recipe = match store.load_recipe(&claim.continuation().cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
@@ -2197,7 +2257,7 @@ fn consume_claimed_with_dispatcher_policy(
             return Err(error);
         }
     };
-    let options = match if allow_historical_terminal {
+    let options = match if matches!(mode, CookMode::ContinueTerminal | CookMode::Adopt) {
         reconstruct_adoption_options_with_dispatcher(&recipe, attempt_dispatcher)
     } else {
         reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)
@@ -2213,7 +2273,7 @@ fn consume_claimed_with_dispatcher_policy(
         }
     };
     let mut options = options;
-    if allow_historical_terminal {
+    if matches!(mode, CookMode::ContinueTerminal | CookMode::Adopt) {
         // A newer coordinator may finish an accepted terminal candidate, but it
         // must never replay provider work under a different runtime generation.
         options.max_attempts = recipe
@@ -2222,10 +2282,16 @@ fn consume_claimed_with_dispatcher_policy(
             .map(|attempt| attempt.attempt)
             .unwrap_or(0);
     }
-    if agent_task_lifecycle::run_record_exists(&claim.continuation().run_id)? {
-        if let Err(error) =
-            reconcile_recipe_attempt_for_continuation(&recipe, &claim.continuation().run_id)
-        {
+    if agent_task_lifecycle::run_record_exists_in_store(
+        &lifecycle_store,
+        &claim.continuation().run_id,
+    )? {
+        if let Err(error) = reconcile_recipe_attempt_for_continuation_in_stores(
+            store,
+            &lifecycle_store,
+            &recipe,
+            &claim.continuation().run_id,
+        ) {
             if error.retryable == Some(true) {
                 claim.retry()?;
             } else {
@@ -3110,7 +3176,7 @@ mod tests {
                 observed = Some(options);
                 Ok(0)
             },
-            true,
+            CookMode::ContinueTerminal,
         )
         .unwrap();
 

@@ -45,17 +45,6 @@ pub enum ScopeContext {
     Manual,
 }
 
-impl ScopeContext {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ScopeContext::PullRequest => "pr",
-            ScopeContext::Push => "push",
-            ScopeContext::Cron => "cron",
-            ScopeContext::Manual => "manual",
-        }
-    }
-}
-
 /// Whether the run should be scoped to changed files or run fully.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,15 +53,6 @@ pub enum ScopeMode {
     Changed,
     /// The whole component.
     Full,
-}
-
-impl ScopeMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ScopeMode::Changed => "changed",
-            ScopeMode::Full => "full",
-        }
-    }
 }
 
 /// Provider-agnostic description of a CI event, normalized from whatever the

@@ -12,15 +12,21 @@ use super::secrets::{
 use super::*;
 use homeboy_engine_primitives::content_hash;
 
+/// The discovered catalog, keyed by the config root it was discovered from.
+///
+/// Providers come from agent-runtime manifests under the config root, so a
+/// catalog is only valid for the root that produced it. Caching it unkeyed made
+/// the first root a process ever looked at answer for every later one, which is
+/// invisible in production (one root per process) and load-bearing under test,
+/// where each hermetic home is a new root in the same process.
 #[cfg(not(test))]
-static PROVIDER_CATALOG: OnceLock<RwLock<AgentTaskProviderCatalog>> = OnceLock::new();
+static PROVIDER_CATALOG: OnceLock<RwLock<Option<(PathBuf, AgentTaskProviderCatalog)>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionProviderAgentTaskExecutor {
     providers: Vec<AgentTaskExecutorProvider>,
     diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
-    #[cfg(test)]
-    pub(super) path_roots: Option<homeboy_core::paths::PathRoots>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,8 +42,16 @@ impl AgentTaskProviderCatalog {
     pub fn discover() -> Self {
         #[cfg(not(test))]
         {
-            let catalog = PROVIDER_CATALOG.get_or_init(|| RwLock::new(discover_provider_catalog()));
-            return catalog.read().expect("provider catalog lock").clone();
+            let root = catalog_config_root();
+            let cache = PROVIDER_CATALOG.get_or_init(|| RwLock::new(None));
+            if let Ok(slot) = cache.read() {
+                if let Some((cached_root, catalog)) = slot.as_ref() {
+                    if *cached_root == root {
+                        return catalog.clone();
+                    }
+                }
+            }
+            return Self::refresh();
         }
         #[cfg(test)]
         {
@@ -49,8 +63,10 @@ impl AgentTaskProviderCatalog {
         #[cfg(not(test))]
         {
             let refreshed = discover_provider_catalog();
-            let catalog = PROVIDER_CATALOG.get_or_init(|| RwLock::new(refreshed.clone()));
-            *catalog.write().expect("provider catalog lock") = refreshed.clone();
+            let cache = PROVIDER_CATALOG.get_or_init(|| RwLock::new(None));
+            if let Ok(mut slot) = cache.write() {
+                *slot = Some((catalog_config_root(), refreshed.clone()));
+            }
             refreshed
         }
         #[cfg(test)]
@@ -218,6 +234,15 @@ impl AgentTaskProviderCatalog {
     }
 }
 
+/// The config root a cached catalog belongs to.
+///
+/// An unresolvable root is its own key, so a failed resolution never adopts the
+/// catalog of whatever root resolved last.
+#[cfg(not(test))]
+fn catalog_config_root() -> PathBuf {
+    homeboy_core::paths::homeboy().unwrap_or_else(|_| PathBuf::from("<unresolved-config-root>"))
+}
+
 fn discover_provider_catalog() -> AgentTaskProviderCatalog {
     let catalog = super::discovery::discover_agent_task_executor_provider_catalog();
     let version = provider_catalog_version(&catalog.providers, &catalog.diagnostics);
@@ -249,8 +274,6 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers: catalog.providers,
             diagnostics: catalog.diagnostics,
-            #[cfg(test)]
-            path_roots: None,
         }
     }
 
@@ -259,14 +282,7 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers,
             diagnostics: Vec::new(),
-            path_roots: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_path_roots(mut self, path_roots: homeboy_core::paths::PathRoots) -> Self {
-        self.path_roots = Some(path_roots);
-        self
     }
 
     pub fn providers(&self) -> &[AgentTaskExecutorProvider] {
@@ -627,6 +643,24 @@ pub fn provider_secret_sources_for_providers(
         sources.extend(provider_declared_secret_sources(provider));
     }
     sources
+}
+
+/// One secret-env scope per provider so catalog `secret_env` resolves each
+/// required name against the provider that requires it (#13629).
+pub fn provider_secret_env_scopes(
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<crate::agent_task_secrets::AgentTaskSecretEnvScope> {
+    providers
+        .iter()
+        .map(
+            |provider| crate::agent_task_secrets::AgentTaskSecretEnvScope {
+                fallback_sources: provider_declared_secret_sources(provider),
+                required_names: super::credential_readiness::provider_required_secret_env_names(
+                    provider,
+                ),
+            },
+        )
+        .collect()
 }
 
 /// Secret sources scoped to a single backend (and optional provider selector).

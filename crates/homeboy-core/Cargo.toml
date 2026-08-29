@@ -24,6 +24,7 @@ slow-tests = []
 
 [dependencies]
 homeboy-artifact-ref-contract = { version = "0.1.0", path = "../contracts/homeboy-artifact-ref-contract" }
+homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
 homeboy-api-jobs-contract = { version = "0.1.0", path = "../contracts/homeboy-api-jobs-contract" }
 homeboy-source-snapshot-contract = { version = "0.1.0", path = "../contracts/homeboy-source-snapshot-contract" }
@@ -46,6 +47,7 @@ homeboy-redaction = { version = "0.1.0", path = "../homeboy-redaction" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_path_to_error = "0.1"
 serde_yml = "0.0.12"
 heck = "0.5"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
@@ -73,5 +75,6 @@ sha2 = "0.10.9"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
+homeboy-serde-pin = { version = "0.1.0", path = "../homeboy-serde-pin" }
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit", features = ["test-support"] }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }

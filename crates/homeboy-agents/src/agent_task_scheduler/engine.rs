@@ -51,8 +51,6 @@ pub struct AgentTaskScheduler {
     /// that the reservation, the terminal record, and the cleanup record are
     /// guaranteed to name the same installation (#7505).
     resolved_lifecycle_store: OnceLock<crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
-    #[cfg(test)]
-    scratch_root: Option<std::path::PathBuf>,
 }
 
 impl AgentTaskScheduler {
@@ -69,8 +67,6 @@ impl AgentTaskScheduler {
             harvest_context: HarvestExecutionContext::default(),
             lifecycle_store: None,
             resolved_lifecycle_store: OnceLock::new(),
-            #[cfg(test)]
-            scratch_root: None,
         }
     }
 
@@ -109,15 +105,23 @@ impl AgentTaskScheduler {
         if let Some(store) = self.resolved_lifecycle_store.get() {
             return Ok(store);
         }
+        #[cfg(test)]
+        let store = match self.run_id.as_ref() {
+            Some(_) => {
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?
+            }
+            None => crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(
+                tempfile::Builder::new()
+                    .prefix("homeboy-scheduler-test-")
+                    .tempdir()
+                    .map_err(|error| homeboy_core::Error::internal_io(error.to_string(), None))?
+                    .keep(),
+            ),
+        };
+        #[cfg(not(test))]
         let store =
             crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
         Ok(self.resolved_lifecycle_store.get_or_init(|| store))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_scratch_root(mut self, data_root: std::path::PathBuf) -> Self {
-        self.scratch_root = Some(data_root);
-        self
     }
 
     pub fn run(&self, plan: AgentTaskPlan) -> AgentTaskAggregate {
@@ -250,12 +254,31 @@ impl AgentTaskScheduler {
                         );
                     }
                 }
+                let rotation_index = plan_rotation
+                    .as_ref()
+                    .and_then(|policy| policy.entries.first())
+                    .is_some_and(|entry| {
+                        entry
+                            .backend
+                            .as_deref()
+                            .is_none_or(|backend| backend == request.executor.backend)
+                            && entry.selector.as_deref().is_none_or(|selector| {
+                                request.executor.selector.as_deref() == Some(selector)
+                            })
+                            && entry
+                                .model
+                                .as_deref()
+                                .is_none_or(|model| request.executor.model() == Some(model))
+                    }) as usize;
                 ScheduledTask {
                     workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                     request,
                     resource_wait: None,
                     attempt: 1,
-                    rotation_index: 0,
+                    // The first matching entry describes this initial attempt,
+                    // so a failure must advance to the next entry rather than
+                    // immediately repeat the exhausted provider route.
+                    rotation_index,
                     rotation_attempts: Vec::new(),
                     candidate_artifacts: Vec::new(),
                     retry_attempts: Vec::new(),
@@ -621,7 +644,7 @@ impl AgentTaskScheduler {
                     .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
                 let source_provenance = harvest_preflight.source_provenance;
-                let scratch = if let Some(lifecycle_store) = self.lifecycle_store.as_ref() {
+                let scratch = self.durable_lifecycle_store().and_then(|lifecycle_store| {
                     crate::controller_scratch::allocate_attempt_at(
                         &lifecycle_store.data_root(),
                         &scratch_run_id,
@@ -629,43 +652,7 @@ impl AgentTaskScheduler {
                         &request.task_id,
                         scheduled.attempt,
                     )
-                } else {
-                    #[cfg(test)]
-                    {
-                        match self.scratch_root.as_ref() {
-                            Some(data_root) => crate::controller_scratch::allocate_test_attempt_at(
-                                data_root,
-                                &scratch_run_id,
-                                &plan.plan_id,
-                                &request.task_id,
-                                scheduled.attempt,
-                            ),
-                            None => crate::controller_scratch::allocate_test_attempt(
-                                &scratch_run_id,
-                                &plan.plan_id,
-                                &request.task_id,
-                                scheduled.attempt,
-                            ),
-                        }
-                    }
-                    #[cfg(not(test))]
-                    {
-                        // The scratch directory holds the working files of the
-                        // very attempt whose reservation was taken through the
-                        // accessor. Allocating it from the environment instead
-                        // would let an attempt's scratch and its durable records
-                        // live in different installations (#7505).
-                        self.durable_lifecycle_store().and_then(|lifecycle_store| {
-                            crate::controller_scratch::allocate_attempt_at(
-                                &lifecycle_store.data_root(),
-                                &scratch_run_id,
-                                &plan.plan_id,
-                                &request.task_id,
-                                scheduled.attempt,
-                            )
-                        })
-                    }
-                };
+                });
                 let scratch = match scratch {
                     Ok(scratch) => scratch,
                     Err(error) => {
@@ -759,10 +746,7 @@ impl AgentTaskScheduler {
                     run_id: self.run_id.clone(),
                     attempt,
                     cancellation: cancellation.clone(),
-                    lifecycle_store: self
-                        .run_id
-                        .as_ref()
-                        .and_then(|_| self.durable_lifecycle_store().ok().cloned()),
+                    lifecycle_store: self.durable_lifecycle_store().ok().cloned(),
                 };
 
                 if let Some(run_id) = self.run_id.as_deref() {
@@ -1327,6 +1311,10 @@ impl AgentTaskScheduler {
                             running_task.rotation_index,
                         ));
                         AgentTaskScheduleSupport::attach_rotation_evidence(
+                            &mut outcome,
+                            &rotation_attempts,
+                        );
+                        AgentTaskScheduleSupport::attach_rotation_exhaustion_diagnostic(
                             &mut outcome,
                             &rotation_attempts,
                         );

@@ -101,7 +101,7 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
             .expect("private source provenance")],
             ..Default::default()
         };
-        let options = homeboy::agents::agent_task_service::AgentTaskCookServiceOptions {
+        let options = homeboy::agents::agent_task_service::CookRequest {
             cook_id: "cook-retained-gates".to_string(),
             initial_run_id: run_id.to_string(),
             initial_plan: test_plan(),

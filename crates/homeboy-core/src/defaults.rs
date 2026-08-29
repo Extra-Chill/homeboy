@@ -255,6 +255,21 @@ pub struct RetentionConfig {
     /// finish an in-progress safe mutation before the executor yields.
     #[serde(default = "default_automatic_retention_max_run_seconds")]
     pub automatic_retention_max_run_seconds: u64,
+    /// Wall-clock budget for a single cleanup category subprocess.
+    ///
+    /// This is a floor, not a ceiling: a category that delegates to a
+    /// configured external provider is additionally guaranteed enough time to
+    /// honor that provider's own configured timeout, so raising a provider
+    /// budget never has to be mirrored here.
+    #[serde(default = "default_cleanup_category_max_seconds")]
+    pub cleanup_category_max_seconds: u64,
+    /// Wall-clock budget for one aggregate `homeboy cleanup` sweep.
+    ///
+    /// Also a floor: the aggregate grows to absorb category budgets that
+    /// exceed [`Self::cleanup_category_max_seconds`], so a slow provider
+    /// cannot starve the categories scheduled after it.
+    #[serde(default = "default_cleanup_aggregate_max_seconds")]
+    pub cleanup_aggregate_max_seconds: u64,
 }
 
 impl Default for RetentionConfig {
@@ -279,6 +294,8 @@ impl Default for RetentionConfig {
             external_storage_max_bytes: default_external_storage_max_bytes(),
             external_storage_reserve_bytes: default_external_storage_reserve_bytes(),
             automatic_retention_max_run_seconds: default_automatic_retention_max_run_seconds(),
+            cleanup_category_max_seconds: default_cleanup_category_max_seconds(),
+            cleanup_aggregate_max_seconds: default_cleanup_aggregate_max_seconds(),
         }
     }
 }
@@ -351,6 +368,14 @@ fn default_external_storage_reserve_bytes() -> u64 {
 
 fn default_automatic_retention_max_run_seconds() -> u64 {
     60
+}
+
+fn default_cleanup_category_max_seconds() -> u64 {
+    30
+}
+
+fn default_cleanup_aggregate_max_seconds() -> u64 {
+    120
 }
 
 /// Timings for the global controller-generation admission queue.
@@ -1189,7 +1214,7 @@ mod tests {
         let config: HomeboyConfig = serde_json::from_value(serde_json::json!({
             "worktree_providers": {"fixture": {"mutation_timeout_ms": 540_000}}
         }))
-        .expect("DMC's 540-second ensure budget is valid");
+        .expect("a 540-second ensure budget is valid");
         assert_eq!(
             config.worktree_providers["fixture"].mutation_timeout_ms,
             540_000

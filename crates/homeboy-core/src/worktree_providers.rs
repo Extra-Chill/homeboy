@@ -201,8 +201,8 @@ pub struct WorktreeProviderCleanupOutput {
     pub providers: Vec<WorktreeProviderCleanupResult>,
 }
 
-/// One phase's inventory snapshot, normalized out of a provider's untyped
-/// cleanup payload.
+/// One phase's inventory snapshot, normalized from a provider's declared
+/// cleanup response.
 ///
 /// Providers commonly observe the same inventory once per internal phase.
 /// Each observation is preserved verbatim so the final total's
@@ -215,14 +215,141 @@ pub struct WorktreeProviderPhaseObservation {
     pub inventory: BTreeMap<String, u64>,
 }
 
-/// Effects a provider reported for one cleanup run, projected from its own
-/// untyped payload.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+struct ProviderCleanupResponse {
+    state: Option<String>,
+    run_id: Option<String>,
+    last_progress: Option<String>,
+    continuation: Option<ProviderCleanupContinuation>,
+    #[serde(default)]
+    summary: ProviderCleanupSummary,
+    #[serde(default)]
+    steps: BTreeMap<String, ProviderCleanupStep>,
+    #[serde(default)]
+    blockers_by_stage: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+struct ProviderCleanupContinuation {
+    status_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+struct ProviderCleanupSummary {
+    removed: Option<u64>,
+    lock_files_removed: Option<u64>,
+    inventory_rows_pruned: Option<u64>,
+    bytes_reclaimed: Option<u64>,
+    blocker_count: Option<u64>,
+    #[serde(default)]
+    blockers_by_reason: BTreeMap<String, u64>,
+    #[serde(default)]
+    current_blockers_by_reason: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+struct ProviderCleanupStep {
+    #[serde(default)]
+    blockers: BTreeMap<String, u64>,
+}
+
+impl ProviderCleanupResponse {
+    fn status_command(&self) -> Option<&str> {
+        self.continuation
+            .as_ref()
+            .and_then(|value| value.status_command.as_deref())
+    }
+    fn effects(&self) -> WorktreeProviderCleanupEffects {
+        let observations = self.phase_observations();
+        WorktreeProviderCleanupEffects {
+            worktrees_removed: self.summary.removed,
+            locks_pruned: self.summary.lock_files_removed,
+            metadata_reconciled: self.summary.inventory_rows_pruned,
+            bytes_reclaimed: self.summary.bytes_reclaimed,
+            reconciliation_blockers: self
+                .summary
+                .blocker_count
+                .or_else(|| latest_unique_inventory_total(&observations)),
+            progress_history: observations,
+        }
+    }
+    fn phase_observations(&self) -> Vec<WorktreeProviderPhaseObservation> {
+        let mut observations = Vec::new();
+        for (stage, step) in &self.steps {
+            push_cleanup_observation(&mut observations, stage, &step.blockers);
+        }
+        for (stage, blockers) in &self.blockers_by_stage {
+            push_cleanup_observation(&mut observations, stage, blockers);
+        }
+        push_cleanup_observation(
+            &mut observations,
+            "summary",
+            &self.summary.blockers_by_reason,
+        );
+        push_cleanup_observation(
+            &mut observations,
+            "current",
+            &self.summary.current_blockers_by_reason,
+        );
+        observations
+    }
+}
+
+fn push_cleanup_observation(
+    observations: &mut Vec<WorktreeProviderPhaseObservation>,
+    phase: &str,
+    inventory: &BTreeMap<String, u64>,
+) {
+    if !inventory.is_empty() {
+        observations.push(WorktreeProviderPhaseObservation {
+            phase: phase.to_string(),
+            inventory: inventory.clone(),
+        });
+    }
+}
+
+fn latest_unique_inventory_total(observations: &[WorktreeProviderPhaseObservation]) -> Option<u64> {
+    if observations.is_empty() {
+        return None;
+    }
+    let mut inventory = BTreeMap::new();
+    for observation in observations {
+        inventory.extend(observation.inventory.clone());
+    }
+    Some(inventory.values().sum())
+}
+
+fn parse_provider_cleanup_response(
+    provider_id: &str,
+    command: &[String],
+    payload: Value,
+) -> Result<ProviderCleanupResponse> {
+    let serialized = serde_json::to_string(&payload).expect("JSON values serialize");
+    let mut deserializer = serde_json::Deserializer::from_str(&serialized);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        provider_lookup_error(
+            provider_id,
+            command,
+            "cleanup",
+            "malformed",
+            "worktree_provider.cleanup_response",
+            format!(
+                "worktree provider `{provider_id}` returned an invalid cleanup response at JSON path `{}`: {}",
+                error.path(),
+                error.inner()
+            ),
+            false,
+        )
+    })
+}
+
+/// Effects a provider reported for one cleanup run, projected from its
+/// validated cleanup response.
 ///
-/// Provider payloads are external and may be absent, partial, or malformed, so
-/// every field is optional: an absent field means "the provider did not report
-/// this" — never "nothing happened". Reading a missing effect as a fabricated
-/// zero is exactly how #9825 reported a destructive mutation as a no-op; do not
-/// reintroduce that conflation here.
+/// Every declared field is optional: an absent field means "the provider did
+/// not report this" — never "nothing happened". Reading a missing effect as a
+/// fabricated zero is exactly how #9825 reported a destructive mutation as a
+/// no-op; do not reintroduce that conflation here.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct WorktreeProviderCleanupEffects {
     /// Worktrees the provider removed or pruned.
@@ -738,6 +865,16 @@ pub(crate) fn observe_worktree_provider_from_config(
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderResolution> {
     resolve_worktree_provider_with_policy_from_config(handle, config, false, false, None, None)
+}
+
+/// Resolve lifecycle ownership without reapplying mutation-admission safety.
+/// A terminal owner is expected to have changed its workspace; the configured
+/// provider remains responsible for enforcing cleanup safety during finalization.
+pub(crate) fn observe_apply_enabled_worktree_provider_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
+    resolve_worktree_provider_with_policy_from_config(handle, config, true, false, None, None)
 }
 
 /// Resolve a workspace only from providers explicitly authorized for apply operations.
@@ -3447,13 +3584,10 @@ fn map_provider_list_result(
                     .map(|path| optional_string(provider_id, index, "task_url", path, item))
                     .transpose()?
                     .flatten(),
-                // Safety flags are advisory hints a provider raises to BLOCK an
-                // unsafe destination (dirty/unpushed/primary => refuse). A
-                // provider that does not report one is making no claim of
-                // unsafety, so an absent value defaults to `false` (permissive)
-                // rather than failing the whole cook closed — the DMC worktree
-                // provider legitimately omits `safety.dirty` (#7886). A value
-                // that IS present but not a boolean is still a contract error.
+                // Safety flags are advisory claims that block an unsafe
+                // destination (dirty/unpushed/primary => refuse). An omitted
+                // claim is not an assertion of unsafety, so it resolves to
+                // `false`; an invalid claim remains a contract error (#7886).
                 safety: WorktreeProviderHandleSafety {
                     dirty: optional_bool(provider_id, index, "dirty", &mapping.dirty, item)?,
                     unpushed: optional_bool(
@@ -4087,6 +4221,32 @@ fn run_provider_cleanup(
     }
 }
 
+/// Largest configured cleanup timeout across the providers that can actually
+/// run in `mode`.
+///
+/// The cleanup aggregate uses this to size the `worktree_providers` category
+/// budget. Without it the enclosing category constant silently truncates every
+/// configured provider timeout, making the documented configuration range
+/// unreachable and terminating slow providers mid-inventory.
+///
+/// Returns `None` when no provider is eligible, so the caller keeps its own
+/// default rather than inventing a budget for work that will not run.
+#[must_use]
+pub fn max_configured_provider_cleanup_timeout(
+    providers: &std::collections::HashMap<String, WorktreeProviderConfig>,
+    mode: &WorktreeProviderCleanupMode,
+) -> Option<Duration> {
+    providers
+        .values()
+        .filter(|provider| provider.enabled)
+        .filter(|provider| match mode {
+            WorktreeProviderCleanupMode::Preview => true,
+            WorktreeProviderCleanupMode::Apply => provider.apply_enabled,
+        })
+        .filter_map(|provider| provider_cleanup_timeout(provider, mode, None).ok())
+        .max()
+}
+
 fn provider_cleanup_timeout(
     provider: &WorktreeProviderConfig,
     mode: &WorktreeProviderCleanupMode,
@@ -4228,13 +4388,54 @@ fn run_command_provider_cleanup_with_liveness(
                 }
             };
             let parsed_payload = parse_json_stdout(&stdout);
-            let phase = provider_phase(&parsed_payload, &mode);
-            let last_progress = provider_last_progress(&parsed_payload)
+            let response = match parsed_payload
+                .clone()
+                .map(|payload| parse_provider_cleanup_response(provider_id, command, payload))
+            {
+                None => None,
+                Some(Ok(response)) => Some(response),
+                Some(Err(error)) => {
+                    return provider_failure_with_output(
+                        provider_id,
+                        mode,
+                        Some(command.clone()),
+                        error.message,
+                        elapsed_ms,
+                        heartbeats,
+                        Some(timeout),
+                        output_status.and_then(|status| status.code()),
+                        stdout,
+                        stderr,
+                        parsed_payload,
+                    );
+                }
+            };
+            let phase = response
+                .as_ref()
+                .and_then(|response| response.state.clone())
+                .or_else(|| Some(mode_phase(&mode).to_string()));
+            let last_progress = response
+                .as_ref()
+                .and_then(|response| response.last_progress.clone())
                 .or_else(|| last_non_empty_line(&stdout))
                 .or_else(|| last_non_empty_line(&stderr));
-            let run_refs = provider_run_refs(&parsed_payload);
+            let run_refs: Vec<WorktreeProviderRunRef> = response
+                .as_ref()
+                .and_then(|response| {
+                    (response.run_id.is_some() || response.status_command().is_some()).then(|| {
+                        WorktreeProviderRunRef {
+                            run_id: response.run_id.clone(),
+                            status_command: response.status_command().map(ToString::to_string),
+                        }
+                    })
+                })
+                .into_iter()
+                .collect();
             let follow_up_command = provider_follow_up_command(&run_refs);
-            let effects = provider_cleanup_effects(&parsed_payload);
+            let effects = response
+                .as_ref()
+                .map(ProviderCleanupResponse::effects)
+                .unwrap_or_default();
             let warnings = provider_cleanup_warnings(&outcome, phase.as_deref(), &effects);
 
             let status = output_status.and_then(|status| status.code());
@@ -4314,6 +4515,35 @@ fn provider_failure_with_details(
     heartbeat_count: usize,
     timeout: Option<Duration>,
 ) -> WorktreeProviderCleanupResult {
+    provider_failure_with_output(
+        provider_id,
+        mode,
+        command_run,
+        error,
+        elapsed_ms,
+        heartbeat_count,
+        timeout,
+        None,
+        String::new(),
+        String::new(),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_failure_with_output(
+    provider_id: &str,
+    mode: WorktreeProviderCleanupMode,
+    command_run: Option<Vec<String>>,
+    error: String,
+    elapsed_ms: u128,
+    heartbeat_count: usize,
+    timeout: Option<Duration>,
+    status: Option<i32>,
+    stdout: String,
+    stderr: String,
+    parsed_payload: Option<Value>,
+) -> WorktreeProviderCleanupResult {
     let phase = Some(mode_phase(&mode).to_string());
     WorktreeProviderCleanupResult {
         provider_id: provider_id.to_string(),
@@ -4325,10 +4555,10 @@ fn provider_failure_with_details(
         timeout_ms: timeout.map_or(0, |timeout| timeout.as_millis()),
         mode,
         command_run,
-        status: None,
-        stdout: String::new(),
-        stderr: String::new(),
-        parsed_payload: None,
+        status,
+        stdout,
+        stderr,
+        parsed_payload,
         phase,
         last_progress: None,
         run_refs: Vec::new(),
@@ -4355,206 +4585,8 @@ fn parse_json_stdout(stdout: &str) -> Option<Value> {
     })
 }
 
-fn provider_phase(payload: &Option<Value>, mode: &WorktreeProviderCleanupMode) -> Option<String> {
-    payload
-        .as_ref()
-        .and_then(|payload| first_string_for_keys(payload, &["phase", "state", "status"]))
-        .or_else(|| Some(mode_phase(mode).to_string()))
-}
-
-fn provider_last_progress(payload: &Option<Value>) -> Option<String> {
-    payload.as_ref().and_then(|payload| {
-        first_string_for_keys(
-            payload,
-            &[
-                "last_progress",
-                "progress",
-                "message",
-                "summary",
-                "last_observed_progress",
-            ],
-        )
-    })
-}
-
-fn provider_run_refs(payload: &Option<Value>) -> Vec<WorktreeProviderRunRef> {
-    let Some(payload) = payload else {
-        return Vec::new();
-    };
-    let mut run_ids = Vec::new();
-    let mut status_commands = Vec::new();
-    collect_strings_for_keys(
-        payload,
-        &["run_id", "runId", "durable_run_id"],
-        &mut run_ids,
-    );
-    collect_strings_for_keys(
-        payload,
-        &["status_command", "statusCommand", "status_cmd"],
-        &mut status_commands,
-    );
-    collect_status_commands_from_arrays(payload, &mut status_commands);
-
-    let len = run_ids.len().max(status_commands.len());
-    (0..len)
-        .map(|index| WorktreeProviderRunRef {
-            run_id: run_ids.get(index).cloned(),
-            status_command: status_commands.get(index).cloned(),
-        })
-        .collect()
-}
-
 fn provider_follow_up_command(refs: &[WorktreeProviderRunRef]) -> Option<String> {
     refs.iter().find_map(|row| row.status_command.clone())
-}
-
-/// Inventory classifications observed in real provider payloads (#9825). The
-/// list is evidence-led: these are the keys the DMC provider emits, plus
-/// obvious spellings a defensive normalizer should not miss. Anything else in
-/// a payload is left uninterpreted.
-const RECONCILIATION_BLOCKER_CLASSIFICATION_KEYS: &[&str] = &[
-    "lifecycle_reconciliation_candidate",
-    "needs_metadata_reconcile",
-    "needs_metadata_reconciliation",
-    "active_no_signal",
-    "live_worktree",
-    "active_lifecycle",
-];
-
-/// A provider-declared total that outranks any inventory derived from phase
-/// snapshots.
-const RECONCILIATION_BLOCKER_TOTAL_KEYS: &[&str] =
-    &["reconciliation_blockers", "reconciliation_blocker_count"];
-
-const WORKTREES_REMOVED_KEYS: &[&str] = &[
-    "worktrees_removed",
-    "removed_worktrees",
-    "worktrees_pruned",
-    "pruned_worktrees",
-    "removed_worktree_count",
-];
-
-const LOCKS_PRUNED_KEYS: &[&str] = &[
-    "locks_pruned",
-    "pruned_locks",
-    "stale_locks_removed",
-    "locks_removed",
-    "removed_locks",
-    "lock_files_removed",
-];
-
-const METADATA_RECONCILED_KEYS: &[&str] = &[
-    "metadata_reconciled",
-    "reconciled_metadata",
-    "reconciled_metadata_count",
-    "metadata_records_reconciled",
-];
-
-const BYTES_RECLAIMED_KEYS: &[&str] = &[
-    "bytes_reclaimed",
-    "reclaimed_bytes",
-    "freed_bytes",
-    "bytes_freed",
-];
-
-/// Project a provider's untyped cleanup payload into typed effects.
-///
-/// Defensive by construction, matching [`provider_phase`] and
-/// [`provider_run_refs`]: an absent, partial, or differently shaped payload
-/// yields absent fields — never fabricated zeros (#9825).
-fn provider_cleanup_effects(payload: &Option<Value>) -> WorktreeProviderCleanupEffects {
-    let Some(payload) = payload else {
-        return WorktreeProviderCleanupEffects::default();
-    };
-    let mut effects = WorktreeProviderCleanupEffects {
-        worktrees_removed: first_u64_for_keys(payload, WORKTREES_REMOVED_KEYS),
-        locks_pruned: first_u64_for_keys(payload, LOCKS_PRUNED_KEYS),
-        metadata_reconciled: first_u64_for_keys(payload, METADATA_RECONCILED_KEYS),
-        bytes_reclaimed: first_u64_for_keys(payload, BYTES_RECLAIMED_KEYS),
-        ..WorktreeProviderCleanupEffects::default()
-    };
-    let observations = provider_phase_observations(payload);
-    // A provider-declared total wins; otherwise collapse the snapshots. Later
-    // observations replace earlier values per classification, so two phases
-    // observing one inventory report that inventory once — not twice (#9825).
-    effects.reconciliation_blockers =
-        first_u64_for_keys(payload, RECONCILIATION_BLOCKER_TOTAL_KEYS)
-            .or_else(|| latest_unique_inventory_total(&observations));
-    effects.progress_history = observations;
-    effects
-}
-
-fn latest_unique_inventory_total(observations: &[WorktreeProviderPhaseObservation]) -> Option<u64> {
-    if observations.is_empty() {
-        return None;
-    }
-    let mut inventory: BTreeMap<&str, u64> = BTreeMap::new();
-    for observation in observations {
-        for (classification, count) in &observation.inventory {
-            inventory.insert(classification.as_str(), *count);
-        }
-    }
-    Some(inventory.values().sum())
-}
-
-/// Collect every inventory snapshot in the payload, in reported order.
-///
-/// Arrays keep their element order; object key order is whatever serde
-/// produced, so only array-ordered snapshots and identical repeated snapshots
-/// carry order guarantees — which is precisely what #9825 needs.
-fn provider_phase_observations(payload: &Value) -> Vec<WorktreeProviderPhaseObservation> {
-    let mut observations = Vec::new();
-    collect_phase_observations(payload, &mut observations);
-    observations
-}
-
-fn collect_phase_observations(value: &Value, out: &mut Vec<WorktreeProviderPhaseObservation>) {
-    collect_phase_observations_labeled(value, None, out);
-}
-
-/// `inherited` is the nearest enclosing phase label.
-///
-/// Providers commonly nest the inventory one level below the label, as
-/// `{"phase": "reconcile", "blockers": {...}}`. Reading the label only off the
-/// object that carries the counts makes every such observation `unlabeled`,
-/// which satisfies the letter of "history is retained" and none of its purpose:
-/// the collapse-to-latest rule is only auditable if a reader can tell which
-/// phase produced which snapshot (#9825).
-fn collect_phase_observations_labeled(
-    value: &Value,
-    inherited: Option<&str>,
-    out: &mut Vec<WorktreeProviderPhaseObservation>,
-) {
-    match value {
-        Value::Object(map) => {
-            let own_label = first_string_for_keys(value, &["phase", "state", "status", "name"]);
-            // An object's own label wins over an ancestor's; a nested object
-            // that names its phase is more specific than the one containing it.
-            let label = own_label.as_deref().or(inherited);
-
-            let mut inventory = BTreeMap::new();
-            for key in RECONCILIATION_BLOCKER_CLASSIFICATION_KEYS {
-                if let Some(count) = map.get(*key).and_then(Value::as_u64) {
-                    inventory.insert((*key).to_string(), count);
-                }
-            }
-            if !inventory.is_empty() {
-                out.push(WorktreeProviderPhaseObservation {
-                    phase: label.unwrap_or("unlabeled").to_string(),
-                    inventory,
-                });
-            }
-            for value in map.values() {
-                collect_phase_observations_labeled(value, label, out);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_phase_observations_labeled(value, inherited, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Warnings that make a successful provider outcome worth reading carefully.
@@ -4591,105 +4623,6 @@ fn mode_phase(mode: &WorktreeProviderCleanupMode) -> &'static str {
     match mode {
         WorktreeProviderCleanupMode::Preview => "preview",
         WorktreeProviderCleanupMode::Apply => "apply",
-    }
-}
-
-fn first_string_for_keys(value: &Value, keys: &[&str]) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for key in keys {
-                if let Some(value) = map.get(*key).and_then(Value::as_str) {
-                    return Some(value.to_string());
-                }
-            }
-            map.values()
-                .find_map(|value| first_string_for_keys(value, keys))
-        }
-        Value::Array(values) => values
-            .iter()
-            .find_map(|value| first_string_for_keys(value, keys)),
-        _ => None,
-    }
-}
-
-/// Numeric twin of [`first_string_for_keys`]. Only non-negative integers count;
-/// fractional or negative values are treated as "not reported" rather than
-/// coerced.
-fn first_u64_for_keys(value: &Value, keys: &[&str]) -> Option<u64> {
-    match value {
-        Value::Object(map) => {
-            for key in keys {
-                if let Some(value) = map.get(*key).and_then(Value::as_u64) {
-                    return Some(value);
-                }
-            }
-            map.values()
-                .find_map(|value| first_u64_for_keys(value, keys))
-        }
-        Value::Array(values) => values
-            .iter()
-            .find_map(|value| first_u64_for_keys(value, keys)),
-        _ => None,
-    }
-}
-
-fn collect_strings_for_keys(value: &Value, keys: &[&str], out: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            for key in keys {
-                if let Some(value) = map.get(*key).and_then(Value::as_str) {
-                    if !out.contains(&value.to_string()) {
-                        out.push(value.to_string());
-                    }
-                }
-            }
-            for value in map.values() {
-                collect_strings_for_keys(value, keys, out);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_strings_for_keys(value, keys, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_status_commands_from_arrays(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            for key in [
-                "status_commands",
-                "statusCommands",
-                "next_commands",
-                "nextCommands",
-            ] {
-                if let Some(values) = map.get(key).and_then(Value::as_array) {
-                    for value in values {
-                        if let Some(command) = value.as_str().or_else(|| {
-                            value
-                                .get("command")
-                                .and_then(Value::as_str)
-                                .or_else(|| value.get("status_command").and_then(Value::as_str))
-                        }) {
-                            if !out.contains(&command.to_string()) {
-                                out.push(command.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            for value in map.values() {
-                collect_status_commands_from_arrays(value, out);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_status_commands_from_arrays(value, out);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -5768,6 +5701,68 @@ mod tests {
             Some(json!({ "mode": "preview" }))
         );
         assert_eq!(output.providers[0].timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn max_configured_cleanup_timeout_reports_the_budget_the_aggregate_must_reserve() {
+        let slow = WorktreeProviderConfig {
+            apply_enabled: true,
+            commands: WorktreeProviderCommands {
+                cleanup_preview_timeout_ms: 180_000,
+                cleanup_apply_timeout_ms: 240_000,
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+        let fast = WorktreeProviderConfig {
+            apply_enabled: false,
+            commands: WorktreeProviderCommands {
+                cleanup_preview_timeout_ms: 5_000,
+                cleanup_apply_timeout_ms: 5_000,
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+        let disabled = WorktreeProviderConfig {
+            enabled: false,
+            commands: WorktreeProviderCommands {
+                cleanup_preview_timeout_ms: 300_000,
+                cleanup_apply_timeout_ms: 300_000,
+                ..Default::default()
+            },
+            ..default_command_provider()
+        };
+
+        let providers = std::collections::HashMap::from([
+            ("slow".to_string(), slow),
+            ("fast".to_string(), fast.clone()),
+            ("disabled".to_string(), disabled),
+        ]);
+
+        // A disabled provider must never inflate the reserved budget.
+        assert_eq!(
+            max_configured_provider_cleanup_timeout(
+                &providers,
+                &WorktreeProviderCleanupMode::Preview
+            ),
+            Some(Duration::from_millis(180_000))
+        );
+        // `fast` cannot apply, so apply mode reserves only the apply-capable provider.
+        assert_eq!(
+            max_configured_provider_cleanup_timeout(
+                &providers,
+                &WorktreeProviderCleanupMode::Apply
+            ),
+            Some(Duration::from_millis(240_000))
+        );
+        // No apply-capable provider means no budget to reserve at all.
+        assert_eq!(
+            max_configured_provider_cleanup_timeout(
+                &std::collections::HashMap::from([("fast".to_string(), fast)]),
+                &WorktreeProviderCleanupMode::Apply
+            ),
+            None
+        );
     }
 
     #[test]
@@ -7779,9 +7774,8 @@ printf '{{"schema":"%s","provider_id":"fixture","handle":"%s","task_url":"%s","p
 
     #[test]
     fn absent_safety_flags_default_to_permissive_instead_of_failing_the_cook() {
-        // The DMC worktree provider omits `safety.dirty` (and can omit the whole
-        // `safety` object). A missing advisory safety flag is not a claim of
-        // unsafety, so it must default to `false` and not reject the cook
+        // An omitted advisory safety flag is not a claim of unsafety,
+        // so it defaults to `false` and does not reject the cook
         // pre-dispatch (#7886).
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path(), "cook-target");
@@ -8399,7 +8393,7 @@ printf '{{"schema":"%s","provider_id":"fixture","handle":"%s","task_url":"%s","p
             concat!(
                 "#!/bin/sh\n",
                 "printf 'starting cleanup\\n' >&2\n",
-                "printf '{\"phase\":\"running\",\"last_progress\":\"removed 10/20\",\"run_id\":\"cleanup-run-1\",\"status_command\":\"provider status cleanup-run-1\"}\\n'\n"
+                "printf '{\"state\":\"running\",\"last_progress\":\"removed 10/20\",\"run_id\":\"cleanup-run-1\",\"continuation\":{\"status_command\":\"provider status cleanup-run-1\"}}\\n'\n"
             ),
         )
         .expect("write script");
@@ -8512,34 +8506,32 @@ mod cleanup_effects_tests {
 
     use super::*;
 
-    /// The reported incident (#9825): the DMC provider observed one inventory
-    /// twice, once per internal phase, and every classification was reported at
-    /// double its real value.
-    ///
-    /// This is the regression the fix exists for, so the fixture is two phase
-    /// snapshots of the *same* inventory. A single-phase payload cannot fail
-    /// the old code and therefore cannot pin this bug.
-    fn two_phase_payload() -> Option<Value> {
+    fn two_stage_response() -> ProviderCleanupResponse {
         let snapshot = json!({
-            "lifecycle_reconciliation_candidate": 187,
-            "needs_metadata_reconcile": 106,
-            "active_no_signal": 50,
-            "live_worktree": 49,
-            "active_lifecycle": 1,
+            "candidate": 187,
+            "needs_reconciliation": 106,
+            "no_signal": 50,
+            "live": 49,
+            "active": 1,
         });
-        Some(json!({
-            "outcome": "complete_with_blockers",
-            "locks_pruned": 49,
-            "phases": [
-                { "phase": "inventory", "blockers": snapshot },
-                { "phase": "reconcile", "blockers": snapshot },
-            ],
-        }))
+        parse_provider_cleanup_response(
+            "fixture",
+            &[],
+            json!({
+                "state": "complete_with_blockers",
+                "summary": { "lock_files_removed": 49 },
+                "steps": {
+                    "inventory": { "blockers": snapshot },
+                    "reconcile": { "blockers": snapshot }
+                }
+            }),
+        )
+        .expect("declared response")
     }
 
     #[test]
-    fn repeated_phase_snapshots_report_the_inventory_once() {
-        let effects = provider_cleanup_effects(&two_phase_payload());
+    fn repeated_stage_snapshots_report_the_inventory_once() {
+        let effects = two_stage_response().effects();
 
         // 187 + 106 + 50 + 49 + 1. Summing the phases instead would give 786,
         // which is exactly what the concise presentation printed.
@@ -8548,23 +8540,23 @@ mod cleanup_effects_tests {
     }
 
     #[test]
-    fn repeated_phase_snapshots_are_retained_as_history() {
-        let effects = provider_cleanup_effects(&two_phase_payload());
+    fn repeated_stage_snapshots_are_retained_as_history() {
+        let effects = two_stage_response().effects();
 
         // Collapsing to the latest total must not destroy the evidence that
         // produced it, or the collapse rule becomes unauditable.
         assert_eq!(effects.progress_history.len(), 2);
-        let phases: Vec<&str> = effects
+        let stages: Vec<&str> = effects
             .progress_history
             .iter()
             .map(|observation| observation.phase.as_str())
             .collect();
-        assert_eq!(phases, vec!["inventory", "reconcile"]);
+        assert_eq!(stages, vec!["inventory", "reconcile"]);
     }
 
     #[test]
     fn a_destructive_mutation_cannot_report_as_a_no_op() {
-        let effects = provider_cleanup_effects(&two_phase_payload());
+        let effects = two_stage_response().effects();
 
         assert_eq!(effects.locks_pruned, Some(49));
         assert_eq!(
@@ -8578,8 +8570,8 @@ mod cleanup_effects_tests {
     /// unreported. Reading absent as zero is what made a successful sweep
     /// indistinguishable from one that did nothing.
     #[test]
-    fn an_absent_payload_yields_absent_effects_not_zeros() {
-        let effects = provider_cleanup_effects(&None);
+    fn an_empty_response_yields_absent_effects_not_zeros() {
+        let effects = ProviderCleanupResponse::default().effects();
 
         assert_eq!(effects.worktrees_removed, None);
         assert_eq!(effects.locks_pruned, None);
@@ -8589,24 +8581,62 @@ mod cleanup_effects_tests {
     }
 
     #[test]
-    fn a_malformed_payload_yields_absent_effects_not_zeros() {
-        let effects = provider_cleanup_effects(&Some(json!("not an object")));
+    fn cleanup_response_uses_the_provider_canonical_fields() {
+        let response = parse_provider_cleanup_response(
+            "fixture",
+            &[],
+            json!({
+                "success": true,
+                "mode": "safe_workspace_cleanup",
+                "run_id": "cleanup-run-17",
+                "continuation": { "status_command": "provider status cleanup-run-17" },
+                "summary": {
+                    "removed": 2,
+                    "lock_files_removed": 3,
+                    "inventory_rows_pruned": 4,
+                    "bytes_reclaimed": 5,
+                    "blocker_count": 6
+                },
+                "steps": { "inventory": { "blockers": { "dirty_worktree": 6 } } },
+                "blockers_by_stage": { "inventory": { "dirty_worktree": 6 } }
+            }),
+        )
+        .expect("canonical provider response");
 
-        assert_eq!(effects.locks_pruned, None);
-        assert_eq!(effects.reconciliation_blockers, None);
+        assert_eq!(
+            response.status_command(),
+            Some("provider status cleanup-run-17")
+        );
+        assert_eq!(response.effects().metadata_reconciled, Some(4));
+    }
+
+    #[test]
+    fn cleanup_response_errors_name_provider_and_json_path() {
+        let error = parse_provider_cleanup_response(
+            "fixture",
+            &[],
+            json!({ "summary": { "removed": "two" } }),
+        )
+        .expect_err("wrong field type violates the cleanup contract");
+
+        assert!(error.message.contains("worktree provider `fixture`"));
+        assert!(error.message.contains("summary.removed"));
     }
 
     /// A provider that publishes its own total is authoritative; the derived
     /// collapse is a fallback for providers that only emit phase snapshots.
     #[test]
     fn a_provider_declared_total_outranks_the_derived_collapse() {
-        let effects = provider_cleanup_effects(&Some(json!({
-            "reconciliation_blockers": 12,
-            "phases": [
-                { "phase": "inventory", "blockers": { "live_worktree": 49 } },
-                { "phase": "reconcile", "blockers": { "live_worktree": 49 } },
-            ],
-        })));
+        let effects = parse_provider_cleanup_response(
+            "fixture",
+            &[],
+            json!({
+                "summary": { "blocker_count": 12 },
+                "steps": { "inventory": { "blockers": { "live": 49 } } }
+            }),
+        )
+        .expect("declared response")
+        .effects();
 
         assert_eq!(effects.reconciliation_blockers, Some(12));
     }
@@ -8615,8 +8645,20 @@ mod cleanup_effects_tests {
     /// repeated observations *within* one provider collapse.
     #[test]
     fn distinct_providers_sum_rather_than_collapse() {
-        let mut aggregate = provider_cleanup_effects(&Some(json!({ "locks_pruned": 49 })));
-        let other = provider_cleanup_effects(&Some(json!({ "locks_pruned": 3 })));
+        let mut aggregate = parse_provider_cleanup_response(
+            "fixture",
+            &[],
+            json!({ "summary": { "lock_files_removed": 49 } }),
+        )
+        .expect("declared response")
+        .effects();
+        let other = parse_provider_cleanup_response(
+            "other",
+            &[],
+            json!({ "summary": { "lock_files_removed": 3 } }),
+        )
+        .expect("declared response")
+        .effects();
         aggregate.absorb(&other);
 
         assert_eq!(aggregate.locks_pruned, Some(52));

@@ -341,6 +341,7 @@ fn resume_promoted_patch_internal<'a>(
         target_path,
         expected_candidate.as_ref(),
         gate_workspace,
+        observation_store,
     )?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
@@ -651,11 +652,25 @@ pub(super) fn promote_with_provider_and_checkpoint(
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
-    // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
-    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let observation_store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
+        &context.path_roots(),
+    )?;
     promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, &observation_store)
+}
+
+#[cfg(test)]
+pub(super) fn promote_with_provider_in_observation_store(
+    options: AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskPromotionReport> {
+    promote_with_provider_and_checkpoint_internal(
+        options,
+        provider,
+        &mut |_| Ok(()),
+        observation_store,
+    )
 }
 
 #[cfg(test)]
@@ -835,7 +850,14 @@ fn promote_with_provider_and_checkpoint_internal(
         let target =
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), worktree_path);
         let gates = if let Some(worktree_path) = worktree_path {
-            run_promotion_gates(&options, provider, worktree_path, None, None)?
+            run_promotion_gates(
+                &options,
+                provider,
+                worktree_path,
+                None,
+                None,
+                observation_store,
+            )?
         } else {
             PromotionGateRun::without_gates(options.dry_run)
         };
@@ -912,6 +934,14 @@ fn promote_with_provider_and_checkpoint_internal(
     }
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     let changed_files = normalized_patch.changed_files.clone();
+    // Resolving the destination is a worktree-safety question: is the dirt in
+    // that checkout this promotion's own candidate, or someone else's work?
+    // The candidate patch answers it. A gate-feedback baseline answers a
+    // different question — which prior gate result this promotion continues —
+    // so it stays whatever the caller supplied and is never synthesized here.
+    let safety_baseline = destination_baseline
+        .clone()
+        .unwrap_or_else(|| candidate_patch_safety_baseline(&patch, &artifact, &patch_path));
 
     // Validate the declared remote base BEFORE mutating the target worktree.
     // Promotion must be atomic around base validation: a nonexistent declared
@@ -919,7 +949,7 @@ fn promote_with_provider_and_checkpoint_internal(
     // no patch applied and no durable post-apply state recorded, so the same
     // artifact/target can be retried with a corrected base (#9400).
     let pre_apply_verified_base = if !options.dry_run {
-        match resolve_promotion_target_path(&options.to_worktree, None)? {
+        match resolve_promotion_target_path(&options.to_worktree, None, Some(&safety_baseline))? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
             // No provider-owned pre-apply target path resolves; fall back to
             // validating against the applied worktree below.
@@ -1020,6 +1050,7 @@ fn promote_with_provider_and_checkpoint_internal(
                     })?
                     .as_ref(),
                 None,
+                observation_store,
             )?,
             verified_base,
         )
@@ -1629,6 +1660,7 @@ fn promote_committed_changes(
         match resolve_promotion_target_path(
             &options.to_worktree,
             trusted_unpushed_candidate_destination.as_ref(),
+            None,
         )? {
             Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
             None => None,
@@ -1720,6 +1752,7 @@ fn promote_committed_changes(
                     })?
                     .as_ref(),
                 None,
+                observation_store,
             )?,
             verified_base,
         )
@@ -1857,6 +1890,7 @@ fn run_promotion_gates(
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
     gate_workspace: Option<&Path>,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PromotionGateRun> {
     emit_promotion_progress(
         "hydration",
@@ -1882,6 +1916,7 @@ fn run_promotion_gates(
             .as_deref()
             .unwrap_or("unrecorded-promotion"),
         expected_candidate,
+        observation_store,
     )?;
     // The immutable candidate establishes source identity only. Dependency
     // setup is intentionally destination-only: gates must consume the exact
@@ -1979,6 +2014,7 @@ fn run_promotion_gates(
                 command,
                 visibility,
                 reveal_policy,
+                observation_store,
             )?
         };
         if gate.status == AgentTaskGateStatus::Failed
@@ -2099,6 +2135,7 @@ impl ImmutableCandidateCheckout {
         source_root: &Path,
         run_id: &str,
         expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+        observation_store: &homeboy_core::observation::ObservationStore,
     ) -> Result<Option<Self>> {
         if !source_root.is_dir() {
             // An external provider can report an opaque or not-yet-mounted
@@ -2147,7 +2184,11 @@ impl ImmutableCandidateCheckout {
                 "homeboy: immutable promotion candidate",
             ],
         )?;
-        let allocation = crate::controller_scratch::allocate_attempt(
+        let data_root = observation_store.data_root().ok_or_else(|| {
+            Error::internal_unexpected("promotion observation store has no data root")
+        })?;
+        let allocation = crate::controller_scratch::allocate_attempt_at(
+            data_root,
             run_id,
             "promotion-candidate-checkout",
             "candidate",
@@ -2237,12 +2278,17 @@ fn run_promotion_gate(
     command: &str,
     visibility: AgentTaskGateVisibility,
     reveal_policy: AgentTaskGateRevealPolicy,
+    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<crate::agent_task_gate::AgentTaskGateReport> {
     let run_id = options
         .source_run_id
         .as_deref()
         .unwrap_or("unrecorded-promotion");
-    let allocation = crate::controller_scratch::allocate_attempt(
+    let data_root = observation_store.data_root().ok_or_else(|| {
+        Error::internal_unexpected("promotion observation store has no data root")
+    })?;
+    let allocation = crate::controller_scratch::allocate_attempt_at(
+        data_root,
         run_id,
         "promotion-verification",
         &format!("gate-{index}"),
@@ -2377,9 +2423,27 @@ fn promotion_source(
 /// Resolve a provider-owned target before the patch is applied, so the declared
 /// base can be validated against it without mutating the working tree (#9400).
 /// Genuinely unmanaged destinations retain the post-apply validation fallback.
+fn candidate_patch_safety_baseline(
+    patch: &str,
+    artifact: &AgentTaskArtifact,
+    patch_path: &Path,
+) -> Value {
+    json!({
+        "schema": "homeboy/agent-task-gate-feedback-baseline/v1",
+        "current_diff": patch,
+        "patch_artifact": {
+            "id": artifact.id,
+            "kind": artifact.kind,
+            "path": patch_path.display().to_string(),
+            "sha256": artifact.sha256,
+        }
+    })
+}
+
 fn resolve_promotion_target_path(
     to_worktree: &str,
     trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
+    safety_baseline: Option<&Value>,
 ) -> Result<Option<PathBuf>> {
     if Path::new(to_worktree).is_dir() {
         return Ok(None);
@@ -2394,7 +2458,7 @@ fn resolve_promotion_target_path(
         to_worktree,
         &homeboy_core::defaults::load_config(),
         homeboy_core::worktree_provider::WorktreeMutationContext {
-            safety_baseline: None,
+            safety_baseline,
             trusted_unpushed_destination: trusted_unpushed_destination.as_ref(),
         },
     ) {

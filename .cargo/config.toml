@@ -4,6 +4,9 @@ test-route-dispatch = "test -p homeboy-cli commands::infra::route::tests::dispat
 
 # Every test binary runs under a small supervisor. It creates a private process
 # group and reaps it when Cargo cancels the runner, so a test cannot leave a
-# daemonized fixture behind after the test binary is interrupted.
+# daemonized fixture behind after the test binary is interrupted. It also
+# enforces HOMEBOY_TEST_TIMEOUT_SECONDS (default: 1500); set
+# HOMEBOY_TEST_ALLOW_UNBOUNDED=1 with HOMEBOY_TEST_TIMEOUT_SECONDS=unbounded
+# only for interactive debugging.
 [target.'cfg(unix)']
 runner = "scripts/nextest-hermetic-test-environment.sh"
