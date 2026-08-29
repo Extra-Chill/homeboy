@@ -112,6 +112,12 @@ const HELPERS: &[RuntimeHelper] = &[
         content: assets::BENCH_HELPER_JS,
         env_var: BENCH_HELPER_JS_ENV,
     },
+    RuntimeHelper {
+        id: RUNTIME_SETTINGS_HELPER_ID,
+        filename: "settings.sh",
+        content: assets::SETTINGS_SH,
+        env_var: RUNTIME_SETTINGS_HELPER_ENV,
+    },
 ];
 
 const DECLARABLE_HELPERS: &[RuntimeHelper] = &[RuntimeHelper {
