@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.38.16] - 2026-08-29
+
+### Changed
+- Declare WordPress readiness extension dependency
+
 ## [3.38.15] - 2026-08-29
 
 ### Fixed
