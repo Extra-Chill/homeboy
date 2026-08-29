@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.14] - 2026-08-29
+
+### Changed
+- Report review-form deadlines truthfully
+- Stage provider evidence outside candidate worktrees
+- Type recipe_run_providers and empty the extra buffer
+- Add a typed orchestration service and Lab HTTP vertical
+- Consolidate Cook service API
+- Provision runtime settings for extension scripts
+- Promote audit to a first-class extension capability
+
+### Fixed
+- preserve excluded snapshot directory roots
+- preserve local Cook ownership
+- resolve catalog secret_env per requiring provider
+
 ## [0.364.13] - 2026-08-29
 
 ### Changed
