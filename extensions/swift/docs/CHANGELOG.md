@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.8.4] - 2026-08-29
+
+### Changed
+- Converge Swift lint and register its runner smokes
+
 ## [2.8.3] - 2026-08-01
 
 ### Changed

@@ -1,6 +1,6 @@
 {
   "name": "Swift",
-  "version": "2.8.3",
+  "version": "2.8.4",
   "icon": "swift",
   "description": "Swift testing infrastructure for macOS, iOS, and Swift CLI projects",
   "author": "Extra Chill",
