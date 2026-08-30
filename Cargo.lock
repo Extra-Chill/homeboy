@@ -759,7 +759,7 @@ name = "homeboy-api-jobs-contract"
 version = "0.1.0"
 dependencies = [
  "homeboy-lab-contract",
- "homeboy-lab-runner-contract",
+ "homeboy-runner-contract",
  "homeboy-source-snapshot-contract",
  "serde",
  "serde_json",
@@ -1101,6 +1101,7 @@ name = "homeboy-lab-runner-contract"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "homeboy-runner-contract",
  "serde",
  "serde_json",
 ]
@@ -1239,7 +1240,6 @@ dependencies = [
 name = "homeboy-runner-contract"
 version = "0.1.0"
 dependencies = [
- "homeboy-api-jobs-contract",
  "homeboy-lab-contract",
  "homeboy-source-snapshot-contract",
  "serde",

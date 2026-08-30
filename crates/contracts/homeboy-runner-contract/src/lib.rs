@@ -4,6 +4,10 @@
 //! boundaries. Execution behavior and service ownership remain outside this
 //! crate.
 
+mod lifecycle;
+
+pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -26,7 +30,7 @@ use homeboy_source_snapshot_contract::SourceSnapshot;
 /// it as well, which removed the lossy `job_artifact_refs` rebuild that silently
 /// dropped `mime`, `size_bytes` and `sha256`. The serialized shape is unchanged
 /// in both collapses: every extra field is `Option` + `skip_serializing_if`.
-pub use homeboy_api_jobs_contract::JobArtifactMetadata;
+pub use homeboy_lab_contract::lab::workload::JobArtifactMetadata;
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
 pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
@@ -114,11 +118,9 @@ pub struct RunnerExecutionDispatch {
 /// Lifecycle facts carried by a runner execution envelope.
 ///
 /// This was a second declaration of
-/// [`homeboy_api_jobs_contract::RunnerJobLifecycleMetadata`] -- the same five
-/// fields with byte-identical serde attributes on each. `homeboy-core` depends
-/// on `homeboy-api-jobs-contract` directly, so the envelope and the job request
-/// were always able to name one type for the same five facts.
-pub type RunnerExecutionLifecycle = homeboy_api_jobs_contract::RunnerJobLifecycleMetadata;
+/// [`RunnerJobLifecycleMetadata`] -- the same five fields with byte-identical
+/// serde attributes on each.
+pub type RunnerExecutionLifecycle = RunnerJobLifecycleMetadata;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerExecutionRecord {
