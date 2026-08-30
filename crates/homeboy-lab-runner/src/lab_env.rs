@@ -138,7 +138,6 @@ fn declared_dependency_paths(
                 serde_json::json!({
                     "local_path": entry.local_path(),
                     "remote_path": entry.remote_path(),
-                    "evidence_path": freshness.get("evidence_path").cloned().unwrap_or(serde_json::Value::Null),
                 }),
             ))
         })
@@ -588,7 +587,6 @@ mod tests {
                     role: "validation_dependency".to_string(),
                     local_path: "/Users/user/Developer/static-site-importer".to_string(),
                     remote_path: "/home/user/Developer/job-123/static-site-importer".to_string(),
-                    evidence_path: "/home/user/Developer/job-123/static-site-importer/.homeboy/lab-source-evidence.json".to_string(),
                 },
             ),
             workspace_mapping_entry(
