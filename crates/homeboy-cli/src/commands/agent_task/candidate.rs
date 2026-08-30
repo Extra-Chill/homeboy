@@ -38,10 +38,6 @@ impl CandidateState {
         }
     }
 
-    pub(crate) fn is_recoverable(self) -> bool {
-        self == Self::PatchAvailable
-    }
-
     pub(crate) fn is_available(self) -> bool {
         matches!(
             self,

@@ -1230,7 +1230,7 @@ pub fn record_detached_cook_supervisor_in_store(
         record.metadata["detached_cook_handoff"]["supervisor_job_id"] = json!(job_id);
         record.metadata["detached_cook_handoff"]["admission_state"] = json!("supervising");
         record.metadata["detached_cook_handoff"]["reattach_command"] =
-            json!(format!("homeboy agent-task status {cook_id} --full"));
+            json!(format!("homeboy agent-task status {cook_id}"));
         true
     })?;
     Ok(())
@@ -1264,8 +1264,7 @@ pub fn record_local_cook_retry_supervisor_in_store(
         supervisor["job_id"] = json!(job_id);
         supervisor["job_type"] = json!(crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE);
         supervisor["pinned_run_id"] = json!(run_id);
-        supervisor["reattach_command"] =
-            json!(format!("homeboy agent-task status {run_id} --full"));
+        supervisor["reattach_command"] = json!(format!("homeboy agent-task status {run_id}"));
         true
     })?;
     if updated.is_none() {
@@ -4469,7 +4468,7 @@ pub(crate) fn trusted_dispatcher_kind(kind: &str) -> Option<String> {
 }
 
 fn queue_quarantine_remediation() -> &'static str {
-    "inspect retained diagnostics with: homeboy agent-task status <run-id> --exact --full"
+    "inspect retained diagnostics with: homeboy agent-task diagnose <run-id> --full"
 }
 
 /// Retain the redacted admission diagnostic on the record inside the store the
@@ -4912,7 +4911,8 @@ pub struct AgentTaskStatusOutcome {
 
 /// Read the bounded controller-owned lifecycle record without reconciliation.
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    persisted_status(run_id)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    status_in_store(&lifecycle_store, run_id)
 }
 
 /// Apply deferred-candidate, runtime-admission, and runner/daemon projections,
@@ -5313,92 +5313,13 @@ pub fn reconcile_status_in_store(
     })
 }
 
-/// Read the controller-owned lifecycle record without contacting its runner.
-///
-/// Prefer [`status`] for the public read contract. This explicit name remains
-/// for internal callers that need to distinguish persisted state from a
-/// diagnostic runner probe.
-pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    persisted_status_in_store(&lifecycle_store, run_id)
-}
-
-/// [`persisted_status`] against explicitly injected durable lifecycle roots.
-pub fn persisted_status_in_store(
+/// [`status`] against explicitly injected durable lifecycle roots.
+pub fn status_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
     lifecycle_store.read_record_bounded(&resolved_run_id)
-}
-
-/// Return the bounded bridge projection without reconciling or writing lifecycle
-/// state. Explicit reconciliation owns runner refresh and durable repair.
-pub fn run_status(
-    run_id: &str,
-    cursor: Option<homeboy_control_plane_contract::EventCursor>,
-) -> Result<AgentTaskRunStatus> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    run_status_in_store(&lifecycle_store, run_id, cursor)
-}
-
-/// [`run_status`] against explicitly injected durable lifecycle roots. The
-/// record, plan, aggregate, and events are pure reads from the same installation.
-pub fn run_status_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    cursor: Option<homeboy_control_plane_contract::EventCursor>,
-) -> Result<AgentTaskRunStatus> {
-    let record = persisted_status_in_store(lifecycle_store, run_id)?;
-    let aggregate = lifecycle_store.read_aggregate(&record.run_id).ok();
-    let plan = load_plan_for_execution_in_store(lifecycle_store, &record.run_id).ok();
-    let candidate = plan.as_ref().and_then(|plan| {
-        (plan.tasks.len() > 1).then(|| {
-            let selected = aggregate
-                .as_ref()
-                .and_then(|value| value.selected_outcome());
-            AgentTaskCandidateStatus {
-                policy: plan.options.candidate_completion,
-                selected_task_id: selected.map(|outcome| outcome.task_id.clone()),
-                candidates: aggregate
-                    .as_ref()
-                    .map(|value| tasks_for_aggregate(&plan, value))
-                    .unwrap_or_else(|| record.tasks.clone()),
-                deadline_timeout_ms: plan.options.timeout_ms,
-                cancellation_supervision: if selected.is_some() {
-                    "scheduler_deferred_cleanup".to_string()
-                } else {
-                    "controller_owned".to_string()
-                },
-                promotion_action: selected.and_then(|outcome| {
-                    outcome.metadata["candidate_selection"]["promotion_action"]
-                        .as_str()
-                        .map(str::to_string)
-                }),
-            }
-        })
-    });
-    let events = control_plane_events_in_store(lifecycle_store, &record.run_id, cursor.as_ref())?;
-    let control_plane_run =
-        crate::orchestration::project_record(&record, plan.as_ref()).map_err(|error| {
-            Error::validation_invalid_argument(
-                "run_id",
-                error.message,
-                Some(record.run_id.clone()),
-                None,
-            )
-        })?;
-
-    Ok(AgentTaskRunStatus {
-        schema: schemas::RUN_STATUS.to_string(),
-        control_plane_run,
-        plan_id: record.plan_id,
-        totals: record
-            .totals
-            .unwrap_or_else(|| totals_for_tasks(&record.tasks)),
-        events,
-        candidate,
-    })
 }
 
 pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
@@ -6298,7 +6219,7 @@ pub fn durable_local_read_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskDurableLocalRead> {
-    let record = persisted_status_in_store(lifecycle_store, run_id)?;
+    let record = status_in_store(lifecycle_store, run_id)?;
     durable_local_read_record_in_store(lifecycle_store, record)
 }
 
@@ -6521,7 +6442,7 @@ pub(crate) fn record_cook_attempt_locked_in_store(
                     "local_cook_supervisor".to_string(),
                     json!({
                         "job_id": supervisor,
-                        "reattach_command": format!("homeboy agent-task status {cook_id} --full"),
+                        "reattach_command": format!("homeboy agent-task status {cook_id}"),
                     }),
                 );
             }

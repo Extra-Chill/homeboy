@@ -556,7 +556,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         value["recorded_on_run"] = serde_json::json!({
             "run_id": record.run_id,
             "metadata_key": "latest_promotion",
-            "status_command": format!("homeboy agent-task status {} --full", run_id)
+            "status_command": format!("homeboy agent-task status {}", run_id)
         });
     }
 
@@ -734,7 +734,7 @@ impl PromotionProgressReporter {
     fn new(run_id: Option<&str>, to_worktree: &str, interval: std::time::Duration) -> Self {
         let source = run_id.unwrap_or("unrecorded-promotion");
         promotion_progress_line(&format!(
-            "promotion: durable source run `{source}`; status -> homeboy agent-task status {source} --full"
+            "promotion: durable source run `{source}`; status -> homeboy agent-task status {source}"
         ));
         promotion_progress_line(&format!(
             "promotion: resume -> homeboy agent-task promote {source} --to-worktree {to_worktree}"
@@ -1139,7 +1139,7 @@ pub(crate) fn verify_replacement(mut args: VerifyReplacementArgs) -> CmdResult<V
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
     value["handoff"] = serde_json::json!({
         "next_command": format!("homeboy agent-task finalize-pr --recover {run_id}"),
-        "status_command": format!("homeboy agent-task status {run_id} --full"),
+        "status_command": format!("homeboy agent-task status {run_id}"),
     });
     Ok((value, 0))
 }

@@ -1986,7 +1986,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
                     scope: "agent_task_status",
                     runner_id: report.runner_id.clone(),
                     job_id: None,
-                    command: format!("homeboy agent-task status {run_id} --full"),
+                    command: format!("homeboy agent-task status {run_id}"),
                     description:
                         "Inspect the durable orphaned agent-task run and its preserved evidence."
                             .to_string(),

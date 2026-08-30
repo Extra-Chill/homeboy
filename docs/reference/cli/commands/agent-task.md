@@ -364,12 +364,7 @@ Read durable run status
 | Option | Value | Description |
 | --- | --- | --- |
 | `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | Return canonical bridged events beside the durable run projection |
-| `--since-cursor` | `<CURSOR>` | Resume canonical bridged events after this cursor |
-| `--full` | flag | Return complete status details instead of the bounded summary |
-| `--bounded` | flag | Present `--full` as a bounded, outcome-first summary with drill-down refs |
 | `--strict-subject-exit` | flag | Exit nonzero when the inspected Cook needs follow-up action |
-| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 | `--watch` | flag | Follow this durable status until it reaches a terminal state or the timeout expires |
 | `--interval` | `<DURATION>` | Delay between status reads while following. Accepts ms, s, m, h, or d |
 | `--timeout` | `<DURATION>` | Total time to follow before returning the latest partial status. Accepts ms, s, m, h, or d |
@@ -508,11 +503,7 @@ List artifacts and evidence refs recorded for a completed run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | Read through the runner bridge instead of controller-only state |
-| `--since-cursor` | `<CURSOR>` | Resume bridged events after this cursor |
 | `--full` | flag | Return complete lifecycle details instead of the bounded summary |
-| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 
 ## `homeboy agent-task retained-artifacts`
 
@@ -700,11 +691,7 @@ Resume a queued or stale-running durable run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | Read through the runner bridge instead of controller-only state |
-| `--since-cursor` | `<CURSOR>` | Resume bridged events after this cursor |
 | `--full` | flag | Return complete lifecycle details instead of the bounded summary |
-| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 
 ## `homeboy agent-task retry`
 

@@ -547,7 +547,7 @@ fn reconcile_fanout_pr_states(batch_id: &str, mutate: bool) -> Result<BTreeMap<S
         let record = if mutate {
             agent_task_lifecycle::reconcile_status(&child.run_id)?
         } else {
-            match agent_task_lifecycle::persisted_status(&child.run_id) {
+            match agent_task_lifecycle::status(&child.run_id) {
                 Ok(record) => record,
                 // The batch report retains the last durable child state and
                 // marks observation freshness separately below. A transient
@@ -886,7 +886,7 @@ fn load_portfolio(
                 batch_record.child_runs.iter().map(|child| {
                     supervisor::AgentTaskFanoutPortfolioChild {
                         child_id: child.task_id.clone(),
-                        tracker_ref: agent_task_lifecycle::persisted_status(&child.run_id)
+                        tracker_ref: agent_task_lifecycle::status(&child.run_id)
                             .ok()
                             .and_then(|record| {
                                 declared_tracker_ref(&record.metadata).map(str::to_string)
@@ -1177,7 +1177,7 @@ fn portfolio_observation(
     let record = if reconcile {
         agent_task_lifecycle::reconcile_status(run_id)
     } else {
-        agent_task_lifecycle::persisted_status(run_id)
+        agent_task_lifecycle::status(run_id)
     }
     .ok();
     let provider = match record.as_ref().map(|record| record.state) {

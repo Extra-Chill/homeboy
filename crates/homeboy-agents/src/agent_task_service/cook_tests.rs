@@ -722,7 +722,7 @@ fn run_next_redacts_poisoned_recipe_dispatcher_kind() {
         );
         assert!(!rendered.contains(POISONED_KIND));
         assert!(rendered.contains("cook_continuation_unsupported_dispatcher"));
-        assert!(rendered.contains("agent-task status <run-id> --exact --full"));
+        assert!(rendered.contains("agent-task diagnose <run-id> --full"));
     });
 }
 
@@ -2099,7 +2099,7 @@ fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
 }
 
 #[test]
-fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
+fn candidate_selection_uses_the_winner_for_review_form() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -2188,33 +2188,6 @@ fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
         selected_candidate_task_id_in_store(&lifecycle_store, run_id).unwrap(),
         Some("winner".to_string())
     );
-    let status = agent_task_lifecycle::run_status_in_store(&lifecycle_store, run_id, None).unwrap();
-    let candidate = status
-        .candidate
-        .as_ref()
-        .expect("candidate status projection");
-    assert_eq!(candidate.policy, plan.options.candidate_completion);
-    assert_eq!(candidate.selected_task_id.as_deref(), Some("winner"));
-    assert_eq!(candidate.candidates.len(), 2);
-    assert_eq!(
-        candidate.cancellation_supervision,
-        "scheduler_deferred_cleanup"
-    );
-    assert_eq!(
-        candidate.promotion_action.as_deref(),
-        Some("promote_selected_candidate_only")
-    );
-    let serialized = serde_json::to_value(&status).unwrap();
-    assert_eq!(serialized["candidate"]["policy"], "first_green");
-    assert_eq!(serialized["candidate"]["deadline_timeout_ms"], Value::Null);
-    let mut legacy_json = serialized;
-    legacy_json
-        .as_object_mut()
-        .expect("status object")
-        .remove("candidate");
-    let legacy: crate::agent_task_lifecycle::AgentTaskRunStatus =
-        serde_json::from_value(legacy_json).unwrap();
-    assert!(legacy.candidate.is_none());
 }
 
 #[test]
@@ -15654,6 +15627,8 @@ struct CaptureBackend {
     committed: bool,
     pushed: bool,
     created: bool,
+    updated: bool,
+    existing_pr: Option<AgentTaskPrRef>,
     candidate_state: Option<crate::agent_task_finalization::AgentTaskPrCandidateState>,
     committed_sha: Option<String>,
     hydrate_run_id: Option<String>,
@@ -15872,7 +15847,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         _base: &str,
         _head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
-        Ok(None)
+        Ok(self.existing_pr.clone())
     }
     fn verify_remote_candidate(
         &mut self,
@@ -15915,12 +15890,17 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     fn update_pr(
         &mut self,
         _path: &str,
-        _number: u64,
+        number: u64,
         _title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef> {
+        self.updated = true;
         self.body = body.to_string();
-        unreachable!("test creates a PR")
+        Ok(AgentTaskPrRef {
+            number,
+            url: format!("https://github.com/Extra-Chill/homeboy/pull/{number}"),
+            is_draft: self.existing_pr.as_ref().is_some_and(|pr| pr.is_draft),
+        })
     }
     fn verify_publication_binding(
         &mut self,
@@ -19085,6 +19065,105 @@ fn substantive_retry_discloses_each_authenticated_contribution() {
 }
 
 #[test]
+fn promoted_detached_retry_recovers_cook_finalization_and_updates_existing_pr() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-13867";
+        let source_run_id = "cook-13867-attempt-1";
+        let retry_run_id = "agent-task-13867-detached-retry";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = source_run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model =
+            Some("openai/gpt-5.6-terra".to_string());
+        options.finalization.base = "stale-feature-base".to_string();
+        options.finalization.head = Some("fix/8058".to_string());
+        options.finalization.draft_pr = true;
+        persist_initial_recipe(&options).expect("persist source Cook recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(source_run_id))
+            .expect("submit source Cook attempt");
+
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(retry_run_id))
+            .expect("submit detached retry");
+        agent_task_lifecycle::record_metadata_value(
+            retry_run_id,
+            "retry_of",
+            serde_json::json!(source_run_id),
+        )
+        .expect("bind detached retry lineage");
+        seed_review_form_aggregate(retry_run_id, &options.identity.initial_plan);
+        agent_task_lifecycle::rewrite_record_for_test(retry_run_id, |record| {
+            record
+                .lifecycle
+                .provider_runtime
+                .push(ProviderRuntimeLifecycle {
+                    task_id: options.identity.initial_plan.tasks[0].task_id.clone(),
+                    backend: "opencode".to_string(),
+                    state: ProviderRuntimeState::Succeeded,
+                    stream_uri: None,
+                    external_runtime_ids: Vec::new(),
+                    metadata: serde_json::json!({ "model": "openai/gpt-5.6-terra" }),
+                });
+        })
+        .expect("persist detached retry model provenance");
+        let promotion = promotion_with_existing_path(retry_run_id, target.path());
+        agent_task_lifecycle::record_promotion(
+            retry_run_id,
+            serde_json::to_value(&promotion).unwrap(),
+        )
+        .expect("persist detached retry promotion");
+
+        let existing_pr = AgentTaskPrRef {
+            number: 348,
+            url: "https://github.com/Automattic/markdown-database-integration/pull/348".to_string(),
+            is_draft: true,
+        };
+        let mut preflight_backend = CaptureBackend {
+            existing_pr: Some(existing_pr.clone()),
+            synthetic_gate_proof: Some(promotion.clone()),
+            ..Default::default()
+        };
+        let preflight =
+            recover_cook_pr_with_backend(retry_run_id, Vec::new(), true, &mut preflight_backend)
+                .expect("generated recovery command preflights detached retry");
+        assert_eq!(preflight["status"], "validated");
+        assert!(
+            !preflight_backend.committed
+                && !preflight_backend.pushed
+                && !preflight_backend.created
+                && !preflight_backend.updated
+        );
+
+        let mut publish_backend = CaptureBackend {
+            existing_pr: Some(existing_pr),
+            synthetic_gate_proof: Some(promotion),
+            ..Default::default()
+        };
+        let published =
+            recover_cook_pr_with_backend(retry_run_id, Vec::new(), false, &mut publish_backend)
+                .expect("generated recovery command publishes detached retry");
+        assert_eq!(published["status"], "draft_published");
+        assert_eq!(published["pr_number"], 348);
+        assert!(publish_backend.committed);
+        assert!(publish_backend.pushed);
+        assert!(publish_backend.updated);
+        assert!(!publish_backend.created);
+
+        let mut repeated_backend = CaptureBackend::default();
+        assert_eq!(
+            recover_cook_pr_with_backend(retry_run_id, Vec::new(), false, &mut repeated_backend,)
+                .expect("detached retry publication receipt is idempotent"),
+            published
+        );
+        assert!(
+            !repeated_backend.committed
+                && !repeated_backend.pushed
+                && !repeated_backend.created
+                && !repeated_backend.updated
+        );
+    });
+}
+
+#[test]
 fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-10980-normal";
@@ -21593,7 +21672,7 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
             assert_eq!(
                 context["legal_actions"],
                 serde_json::json!([
-                    { "action": "status", "command": format!("homeboy agent-task status {} --full", options.identity.initial_run_id) },
+                    { "action": "status", "command": format!("homeboy agent-task status {}", options.identity.initial_run_id) },
                     { "action": "diagnose", "command": format!("homeboy agent-task diagnose {}", options.identity.initial_run_id) },
                     { "action": "resume", "command": format!("homeboy agent-task cook-continue {}", options.identity.initial_run_id) },
                 ]),

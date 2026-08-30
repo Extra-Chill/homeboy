@@ -378,7 +378,7 @@ fn failed_child_action_diagnostic(
     let repeated_failure = repeated_failure_diagnostic(record, &failure_signature);
     let next_command = child_run_id
         .as_ref()
-        .map(|run_id| format!("homeboy agent-task status {run_id} --full"))
+        .map(|run_id| format!("homeboy agent-task status {run_id}"))
         .unwrap_or_else(|| {
             format!(
                 "homeboy agent-task controller run {} --action-id {}",

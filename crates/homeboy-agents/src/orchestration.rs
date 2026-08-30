@@ -6,10 +6,10 @@
 //! resolve ambient stores or providers itself.
 
 use homeboy_control_plane_contract::{
-    ControlPlaneBlocker, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneEvidenceRef,
-    ControlPlaneLocation, ControlPlaneOperation, ControlPlaneOwner, ControlPlaneProviderSummary,
-    ControlPlaneResource, ControlPlaneRun, ControlPlaneRunState, ControlPlaneRuntime,
-    ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunId,
+    ControlPlaneBlocker, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneEvidenceRef, ControlPlaneLocation, ControlPlaneOperation, ControlPlaneOwner,
+    ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunState,
+    ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunId,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 
@@ -147,6 +147,34 @@ impl<L: EventLookup> OrchestrationService<L> {
             ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
         })
     }
+}
+
+/// Read one canonical run resource from the current controller installation.
+pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<ControlPlaneRun> {
+    let requested_id = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    OrchestrationService::new(LifecycleStoreLookup::new(store))
+        .run(&requested_id)
+        .map_err(|error| match error.class {
+            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
+                homeboy_core::Error::validation_invalid_argument(
+                    "run_id",
+                    error.message,
+                    Some(run_id.to_string()),
+                    None,
+                )
+            }
+            ControlPlaneErrorClass::Unavailable => {
+                homeboy_core::Error::internal_unexpected(error.message)
+            }
+        })
 }
 
 /// Project a durable record and optional plan the caller already loaded.

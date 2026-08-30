@@ -789,7 +789,7 @@ fn cook_alias_status_projects_active_adoption_remediation() {
     );
     assert_eq!(
         adoption.remediation_status_command.as_deref(),
-        Some("homeboy agent-task status cook-adoption-remediation-status-attempt-2 --full")
+        Some("homeboy agent-task status cook-adoption-remediation-status-attempt-2")
     );
 }
 

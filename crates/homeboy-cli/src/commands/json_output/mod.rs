@@ -883,7 +883,6 @@ fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTask
     match &args.command {
         AgentTaskCommand::Cook(args) => args.full,
         AgentTaskCommand::CookContinue(args) => args.full,
-        AgentTaskCommand::Status(args) => args.full,
         AgentTaskCommand::Artifacts(args) | AgentTaskCommand::Resume(args) => args.full,
         AgentTaskCommand::Evidence(args) => args.full,
         AgentTaskCommand::Diagnose(args) => args.full,

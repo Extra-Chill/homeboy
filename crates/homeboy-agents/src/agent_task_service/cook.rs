@@ -4041,7 +4041,7 @@ fn make_provider_timeout_actionable(
         if deferred_cleanup_pending {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),
-                command: format!("homeboy agent-task status {run_id} --exact --full"),
+                command: format!("homeboy agent-task diagnose {run_id} --full"),
             });
         }
         if let Some(command) = command {
@@ -4185,7 +4185,7 @@ fn make_review_form_timeout_actionable(
         if deferred_cleanup_pending {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),
-                command: format!("homeboy agent-task status {run_id} --exact --full"),
+                command: format!("homeboy agent-task diagnose {run_id} --full"),
             });
         }
         if let Some(command) = command {
