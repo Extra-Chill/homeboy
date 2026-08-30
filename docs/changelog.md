@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.17] - 2026-08-30
+
+### Changed
+- Type lifecycle hook events
+- group durable Cook request
+- remove stale direct routing fixtures
+- Delete control-plane compatibility scaffolding
+- Simplify the control-plane read API
+
+### Fixed
+- bound compact provider dispatchability
+- separate lifecycle and tracker identity
+- reconcile terminal job observations
+- preserve Lab proxy ownership through provider_start
+
 ## [0.364.16] - 2026-08-30
 
 ### Changed
