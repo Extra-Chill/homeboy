@@ -41,7 +41,7 @@ use super::types::{
     RunnerWorkspaceLivenessEvidence, RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata,
     RunnerWorkspacePruneConvergence, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
     RunnerWorkspacePruneOutput, RunnerWorkspacePrunePageReceipt, RunnerWorkspacePruneSkippedEntry,
-    RunnerWorkspacePruneWithheldReason, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspacePruneWithheldReason, RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions,
     RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
@@ -56,10 +56,10 @@ use homeboy_core::server::{
 };
 
 mod snapshots;
-use snapshots::workspace_snapshot_for_lease;
 #[cfg(test)]
 pub(crate) use snapshots::workspace_snapshot_scan_command;
 pub use snapshots::{list_workspaces, workspace_snapshots};
+use snapshots::{workspace_metadata_for_lease, workspace_snapshot_entry};
 
 pub(crate) const WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 const MIN_RUNNER_WORKSPACE_FREE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -287,6 +287,9 @@ pub fn sync_workspace_in_roots(
                 )
             });
             let prepared_workspace_lease = metadata.workspace_lease.clone();
+            let workspace_ref = prepared_workspace_lease
+                .clone()
+                .expect("new workspace metadata has an opaque ref");
             let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
                 metadata,
@@ -321,6 +324,7 @@ pub fn sync_workspace_in_roots(
                     resource_lifecycle,
                     sync_mode: options.mode,
                     snapshot_identity: snapshot,
+                    workspace_ref,
                     prepared_workspace_lease,
                     counts: stats,
                     excludes,
@@ -488,6 +492,9 @@ pub fn sync_workspace_in_roots(
                 )
             });
             let prepared_workspace_lease = metadata.workspace_lease.clone();
+            let workspace_ref = prepared_workspace_lease
+                .clone()
+                .expect("new workspace metadata has an opaque ref");
             let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
                 metadata,
@@ -522,6 +529,7 @@ pub fn sync_workspace_in_roots(
                     resource_lifecycle,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
+                    workspace_ref,
                     prepared_workspace_lease,
                     counts: ByteFileCounts::default(),
                     excludes,
@@ -754,6 +762,9 @@ fn materialize_git_fallback_filesystem_snapshot(
         )
     });
     let prepared_workspace_lease = metadata.workspace_lease.clone();
+    let workspace_ref = prepared_workspace_lease
+        .clone()
+        .expect("new workspace metadata has an opaque ref");
     let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
         runner,
         metadata,
@@ -788,6 +799,7 @@ fn materialize_git_fallback_filesystem_snapshot(
             resource_lifecycle,
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: snapshot,
+            workspace_ref,
             prepared_workspace_lease,
             counts: stats,
             excludes: excludes.to_vec(),
@@ -820,11 +832,12 @@ pub fn update_workspace(
         )
     })?;
     validate_absolute_path("workspace_root", workspace_root)?;
-    let snapshot = workspace_snapshot_for_lease(
+    let snapshot = workspace_metadata_for_lease(
         &runner,
         &format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/')),
         &options.lease,
     )?
+    .and_then(|(_, metadata)| workspace_snapshot_entry(metadata))
     .ok_or_else(|| {
         Error::validation_invalid_argument(
             "lease",
@@ -956,6 +969,195 @@ pub fn update_workspace(
     ))
 }
 
+/// Resolve an opaque workspace capability to the exact metadata-backed
+/// materialization it names. The metadata is never allowed to redirect the
+/// capability away from the physical directory that contained it.
+pub fn resolve_workspace_ref(
+    runner_id: &str,
+    workspace_ref: &str,
+) -> Result<RunnerWorkspaceRefResolution> {
+    workspace_ref
+        .strip_prefix("workspace:")
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+        .ok_or_else(|| {
+            workspace_ref_error(
+                workspace_ref,
+                "workspace_ref_invalid",
+                "runner workspace ref must be an opaque `workspace:<uuid>` capability",
+            )
+        })?;
+    let runner = load(runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace ref resolution requires workspace_root",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    validate_absolute_path("workspace_root", workspace_root)?;
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    let (physical_path, metadata) =
+        workspace_metadata_for_lease(&runner, &lab_workspaces_root, workspace_ref)?.ok_or_else(
+            || {
+                workspace_ref_error(
+            workspace_ref,
+            "workspace_ref_missing",
+            "runner workspace ref is missing, superseded, or no longer retained on this runner",
+        )
+            },
+        )?;
+
+    let physical = Path::new(&physical_path);
+    if metadata.runner_id != runner.id
+        || metadata.remote_path != physical_path
+        || physical.parent() != Some(Path::new(&lab_workspaces_root))
+    {
+        return Err(workspace_ref_error(
+            workspace_ref,
+            "workspace_ref_refused",
+            "runner workspace ref metadata does not match its selected runner and physical snapshot",
+        ));
+    }
+    if runner.kind == RunnerKind::Local {
+        if physical
+            .symlink_metadata()
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            return Err(workspace_ref_error(
+                workspace_ref,
+                "workspace_ref_refused",
+                "runner workspace ref cannot resolve through a symlinked snapshot",
+            ));
+        }
+        let canonical_root = Path::new(&lab_workspaces_root)
+            .canonicalize()
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("canonicalize runner workspace ref root".to_string()),
+                )
+            })?;
+        let canonical_physical = physical.canonicalize().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("canonicalize runner workspace ref".to_string()),
+            )
+        })?;
+        if canonical_physical.parent() != Some(canonical_root.as_path()) {
+            return Err(workspace_ref_error(
+                workspace_ref,
+                "workspace_ref_refused",
+                "runner workspace ref does not resolve to a direct physical snapshot under the runner workspace root",
+            ));
+        }
+    }
+
+    let lifecycle = metadata.resource_lifecycle.as_ref().ok_or_else(|| {
+        workspace_ref_error(
+            workspace_ref,
+            "workspace_ref_refused",
+            "runner workspace ref has no authoritative lifecycle record",
+        )
+    })?;
+    let lifecycle_matches = lifecycle.is_runner_workspace()
+        && lifecycle.runner_id.as_deref() == Some(runner.id.as_str())
+        && lifecycle.path == metadata.remote_path
+        && lifecycle.status == ResourceLifecycleResourceStatus::Active;
+    let expired = lifecycle.ttl.as_deref().is_some_and(|ttl| {
+        chrono::DateTime::parse_from_rfc3339(&metadata.synced_at)
+            .ok()
+            .map(|created| {
+                resource_lifecycle_path_ttl_expired_at(
+                    ttl,
+                    SystemTime::from(created),
+                    chrono::Utc::now(),
+                )
+            })
+            .unwrap_or(true)
+    });
+    if metadata.terminal_evidence.is_some() || !lifecycle_matches || expired {
+        return Err(workspace_ref_error(
+            workspace_ref,
+            "workspace_ref_expired",
+            "runner workspace ref has expired or reached terminal lifecycle state",
+        ));
+    }
+
+    let mut source_snapshot = homeboy_core::source_snapshot::existing_remote(
+        &runner.id,
+        &metadata.remote_path,
+        Some(workspace_root),
+    );
+    source_snapshot.local_path = Some(metadata.local_path.clone());
+    source_snapshot.git_branch = metadata.source_ref.clone();
+    source_snapshot.git_sha = metadata.source_commit.clone();
+    source_snapshot.dirty = metadata.source_dirty.unwrap_or(false);
+    source_snapshot.sync_mode = metadata.sync_mode.clone();
+    source_snapshot.workspace_snapshot_identity = Some(metadata.snapshot_identity.clone());
+    source_snapshot.prepared_workspace_original_snapshot_identity =
+        metadata.original_prepared_snapshot_identity.clone();
+    source_snapshot.prepared_workspace_update_lineage = metadata.update_lineage.clone();
+    source_snapshot.synced_at = metadata.synced_at.clone();
+    source_snapshot.sync_excludes = metadata.snapshot_excludes.clone();
+
+    Ok(RunnerWorkspaceRefResolution {
+        workspace_ref: workspace_ref.to_string(),
+        local_path: metadata.local_path,
+        remote_path: metadata.remote_path,
+        source_snapshot,
+        snapshot_excludes: metadata.snapshot_excludes,
+        content_manifest: metadata.content_manifest,
+    })
+}
+
+/// Prove the controller source used to detect and package dependencies still
+/// has the content identity persisted with the resolved runner snapshot.
+pub fn verify_workspace_ref_hydration_source(
+    resolved: &RunnerWorkspaceRefResolution,
+) -> Result<()> {
+    let local_path = Path::new(&resolved.local_path);
+    let unchanged = if let Some(expected) = resolved.content_manifest.as_ref() {
+        local_path.is_dir()
+            && workspace_content_manifest_for_policy(
+                local_path,
+                &resolved.snapshot_excludes,
+                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+            )
+            .is_ok_and(|actual| &actual == expected)
+    } else {
+        let state = local_git_state(local_path);
+        local_path.is_dir()
+            && state.commit == resolved.source_snapshot.git_sha
+            && state.ref_name == resolved.source_snapshot.git_branch
+            && state.dirty == Some(resolved.source_snapshot.dirty)
+    };
+    if unchanged {
+        return Ok(());
+    }
+
+    Err(workspace_ref_error(
+        &resolved.workspace_ref,
+        "workspace_ref_source_drift",
+        "runner workspace ref hydration source no longer matches the persisted snapshot",
+    ))
+}
+
+fn workspace_ref_error(workspace_ref: &str, reason: &'static str, message: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "workspace_ref",
+        message,
+        Some(workspace_ref.to_string()),
+        Some(vec![
+            "Run `homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot` and retry with the returned `workspace_ref`.".to_string(),
+        ]),
+    );
+    error.details["reason"] = serde_json::json!(reason);
+    error.details["recovery"] = serde_json::json!("resync_workspace");
+    error
+}
+
 /// Hydrate execution provenance from a metadata-backed prepared workspace.
 /// Ordinary runner paths remain unchanged; only an exact workspace match gains
 /// the original snapshot and ordered delta lineage recorded at promotion time.
@@ -1029,10 +1231,14 @@ pub fn reuse_compatible_snapshot_workspace(
     let local_path_string = local_path.display().to_string();
     let Some(snapshot) = snapshots.snapshots.into_iter().find(|snapshot| {
         snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
+            && snapshot.workspace_ref.is_some()
             && snapshot.local_path == local_path_string
             && snapshot.source_commit.as_deref() == Some(source_commit.as_str())
             && snapshot.source_dirty == Some(false)
     }) else {
+        return Ok(None);
+    };
+    let Some(workspace_ref) = snapshot.workspace_ref.clone() else {
         return Ok(None);
     };
 
@@ -1114,6 +1320,7 @@ pub fn reuse_compatible_snapshot_workspace(
         resource_lifecycle,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: snapshot.snapshot_identity,
+        workspace_ref,
         prepared_workspace_lease: snapshot.workspace_lease,
         counts: ByteFileCounts::default(),
         excludes,

@@ -6,6 +6,7 @@ use super::super::validation_dependencies::RunnerValidationDependencySyncOutput;
 use super::super::RunnerWorkspaceLease;
 use super::snapshot::WorkspaceContentManifest;
 use homeboy_core::resource_lifecycle_index::ResourceLifecycleRecord;
+use homeboy_core::source_snapshot::SourceSnapshot;
 
 pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
@@ -47,6 +48,9 @@ pub struct RunnerWorkspaceSyncOutput {
     pub resource_lifecycle: ResourceLifecycleRecord,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub snapshot_identity: String,
+    /// Opaque capability for resolving this exact physical snapshot in a later
+    /// runner command. Callers must not parse it as a path or source identity.
+    pub workspace_ref: String,
     /// Opaque lease used by `runner workspace update`; distinct from the
     /// deterministic source snapshot identity.
     pub prepared_workspace_lease: Option<String>,
@@ -506,6 +510,8 @@ pub struct RunnerWorkspaceSnapshotEntry {
     pub snapshot_identity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_lease: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_ref: Option<String>,
     #[serde(default)]
     pub workspace_generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -532,6 +538,20 @@ pub struct RunnerWorkspaceSnapshotEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_lifecycle: Option<ResourceLifecycleRecord>,
     pub exec_command: String,
+}
+
+/// Validated handoff for one metadata-backed physical runner workspace.
+///
+/// The ref remains opaque to callers; resolution is the only boundary that
+/// turns it into paths and source provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerWorkspaceRefResolution {
+    pub workspace_ref: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub source_snapshot: SourceSnapshot,
+    pub(crate) snapshot_excludes: Vec<String>,
+    pub(crate) content_manifest: Option<WorkspaceContentManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
