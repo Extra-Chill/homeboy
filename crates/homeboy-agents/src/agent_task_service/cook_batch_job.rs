@@ -52,9 +52,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use homeboy_core::daemon::controller_job_driver::{
-    self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
-};
+use homeboy_core::daemon::controller_job_driver::ControllerJobPublicError;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, ProcessIdentityState, ProcessStartIdentity,
 };
@@ -343,8 +341,6 @@ fn invalid_cook_batch_job(message: &str) -> homeboy_core::Error {
     homeboy_core::Error::validation_invalid_argument("cook_batch_job", message, None, None)
 }
 
-pub struct CookBatchJobDriver;
-
 struct CookBatchWorkHandler;
 
 impl WorkJobHandler for CookBatchWorkHandler {
@@ -417,104 +413,15 @@ impl WorkJobHandler for CookBatchWorkHandler {
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
+        // The durable marker is written before per-child cancellation so a
+        // racing coordinator stops claiming work. The coordinator itself is
+        // not signalled: it is the parent of in-flight cooks, which must use
+        // their ordered lifecycle cancellation path to terminalize cleanly.
         let job = AgentTaskCookBatchJob::parse(checkpoint.clone())?;
         if job.phase == AgentTaskCookBatchJobPhase::Completed {
             return Ok(());
         }
         stop_batch(&job.request.batch_id)
-    }
-}
-
-/// Recovery-only adapter for persisted `agent-task-cook-batch` v1 jobs.
-impl ControllerJobDriver for CookBatchJobDriver {
-    fn job_type(&self) -> &'static str {
-        AGENT_TASK_COOK_BATCH_JOB_TYPE
-    }
-
-    fn version(&self) -> u32 {
-        AGENT_TASK_COOK_BATCH_JOB_VERSION
-    }
-
-    fn public_request(&self, request: &Value) -> Result<Value> {
-        CookBatchWorkHandler.public_request(request)
-    }
-
-    fn public_progress(&self, progress: &Value) -> Result<Value> {
-        CookBatchWorkHandler.public_progress(progress)
-    }
-
-    fn public_result(&self, result: &Value) -> Result<Value> {
-        CookBatchWorkHandler.public_result(result)
-    }
-
-    fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
-        CookBatchWorkHandler.public_error(error)
-    }
-
-    fn validate_secret_references(&self, request: &Value) -> Result<()> {
-        CookBatchWorkHandler.validate_secret_references(request)
-    }
-
-    fn prepare(&self, request: Value) -> Result<Value> {
-        CookBatchWorkHandler.prepare(request)
-    }
-
-    fn execute(&self, prepared: Value, handle: ControllerJobHandle) -> Result<Value> {
-        CookBatchWorkHandler.advance(
-            prepared,
-            WorkJobHandle::legacy(handle, &CookBatchWorkHandler),
-            WorkJobInvocation::Execute,
-        )
-    }
-
-    /// Re-adopt supervision after a daemon restart.
-    ///
-    /// Idempotent by construction: no branch below starts a coordinator or a
-    /// child. A completed job short-circuits on its durable terminal state; an
-    /// unfinished one either re-attaches to a coordinator still provably alive,
-    /// or reads the durable outcome of one that is not.
-    ///
-    /// Note what is deliberately absent: there is no branch that relaunches an
-    /// interrupted wave. A wave whose coordinator died is carried forward by
-    /// `agent-task fanout resume`, which harvests terminal-but-unfinalized
-    /// children through their original gates and finalization contract. Doing
-    /// that from here would put two owners on the same children.
-    fn resume(&self, checkpoint: Value, handle: ControllerJobHandle) -> Result<Value> {
-        CookBatchWorkHandler.advance(
-            checkpoint,
-            WorkJobHandle::legacy(handle, &CookBatchWorkHandler),
-            WorkJobInvocation::Resume,
-        )
-    }
-
-    /// Stop the wave through the one established cancellation path.
-    ///
-    /// Two things are true of a batch that are not true of a single Cook, and
-    /// they need different mechanisms:
-    ///
-    /// * A child already in flight is stopped exactly as `cook_job` stops its
-    ///   Cook — `agent_task_lifecycle::cancel_run`, which terminates a detached
-    ///   child's process tree under an exact `ProcessStartIdentity` match before
-    ///   an attempt exists, and marks the live attempt cancelled after one does,
-    ///   which the running cook's own supervisor turns into a process-tree
-    ///   termination. No second stop mechanism is introduced.
-    /// * A child that was never claimed has no lifecycle record at all, so there
-    ///   is nothing to cancel. Those are stopped by
-    ///   `record_coordinator_cancellation`, which the coordinator's claim loop
-    ///   reads before starting each child.
-    ///
-    /// The cancellation marker is written *first*, so a coordinator racing this
-    /// call stops claiming while the per-child cancellations are still going out
-    /// rather than starting fresh work behind them.
-    ///
-    /// The coordinator process itself is deliberately **not** signalled. It is
-    /// the parent of every in-flight cook, and killing its process tree would
-    /// take down children in the middle of committing, pushing, or opening a
-    /// pull request — precisely the states `cancel_run`'s ordered path exists to
-    /// terminalize cleanly. With no claimable work and no live children, the
-    /// coordinator drains and exits on its own.
-    fn cancel(&self, prepared: &Value) -> Result<()> {
-        CookBatchWorkHandler.cancel(prepared)
     }
 }
 
@@ -667,18 +574,14 @@ fn coordinator_is_live(request: &AgentTaskCookBatchJobRequest) -> bool {
     )
 }
 
-/// Register the cook batch driver with core's generic controller-job lifecycle.
+/// Register the cook batch handler with the generic work lifecycle.
 /// Registration is idempotent because CLI startup can run in test processes
 /// that initialize the command runtime more than once.
-pub fn register_cook_batch_job_driver() {
+pub fn register_cook_batch_work_handler() {
     static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     REGISTERED.get_or_init(|| {
         register_work_job_handler(std::sync::Arc::new(CookBatchWorkHandler))
             .expect("register cook batch work job handler");
-        controller_job_driver::register_controller_job_driver(std::sync::Arc::new(
-            CookBatchJobDriver,
-        ))
-        .expect("register cook batch controller job driver");
     });
 }
 
@@ -743,6 +646,7 @@ mod tests {
         WORK_JOB_RESULT_SCHEMA, WORK_JOB_TYPE, WORK_JOB_VERSION,
     };
     use homeboy_core::api_jobs::JobEventKind;
+    use homeboy_core::daemon::controller_job_driver::ControllerJobDriver;
     use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness};
     use std::sync::Arc;
 
@@ -751,7 +655,7 @@ mod tests {
     };
 
     fn submission(batch_id: &str, pid: u32) -> Value {
-        register_cook_batch_job_driver();
+        register_cook_batch_work_handler();
         cook_batch_job_submission(batch_id, pid, &IDENTITY).expect("build batch job submission")
     }
 
@@ -927,7 +831,7 @@ mod tests {
     #[test]
     fn the_public_error_carries_only_a_code() {
         let public =
-            CookBatchJobDriver.public_error(&invalid_cook_batch_job("prompt: the private text"));
+            CookBatchWorkHandler.public_error(&invalid_cook_batch_job("prompt: the private text"));
 
         assert_eq!(
             public.message,
@@ -1069,52 +973,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn execute_and_resume_supervise_through_the_controller_job_handle() {
-        with_isolated_home(|_| {
-            let batch_id = "fanout-controller-harness";
-            persist_batch(batch_id, &["unstarted"]);
-            let request = request_of(batch_id, u32::MAX);
-            let driver: Arc<dyn ControllerJobDriver> = Arc::new(CookBatchJobDriver);
-            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
-                .expect("construct controller job harness");
-            let prepared = driver.prepare(request).expect("prepare batch job");
-
-            let result = driver
-                .execute(prepared, harness.handle())
-                .expect("supervise dead coordinator");
-
-            assert_eq!(result["phase"], "completed");
-            assert_eq!(result["terminal_state"], "partial_failure");
-            let checkpoint = harness
-                .checkpoint()
-                .expect("read checkpoint")
-                .expect("supervision checkpoint");
-            assert_eq!(checkpoint["phase"], "supervising");
-            let progress = harness
-                .events()
-                .expect("read controller events")
-                .into_iter()
-                .find(|event| event.kind == JobEventKind::Progress)
-                .and_then(|event| event.data)
-                .expect("projected supervision progress");
-            assert_eq!(progress["batch_id"], batch_id);
-            assert!(progress.get("child_pid").is_none());
-
-            let mut completed = checkpoint;
-            completed["phase"] = json!("completed");
-            completed["terminal_state"] = json!("partial_failure");
-            let first = driver
-                .resume(completed.clone(), harness.handle())
-                .expect("first completed replay");
-            let second = driver
-                .resume(completed, harness.handle())
-                .expect("second completed replay");
-            assert_eq!(first, second);
-            assert_eq!(first, result);
-        });
-    }
-
     /// A coordinator that died before writing its batch record is not a
     /// vacuously successful empty wave.
     #[test]
@@ -1161,7 +1019,7 @@ mod tests {
         job.phase = AgentTaskCookBatchJobPhase::Completed;
         job.terminal_state = Some(AgentTaskBatchState::Succeeded);
 
-        CookBatchJobDriver
+        CookBatchWorkHandler
             .cancel(&job.to_checkpoint().expect("serialize"))
             .expect("cancelling a completed cook batch job is a no-op");
     }
@@ -1176,7 +1034,7 @@ mod tests {
             persist_batch("fanout-cancel", &["a", "b", "c"]);
             let request = request_of("fanout-cancel", 4242);
 
-            CookBatchJobDriver
+            CookBatchWorkHandler
                 .cancel(&request)
                 .expect("cancellation tolerates children that never started");
 
@@ -1185,7 +1043,7 @@ mod tests {
                 "the claim loop's stop signal must be durable"
             );
             // Replaying cancellation converges rather than erroring.
-            CookBatchJobDriver
+            CookBatchWorkHandler
                 .cancel(&request)
                 .expect("cancellation is idempotent");
         });
@@ -1197,7 +1055,7 @@ mod tests {
     #[test]
     fn cancelling_before_the_batch_record_exists_is_not_an_error() {
         with_isolated_home(|_| {
-            CookBatchJobDriver
+            CookBatchWorkHandler
                 .cancel(&request_of("fanout-cancel-early", 4242))
                 .expect("a wave cancelled during startup must still cancel");
 
@@ -1209,8 +1067,8 @@ mod tests {
     }
 
     #[test]
-    fn driver_registration_is_idempotent() {
-        register_cook_batch_job_driver();
-        register_cook_batch_job_driver();
+    fn work_handler_registration_is_idempotent() {
+        register_cook_batch_work_handler();
+        register_cook_batch_work_handler();
     }
 }

@@ -25,7 +25,7 @@
 //! Detachment alone left the cook PID-owned: durable enough to read, but with
 //! no job record, no checkpoint, and no authority that outlived the launcher.
 //! The launcher now also submits the cook to the daemon as a typed controller
-//! job (`agent_task_service::CookJobDriver`), so the daemon owns the lifecycle
+//! job (`agent_task_service::WorkJobDriver`), so the daemon owns the lifecycle
 //! — durable record, checkpointing, cancellation, and HTTP inspection — while
 //! this launcher still spawns the child.
 //!

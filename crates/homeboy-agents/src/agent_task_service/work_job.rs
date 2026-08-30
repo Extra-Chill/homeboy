@@ -81,19 +81,12 @@ pub trait WorkJobHandler: Send + Sync {
     fn cancel(&self, checkpoint: &Value) -> Result<()>;
 }
 
-#[derive(Clone, Copy)]
-enum WorkJobFraming {
-    Versioned,
-    Legacy,
-}
-
 /// The bounded event surface available to domain handlers.
 #[derive(Clone)]
 pub struct WorkJobHandle {
     inner: ControllerJobHandle,
     work_type: &'static str,
     work_version: u32,
-    framing: WorkJobFraming,
 }
 
 impl WorkJobHandle {
@@ -102,16 +95,6 @@ impl WorkJobHandle {
             inner,
             work_type: handler.work_type(),
             work_version: handler.version(),
-            framing: WorkJobFraming::Versioned,
-        }
-    }
-
-    pub(crate) fn legacy(inner: ControllerJobHandle, handler: &dyn WorkJobHandler) -> Self {
-        Self {
-            inner,
-            work_type: handler.work_type(),
-            work_version: handler.version(),
-            framing: WorkJobFraming::Legacy,
         }
     }
 
@@ -124,27 +107,21 @@ impl WorkJobHandle {
     }
 
     pub fn progress(&self, progress: Value) -> Result<()> {
-        match self.framing {
-            WorkJobFraming::Versioned => self.inner.progress(to_value(WorkJobProgress {
-                schema: WORK_JOB_PROGRESS_SCHEMA.to_string(),
-                work_type: self.work_type.to_string(),
-                work_version: self.work_version,
-                progress,
-            })?),
-            WorkJobFraming::Legacy => self.inner.progress(progress),
-        }
+        self.inner.progress(to_value(WorkJobProgress {
+            schema: WORK_JOB_PROGRESS_SCHEMA.to_string(),
+            work_type: self.work_type.to_string(),
+            work_version: self.work_version,
+            progress,
+        })?)
     }
 
     pub fn checkpoint(&self, checkpoint: Value) -> Result<()> {
-        match self.framing {
-            WorkJobFraming::Versioned => self.inner.checkpoint(to_value(WorkJobCheckpoint {
-                schema: WORK_JOB_CHECKPOINT_SCHEMA.to_string(),
-                work_type: self.work_type.to_string(),
-                work_version: self.work_version,
-                checkpoint,
-            })?),
-            WorkJobFraming::Legacy => self.inner.checkpoint(checkpoint),
-        }
+        self.inner.checkpoint(to_value(WorkJobCheckpoint {
+            schema: WORK_JOB_CHECKPOINT_SCHEMA.to_string(),
+            work_type: self.work_type.to_string(),
+            work_version: self.work_version,
+            checkpoint,
+        })?)
     }
 }
 
