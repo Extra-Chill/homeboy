@@ -1814,7 +1814,7 @@ fn project_operator_value(value: &mut Value, evidence_content: bool) {
                     || (evidence_content && key == "body")
                 {
                     if let Value::String(text) = item {
-                        if text.len() > COMPACT_TEXT_LIMIT {
+                        if text.len() > COMPACT_TEXT_LIMIT && !is_bounded_failure_result(text) {
                             let digest = content_hash::sha256_hex(text.as_bytes());
                             *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
                         }
@@ -1828,6 +1828,61 @@ fn project_operator_value(value: &mut Value, evidence_content: bool) {
             }
         }
         _ => {}
+    }
+}
+
+fn is_bounded_failure_result(text: &str) -> bool {
+    if text.len() > 8_192 {
+        return false;
+    }
+    let Ok(Value::Object(result)) = serde_json::from_str(text) else {
+        return false;
+    };
+    let failed = result.get("success").and_then(Value::as_bool) == Some(false)
+        || result
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| {
+                matches!(
+                    status.to_ascii_lowercase().as_str(),
+                    "blocked" | "error" | "failed" | "failure" | "timed_out" | "timeout"
+                )
+            });
+    failed
+}
+
+#[cfg(test)]
+mod bounded_failure_result_tests {
+    use super::{is_bounded_failure_result, COMPACT_TEXT_LIMIT};
+
+    #[test]
+    fn retains_code_less_payloads_for_every_liftable_failure_status() {
+        for status in [
+            "blocked",
+            "error",
+            "failed",
+            "failure",
+            "timed_out",
+            "timeout",
+        ] {
+            let payload = serde_json::json!({
+                "status": status,
+                "message": "x".repeat(COMPACT_TEXT_LIMIT),
+            })
+            .to_string();
+            assert!(payload.len() > COMPACT_TEXT_LIMIT);
+            assert!(is_bounded_failure_result(&payload), "status={status}");
+        }
+    }
+
+    #[test]
+    fn retains_success_false_without_a_code() {
+        let payload = serde_json::json!({
+            "success": false,
+            "message": "x".repeat(COMPACT_TEXT_LIMIT),
+        })
+        .to_string();
+        assert!(is_bounded_failure_result(&payload));
     }
 }
 

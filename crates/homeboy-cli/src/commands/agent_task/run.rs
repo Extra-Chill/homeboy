@@ -351,6 +351,7 @@ pub(crate) fn preview_cook(
         provision["action"].as_str(),
         Some("materialization_required" | "unresolved_provider")
     ) {
+        let failure = provision.get("failure").cloned();
         return Ok((
             serde_json::json!({
                 "schema": "homeboy/agent-task-cook-preview/v1",
@@ -367,6 +368,7 @@ pub(crate) fn preview_cook(
                     "notification_resolution": notification_resolution,
                 },
                 "progress": progress,
+                "failure": failure,
                 "replay_argv": replay.argv,
                 "replay_requires": replay.requires,
             }),
@@ -4464,6 +4466,7 @@ fn unresolved_provider_preview(
         .as_str()
         .unwrap_or_default();
     let planning_timeout = preview_provider_plan_timeout(config, provider_id);
+    let failure = error.details.get("provider_failure").cloned();
     serde_json::json!({
         "action": "unresolved_provider",
         "disposition": "unresolved",
@@ -4474,6 +4477,7 @@ fn unresolved_provider_preview(
         "planning_timeout": planning_timeout,
         "reason": error.message,
         "remediation": error.details["tried"],
+        "failure": failure,
         "details": error.details,
     })
 }

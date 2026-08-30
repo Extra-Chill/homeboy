@@ -729,17 +729,178 @@ fn failure_diagnostics_for_data(
     if exit_code == 0 {
         return None;
     }
+
+    let specialized_digest = release_failure_digest(data)
+        .or_else(|| cook_batch_failure_digest(data))
+        .or_else(|| formatting_failure_digest(data));
+    if let Some(failure_digest) = specialized_digest {
+        return Some(command_failed_diagnostics(exit_code, failure_digest));
+    }
+    if let Some(failure) = declared_failure(data) {
+        let mut details = failure.details;
+        details.insert("exit_code".to_string(), Value::from(exit_code));
+        details.insert(
+            "source_pointer".to_string(),
+            Value::String("/failure".to_string()),
+        );
+        let failure_digest = CommandFailureDigest {
+            summary: failure.message.clone(),
+            stdout_tail: failure.stdout_tail,
+            stderr_tail: failure.stderr_tail,
+            artifact_refs: Vec::new(),
+            next_actions: failure.next_actions,
+            retryable: failure.retryable,
+        };
+        return Some(CommandDiagnostics {
+            code: failure.code,
+            message: failure.message,
+            details: Value::Object(details),
+            hints: None,
+            retryable: failure.retryable,
+            failure_digest: Some(failure_digest),
+        });
+    }
+
     let failure_digest = failure_digest_for_data(data).or_else(|| {
         run.as_ref()
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
-    failure_digest.map(|failure_digest| CommandDiagnostics {
+    failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+}
+
+fn command_failed_diagnostics(
+    exit_code: i32,
+    failure_digest: CommandFailureDigest,
+) -> CommandDiagnostics {
+    CommandDiagnostics {
         code: "command.failed".to_string(),
         message: failure_digest.summary.clone(),
         details: serde_json::json!({ "exit_code": exit_code }),
         hints: None,
         retryable: failure_digest.retryable,
         failure_digest: Some(failure_digest),
+    }
+}
+
+struct DeclaredFailure {
+    code: String,
+    message: String,
+    details: Map<String, Value>,
+    stdout_tail: Option<String>,
+    stderr_tail: Option<String>,
+    next_actions: Vec<CommandNextAction>,
+    retryable: Option<bool>,
+}
+
+/// Lift only the payload's declared current failure. Producer layers promote
+/// causal subprocess failures here; unrelated nested historical records are
+/// data and must not be attributed to this command invocation.
+fn declared_failure(data: &Value) -> Option<DeclaredFailure> {
+    let object = data.get("failure")?.as_object()?;
+    let message = ["message", "problem", "summary"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(Value::as_str))
+        .or_else(|| object.get("error").and_then(Value::as_str))?
+        .trim();
+    if message.is_empty() {
+        return None;
+    }
+
+    let local_details = object.get("details").and_then(Value::as_object);
+    let detail_value = object
+        .get("details")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(object.clone()));
+    let details = bounded_failure_detail(&detail_value)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let stream_tail = |key: &str| {
+        local_details
+            .and_then(|value| value.get(key))
+            .or_else(|| object.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .map(tail_text)
+    };
+    let retryable = object
+        .get("retryable")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            local_details
+                .and_then(|details| details.get("retryable"))
+                .and_then(Value::as_bool)
+        });
+
+    Some(DeclaredFailure {
+        code: object
+            .get("code")
+            .or_else(|| object.get("kind"))
+            .or_else(|| object.get("class"))
+            .and_then(Value::as_str)
+            .filter(|code| !code.trim().is_empty())
+            .map(|code| bounded_text(code.trim(), 128))
+            .unwrap_or_else(|| "command.failed".to_string()),
+        message: bounded_text(message, 1_000),
+        stdout_tail: stream_tail("stdout_tail").or_else(|| stream_tail("stdout")),
+        stderr_tail: stream_tail("stderr_tail").or_else(|| stream_tail("stderr")),
+        next_actions: object
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(4)
+            .filter_map(|action| serde_json::from_value(action.clone()).ok())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(failure_replay_action(&details))
+            .take(4)
+            .collect(),
+        details,
+        retryable,
+    })
+}
+
+fn bounded_failure_detail(value: &Value) -> Value {
+    match value {
+        Value::String(value) => Value::String(bounded_text(value, 1_000)),
+        Value::Array(items) => {
+            Value::Array(items.iter().take(4).map(bounded_failure_detail).collect())
+        }
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .take(8)
+                .map(|(key, value)| (key.clone(), bounded_failure_detail(value)))
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
+fn failure_replay_action(details: &Map<String, Value>) -> Option<CommandNextAction> {
+    let command = details
+        .get("refresh_command")
+        .and_then(Value::as_str)
+        .or_else(|| details.get("replay_command").and_then(Value::as_str))
+        .or_else(|| details.get("recovery_command").and_then(Value::as_str))
+        .or_else(|| {
+            details
+                .get("remediation")
+                .and_then(Value::as_object)
+                .and_then(|remediation| {
+                    remediation
+                        .get("command")
+                        .or_else(|| remediation.get("replay_command"))
+                        .and_then(Value::as_str)
+                })
+        })
+        .map(str::trim)
+        .filter(|command| !command.is_empty());
+    command.map(|command| {
+        CommandNextAction::new("replay the failed operation", command)
+            .with_kind(CommandNextActionKind::Repair)
     })
 }
 
@@ -777,15 +938,6 @@ fn actions_for_error(err: &Error) -> Vec<CommandNextAction> {
 }
 
 fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
-    if let Some(digest) = release_failure_digest(data) {
-        return Some(digest);
-    }
-    if let Some(digest) = cook_batch_failure_digest(data) {
-        return Some(digest);
-    }
-    if let Some(digest) = formatting_failure_digest(data) {
-        return Some(digest);
-    }
     let failure = data.get("failure").and_then(Value::as_object);
     let summary = failure
         .and_then(|failure| string_at_object(failure, "summary"))
@@ -2011,6 +2163,160 @@ mod tests {
             value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
             "homeboy agent-task cook-continue cook-1"
         );
+    }
+
+    #[test]
+    fn cook_preview_lifts_declared_typed_provider_failure() {
+        let provider_failure = json!({
+            "schema": "fixture/worktree-provider-error/v1",
+            "status": "error",
+            "code": "freshness_refresh_required",
+            "message": "workspace freshness must be refreshed before planning",
+            "refresh_command": "workspace-provider refresh example@fix-13848",
+            "remediation": ["refresh provider state, then replay planning"],
+            "stderr": "provider freshness probe timed out",
+            "evidence": "x".repeat(600),
+        });
+        let provider_stderr = serde_json::to_string(&provider_failure).expect("provider failure");
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "mutates": false,
+            "failure": {
+                "code": "freshness_refresh_required",
+                "message": "workspace freshness must be refreshed before planning",
+                "details": {
+                    "refresh_command": "workspace-provider refresh example@fix-13848",
+                    "remediation": ["refresh provider state, then replay planning"],
+                },
+                "stderr_tail": "provider freshness probe timed out",
+            },
+            "resolved": {
+                "worktree": "example@fix-13848",
+                "workspace": {
+                    "action": "unresolved_provider",
+                    "disposition": "unresolved",
+                    "kind": "provider",
+                    "handle": "example@fix-13848",
+                    "provider_id": "fixture",
+                    "reason": "worktree provider plan command failed with exit code 1",
+                    "details": {
+                        "field": "to_worktree",
+                        "problem": "worktree provider plan command failed with exit code 1",
+                        "worktree_provider_phase": "worktree_provider_plan",
+                        "worktree_provider_replay_command": "workspace-provider plan example@fix-13848",
+                        "command_evidence": {
+                            "command": "workspace-provider plan example@fix-13848",
+                            "exit_code": 1,
+                            "stdout": provider_stderr,
+                            "stderr": "provider plan failed",
+                        },
+                    },
+                },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--preview"],
+        });
+        assert!(provider_stderr.len() > 512, "exercise compact projection");
+        let mut compact_payload = payload.clone();
+        crate::commands::agent_task::status::project_operator_output(&mut compact_payload);
+        assert_eq!(
+            compact_payload, payload,
+            "typed failure evidence is retained"
+        );
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(compact_payload),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "freshness_refresh_required");
+        assert_eq!(
+            value["summary"],
+            "workspace freshness must be refreshed before planning"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["refresh_command"],
+            "workspace-provider refresh example@fix-13848"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["remediation"],
+            json!(["refresh provider state, then replay planning"])
+        );
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["stderr_tail"],
+            "provider freshness probe timed out"
+        );
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "workspace-provider refresh example@fix-13848"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["source_pointer"],
+            "/failure"
+        );
+        assert_eq!(
+            value["data"]["resolved"]["workspace"]["details"]["field"],
+            "to_worktree"
+        );
+        assert_eq!(
+            value["data"]["resolved"]["workspace"]["details"]["worktree_provider_phase"],
+            "worktree_provider_plan"
+        );
+        assert_eq!(
+            value["data"]["resolved"]["workspace"]["details"]["worktree_provider_replay_command"],
+            "workspace-provider plan example@fix-13848"
+        );
+        assert_eq!(value["data"], payload, "nested evidence remains lossless");
+    }
+
+    #[test]
+    fn historical_nested_errors_are_not_attributed_to_the_current_exit() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "fixture/history/v1",
+                "history": [{
+                    "status": "failed",
+                    "error": {
+                        "code": "historical.provider_failure",
+                        "message": "an earlier attempt failed",
+                    },
+                }],
+                "resolved": { "status": "blocked" },
+            })),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "command.failed");
+        assert!(!value["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("earlier attempt"));
+    }
+
+    #[test]
+    fn truly_causeless_nonzero_result_keeps_generic_failure() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "homeboy/agent-task-cook-preview/v1",
+                "mutates": false,
+                "resolved": { "worktree": "example@fix-13848" },
+            })),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "command.failed");
+        assert_eq!(
+            value["summary"],
+            "agent-task cook exited 1 without reporting a failure cause"
+        );
+        assert!(value["diagnostics"].get("failure_digest").is_none());
     }
 
     /// #13702: `success: false` is never emitted without a named cause. A
