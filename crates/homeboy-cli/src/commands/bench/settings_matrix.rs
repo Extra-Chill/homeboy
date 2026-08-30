@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use homeboy::agents::agent_tasks::AgentTaskMatrixExecutionState;
 use homeboy::core::matrix_artifact_summary;
-use homeboy_extension::bench::{BenchCommandOutput, BenchScenario};
+use homeboy_core::bench::{BenchCommandOutput, BenchScenario};
 
 use super::{filter_homeboy_flags, matrix as bench_runner, BenchRunArgs};
 

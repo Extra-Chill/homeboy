@@ -89,7 +89,6 @@ lost one in the same PR.
 homeboy-agents             7    ~114,000 lines   triaged, 42 items classified
 homeboy-deploy             3
 homeboy-release            1     ~39,700 lines
-homeboy-extension          1     ~10,800 lines
 homeboy-engine-primitives  1
 homeboy-paths              1
 tests/ support modules     2    shared scaffolding, partially used per binary

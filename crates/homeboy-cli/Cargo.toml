@@ -23,7 +23,6 @@ test-support = ["homeboy-core/test-support", "homeboy-agents/test-support"]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
-homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-release = { version = "0.1.0", path = "../homeboy-release" }
 homeboy-deploy = { version = "0.1.0", path = "../homeboy-deploy" }
@@ -68,6 +67,5 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 homeboy-serde-pin = { version = "0.1.0", path = "../homeboy-serde-pin" }
 # Enable homeboy-core's shared hermetic test fixtures for this crate's test build.
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
-homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-agents = { version = "0.1.0", path = "../homeboy-agents", features = ["test-support"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

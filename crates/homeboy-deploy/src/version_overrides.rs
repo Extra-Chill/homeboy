@@ -12,7 +12,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::paths as base_path;
 use homeboy_core::project::Project;
 use homeboy_core::server::SshClient;
-use homeboy_extension::{
+use homeboy_core::{
     load_all_extensions, DeployArchiveInstallPolicy, DeployOverride, DeployVerification,
     ExtensionManifest,
 };
@@ -842,7 +842,7 @@ mod tests {
     use super::*;
     use homeboy_core::component::VersionTarget;
     use homeboy_core::server::SshClient;
-    use homeboy_extension::{
+    use homeboy_core::{
         DeployArchiveInstallPolicy, DeployOverride, DeployRequiredHeader, DeployVerification,
         ExtensionManifest,
     };

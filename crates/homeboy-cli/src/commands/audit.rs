@@ -11,7 +11,7 @@ use homeboy::core::observation::{
     finding_records_from_audit, ActiveObservation, NewFindingRecord, NewRunRecord, RunStatus,
 };
 
-use homeboy_extension::{ExtensionCapability, ExtensionRunner};
+use homeboy_core::{ExtensionCapability, ExtensionRunner};
 
 use super::source_command::resolve_source_context;
 use super::utils::args::{
@@ -552,7 +552,7 @@ pub(crate) fn resolve_audit_reference_paths(
         // An unreadable sibling manifest does not get to fail audit for the
         // extensions that are readable (#11122). Only a declared-and-broken
         // setup script is an error.
-        let Ok(manifest) = homeboy_extension::load_extension(ext_id) else {
+        let Ok(manifest) = homeboy_core::load_extension(ext_id) else {
             continue;
         };
         if !manifest.has_audit() {

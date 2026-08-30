@@ -8,11 +8,11 @@ use super::*;
 
 use crate::component::ScopedExtensionConfig;
 use crate::test_support::with_isolated_home;
-use homeboy_extension::{DeployCapability, ExtensionManifest};
+use homeboy_core::{DeployCapability, ExtensionManifest};
 use std::collections::HashMap;
 
 fn install_wordpress_extension() {
-    homeboy_extension::save_manifest(&ExtensionManifest {
+    homeboy_core::save_manifest(&ExtensionManifest {
         id: "wordpress".to_string(),
         name: "WordPress".to_string(),
         version: "1.0.0".to_string(),

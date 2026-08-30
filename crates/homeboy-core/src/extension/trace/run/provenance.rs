@@ -109,7 +109,7 @@ pub(super) fn push_git_provenance_reasons(
 }
 
 fn declared_toolchain_env_value(
-    requirement: &crate::manifest_config::TraceToolchainProvenanceConfig,
+    requirement: &crate::extension::manifest_config::TraceToolchainProvenanceConfig,
     args: &TraceRunWorkflowArgs,
 ) -> Option<(String, String)> {
     requirement.env_keys.iter().find_map(|key| {

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use homeboy_extension::trace::{self as extension_trace, TraceCommandOutput};
+use homeboy_core::trace::{self as extension_trace, TraceCommandOutput};
 use serde::Serialize;
 
 use super::compare_targets::run_compare_targets;

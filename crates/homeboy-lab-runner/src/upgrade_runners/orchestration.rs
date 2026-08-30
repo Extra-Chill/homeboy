@@ -135,7 +135,7 @@ fn runner_manifest_preflight_with_executor(
         let Some(requires_homeboy) = requires_homeboy else {
             continue;
         };
-        match homeboy_extension::evaluate_core_compatibility_for_version(
+        match homeboy_core::evaluate_core_compatibility_for_version(
             Some(&requires_homeboy),
             None,
             candidate_version,

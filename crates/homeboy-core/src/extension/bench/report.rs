@@ -235,5 +235,5 @@ fn artifact_ref(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/extension/bench/phase_tag_test.rs"]
+#[path = "../../../../../tests/core/extension/bench/phase_tag_test.rs"]
 mod phase_tag_test;

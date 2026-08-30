@@ -1,5 +1,5 @@
 use homeboy_core::extension_update_check::read_source_revision;
-use homeboy_extension::{
+use homeboy_core::{
     check_update_available, extension_ready_status, is_extension_linked, load_extension,
 };
 

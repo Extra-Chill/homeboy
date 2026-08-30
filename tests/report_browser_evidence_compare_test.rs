@@ -6,7 +6,7 @@ use homeboy::commands::runs::report::{
     browser_evidence_compare_from_dirs_with_visual_and_adapters, BrowserEvidenceCompareArgs,
     VisualCompareOptions,
 };
-use homeboy_extension::{
+use homeboy_core::{
     TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
     TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig,
 };

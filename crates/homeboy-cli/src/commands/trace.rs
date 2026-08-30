@@ -10,13 +10,13 @@ use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::observation::{ActiveObservation, NewRunRecord};
 use homeboy::rig::{self, RigSpec};
-use homeboy_extension::trace as extension_trace;
-use homeboy_extension::trace::{
+use homeboy_core::trace as extension_trace;
+use homeboy_core::trace::{
     TraceAttachment, TraceCanonicalPolicy, TraceCheckoutProvenance, TraceCommandOutput,
     TraceListWorkflowArgs, TraceOverlayRequest, TraceRunWorkflowArgs, TraceRunnerInputs,
     TraceSpanDefinition,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_core::ExtensionCapability;
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use super::CmdResult;

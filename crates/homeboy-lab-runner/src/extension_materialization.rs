@@ -145,7 +145,7 @@ fn materialize_lab_job_extension_overlay_snapshots(
         })?;
         let mut shared_assets = Vec::new();
         for (asset_path, asset_source) in
-            homeboy_extension::lifecycle::shared_assets_for_extension_source(&resolved_source)
+            homeboy_core::extension::lifecycle::shared_assets_for_extension_source(&resolved_source)
         {
             if !asset_source.is_dir() {
                 continue;
@@ -1275,7 +1275,7 @@ mod tests {
                 "#!/bin/sh\nset -eu\nexec node --test \"$1\"\n",
             )
             .expect("shared node runner");
-            homeboy_extension::install(&nodejs.display().to_string(), Some("nodejs"))
+            homeboy_core::install(&nodejs.display().to_string(), Some("nodejs"))
                 .expect("install linked nodejs extension");
 
             let runner_root = tempfile::tempdir().expect("runner root");

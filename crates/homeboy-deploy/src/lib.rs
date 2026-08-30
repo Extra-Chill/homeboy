@@ -802,7 +802,7 @@ mod tests {
     use homeboy_core::project::{Project, ProjectComponentAttachment};
     use homeboy_core::server::{self, Server};
     use homeboy_core::test_support::with_isolated_home;
-    use homeboy_extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
+    use homeboy_core::{DeployCapability, ExtensionManifest, RemotePathRootRule};
     use std::collections::{BTreeMap, HashMap};
     use std::path::Path;
 
@@ -963,7 +963,7 @@ mod tests {
             let base_path = home.path().join("runtime");
             std::fs::create_dir_all(&base_path).expect("runtime root");
             let managed_root = base_path.join("wp-content");
-            homeboy_extension::save_manifest(&ExtensionManifest {
+            homeboy_core::save_manifest(&ExtensionManifest {
                 id: "managed-paths".to_string(),
                 name: "Managed Paths".to_string(),
                 version: "1.0.0".to_string(),

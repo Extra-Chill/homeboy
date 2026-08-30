@@ -6,9 +6,9 @@
 
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
-use homeboy_extension as extension;
-use homeboy_extension::ExtensionCapability;
-use homeboy_extension::{self, ExtensionManifest};
+use homeboy_core::extension;
+use homeboy_core::ExtensionCapability;
+use homeboy_core::{self, ExtensionManifest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -439,15 +439,15 @@ fn record_existing_cleanup_path(component_path: &Path, path: &str, paths: &mut B
 fn build_declared_component_artifact(
     component: &Component,
     declared_build_artifact: Option<&str>,
-) -> Result<Option<homeboy_extension::build::BuildOutput>> {
+) -> Result<Option<homeboy_core::build::BuildOutput>> {
     if declared_build_artifact.is_none_or(|path| path.trim().is_empty())
         || !component.has_script(ExtensionCapability::Build)
     {
         return Ok(None);
     }
 
-    let (build, exit_code) = homeboy_extension::build::build_component_with_output(component)
-        .map_err(|error| {
+    let (build, exit_code) =
+        homeboy_core::build::build_component_with_output(component).map_err(|error| {
             Error::validation_invalid_argument(
                 "scripts.build",
                 error.message,
@@ -475,7 +475,7 @@ fn build_declared_component_artifact(
 }
 
 fn format_build_failure(
-    build: &homeboy_extension::build::BuildOutput,
+    build: &homeboy_core::build::BuildOutput,
     working_dir: &str,
     exit_code: i32,
 ) -> String {
@@ -518,7 +518,7 @@ mod build_failure_tests {
 
     #[test]
     fn timed_out_build_error_is_reproducible_and_bounded() {
-        let build = homeboy_extension::build::BuildOutput {
+        let build = homeboy_core::build::BuildOutput {
             command: "build.run".to_string(),
             component_id: "example".to_string(),
             build_command: "make release".to_string(),

@@ -20,8 +20,8 @@ use homeboy::core::git;
 use homeboy::core::observation::ObservationStore;
 use homeboy::core::plan::PlanStep;
 use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
-use homeboy_extension::lint::LintCommandOutput;
-use homeboy_extension::test::TestCommandOutput;
+use homeboy_core::lint::LintCommandOutput;
+use homeboy_core::test::TestCommandOutput;
 use homeboy_release::release::{changelog, version};
 use homeboy_review::review::{
     self, ReviewArtifactFindings, ReviewCommandOutput, ReviewOutputInput, ReviewService,

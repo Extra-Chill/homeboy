@@ -326,7 +326,7 @@ impl BenchPhaseGroups {
     /// without a policy or without a `phase` tag fall into `untagged`.
     /// Within each phase bucket the metric names are kept in
     /// alphabetical order so the render is stable across runs.
-    pub(in crate::bench::report) fn from_policies(
+    pub(in crate::extension::bench::report) fn from_policies(
         policies: &BTreeMap<String, BenchMetricPolicy>,
         metric_names: &std::collections::BTreeSet<String>,
     ) -> Self {
@@ -347,7 +347,7 @@ impl BenchPhaseGroups {
     /// name is in the `untagged` bucket. Used to suppress the
     /// `phase_groups` field entirely so back-compat consumers see no
     /// change in the JSON envelope.
-    pub(in crate::bench::report) fn is_phaseless(&self) -> bool {
+    pub(in crate::extension::bench::report) fn is_phaseless(&self) -> bool {
         self.cold.is_empty() && self.warm.is_empty() && self.amortized.is_empty()
     }
 }

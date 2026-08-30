@@ -7,8 +7,8 @@
 //! into them — a genuine dependency cycle, and the reason the two subsystems
 //! could not simply be split into their own crates (#11144).
 //!
-//! Everything here depends only on `homeboy-core` (plus `homeboy-extension` for
-//! extension-declared version patterns), so it sits strictly below both
+//! Everything here depends only on `homeboy-core` (plus the extension contract for
+//! extension-declared hook events), so it sits strictly below both
 //! subsystems and makes `homeboy-deploy` -> `homeboy-release` a one-way edge.
 //!
 //! Deliberately *not* here: the release-owned mutation guard

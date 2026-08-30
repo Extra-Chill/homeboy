@@ -226,9 +226,9 @@ fn aggregate_span_result(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/core/extension/bench/aggregation_test.rs"]
+#[path = "../../../../../tests/core/extension/bench/aggregation_test.rs"]
 mod aggregation_test;
 
 #[cfg(test)]
-#[path = "../../../../tests/core/extension/bench/runs_flag_test.rs"]
+#[path = "../../../../../tests/core/extension/bench/runs_flag_test.rs"]
 mod runs_flag_test;

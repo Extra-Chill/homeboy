@@ -1295,7 +1295,7 @@ mod changed_scope_tests {
 /// The `[errors_only, sniffs, exclude_sniffs]` triplet used to be re-declared
 /// field-by-field on `LintArgs` (CLI), `LintRunWorkflowArgs` (workflow), and
 /// `LintSourceOptions` (refactor). Owning the group here — and mapping it to
-/// the core [`homeboy_extension::lint::LintSniffFilters`] contract —
+/// the core [`homeboy_core::lint::LintSniffFilters`] contract —
 /// keeps the shape defined once instead of being repeated across layers (#5576).
 #[derive(Args, Debug, Clone, Default)]
 pub struct LintSniffArgs {
@@ -1314,8 +1314,8 @@ pub struct LintSniffArgs {
 
 impl LintSniffArgs {
     /// Project the CLI flags onto the shared core sniff-filter contract.
-    pub(crate) fn to_lint_sniff_filters(&self) -> homeboy_extension::lint::LintSniffFilters {
-        homeboy_extension::lint::LintSniffFilters {
+    pub(crate) fn to_lint_sniff_filters(&self) -> homeboy_core::lint::LintSniffFilters {
+        homeboy_core::lint::LintSniffFilters {
             errors_only: self.errors_only,
             sniffs: self.sniffs.clone(),
             exclude_sniffs: self.exclude_sniffs.clone(),

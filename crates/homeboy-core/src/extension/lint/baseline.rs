@@ -14,7 +14,7 @@ use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig, Finge
 const BASELINE_KEY: &str = "lint";
 
 #[cfg(test)]
-#[path = "../../../../tests/core/lint_baseline_test.rs"]
+#[path = "../../../../../tests/core/lint_baseline_test.rs"]
 mod lint_baseline_test;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

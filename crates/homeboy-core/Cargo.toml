@@ -8,9 +8,6 @@ description = "Core engine for homeboy: build/deploy/test/triage orchestration, 
 repository = "https://github.com/Extra-Chill/homeboy"
 publish = false
 
-[package.metadata.cargo-machete]
-ignored = ["homeboy-extension"] # Imported by an out-of-tree included test fixture.
-
 [lib]
 name = "homeboy_core"
 path = "src/lib.rs"
@@ -77,4 +74,3 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 homeboy-serde-pin = { version = "0.1.0", path = "../homeboy-serde-pin" }
 homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit", features = ["test-support"] }
-homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }

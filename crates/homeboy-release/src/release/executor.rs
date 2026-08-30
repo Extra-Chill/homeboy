@@ -557,7 +557,7 @@ mod tests {
     use crate::release::types::{ReleaseArtifact, ReleaseStepStatus};
     use homeboy_core::component::{Component, ScopedExtensionConfig};
     use homeboy_core::git::release_download::GitHubRepo;
-    use homeboy_extension::ExtensionManifest;
+    use homeboy_core::ExtensionManifest;
     fn test_repo() -> GitHubRepo {
         GitHubRepo {
             host: "github.com".to_string(),
@@ -931,7 +931,7 @@ mod tests {
                 "wordpress",
                 "mkdir -p build; printf artifact > build/fixture.zip; printf '[{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}]'",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
             let component_config = Component {
                 id: "fixture".to_string(),
                 local_path: component.path().to_string_lossy().to_string(),
@@ -999,7 +999,7 @@ mod tests {
                 "rm -f packages/plugin/dist/plugin.zip; mkdir -p target; printf npm > target/plugin-1.2.3.tgz; \
                  printf '[{\"path\":\"target/plugin-1.2.3.tgz\",\"type\":\"npm\"}]'",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
             let component = Component {
                 id: "plugin".to_string(),
                 local_path: component_dir.path().to_string_lossy().to_string(),
@@ -1144,7 +1144,7 @@ mod tests {
                 "mkdir -p target; printf npm > target/plugin-1.2.3.tgz; \
                  printf '[{\"path\":\"target/plugin-1.2.3.tgz\",\"type\":\"npm\"}]'",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
 
             let error = run_package(
                 &test_roots(),
@@ -1311,8 +1311,8 @@ mod tests {
                 "package-b",
                 "printf '[{\"path\":\"target/package-b.zip\",\"type\":\"archive\"}]'",
             );
-            homeboy_extension::save_manifest(&package_a).expect("save package A extension");
-            homeboy_extension::save_manifest(&package_b).expect("save package B extension");
+            homeboy_core::save_manifest(&package_a).expect("save package A extension");
+            homeboy_core::save_manifest(&package_b).expect("save package B extension");
 
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(
@@ -1351,7 +1351,7 @@ mod tests {
                 "wordpress",
                 "printf '[{\"path\":\"build/%s.zip\",\"type\":\"wordpress\"}]' \"$HOMEBOY_COMPONENT_ID\"",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
 
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(
@@ -1392,7 +1392,7 @@ mod tests {
                     payload_out.display()
                 ),
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
 
             let mut component = Component::default();
             component.extensions = Some(std::collections::HashMap::from([
@@ -1481,7 +1481,7 @@ mod tests {
                     component_env_out.display()
                 ),
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
 
             package_preflight::run_package_preflight(&component.path().to_string_lossy())
                 .expect("package guards");
@@ -1520,7 +1520,7 @@ mod tests {
                  cp ../../build-input.txt build/root-input.txt; \
                  printf '[{\"path\":\"build/root-input.txt\",\"type\":\"archive\"}]'",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
 
             package_preflight::run_package_preflight(&component.to_string_lossy())
                 .expect("package guards");
@@ -1536,7 +1536,7 @@ mod tests {
                 "wordpress",
                 "printf 'building package\n'; printf 'error: missing tsconfig.base.json\n' >&2; exit 9",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
 
             let mut state = ReleaseState::default();
             let err = run_package(
@@ -1571,8 +1571,8 @@ mod tests {
                 "package-b",
                 "printf 'archive command failed' >&2; exit 7",
             );
-            homeboy_extension::save_manifest(&package_a).expect("save package A extension");
-            homeboy_extension::save_manifest(&package_b).expect("save package B extension");
+            homeboy_core::save_manifest(&package_a).expect("save package A extension");
+            homeboy_core::save_manifest(&package_b).expect("save package B extension");
 
             let mut state = crate::release::types::ReleaseState::default();
             let err = run_package(
@@ -1614,7 +1614,7 @@ mod tests {
                 "printf '[BUILD] Installing npm dependencies...\\n'; \
                  printf 'npm error: ERESOLVE\\n' >&2; exit 1",
             );
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
 
             let mut state = crate::release::types::ReleaseState::default();
             let err = run_package(
@@ -1670,7 +1670,7 @@ mod tests {
                 marker = marker.display()
             );
             let package = release_package_extension("wordpress", &script);
-            homeboy_extension::save_manifest(&package).expect("save package extension");
+            homeboy_core::save_manifest(&package).expect("save package extension");
 
             let mut state = crate::release::types::ReleaseState::default();
             let result = run_package(

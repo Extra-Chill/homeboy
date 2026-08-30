@@ -407,13 +407,13 @@ mod tests {
     /// removed. Recorded rather than hand-written so the classifier is proven
     /// against the exact bytes the gate really sees.
     const RECORDED_CARGO_OUTPUT: &str =
-        include_str!("../../../../../tests/fixtures/test_durations/cargo-test-slow-binary.txt");
+        include_str!("../../../../../../tests/fixtures/test_durations/cargo-test-slow-binary.txt");
 
     /// The same recording truncated at a real line boundary, mid-binary, the
     /// way a SIGKILL at the timeout truncates it: earlier binaries have
     /// reported, the one that was executing never will.
     const RECORDED_TRUNCATED_OUTPUT: &str = include_str!(
-        "../../../../../tests/fixtures/test_durations/cargo-test-timeout-truncated.txt"
+        "../../../../../../tests/fixtures/test_durations/cargo-test-timeout-truncated.txt"
     );
 
     /// The budget this repository's Test gate enforced when #10655 was filed.

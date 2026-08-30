@@ -7,12 +7,12 @@
 //! well-formed, and that decision has to be made in two places that cannot see
 //! each other:
 //!
-//! - `homeboy-extension`, at install/replace time, so a malformed declaration is
+//! - `homeboy-core`, at install/replace time, so a malformed declaration is
 //!   rejected and rolled back instead of installed silently.
 //! - `homeboy-agents`, at discovery time, which owns the far richer resolved
 //!   provider type.
 //!
-//! `homeboy-agents` depends on `homeboy-extension`, so `homeboy-extension` can
+//! `homeboy-agents` depends on `homeboy-core`, so core can
 //! never call into it. Rather than duplicate the rule on both sides (which would
 //! drift), the rule lives here once and both sides call it.
 //!

@@ -223,27 +223,27 @@ fn extension_manifest_accepts_real_extension_fixture_shapes() {
     for (fixture_id, raw) in [
         (
             "rust",
-            include_str!("../../../tests/fixtures/extension_manifests/rust.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/rust.json"),
         ),
         (
             "fixture-js-runtime",
-            include_str!("../../../tests/fixtures/extension_manifests/js_runtime.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/js_runtime.json"),
         ),
         (
             "go",
-            include_str!("../../../tests/fixtures/extension_manifests/go.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/go.json"),
         ),
         (
             "swift",
-            include_str!("../../../tests/fixtures/extension_manifests/swift.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/swift.json"),
         ),
         (
             "wordpress",
-            include_str!("../../../tests/fixtures/extension_manifests/wordpress.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/wordpress.json"),
         ),
         (
             "managed-preview",
-            include_str!("../../../tests/fixtures/extension_manifests/managed-preview.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/managed-preview.json"),
         ),
     ] {
         let mut manifest: ExtensionManifest = serde_json::from_str(raw)
@@ -277,23 +277,23 @@ fn shipped_manifests_do_not_yet_declare_every_exported_sidecar() {
     for (fixture_id, raw) in [
         (
             "rust",
-            include_str!("../../../tests/fixtures/extension_manifests/rust.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/rust.json"),
         ),
         (
             "go",
-            include_str!("../../../tests/fixtures/extension_manifests/go.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/go.json"),
         ),
         (
             "swift",
-            include_str!("../../../tests/fixtures/extension_manifests/swift.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/swift.json"),
         ),
         (
             "wordpress",
-            include_str!("../../../tests/fixtures/extension_manifests/wordpress.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/wordpress.json"),
         ),
         (
             "managed-preview",
-            include_str!("../../../tests/fixtures/extension_manifests/managed-preview.json"),
+            include_str!("../../../../tests/fixtures/extension_manifests/managed-preview.json"),
         ),
     ] {
         let manifest: ExtensionManifest = serde_json::from_str(raw)
@@ -341,7 +341,7 @@ fn shipped_manifests_do_not_yet_declare_every_exported_sidecar() {
 
 #[test]
 fn executable_pruned_fields_remain_loadable_as_unknown_manifest_data() {
-    let raw = include_str!("../../../tests/fixtures/extension_manifests/swift.json");
+    let raw = include_str!("../../../../tests/fixtures/extension_manifests/swift.json");
     let manifest: ExtensionManifest =
         serde_json::from_str(raw).expect("swift fixture should parse");
     let executable = manifest.executable.expect("executable fixture");

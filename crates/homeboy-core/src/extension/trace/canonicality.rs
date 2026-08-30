@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::manifest_config::TraceToolchainProvenanceConfig;
+use crate::extension::manifest_config::TraceToolchainProvenanceConfig;
 use crate::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::error::Result;
@@ -217,7 +217,7 @@ pub(crate) fn trace_toolchain_provenance_requirements(
     if !manifest_path.exists() {
         return Ok(Vec::new());
     }
-    let manifest = crate::env_provider::load_manifest_from_dir(&context.extension_path)?;
+    let manifest = crate::extension::env_provider::load_manifest_from_dir(&context.extension_path)?;
     Ok(manifest.trace_toolchain_provenance().to_vec())
 }
 

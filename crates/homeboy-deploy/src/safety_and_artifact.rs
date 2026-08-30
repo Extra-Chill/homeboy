@@ -9,7 +9,7 @@ use homeboy_core::engine::shell;
 use homeboy_core::engine::template::{render_map, TemplateVars};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server::SshClient;
-use homeboy_extension::DeployVerification;
+use homeboy_core::DeployVerification;
 
 use super::transfer::{upload_directory, upload_file};
 use super::types::{DeployEffect, DeployResult};
@@ -494,7 +494,7 @@ mod tests {
     use crate::lifecycle::DeployObservation;
     use homeboy_core::observation::ObservationStore;
     use homeboy_core::server::SshClient;
-    use homeboy_extension::DeployVerification;
+    use homeboy_core::DeployVerification;
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs;

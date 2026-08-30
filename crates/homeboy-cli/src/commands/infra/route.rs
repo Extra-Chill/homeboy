@@ -4129,15 +4129,15 @@ fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverride
 
 /// The test manifest, not the ambient controller, owns portable environment.
 /// This runs before direct Lab dispatch and deferred-plan persistence.
-fn portable_test_env(cli: &Cli) -> homeboy::core::Result<homeboy_extension::test::PortableTestEnv> {
+fn portable_test_env(cli: &Cli) -> homeboy::core::Result<homeboy_core::test::PortableTestEnv> {
     let Commands::Review(review) = &cli.command else {
-        return Ok(homeboy_extension::test::PortableTestEnv {
+        return Ok(homeboy_core::test::PortableTestEnv {
             public_env: Vec::new(),
             secret_env: Default::default(),
         });
     };
     let Some(crate::commands::review::ReviewCommand::Test(args)) = review.command.as_ref() else {
-        return Ok(homeboy_extension::test::PortableTestEnv {
+        return Ok(homeboy_core::test::PortableTestEnv {
             public_env: Vec::new(),
             secret_env: Default::default(),
         });
@@ -4146,9 +4146,9 @@ fn portable_test_env(cli: &Cli) -> homeboy::core::Result<homeboy_extension::test
         &args.comp,
         &args.setting_args,
         &args.extension_override,
-        Some(homeboy_extension::ExtensionCapability::Test),
+        Some(homeboy_core::ExtensionCapability::Test),
     )?;
-    homeboy_extension::test::portable_env(&context.component)
+    homeboy_core::test::portable_env(&context.component)
 }
 
 fn parse_lab_env_pair(source: &str, raw: &str) -> homeboy::core::Result<(String, String)> {

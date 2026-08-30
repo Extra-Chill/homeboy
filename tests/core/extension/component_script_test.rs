@@ -6,13 +6,13 @@ use std::process::Command;
 
 use crate::commands::test::{run as run_test, TestArgs};
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
-use homeboy_core::engine::run_dir::RunDir;
-use homeboy_core::test_support::with_isolated_home;
-use homeboy_extension::component_script::{
+use homeboy_core::component_script::{
     run_component_scripts, run_component_scripts_with_env, run_component_scripts_with_run_dir,
     source_path,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_core::engine::run_dir::RunDir;
+use homeboy_core::test_support::with_isolated_home;
+use homeboy_core::ExtensionCapability;
 
 fn test_command_args(root: &Path) -> TestArgs {
     TestArgs::for_test("fixture", root)
@@ -926,7 +926,7 @@ fn extension_policy_with_evidence_allows_a_neutral_no_test_scope() {
         assert_eq!(output.status, "skipped");
         assert_eq!(
             output.phase.expect("phase").status,
-            homeboy_extension::PhaseStatus::Skipped
+            homeboy_core::PhaseStatus::Skipped
         );
     });
 }

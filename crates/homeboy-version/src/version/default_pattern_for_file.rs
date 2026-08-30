@@ -10,8 +10,8 @@ use homeboy_core::engine::codebase_scan;
 use homeboy_core::engine::text;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension_execution::{resolve_owner, SINCE_TAG_SURFACE};
+use homeboy_core::load_all_extensions;
 use homeboy_core::paths::resolve_path_string;
-use homeboy_extension::load_all_extensions;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -238,16 +238,14 @@ pub(crate) fn detect_unconfigured_patterns(component: &Component) -> Vec<Unconfi
 ///   it (agreeing extensions are not ambiguous)
 /// - conflicting configs → [`resolve_owner`] on the `since_tag` surface, then a
 ///   hard error with a runnable fix command
-fn resolve_since_tag_config(
-    component: &Component,
-) -> Result<Option<homeboy_extension::SinceTagConfig>> {
-    use homeboy_extension::load_extension;
+fn resolve_since_tag_config(component: &Component) -> Result<Option<homeboy_core::SinceTagConfig>> {
+    use homeboy_core::load_extension;
 
     let Some(extensions) = component.extensions.as_ref() else {
         return Ok(None);
     };
 
-    let mut providers: BTreeMap<String, homeboy_extension::SinceTagConfig> = BTreeMap::new();
+    let mut providers: BTreeMap<String, homeboy_core::SinceTagConfig> = BTreeMap::new();
     for extension_id in extensions.keys() {
         let Ok(manifest) = load_extension(extension_id) else {
             continue;
