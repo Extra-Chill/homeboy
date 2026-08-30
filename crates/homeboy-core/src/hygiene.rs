@@ -1177,7 +1177,7 @@ mod tests {
         let ids = validation_dependency_ids(dir.path()).expect("ids");
         assert_eq!(
             ids,
-            vec!["workspace-events".to_string(), "shared-runtime".to_string()]
+            vec!["shared-runtime".to_string(), "workspace-events".to_string()]
         );
     }
 
