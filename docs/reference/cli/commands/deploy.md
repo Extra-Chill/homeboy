@@ -50,3 +50,4 @@ Deploy components to remote server
 | `--tagged` | flag | Force local tag-based build/deploy, ignoring reusable release assets |
 | `--target` | `<TARGET>` | Select which deliverable a dual-deliverable component deploys Values: `server`, `provider`. |
 | `--resume` | `<RUN_ID>` | Resume a prior multi-project deploy run after exact identity validation |
+| `--max-concurrency` | `<COUNT>` | Maximum number of project targets applied concurrently |
