@@ -2270,7 +2270,7 @@ pub(super) fn remote_daemon_adopt_orphan_command(
         .map(|job_id| format!(" --confirm-untracked-child-dead {job_id}"))
         .collect::<String>();
     format!(
-        "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead{} --addr 127.0.0.1:0",
+        "{} daemon adopt-orphan --lease-id {}{} --addr 127.0.0.1:0",
         shell::quote_arg(homeboy),
         shell::quote_arg(lease_id),
         confirmations,

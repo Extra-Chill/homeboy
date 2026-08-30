@@ -684,9 +684,7 @@ pub struct ArtifactFetchOutcome {
 /// established here. `validate_state_loss_preconditions` requires an absent
 /// state record, a `LeaseMissing` freshness code, an unreachable daemon, and a
 /// non-running recorded PID, and then `probe_recorded_daemon_endpoint` must
-/// fail to connect to the recorded endpoint. The former `--confirm-pid-dead`
-/// and `--confirm-control-plane-lost` gates ran *before* all of that and so
-/// could only reject correct operators.
+/// fail to connect to the recorded endpoint.
 pub fn recover_missing_lease_state(
     lease_id: &str,
     recorded_pid: u32,
@@ -1432,7 +1430,7 @@ pub fn adopt_orphaned_lease(
 /// `reconcile_dead_lease_orphans_with_operations` requires a `PidDead` freshness
 /// code, a non-running recorded PID, persisted unexpected-termination evidence
 /// bound to this exact lease and PID, and a second liveness proof taken under
-/// the owner lock. `--confirm-pid-dead` added nothing to that.
+/// the owner lock.
 pub fn reconcile_dead_lease_orphans(
     lease_id: &str,
     job_ids: &[uuid::Uuid],
@@ -1769,8 +1767,7 @@ where
 /// Absence of a daemon owner is proven, not asserted: the daemon owner lock is
 /// refused while any daemon is live or starting, and `prove_no_daemon_owner`
 /// then fails closed on any related daemon process candidate or any reachable
-/// listener at `addr`. The former `--confirm-no-daemon-owner` gate ran ahead of
-/// both probes.
+/// listener at `addr`.
 pub fn reconcile_leaseless_orphans(
     addr: &str,
     replacement_operation_id: Option<&str>,

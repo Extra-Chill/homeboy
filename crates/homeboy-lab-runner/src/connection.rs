@@ -1101,42 +1101,40 @@ fn connect_with_orphan_adoption_and_live_lease(
             .and_then(|session| session.remote_daemon_address.as_deref())
             .filter(|address| parse_loopback_daemon_addr(address).is_ok())
             .unwrap_or("127.0.0.1:0");
-        let recovery =
-            execute_remote_leaseless_recovery(daemon_recovery_capabilities, |contract| {
-                let command = remote_leaseless_recovery_command(
-                    homeboy,
-                    recovery_addr,
-                    contract,
-                    &replacement_operation_id,
-                );
-                // The negotiated command is persisted before its SSH mutation.
-                // A write failure aborts before the remote operation.
-                if super::generation_store::record_replacement_operation_replay(
-                    runner_id,
-                    "leaseless",
-                    &command,
-                )
-                .is_err()
-                {
-                    return homeboy_core::server::CommandOutput {
-                        success: false,
-                        stdout: String::new(),
-                        stderr: "could not journal replacement operation".to_string(),
-                        exit_code: 1,
-                        timed_out: false,
-                        observation: Default::default(),
-                        child_resource: None,
-                    };
-                }
-                fenced_remote_mutation(
-                    runner_id,
-                    previous_session.as_ref(),
-                    "reconcile_leaseless_orphans",
-                    &client,
-                    &command,
-                    REMOTE_LEASELESS_RECOVERY_TIMEOUT,
-                )
-            });
+        let recovery = execute_remote_leaseless_recovery(daemon_recovery_capabilities, |_| {
+            let command = remote_leaseless_recovery_command(
+                homeboy,
+                recovery_addr,
+                &replacement_operation_id,
+            );
+            // The negotiated command is persisted before its SSH mutation.
+            // A write failure aborts before the remote operation.
+            if super::generation_store::record_replacement_operation_replay(
+                runner_id,
+                "leaseless",
+                &command,
+            )
+            .is_err()
+            {
+                return homeboy_core::server::CommandOutput {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "could not journal replacement operation".to_string(),
+                    exit_code: 1,
+                    timed_out: false,
+                    observation: Default::default(),
+                    child_resource: None,
+                };
+            }
+            fenced_remote_mutation(
+                runner_id,
+                previous_session.as_ref(),
+                "reconcile_leaseless_orphans",
+                &client,
+                &command,
+                REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+            )
+        });
         let (contract, recovery) = match recovery {
             Ok(recovery) => recovery,
             Err(message) => {
@@ -1642,16 +1640,10 @@ fn verify_live_lease_adoption(
 fn remote_leaseless_recovery_command(
     homeboy: &str,
     addr: &str,
-    contract: RunnerLeaselessRecoveryContract,
     replacement_operation_id: &str,
 ) -> String {
-    let confirmations = match contract {
-        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
-        | RunnerLeaselessRecoveryContract::ReconcileLeaselessOrphansAndConfirmNoDaemonOwner
-        | RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost => "--confirm-no-daemon-owner",
-    };
     format!(
-        "{} daemon reconcile-leaseless-orphans {confirmations} --replacement-operation-id {} --addr {}",
+        "{} daemon reconcile-leaseless-orphans --replacement-operation-id {} --addr {}",
         shell::quote_arg(homeboy),
         shell::quote_arg(replacement_operation_id),
         shell::quote_arg(addr),
@@ -1812,7 +1804,7 @@ fn remote_state_loss_recovery_command(
     replacement_operation_id: &str,
 ) -> String {
     format!(
-        "{} daemon recover-missing-lease-state --lease-id {} --recorded-pid {} --recorded-endpoint {} --confirm-pid-dead --confirm-control-plane-lost --replacement-operation-id {} --addr 127.0.0.1:0",
+        "{} daemon recover-missing-lease-state --lease-id {} --recorded-pid {} --recorded-endpoint {} --replacement-operation-id {} --addr 127.0.0.1:0",
         shell::quote_arg(homeboy),
         shell::quote_arg(lease_id),
         recorded_pid,

@@ -86,7 +86,7 @@ pub(crate) fn connect_action(runner_id: &str) -> ExecutableAction {
     )
 }
 
-/// `homeboy runner connect <id> --adopt-orphan-lease <lease> --confirm-pid-dead`.
+/// `homeboy runner connect <id> --adopt-orphan-lease <lease>`.
 pub(crate) fn adopt_orphan_lease_action(runner_id: &str, lease_id: &str) -> ExecutableAction {
     runner_action(
         "runner.adopt_orphan_lease",
@@ -97,13 +97,12 @@ pub(crate) fn adopt_orphan_lease_action(runner_id: &str, lease_id: &str) -> Exec
             runner_id.to_string(),
             "--adopt-orphan-lease".to_string(),
             lease_id.to_string(),
-            "--confirm-pid-dead".to_string(),
         ],
         ActionSafety::Mutating,
     )
 }
 
-/// `homeboy runner connect <id> --reconcile-leaseless-orphans --confirm-no-daemon-owner`.
+/// `homeboy runner connect <id> --reconcile-leaseless-orphans`.
 pub(crate) fn reconcile_leaseless_orphans_action(runner_id: &str) -> ExecutableAction {
     runner_action(
         "runner.reconcile_leaseless_orphans",
@@ -113,7 +112,6 @@ pub(crate) fn reconcile_leaseless_orphans_action(runner_id: &str) -> ExecutableA
             "connect".to_string(),
             runner_id.to_string(),
             "--reconcile-leaseless-orphans".to_string(),
-            "--confirm-no-daemon-owner".to_string(),
         ],
         ActionSafety::Mutating,
     )
@@ -360,7 +358,7 @@ mod tests {
             plan(&report),
             vec![(
                 RUNNER_ADOPT_ORPHAN_LEASE.to_string(),
-                "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-remote --confirm-pid-dead".to_string()
+                "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-remote".to_string()
             )]
         );
     }
@@ -382,7 +380,7 @@ mod tests {
             plan(&report),
             vec![(
                 RUNNER_RECONCILE_LEASELESS_ORPHANS.to_string(),
-                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string()
+                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans".to_string()
             )]
         );
     }
