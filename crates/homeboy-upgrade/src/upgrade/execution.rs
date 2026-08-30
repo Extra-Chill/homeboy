@@ -115,6 +115,22 @@ pub(crate) fn annotate_truncation(detail: &str, capture: &StreamCaptureMetadata)
     }
 }
 
+fn upgrade_failure_detail(stderr: &[u8], stdout: &[u8]) -> Option<String> {
+    let (stderr, stderr_capture) = bound_captured_stream(stderr, UPGRADE_CAPTURE_LIMIT_BYTES);
+    let (stdout, stdout_capture) = bound_captured_stream(stdout, UPGRADE_CAPTURE_LIMIT_BYTES);
+    let stderr =
+        (!stderr.trim().is_empty()).then(|| annotate_truncation(stderr.trim(), &stderr_capture));
+    let stdout =
+        (!stdout.trim().is_empty()).then(|| annotate_truncation(stdout.trim(), &stdout_capture));
+
+    match (stderr, stdout) {
+        (Some(stderr), Some(stdout)) => Some(format!("stderr:\n{stderr}\nstdout:\n{stdout}")),
+        (Some(stderr), None) => Some(stderr),
+        (None, Some(stdout)) => Some(stdout),
+        (None, None) => None,
+    }
+}
+
 pub(crate) fn execute_upgrade(
     method: InstallMethod,
     source_path: Option<&Path>,
@@ -227,21 +243,10 @@ pub(crate) fn execute_upgrade(
     };
 
     if !output.status.success() {
-        // The upgrade command's stdout/stderr are unbounded; bound the retained
-        // bytes (keeping the trailing tail) with truncation metadata so a
-        // pathological command cannot force an arbitrarily large failure string
-        // into memory or logs (#5297).
-        let (stderr, stderr_capture) =
-            bound_captured_stream(&output.stderr, UPGRADE_CAPTURE_LIMIT_BYTES);
-        let (stdout, stdout_capture) =
-            bound_captured_stream(&output.stdout, UPGRADE_CAPTURE_LIMIT_BYTES);
-        let error_detail = if !stderr.trim().is_empty() {
-            annotate_truncation(stderr.trim(), &stderr_capture)
-        } else if !stdout.trim().is_empty() {
-            annotate_truncation(stdout.trim(), &stdout_capture)
-        } else {
-            format!("exit code {}", output.status.code().unwrap_or(1))
-        };
+        // Keep both bounded streams: installers may log progress to stderr while
+        // a staged candidate returns the actionable failure contract on stdout.
+        let error_detail = upgrade_failure_detail(&output.stderr, &output.stdout)
+            .unwrap_or_else(|| format!("exit code {}", output.status.code().unwrap_or(1)));
         return Err(upgrade_failure_error(
             method,
             &error_detail,
