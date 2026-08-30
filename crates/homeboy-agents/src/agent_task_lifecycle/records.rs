@@ -4,9 +4,8 @@ use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
 
 pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
-    pub(crate) const RUN_LOG: &str = "homeboy/agent-task-run-log/v2";
-    pub(crate) const EVENT: &str = "homeboy/agent-task-event/v1";
-    pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v2";
+    pub(crate) const RUN_LOG: &str = "homeboy/agent-task-run-log/v3";
+    pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v3";
     pub(crate) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
     pub(crate) const COOK_INDEX: &str = "homeboy/agent-task-cook-index/v1";
 }
@@ -1699,39 +1698,9 @@ pub struct AgentTaskRunProviderHandle {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunLog {
     pub schema: String,
-    pub run_id: String,
-    /// The canonical consumer event stream. v1 exposed the same information
-    /// twice as `events` and `normalized_events`.
-    pub events: Vec<AgentTaskEventEnvelope>,
+    pub events: homeboy_control_plane_contract::ControlPlaneEventPage,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw_events: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskEventEnvelope {
-    pub schema: String,
-    pub run_id: String,
-    pub task_id: String,
-    pub sequence: u64,
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub status: AgentTaskState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heartbeat_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub progress: Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<AgentTaskArtifactRef>,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1740,9 +1709,7 @@ pub struct AgentTaskRunStatus {
     pub control_plane_run: homeboy_control_plane_contract::ControlPlaneRun,
     pub plan_id: String,
     pub totals: AgentTaskAggregateTotals,
-    pub latest_event_cursor: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub normalized_events: Vec<AgentTaskEventEnvelope>,
+    pub events: homeboy_control_plane_contract::ControlPlaneEventPage,
     /// Candidate detail for multi-candidate Cook runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate: Option<AgentTaskCandidateStatus>,

@@ -1075,7 +1075,7 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
                     .map(|heartbeat| heartbeat.last_seen_at.as_str()),
                 loaded.updated_at.as_deref()
             );
-            assert_eq!(log.events.len(), 1);
+            assert_eq!(log.events.events.len(), 1);
             assert!(artifacts.evidence_refs.is_empty());
         }
     });
@@ -1736,27 +1736,26 @@ fn logs_expose_mirrored_live_runner_events_before_terminal_aggregate() {
 
     let log = logs_in_store(&lifecycle_store, "live-runner-events").expect("live logs resolve");
 
-    assert_eq!(log.events.len(), 1);
-    assert!(log.events[0]
-        .message
-        .as_deref()
+    assert_eq!(log.events.events.len(), 1);
+    assert!(log.events.events[0].data["message"]
+        .as_str()
         .is_some_and(|message| message.contains("provider started")));
     assert_eq!(
-        log.events[0].provider.as_deref(),
+        log.events.events[0].data["provider"].as_str(),
         Some("openai/gpt-5.6-terra")
     );
-    assert_eq!(log.events[0].phase.as_deref(), Some("implementing"));
+    assert_eq!(log.events.events[0].data["phase"], "implementing");
     assert_eq!(
-        log.events[0].activity.as_deref(),
+        log.events.events[0].data["activity"].as_str(),
         Some("editing lifecycle projection")
     );
-    assert_eq!(log.events[0].heartbeat_at_ms, Some(42));
+    assert_eq!(log.events.events[0].data["heartbeat_at_ms"], 42);
     assert!(log.raw_events.is_empty(), "raw transport is opt-in");
 
     let raw_log = logs_with_raw_in_store(&lifecycle_store, "live-runner-events", true)
         .expect("raw logs resolve");
     assert_eq!(
-        raw_log.events[0].metadata["provider"],
+        raw_log.events.events[0].data["transport"]["provider"],
         "openai/gpt-5.6-terra"
     );
     assert_eq!(raw_log.raw_events.len(), 1);
@@ -2674,7 +2673,7 @@ fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
         ArtifactRetentionStatus::Retained
     );
     assert_eq!(log.schema, schemas::RUN_LOG);
-    assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
+    assert_eq!(log.events.events[0].data["state"], "succeeded");
     assert_eq!(artifact_report.schema, schemas::RUN_ARTIFACTS);
     assert_eq!(artifact_report.artifacts[0].id, "patch");
     assert_eq!(artifact_report.evidence_refs[0].kind, "transcript");
@@ -3030,15 +3029,21 @@ fn logs_include_normalized_event_envelopes() {
 
     let log = logs_in_store(&lifecycle_store, "run-event-envelope").expect("logs");
 
-    assert_eq!(log.schema, "homeboy/agent-task-run-log/v2");
-    assert_eq!(log.events.len(), 2);
-    assert_eq!(log.events[0].schema, schemas::EVENT);
-    assert_eq!(log.events[0].run_id, "run-event-envelope");
-    assert_eq!(log.events[0].task_id, "task-a");
-    assert_eq!(log.events[0].sequence, 1);
-    assert_eq!(log.events[0].status, AgentTaskState::Running);
-    assert_eq!(log.events[1].message.as_deref(), Some("ok"));
-    assert_eq!(log.events[1].artifact_refs.len(), 1);
+    assert_eq!(log.schema, "homeboy/agent-task-run-log/v3");
+    assert_eq!(log.events.events.len(), 2);
+    assert_eq!(
+        log.events.events[0].schema,
+        homeboy_control_plane_contract::CONTROL_PLANE_EVENT_SCHEMA
+    );
+    assert_eq!(log.events.events[0].run.as_str(), "run-event-envelope");
+    assert_eq!(
+        log.events.events[0].task.as_ref().map(|id| id.as_str()),
+        Some("task-a")
+    );
+    assert_eq!(log.events.events[0].sequence, 1);
+    assert_eq!(log.events.events[0].data["state"], "running");
+    assert_eq!(log.events.events[1].data["message"], "ok");
+    assert_eq!(log.events.events[1].artifacts.len(), 1);
     assert!(log.raw_events.is_empty());
 }
 
@@ -3365,7 +3370,7 @@ fn runner_backed_logs_read_persisted_events_without_a_runner_probe() {
 
         let log = logs("runner-backed-logs-local-only").expect("durable logs resolve");
 
-        assert_eq!(log.run_id, "runner-backed-logs-local-only");
+        assert_eq!(log.events.run.as_str(), "runner-backed-logs-local-only");
         assert_eq!(
             interactions.load(std::sync::atomic::Ordering::SeqCst),
             0,

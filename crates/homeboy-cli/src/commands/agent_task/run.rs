@@ -8441,7 +8441,7 @@ pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
 pub(super) fn run_resume_with_executor_and_bridge(
     run_id: String,
     bridge: bool,
-    since_cursor: Option<u64>,
+    since_cursor: Option<String>,
     full: bool,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
@@ -8458,7 +8458,8 @@ pub(super) fn run_resume_with_executor_and_bridge(
         // local aggregate is absent. Reproject only after that shared recovery
         // contract has persisted the aggregate and identity.
         agent_task_service::reconcile_terminal_artifact_projection(&run_id)?;
-        let status = agent_task_service::run_status(&run_id, since_cursor)?;
+        let cursor = super::status::parse_event_cursor(since_cursor.as_deref(), "since_cursor")?;
+        let status = agent_task_service::run_status(&run_id, cursor)?;
         return Ok((
             serde_json::to_value(status).unwrap_or(Value::Null),
             result.exit_code,

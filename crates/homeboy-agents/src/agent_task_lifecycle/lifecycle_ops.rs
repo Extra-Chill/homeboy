@@ -5317,9 +5317,12 @@ pub fn persisted_status_in_store(
 /// a read model (such as activity) projects lifecycle state. A controller wait
 /// expiry is not terminal after a runner job is recorded: the runner daemon
 /// remains the authority until it reports a terminal job result.
-pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
+pub fn run_status(
+    run_id: &str,
+    cursor: Option<homeboy_control_plane_contract::EventCursor>,
+) -> Result<AgentTaskRunStatus> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    run_status_in_store(&lifecycle_store, run_id, since_cursor)
+    run_status_in_store(&lifecycle_store, run_id, cursor)
 }
 
 /// [`run_status`] against explicitly injected durable lifecycle roots.
@@ -5332,7 +5335,7 @@ pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRu
 pub fn run_status_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    since_cursor: Option<u64>,
+    cursor: Option<homeboy_control_plane_contract::EventCursor>,
 ) -> Result<AgentTaskRunStatus> {
     let record = status_in_store(
         lifecycle_store,
@@ -5382,16 +5385,8 @@ pub fn run_status_in_store(
             }
         })
     });
-    let normalized_events = normalize_progress_events(&record.run_id, &events, &artifact_refs);
-    let latest_event_cursor = normalized_events
-        .last()
-        .map(|event| event.sequence)
-        .unwrap_or(0);
-    let cursor = since_cursor.unwrap_or(0);
-    let normalized_events = normalized_events
-        .into_iter()
-        .filter(|event| event.sequence > cursor)
-        .collect();
+    let events = normalize_progress_events(&record, &events, &artifact_refs)?;
+    let events = control_plane_event_page(&record, events, cursor.as_ref())?;
     let control_plane_run =
         crate::orchestration::project_record(&record, plan.as_ref()).map_err(|error| {
             Error::validation_invalid_argument(
@@ -5409,8 +5404,7 @@ pub fn run_status_in_store(
         totals: record
             .totals
             .unwrap_or_else(|| totals_for_tasks(&record.tasks)),
-        latest_event_cursor,
-        normalized_events,
+        events,
         candidate,
     })
 }

@@ -346,8 +346,8 @@ pub mod lifecycle {
         AgentTaskAcceptanceVerificationRequest, AgentTaskAcceptanceVerifier,
         AgentTaskAcceptanceVerifierProvenance, AgentTaskArtifactRef, AgentTaskCookIndex,
         AgentTaskCookIndexAttempt, AgentTaskDurableLocalRead, AgentTaskDurableReadUnavailable,
-        AgentTaskEventEnvelope, AgentTaskLifecycleStore, AgentTaskPreDispatchFailure,
-        AgentTaskRecordHealthItem, AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
+        AgentTaskLifecycleStore, AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem,
+        AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
         AgentTaskRecordReconciliationItem, AgentTaskRecordReconciliationReport,
         AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
         AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus,
@@ -355,9 +355,8 @@ pub mod lifecycle {
         AgentTaskRunnerProbePlan, AgentTaskStatusOptions, AgentTaskStatusOutcome,
         CanonicalControlPlaneIdentities, ClaimOutcome, ControllerRuntimePruneResult,
         DetachedCookMaterializingAttempt, DetachedLabRunRecord, LabOffloadProxyPlan,
-        LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
-        RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT, RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL,
-        RUNNER_PROBE_SKIPPED_NOT_RUNNING,
+        LocalCookRetryLaunchClaim, RunnerPinnedRuntime, RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT,
+        RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL, RUNNER_PROBE_SKIPPED_NOT_RUNNING,
     };
     pub use super::super::agent_task_lifecycle::{
         cook_index_exists, mark_running, record_run_aggregate, record_runner_job_identity,

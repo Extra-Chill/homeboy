@@ -95,6 +95,18 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 id: (*id).to_string(),
             })
         }
+        (HttpMethod::Get, ["v1", "control-plane", "runs", id, "events"]) => {
+            let cursor = query_value(path, "cursor")
+                .map(homeboy_control_plane_contract::EventCursor::new)
+                .transpose()
+                .map_err(|error| {
+                    Error::validation_invalid_argument("cursor", error.to_string(), None, None)
+                })?;
+            Ok(HttpEndpoint::ControlPlaneRunEvents {
+                id: (*id).to_string(),
+                cursor,
+            })
+        }
         (HttpMethod::Get, ["jobs"]) => Ok(HttpEndpoint::Jobs),
         (HttpMethod::Get, ["jobs", id]) => Ok(HttpEndpoint::Job {
             id: (*id).to_string(),
@@ -156,6 +168,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /activity/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
                 "GET /v1/control-plane/runs/:id".to_string(),
+                "GET /v1/control-plane/runs/:id/events".to_string(),
                 "GET /jobs".to_string(),
                 "GET /jobs/:id".to_string(),
                 "GET /jobs/:id/events".to_string(),
@@ -191,6 +204,9 @@ where
     match &endpoint {
         HttpEndpoint::ControlPlaneRun { id } => {
             return control_plane_run_response(endpoint.clone(), id);
+        }
+        HttpEndpoint::ControlPlaneRunEvents { id, cursor } => {
+            return control_plane_events_response(endpoint.clone(), id, cursor.as_ref());
         }
         HttpEndpoint::ControlPlaneCapabilities => {
             return control_plane_capabilities_response();
@@ -354,7 +370,9 @@ where
                 },
             )?,
         }),
-        HttpEndpoint::ControlPlaneRun { .. } | HttpEndpoint::ControlPlaneCapabilities => {
+        HttpEndpoint::ControlPlaneRun { .. }
+        | HttpEndpoint::ControlPlaneRunEvents { .. }
+        | HttpEndpoint::ControlPlaneCapabilities => {
             unreachable!("returned before store open")
         }
         HttpEndpoint::Jobs => {
@@ -437,7 +455,7 @@ where
 /// `daemon_endpoint_identity` applies to its nonce.
 const MAX_AGENT_TASK_RUN_ID_LEN: usize = 256;
 
-/// `GET /v1/control-plane/capabilities` and `GET /v1/control-plane/runs/:id`.
+/// Versioned control-plane capability, run, and event reads.
 ///
 /// Route handlers only parse HTTP, call the registered orchestration provider,
 /// and serialize the contract.
@@ -461,10 +479,31 @@ fn control_plane_run_response(endpoint: HttpEndpoint, run_id: &str) -> Result<Ht
     }
 }
 
+fn control_plane_events_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> Result<HttpApiResponse> {
+    match control_plane_events(run_id, cursor) {
+        Ok(events) => control_plane_ok(endpoint, events),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
 fn control_plane_run(
     run_id: &str,
 ) -> std::result::Result<
     homeboy_control_plane_contract::ControlPlaneRun,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let run_id = control_plane_run_id(run_id)?;
+    crate::control_plane::run(&run_id)
+}
+
+fn control_plane_run_id(
+    run_id: &str,
+) -> std::result::Result<
+    homeboy_control_plane_contract::RunId,
     homeboy_control_plane_contract::ControlPlaneError,
 > {
     if run_id.len() > MAX_AGENT_TASK_RUN_ID_LEN {
@@ -474,17 +513,20 @@ fn control_plane_run(
             )),
         );
     }
-    let run_id = match homeboy_control_plane_contract::RunId::new(run_id) {
-        Ok(run_id) => run_id,
-        Err(error) => {
-            return Err(
-                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
-                    error.to_string(),
-                ),
-            )
-        }
-    };
-    crate::control_plane::run(&run_id)
+    homeboy_control_plane_contract::RunId::new(run_id).map_err(|error| {
+        homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
+    })
+}
+
+fn control_plane_events(
+    run_id: &str,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> std::result::Result<
+    homeboy_control_plane_contract::ControlPlaneEventPage,
+    homeboy_control_plane_contract::ControlPlaneError,
+> {
+    let requested_id = control_plane_run_id(run_id)?;
+    crate::control_plane::events(&requested_id, cursor)
 }
 
 fn control_plane_ok<T: serde::Serialize>(

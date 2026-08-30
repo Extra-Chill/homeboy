@@ -307,7 +307,8 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         // expires unbound controller handoffs, and persists the result. So this
         // answer is not merely a different view from `activity show <id>` — it
         // can also change what a later `activity show` returns. Say so (#W3-15).
-        let bridge_status = agent_task_service::run_status(&target.run_id, args.since_cursor)?;
+        let cursor = parse_event_cursor(args.since_cursor.as_deref(), "since_cursor")?;
+        let bridge_status = agent_task_service::run_status(&target.run_id, cursor)?;
         let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
         attach_reconciled(&mut value, true);
         if let Some(selection) = target.selection {
@@ -666,7 +667,7 @@ fn status_change_projection(status: &Value) -> Value {
         "task_state_digest": task_state_digest,
         "progress": bounded_value(status.get("progress").unwrap_or(&Value::Null)),
         "liveness": compact_fields(status.get("liveness").unwrap_or(&Value::Null), &["state", "status", "reason"]),
-        "normalized_event_count": status.get("normalized_events").and_then(Value::as_array).map(Vec::len),
+        "event_count": status.pointer("/events/events").and_then(Value::as_array).map(Vec::len),
     })
 }
 
@@ -679,7 +680,7 @@ fn status_change_digest_projection(status: &Value) -> Value {
         "totals": basis.get("totals"),
         "task_count": status.get("tasks").and_then(Value::as_array).map(Vec::len),
         "task_state_digest": basis.get("task_state_digest"),
-        "normalized_event_count": basis.get("normalized_event_count"),
+        "event_count": basis.get("event_count"),
     })
 }
 
@@ -869,6 +870,23 @@ fn status_run_state(status: &Value) -> Option<&Value> {
     status
         .get("state")
         .or_else(|| status.pointer("/control_plane_run/state"))
+}
+
+pub(super) fn parse_event_cursor(
+    cursor: Option<&str>,
+    field: &'static str,
+) -> homeboy::core::Result<Option<homeboy_control_plane_contract::EventCursor>> {
+    cursor
+        .map(homeboy_control_plane_contract::EventCursor::new)
+        .transpose()
+        .map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                field,
+                error.to_string(),
+                cursor.map(str::to_string),
+                None,
+            )
+        })
 }
 
 /// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
@@ -2474,11 +2492,8 @@ fn preserve_controller_owner_placement_with_prefix(
 }
 
 pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
-    let log = if args.raw {
-        agent_task_service_direct::logs_with_raw(&args.run_id)?
-    } else {
-        agent_task_service_direct::logs(&args.run_id)?
-    };
+    let cursor = parse_event_cursor(args.cursor.as_deref(), "cursor")?;
+    let log = agent_task_service_direct::logs_from_cursor(&args.run_id, cursor.as_ref(), args.raw)?;
     let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     Ok((value, 0))
@@ -4015,13 +4030,15 @@ mod watch_tests {
     #[test]
     fn bridge_snapshot_is_retained_without_projection_loss() {
         let bridge = json!({
-            "schema": "homeboy/agent-task-run-status/v2",
+            "schema": "homeboy/agent-task-run-status/v3",
             "control_plane_run": {
                 "run": "run-1",
                 "state": "succeeded"
             },
             "reconciled": true,
-            "normalized_events": [{ "type": "agent_task.state_changed" }]
+            "events": {
+                "events": [{ "kind": "task.state_changed" }]
+            }
         });
         let mut full_args = args();
         full_args.full = true;

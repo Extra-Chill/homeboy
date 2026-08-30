@@ -22,6 +22,7 @@ test-support = ["homeboy-core/test-support", "homeboy-agents/test-support"]
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
+homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-release = { version = "0.1.0", path = "../homeboy-release" }

@@ -9,6 +9,7 @@
 
 pub mod capabilities;
 pub mod control_plane_ref;
+pub mod event;
 pub mod identity;
 pub mod resolve;
 pub mod resource;
@@ -18,8 +19,13 @@ pub use capabilities::{
     CONTROL_PLANE_CAPABILITIES_SCHEMA,
 };
 pub use control_plane_ref::{ControlPlaneRef, ControlPlaneRefError};
+pub use event::{
+    ControlPlaneEvent, ControlPlaneEventPage, ControlPlaneEventSource,
+    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+};
 pub use identity::{
-    AttemptId, ExecutionId, IdentityError, MissionId, ProviderSessionId, RunId, TaskId,
+    AttemptId, EventCursor, EventId, ExecutionId, IdentityError, MissionId, ProviderSessionId,
+    RunId, TaskId,
 };
 pub use resolve::{resolve, IdentityKind, ResolveError, ResolvedIdentities};
 pub use resource::{

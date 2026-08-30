@@ -616,7 +616,7 @@ fn lab_runner_handoff_materializes_the_run_before_preparation_failure() {
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
         assert_eq!(record.state, AgentTaskRunState::Failed);
         assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
-        assert!(!log.events.is_empty());
+        assert!(!log.events.events.is_empty());
         assert_eq!(recovery.exit_code, 1);
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],

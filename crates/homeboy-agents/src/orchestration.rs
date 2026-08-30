@@ -23,8 +23,9 @@ const ID_BOUND: usize = 128;
 const STATE_BOUND: usize = 64;
 const MESSAGE_BOUND: usize = 256;
 const GATE_BOUND: usize = 12;
-const REF_BOUND: usize = 32;
+pub(crate) const REF_BOUND: usize = 32;
 const URI_BOUND: usize = 512;
+const EVENT_PAGE_BOUND: usize = 100;
 
 /// One bounded non-reconciling read of the durable record and optional plan.
 #[derive(Debug, Clone)]
@@ -37,6 +38,14 @@ pub struct RunSnapshot {
 /// doubles; the service never opens an environment-rooted store itself.
 pub trait RunLookup {
     fn get(&self, id: &RunId) -> Result<Option<RunSnapshot>, ControlPlaneError>;
+}
+
+pub trait EventLookup {
+    fn events(
+        &self,
+        id: &RunId,
+        cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+    ) -> Result<Option<homeboy_control_plane_contract::ControlPlaneEventPage>, ControlPlaneError>;
 }
 
 /// Durable lifecycle-store lookup. Bounded, non-reconciling, non-writing.
@@ -73,6 +82,25 @@ impl RunLookup for LifecycleStoreLookup {
     }
 }
 
+impl EventLookup for LifecycleStoreLookup {
+    fn events(
+        &self,
+        id: &RunId,
+        cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+    ) -> Result<Option<homeboy_control_plane_contract::ControlPlaneEventPage>, ControlPlaneError>
+    {
+        match crate::agent_task_lifecycle::control_plane_events_in_store(
+            &self.store,
+            id.as_str(),
+            cursor,
+        ) {
+            Ok(events) => Ok(Some(events)),
+            Err(error) if is_run_not_found(&error) => Ok(None),
+            Err(error) => Err(ControlPlaneError::unavailable(error.message)),
+        }
+    }
+}
+
 /// Public typed orchestration facade.
 pub struct OrchestrationService<L> {
     lookup: L,
@@ -86,10 +114,11 @@ impl<L: RunLookup> OrchestrationService<L> {
     /// Operations actually wired in this build. Mutations are not advertised.
     pub fn capabilities() -> ControlPlaneCapabilities {
         ControlPlaneCapabilities::new(
-            vec![ControlPlaneResource::Run],
+            vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
             vec![
                 ControlPlaneOperation::GetCapabilities,
                 ControlPlaneOperation::GetRun,
+                ControlPlaneOperation::GetRunEvents,
             ],
         )
     }
@@ -100,6 +129,23 @@ impl<L: RunLookup> OrchestrationService<L> {
             ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
         })?;
         project_record(&snapshot.record, snapshot.plan.as_ref())
+    }
+}
+
+impl<L: EventLookup> OrchestrationService<L> {
+    pub fn events(
+        &self,
+        requested_id: &RunId,
+        cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+    ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage, ControlPlaneError> {
+        if cursor.is_some_and(|cursor| cursor.as_str().parse::<u64>().is_err()) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane event cursor is invalid",
+            ));
+        }
+        self.lookup.events(requested_id, cursor)?.ok_or_else(|| {
+            ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
+        })
     }
 }
 
@@ -138,6 +184,44 @@ pub fn project_record(
     resource.evidence = evidence_refs(record);
     resource.artifacts = artifact_refs(record);
     Ok(resource)
+}
+
+/// Apply one opaque resume cursor and a fixed page bound to an ordered stream.
+pub fn event_page(
+    run: RunId,
+    events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage, ControlPlaneError> {
+    use homeboy_control_plane_contract::{
+        ControlPlaneEventPage, EventCursor, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    };
+
+    let after = cursor
+        .map(|cursor| {
+            cursor.as_str().parse::<u64>().map_err(|_| {
+                ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
+            })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let mut remaining = events.into_iter().filter(|event| event.sequence > after);
+    let page_events: Vec<_> = remaining.by_ref().take(EVENT_PAGE_BOUND).collect();
+    let has_more = remaining.next().is_some();
+    let next_cursor = page_events
+        .last()
+        .map(|event| event.sequence.to_string())
+        .or_else(|| cursor.map(|cursor| cursor.as_str().to_string()))
+        .map(EventCursor::new)
+        .transpose()
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+
+    Ok(ControlPlaneEventPage {
+        schema: CONTROL_PLANE_EVENT_PAGE_SCHEMA.to_string(),
+        run,
+        events: page_events,
+        next_cursor,
+        has_more,
+    })
 }
 
 fn identities_for_record(
@@ -475,7 +559,7 @@ fn nonempty_bounded(value: &str, max: usize) -> Option<String> {
     (!trimmed.is_empty()).then(|| bounded(trimmed, max))
 }
 
-fn redacted_bounded(value: &str, max: usize) -> String {
+pub(crate) fn redacted_bounded(value: &str, max: usize) -> String {
     bounded(&homeboy_core::redaction::redact_string(value), max)
 }
 
@@ -500,6 +584,16 @@ impl ControlPlaneProvider for RegisteredProvider {
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
     }
+
+    fn events(
+        &self,
+        requested_id: &RunId,
+        cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+    ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store)).events(requested_id, cursor)
+    }
 }
 
 /// Register the orchestration service as the HTTP control-plane provider.
@@ -509,13 +603,14 @@ pub fn register() {
 
 #[cfg(test)]
 mod tests {
-    use super::{project_record, OrchestrationService, RunLookup, RunSnapshot};
+    use super::{event_page, project_record, OrchestrationService, RunLookup, RunSnapshot};
     use crate::agent_task_lifecycle::AgentTaskRunRecord;
     use crate::agent_task_schedule::AgentTaskPlan;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneErrorClass,
-        ControlPlaneOperation, ControlPlaneRunState, RunId,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState,
+        EventCursor, EventId, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use serde_json::json;
@@ -591,6 +686,59 @@ mod tests {
         record
     }
 
+    fn event(run: &RunId, sequence: u64) -> ControlPlaneEvent {
+        ControlPlaneEvent {
+            schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
+            event: EventId::new(format!("{}:event:{sequence}", run.as_str())).expect("event"),
+            sequence,
+            occurred_at: None,
+            mission: None,
+            run: run.clone(),
+            task: None,
+            attempt: None,
+            execution: None,
+            kind: "run.progress".to_string(),
+            source: ControlPlaneEventSource {
+                component: "test".to_string(),
+                instance: None,
+            },
+            data: json!({ "sequence": sequence }),
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn event_pages_are_bounded_and_resume_after_the_opaque_cursor() {
+        let run = RunId::new("run-events").expect("run");
+        let events = (1..=101).map(|sequence| event(&run, sequence)).collect();
+        let first = event_page(run.clone(), events, None).expect("first page");
+        assert_eq!(first.events.len(), 100);
+        assert!(first.has_more);
+        assert_eq!(
+            first.next_cursor.as_ref().map(EventCursor::as_str),
+            Some("100")
+        );
+
+        let second = event_page(
+            run,
+            vec![event(&RunId::new("run-events").unwrap(), 101)],
+            first.next_cursor.as_ref(),
+        )
+        .expect("second page");
+        assert_eq!(second.events.len(), 1);
+        assert_eq!(second.events[0].sequence, 101);
+        assert!(!second.has_more);
+    }
+
+    #[test]
+    fn event_pages_reject_unknown_cursor_encodings() {
+        let run = RunId::new("run-events").expect("run");
+        let cursor = EventCursor::new("not-a-provider-cursor").expect("typed opaque cursor");
+        let error = event_page(run, Vec::new(), Some(&cursor)).expect_err("invalid cursor");
+        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+    }
+
     fn snapshot(run_id: &str, plan: Option<AgentTaskPlan>) -> RunSnapshot {
         RunSnapshot {
             record: record(run_id),
@@ -626,7 +774,8 @@ mod tests {
             capabilities.operations,
             vec![
                 ControlPlaneOperation::GetCapabilities,
-                ControlPlaneOperation::GetRun
+                ControlPlaneOperation::GetRun,
+                ControlPlaneOperation::GetRunEvents,
             ]
         );
         assert!(!capabilities.operations.is_empty());

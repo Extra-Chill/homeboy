@@ -77,6 +77,14 @@ opaque_identity!(
     /// A provider session identity.
     ProviderSessionId
 );
+opaque_identity!(
+    /// Stable identity of one event in a run stream.
+    EventId
+);
+opaque_identity!(
+    /// Opaque resume cursor returned by an event page.
+    EventCursor
+);
 
 /// Why an identity newtype could not be constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]

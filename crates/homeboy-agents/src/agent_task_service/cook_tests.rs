@@ -6741,8 +6741,11 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
             0
         );
         assert_eq!(
-            logs.events.last().map(|event| event.status),
-            Some(AgentTaskState::Failed)
+            logs.events
+                .events
+                .last()
+                .and_then(|event| event.data["state"].as_str()),
+            Some("failed")
         );
         assert_eq!(retry.metadata["retry_of"], run_id);
         assert_eq!(
@@ -10114,7 +10117,7 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
                 let logs =
                     agent_task_lifecycle::logs(cook).expect("Cook alias logs resolve in observer");
                 assert_eq!(status.run_id, run);
-                assert!(!logs.events.is_empty());
+                assert!(!logs.events.events.is_empty());
                 observer_records
                     .lock()
                     .expect("observer records lock")
