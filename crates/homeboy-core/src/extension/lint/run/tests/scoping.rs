@@ -4,7 +4,7 @@ use super::super::scoping::{
 };
 use super::super::types::ScopedLintRun;
 use super::{component, split_lint_routes};
-use crate::LintChangedFileRoute;
+use crate::extension::LintChangedFileRoute;
 use homeboy_core::component::Component;
 
 #[test]

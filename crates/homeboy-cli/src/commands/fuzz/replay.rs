@@ -10,7 +10,10 @@ use homeboy::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::runner::runners::is_retrievable_runner_artifact;
-use homeboy_core::{self, ExtensionCapability, ExtensionRunner};
+use homeboy_core::{
+    self,
+    extension::{ExtensionCapability, ExtensionRunner},
+};
 
 use super::super::utils::args::PositionalComponentArgs;
 use super::types::{
@@ -307,7 +310,7 @@ impl ReplayLikeMode {
 
 #[derive(Clone)]
 struct ResolvedReplayContext {
-    execution_context: homeboy_core::ExtensionExecutionContext,
+    execution_context: homeboy_core::extension_execution::ExtensionExecutionContext,
     component: homeboy::core::component::Component,
     command: Option<String>,
 }
@@ -332,8 +335,10 @@ fn resolve_replay_context(
         ExtensionCapability::Fuzz,
         rig_context.as_ref(),
     )?;
-    let execution_context =
-        extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
+    let execution_context = homeboy_core::extension_execution::resolve_execution_context(
+        &ctx.component,
+        ExtensionCapability::Fuzz,
+    )?;
     let command = extension::load_extension(&execution_context.extension_id)
         .ok()
         .and_then(|manifest| manifest.fuzz)

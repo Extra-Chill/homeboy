@@ -1,10 +1,11 @@
-use crate as extension;
+use crate::extension;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::{exec_context, ExtensionCapability, ExtensionExecutionContext, ExtensionPhaseTiming};
+use crate::extension::{exec_context, ExtensionCapability, ExtensionPhaseTiming};
+use crate::extension_execution::{self, ExtensionExecutionContext};
 use homeboy_core::artifact_inputs::{self, ResolvedArtifactInput};
 use homeboy_core::component::{self, Component};
 use homeboy_core::config::{is_json_input, parse_bulk_ids};
@@ -71,7 +72,8 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
     }
 
     // 1. Check exactly one build-capable extension for bundled script or local script patterns
-    if let Ok(context) = extension::resolve_execution_context(component, ExtensionCapability::Build)
+    if let Ok(context) =
+        extension_execution::resolve_execution_context(component, ExtensionCapability::Build)
     {
         let extension_id = context.extension_id.clone();
         let extension = extension::load_extension(&extension_id)?;
@@ -560,9 +562,9 @@ fn execute_build_component(
         build_timeout.as_secs()
     );
     let runner_output = if let ResolvedBuildCommand::ComponentScript { .. } = &resolved {
-        crate::component_script::run_component_scripts_with_run_dir_and_timeout(
+        crate::extension::component_script::run_component_scripts_with_run_dir_and_timeout(
             comp,
-            crate::component_script::ComponentScriptRunRequest {
+            crate::extension::component_script::ComponentScriptRunRequest {
                 capability: extension::ExtensionCapability::Build,
                 source_path: &validated_path,
                 run_dir: &run_dir,
@@ -589,8 +591,10 @@ fn execute_build_component(
         }
         runner.run()?
     } else {
-        let context =
-            extension::resolve_execution_context(comp, extension::ExtensionCapability::Build)?;
+        let context = extension_execution::resolve_execution_context(
+            comp,
+            extension::ExtensionCapability::Build,
+        )?;
         let mut runner = extension::ExtensionRunner::for_context(context)
             .component(comp.clone())
             .working_dir(&local_path_str)
@@ -883,7 +887,7 @@ fn run_pre_build_scripts(
             build_context.component.local_path.clone(),
         ),
     ];
-    env.extend(crate::component_script::component_env_vars(
+    env.extend(crate::extension::component_script::component_env_vars(
         &build_context.component,
     ));
     let env_refs: Vec<(&str, &str)> = env

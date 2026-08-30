@@ -10,7 +10,6 @@
 use serde_json::Value;
 
 use crate::agent_task_controller_service::{validate_loop_spec, AgentTaskRepoLoopSpec};
-use crate::agent_task_repo_loop_compile::validate_repo_loop_artifact_references;
 use homeboy_core::proof::loop_spec_validation::{
     register_loop_spec_validation_provider, LoopSpecValidationDiagnostic,
     LoopSpecValidationProvider,
@@ -31,12 +30,6 @@ impl LoopSpecValidationProvider for AgentTaskLoopSpecValidationProvider {
         if let Err(error) = validate_loop_spec(&spec) {
             diagnostics.push(LoopSpecValidationDiagnostic {
                 code: "invalid_controller_loop_spec".to_string(),
-                message: error.message,
-            });
-        }
-        if let Err(error) = validate_repo_loop_artifact_references(&spec) {
-            diagnostics.push(LoopSpecValidationDiagnostic {
-                code: "invalid_artifact_references".to_string(),
                 message: error.message,
             });
         }

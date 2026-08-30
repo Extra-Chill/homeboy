@@ -4,9 +4,11 @@ use std::path::PathBuf;
 use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::observation::ObservationStore;
 use homeboy::runner::runners::{LabRunnerReadiness, LabRunnerReadinessState};
-use homeboy_core::bench::artifact::BenchArtifact;
-use homeboy_core::bench::run::BenchRunFailure;
-use homeboy_core::bench::{parse_bench_results_str, BenchResults, BenchRunWorkflowResult};
+use homeboy_core::extension::bench::artifact::BenchArtifact;
+use homeboy_core::extension::bench::run::BenchRunFailure;
+use homeboy_core::extension::bench::{
+    parse_bench_results_str, BenchResults, BenchRunWorkflowResult,
+};
 
 use super::*;
 use crate::commands::bench::{BenchRigOrder, BenchRunArgs};
@@ -157,21 +159,23 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
                 ..BenchArtifact::default()
             },
         );
-        let child_command_failures = vec![homeboy_core::bench::parsing::BenchChildCommandFailure {
-            argv: vec!["generic-child".to_string(), "run".to_string()],
-            command: None,
-            exit_status: Some(9),
-            signal: None,
-            stdout_tail: Some("child stdout tail".to_string()),
-            stderr_tail: Some("child stderr tail".to_string()),
-            scenario_id: Some("cold".to_string()),
-            iteration: Some("5/10".to_string()),
-            batch: None,
-            artifact_refs: vec![serde_json::json!({
-                "kind": "log",
-                "ref": "runner-artifact://run/child-log"
-            })],
-        }];
+        let child_command_failures = vec![
+            homeboy_core::extension::bench::parsing::BenchChildCommandFailure {
+                argv: vec!["generic-child".to_string(), "run".to_string()],
+                command: None,
+                exit_status: Some(9),
+                signal: None,
+                stdout_tail: Some("child stdout tail".to_string()),
+                stderr_tail: Some("child stderr tail".to_string()),
+                scenario_id: Some("cold".to_string()),
+                iteration: Some("5/10".to_string()),
+                batch: None,
+                artifact_refs: vec![serde_json::json!({
+                    "kind": "log",
+                    "ref": "runner-artifact://run/child-log"
+                })],
+            },
+        ];
         results.child_command_failures = child_command_failures.clone();
         let mut workflow = BenchRunWorkflowResult {
             status: "passed".to_string(),

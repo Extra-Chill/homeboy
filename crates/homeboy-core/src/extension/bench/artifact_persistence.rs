@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::bench::{
+use crate::extension::bench::{
     BenchArtifact, BenchDiagnostic, BenchDiagnosticSource, BenchResults, BenchRunWorkflowResult,
 };
 use homeboy_core::artifacts as artifact_links;

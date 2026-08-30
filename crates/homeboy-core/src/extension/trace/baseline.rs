@@ -367,7 +367,9 @@ impl generic::Fingerprintable for TraceBaselineItem<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::parsing::{TraceAssertion, TraceSpanResult, TraceSpanStatus, TraceStatus};
+    use crate::extension::trace::parsing::{
+        TraceAssertion, TraceSpanResult, TraceSpanStatus, TraceStatus,
+    };
 
     fn results(duration_ms: u64) -> TraceResults {
         TraceResults {

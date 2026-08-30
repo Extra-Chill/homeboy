@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::trace::attach::TraceAttachment;
-use crate::trace::canonicality::TraceCanonicalPolicy;
-use crate::trace::parsing::{TraceGitProvenance, TraceResults, TraceStatus};
-use crate::trace::probes::TraceProbeConfig;
-use crate::{ExtensionCapability, ExtensionExecutionContext, RunnerOutput};
+use crate::extension::trace::attach::TraceAttachment;
+use crate::extension::trace::canonicality::TraceCanonicalPolicy;
+use crate::extension::trace::parsing::{TraceGitProvenance, TraceResults, TraceStatus};
+use crate::extension::trace::probes::TraceProbeConfig;
+use crate::extension::{ExtensionCapability, RunnerOutput};
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, ErrorCode};
@@ -235,8 +236,10 @@ fn resolve_trace_baseline_root_with_rig_uses_rig_state_dir_and_skips_component_p
 
 #[test]
 fn rig_save_baseline_does_not_write_component_homeboy_json() {
-    use crate::trace::baseline;
-    use crate::trace::parsing::{TraceResults, TraceSpanResult, TraceSpanStatus, TraceStatus};
+    use crate::extension::trace::baseline;
+    use crate::extension::trace::parsing::{
+        TraceResults, TraceSpanResult, TraceSpanStatus, TraceStatus,
+    };
 
     let temp = tempfile::tempdir().unwrap();
     let component_path = temp.path().to_string_lossy().to_string();
@@ -535,8 +538,9 @@ fn test_run_args(path: &std::path::Path) -> TraceRunWorkflowArgs {
             ignore_baseline: true,
             ratchet: false,
         },
-        regression_threshold_percent: crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        regression_threshold_percent:
+            crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         canonical_policy: TraceCanonicalPolicy::Development,
         checkout_provenance: None,
     }

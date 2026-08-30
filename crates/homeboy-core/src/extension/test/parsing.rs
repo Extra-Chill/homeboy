@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
-use crate::test::analyze::{TestAnalysis, TestAnalysisInput, TestFailure};
-use crate::test::TestCounts;
+use crate::extension::test::analyze::{TestAnalysis, TestAnalysisInput, TestFailure};
+use crate::extension::test::TestCounts;
 use homeboy_core::error::Result;
 use homeboy_core::structured_sidecar;
 use homeboy_engine_primitives::local_files;

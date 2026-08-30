@@ -1,7 +1,7 @@
 //! Bench failure classification.
 
-use crate::bench::phase_events::BenchPhaseFailureClassification;
-use crate::bench::responsiveness::BenchResponsivenessSummary;
+use crate::extension::bench::phase_events::BenchPhaseFailureClassification;
+use crate::extension::bench::responsiveness::BenchResponsivenessSummary;
 
 pub(crate) fn classify_bench_failure(
     success: bool,

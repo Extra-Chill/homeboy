@@ -134,7 +134,9 @@ pub(crate) fn run_audit_refactor(
     })
 }
 
-fn resolve_verify_config(component_id: &str) -> Option<homeboy_core::AutofixVerifyConfig> {
+fn resolve_verify_config(
+    component_id: &str,
+) -> Option<homeboy_core::extension::AutofixVerifyConfig> {
     use homeboy_core::component;
 
     let comp = component::load(component_id).ok()?;

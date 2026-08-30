@@ -7,8 +7,8 @@
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
-use homeboy_core::ExtensionCapability;
-use homeboy_core::{self, ExtensionManifest};
+use homeboy_core::extension::ExtensionCapability;
+use homeboy_core::{self, extension::ExtensionManifest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -439,15 +439,15 @@ fn record_existing_cleanup_path(component_path: &Path, path: &str, paths: &mut B
 fn build_declared_component_artifact(
     component: &Component,
     declared_build_artifact: Option<&str>,
-) -> Result<Option<homeboy_core::build::BuildOutput>> {
+) -> Result<Option<homeboy_core::extension::build::BuildOutput>> {
     if declared_build_artifact.is_none_or(|path| path.trim().is_empty())
         || !component.has_script(ExtensionCapability::Build)
     {
         return Ok(None);
     }
 
-    let (build, exit_code) =
-        homeboy_core::build::build_component_with_output(component).map_err(|error| {
+    let (build, exit_code) = homeboy_core::extension::build::build_component_with_output(component)
+        .map_err(|error| {
             Error::validation_invalid_argument(
                 "scripts.build",
                 error.message,
@@ -475,7 +475,7 @@ fn build_declared_component_artifact(
 }
 
 fn format_build_failure(
-    build: &homeboy_core::build::BuildOutput,
+    build: &homeboy_core::extension::build::BuildOutput,
     working_dir: &str,
     exit_code: i32,
 ) -> String {
@@ -518,7 +518,7 @@ mod build_failure_tests {
 
     #[test]
     fn timed_out_build_error_is_reproducible_and_bounded() {
-        let build = homeboy_core::build::BuildOutput {
+        let build = homeboy_core::extension::build::BuildOutput {
             command: "build.run".to_string(),
             component_id: "example".to_string(),
             build_command: "make release".to_string(),
@@ -813,9 +813,12 @@ fn package_provider_config(
     skip_build_validation: bool,
 ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
     let mut config: std::collections::HashMap<_, _> =
-        extension::extract_component_extension_settings(component, extension_id)
-            .into_iter()
-            .collect();
+        homeboy_core::extension_execution::extract_component_extension_settings(
+            component,
+            extension_id,
+        )
+        .into_iter()
+        .collect();
     if let Some(release_config) = package_build_config(skip_build_validation) {
         config.extend(release_config);
     }

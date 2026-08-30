@@ -10,12 +10,13 @@ pub mod report;
 pub mod run;
 pub mod workflow;
 
-use crate::test::drift::DriftOptions;
-use crate::{
-    ExtensionCapability, ExtensionExecutionContext, ExtensionRunner, TestChangedFileExclusiveEnv,
-    TestChangedFileRouting, TestChangedFileRoutingStrategy, TestPassthroughFilter,
-    TestPassthroughFilterStrategy, TestSecretEnvProjection,
+use crate::extension::test::drift::DriftOptions;
+use crate::extension::{
+    ExtensionCapability, ExtensionRunner, TestChangedFileExclusiveEnv, TestChangedFileRouting,
+    TestChangedFileRoutingStrategy, TestPassthroughFilter, TestPassthroughFilterStrategy,
+    TestSecretEnvProjection,
 };
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::git;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,7 +60,7 @@ pub use workflow::{
 pub fn resolve_test_command(
     component: &Component,
 ) -> homeboy_core::error::Result<ExtensionExecutionContext> {
-    crate::resolve_execution_context(component, ExtensionCapability::Test)
+    crate::extension_execution::resolve_execution_context(component, ExtensionCapability::Test)
 }
 
 /// Resolve only the process environment explicitly declared portable by the
@@ -73,7 +74,7 @@ pub struct PortableTestEnv {
 /// explicitly declared by the selected test extension.
 pub fn portable_env(component: &Component) -> homeboy_core::Result<PortableTestEnv> {
     let context = resolve_test_command(component)?;
-    let manifest = crate::load_extension(&context.extension_id)?;
+    let manifest = crate::extension_store::load_extension(&context.extension_id)?;
     let Some(test) = manifest.test else {
         return Ok(PortableTestEnv {
             public_env: Vec::new(),
@@ -146,7 +147,7 @@ pub fn declared_secret_env_names(component: &Component) -> homeboy_core::Result<
     let Ok(context) = resolve_test_command(component) else {
         return Ok(Vec::new());
     };
-    let Some(test) = crate::load_extension(&context.extension_id)?.test else {
+    let Some(test) = crate::extension_store::load_extension(&context.extension_id)?.test else {
         return Ok(Vec::new());
     };
 
@@ -182,7 +183,7 @@ pub fn build_test_runner(
 ) -> homeboy_core::Result<ExtensionRunner> {
     let resolved = resolve_test_command(component)?;
     let extension_id = resolved.extension_id.clone();
-    let test_config = crate::load_extension(&extension_id)?.test;
+    let test_config = crate::extension_store::load_extension(&extension_id)?.test;
     let (secret_env_names, secret_env_projections) = test_config
         .map(|test| {
             (
@@ -380,7 +381,7 @@ fn test_passthrough_filter(
     component: &Component,
 ) -> homeboy_core::error::Result<Option<TestPassthroughFilter>> {
     let context = resolve_test_command(component)?;
-    let manifest = crate::load_extension(&context.extension_id)?;
+    let manifest = crate::extension_store::load_extension(&context.extension_id)?;
     Ok(manifest
         .test
         .and_then(|test| test.passthrough_filter.clone()))
@@ -423,7 +424,7 @@ fn positional_filter_args(args: &[String]) -> Vec<String> {
 fn test_changed_file_routing(
     extension_id: &str,
 ) -> homeboy_core::error::Result<Option<TestChangedFileRouting>> {
-    let manifest = crate::load_extension(extension_id)?;
+    let manifest = crate::extension_store::load_extension(extension_id)?;
     Ok(manifest
         .test
         .and_then(|test| test.changed_file_routing.clone()))
@@ -988,7 +989,7 @@ pub fn resolve_drift_options(
 
     if let Some(extensions) = &component.extensions {
         for extension_id in extensions.keys() {
-            let manifest = crate::load_extension(extension_id)?;
+            let manifest = crate::extension_store::load_extension(extension_id)?;
             if let Some(config) = manifest.test_drift() {
                 return Ok(DriftOptions::from_config(
                     &source_path,
@@ -1235,7 +1236,7 @@ fn is_direct_changed_test_path(file: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TestDriftConfig, TestSettingStringPredicate};
+    use crate::extension::{TestDriftConfig, TestSettingStringPredicate};
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;

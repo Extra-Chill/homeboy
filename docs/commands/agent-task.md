@@ -843,19 +843,17 @@ homeboy agent-task controller validate-proof @proof.json
 ## Loop Spec Compilation
 
 `agent-task compile-loop --definition <SPEC>` compiles a declarative loop spec into
-an executable `homeboy/agent-task-plan/v1` without submitting or running it. It
+an executable plan without submitting or running it. It
 accepts Homeboy's native `homeboy/agent-task-loop-definition/v1` shape and the
 repo-authored workflow-oriented loop spec shape used by WPSG-style controllers.
 
-Repo-style compilation is intentionally deterministic: workflow ids become task
-ids, artifact producers are wired to consumers through `output_dependencies`, and
-declared emitted artifacts become `artifact_outputs`. Controller-only sections
-such as transition policies, phases, arbitrary actions, initial events, and
-entity fan-out are rejected with explicit diagnostics instead of being ignored.
+Native loop definitions compile to `homeboy/agent-task-plan/v1`. Repo-style specs
+use the canonical controller-spec compiler and emit a generic Homeboy `agent_task`
+plan. Workflow ids become executable stages, and declared artifact flow becomes
+stage dependencies. This is the same compiler used by controller execution, so
+policies, phases, gates, metrics, and fan-out are validated by one implementation.
 
-Repo-style specs may also declare an `artifact_graph` edge list. The narrow
-compiler support is deliberately limited to direct one-producer, one-consumer
-artifact flow:
+Repo-style specs may also declare an explicit `artifact_graph` edge list:
 
 ```json
 {
@@ -873,12 +871,7 @@ artifact flow:
 ```
 
 `compile-loop` validates graph edges against declared artifacts and workflow
-`emits`/`consumes`, then materializes supported edges as `output_dependencies`
-and `artifact_outputs`. The controller path exposes the same edge records in
-workflow `client_context.artifact_graph_edges` and includes graph producers in
-`artifact_dependencies.producer_workflow_ids`. Fan-out graph edges, joins, gates,
-and retry policy remain controller-only follow-ups and produce deterministic
-diagnostics instead of partial compilation.
+`emits`/`consumes`, then materializes them as executable stage dependencies.
 
 ## Durable Loops
 

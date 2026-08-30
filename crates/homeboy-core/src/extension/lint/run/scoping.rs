@@ -2,8 +2,8 @@
 //! flags into runner-compatible globbed lint runs via extension routes.
 
 use super::types::{LintRunWorkflowArgs, ScopedLintPlan, ScopedLintRun};
-use crate as extension;
-use crate::LintChangedFileRoute;
+use crate::extension;
+use crate::extension::LintChangedFileRoute;
 use homeboy_core::component::Component;
 use homeboy_core::git;
 use std::path::Path;

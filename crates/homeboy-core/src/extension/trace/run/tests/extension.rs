@@ -5,12 +5,15 @@ use std::fs;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
-use crate::trace::attach::TraceAttachment;
-use crate::trace::canonicality::TraceCanonicalPolicy;
-use crate::trace::generic_runner::{discover_generic_trace_workloads, trace_workload_scenario_id};
-use crate::trace::overlay::{apply_trace_overlays, TraceOverlayRequest};
-use crate::trace::probes::TraceProbeConfig;
-use crate::{ExtensionCapability, ExtensionExecutionContext, RunnerOutput};
+use crate::extension::trace::attach::TraceAttachment;
+use crate::extension::trace::canonicality::TraceCanonicalPolicy;
+use crate::extension::trace::generic_runner::{
+    discover_generic_trace_workloads, trace_workload_scenario_id,
+};
+use crate::extension::trace::overlay::{apply_trace_overlays, TraceOverlayRequest};
+use crate::extension::trace::probes::TraceProbeConfig;
+use crate::extension::{ExtensionCapability, RunnerOutput};
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::{Component, ScopedExtensionConfig};
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_core::engine::run_dir::RunDir;
@@ -111,8 +114,9 @@ JSON
             ignore_baseline: true,
             ratchet: false,
         },
-        regression_threshold_percent: crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        regression_threshold_percent:
+            crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         canonical_policy: TraceCanonicalPolicy::Development,
         checkout_provenance: None,
     };
@@ -183,8 +187,9 @@ JSON
             ignore_baseline: true,
             ratchet: false,
         },
-        regression_threshold_percent: crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        regression_threshold_percent:
+            crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         canonical_policy: TraceCanonicalPolicy::Development,
         checkout_provenance: None,
     };
@@ -276,8 +281,9 @@ fn test_run_trace_workflow() {
             ignore_baseline: true,
             ratchet: false,
         },
-        regression_threshold_percent: crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        regression_threshold_percent:
+            crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         canonical_policy: TraceCanonicalPolicy::Development,
         checkout_provenance: None,
     };
@@ -365,8 +371,9 @@ JSON
             ignore_baseline: true,
             ratchet: false,
         },
-        regression_threshold_percent: crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        regression_threshold_percent:
+            crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         canonical_policy: TraceCanonicalPolicy::Development,
         checkout_provenance: None,
     };
@@ -430,8 +437,9 @@ exit 1
             ignore_baseline: true,
             ratchet: false,
         },
-        regression_threshold_percent: crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        regression_threshold_percent:
+            crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         canonical_policy: TraceCanonicalPolicy::Development,
         checkout_provenance: None,
     };
@@ -524,8 +532,9 @@ JSON
                 ratchet: false,
             },
             regression_threshold_percent:
-                crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+            regression_min_delta_ms:
+                crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
             checkout_provenance: None,
         },
@@ -656,7 +665,9 @@ fn trace_overlay_run_failure_reverts_patch_and_releases_lock() {
             fs::read_to_string(fixture.component_dir.join("scenario.txt")).unwrap(),
             "base\n"
         );
-        assert!(crate::trace::list_trace_overlay_locks().unwrap().is_empty());
+        assert!(crate::extension::trace::list_trace_overlay_locks()
+            .unwrap()
+            .is_empty());
         run_dir.cleanup();
     });
 }
@@ -714,8 +725,9 @@ fn overlay_fixture(keep_overlay: bool) -> OverlayFixture {
             ignore_baseline: true,
             ratchet: false,
         },
-        regression_threshold_percent: crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+        regression_threshold_percent:
+            crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+        regression_min_delta_ms: crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
         canonical_policy: TraceCanonicalPolicy::Development,
         checkout_provenance: None,
     };

@@ -30,7 +30,7 @@ Runner sync uses this contract:
 - `--upgrade-runner`: Select configured runners to converge with the controller upgrade. Repeat to target multiple runners.
 - `--runner-only`: With `--upgrade-runner`, preserve the controller and refresh only the selected runners. The response explicitly reports this partial scope and the exact controller-plus-runner convergence command.
 - `--method`: Override install method detection (`homebrew|cargo|source|binary`).
-- `--version <TAG>`: Pin the published release to install (`v0.332.0` or `0.332.0`). Binary installs only, and it implies `--force` at the release gate so a deliberate downgrade is not discarded as "already at latest".
+- `--version <TAG>`: Pin the published release to install (`v0.332.0` or `0.332.0`). When `--method` is omitted, this infers `--method binary` and reports that choice before mutation. An explicit incompatible method is rejected. A pin also implies `--force` at the release gate so a deliberate downgrade is not discarded as "already at latest".
 
 ## Release selection for binary installs
 
@@ -38,7 +38,7 @@ Binary installs download a release asset named `homeboy-<target triple>.tar.xz`,
 
 - **`--check` verifies an installable artifact**, not just a newer version string. `latest_version` is the newest release carrying an artifact for the running target, and `update_available` is keyed off it. A release this platform cannot install is never reported as available.
 - **Selection falls back** to the newest release that does have this target's asset, and says so: `v0.333.0 has no x86_64-unknown-linux-gnu asset; upgrading to v0.332.0 instead.`
-- **`--version <TAG>` pins deliberately.** A pin to a release with no asset for this target is refused before any binary mutation, naming the asset it looked for and the releases that would work.
+- **`--version <TAG>` pins deliberately.** With no explicit `--method`, a pin selects the binary install method even when the current controller was installed by Cargo. A pin to a release with no asset for this target is refused before any binary mutation, naming the asset it looked for and the releases that would work.
 - **The target triple is detected honestly.** An OS/architecture pair Homeboy publishes no assets for is reported as undetermined; asset availability is then explicitly *not verified* rather than guessed.
 - **A 404 names the resolved asset URL and the target triple** it looked for, so diagnosing a missing asset does not require listing release assets by hand.
 
@@ -92,7 +92,7 @@ Force reinstall:
 homeboy upgrade --force
 ```
 
-Pin a specific published release (binary installs):
+Pin a specific published release (infers a binary install):
 
 ```sh
 homeboy upgrade --version v0.332.0

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::bench::parsing::{self, BenchResults, BenchScenario};
+use crate::extension::bench::parsing::{self, BenchResults, BenchScenario};
 use homeboy_core::error::Result;
 
 use super::scenario::{apply_scenario_filter, normalize_workload_json_scenario_ids};

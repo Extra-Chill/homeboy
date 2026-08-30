@@ -2,15 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
+use homeboy_core::extension::trace::TraceProbeConfig;
+use homeboy_core::extension::trace::TraceSpanMetadata;
 use homeboy_core::resource_cleanup_intent::ResourceCleanupIntent;
 use homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy;
-use homeboy_core::trace::TraceProbeConfig;
-use homeboy_core::trace::TraceSpanMetadata;
 use std::collections::{BTreeMap, HashMap};
 
 pub use homeboy_core::artifact_postprocess::ArtifactPostprocessAction as ArtifactPostprocessSpec;
-use homeboy_core::bench::{BenchGate, BenchGateOp};
 use homeboy_core::component::ScopedExtensionConfig;
+use homeboy_core::extension::bench::{BenchGate, BenchGateOp};
 pub use homeboy_core::lifecycle::{
     LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
     LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef,

@@ -1,6 +1,7 @@
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
+use homeboy_core::extension_update_check::is_git_url;
 use homeboy_core::{build_identity, git};
 use semver::Version;
 use std::path::{Path, PathBuf};
@@ -226,7 +227,12 @@ pub fn run_upgrade_with_method(
         return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
-    let install_method = method_override.unwrap_or_else(detect_install_method);
+    let (install_method, inferred_from_pin) =
+        resolve_install_method(method_override, pinned_version, detect_install_method);
+
+    if inferred_from_pin {
+        upgrade_phase("install method: binary (inferred from --version)");
+    }
 
     if install_method == InstallMethod::Unknown {
         return Err(Error::validation_invalid_argument(
@@ -881,7 +887,7 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
                     .requires
                     .as_ref()
                     .and_then(|requirements| requirements.homeboy.as_deref());
-                match homeboy_core::evaluate_core_compatibility_for_version(
+                match homeboy_core::extension::evaluate_core_compatibility_for_version(
                     requires,
                     homeboy_core::extension_update_check::read_source_revision(&extension_id),
                     candidate_version,
@@ -998,6 +1004,24 @@ fn controller_replacement_proceeds(
 /// nothing (#11750).
 fn controller_replacement_is_deliberate(force: bool, pinned_version: Option<&str>) -> bool {
     force || pinned_version.is_some()
+}
+
+/// A published release pin identifies the binary transport when the operator
+/// leaves method selection implicit. Explicit methods remain authoritative so
+/// incompatible combinations reach validation and fail closed.
+fn resolve_install_method<F>(
+    method_override: Option<InstallMethod>,
+    pinned_version: Option<&str>,
+    detect: F,
+) -> (InstallMethod, bool)
+where
+    F: FnOnce() -> InstallMethod,
+{
+    match method_override {
+        Some(method) => (method, false),
+        None if pinned_version.is_some() => (InstallMethod::Binary, true),
+        None => (detect(), false),
+    }
 }
 
 /// `--version` pins a published *release asset*, so it is only meaningful for
@@ -1467,7 +1491,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                 Ok(manifest) => {
                     let (source_url, update_note) =
                         match extension::resolve_source_url_read_only(&extension_id) {
-                            Ok(source_url) if extension::is_git_url(&source_url) => {
+                            Ok(source_url) if is_git_url(&source_url) => {
                                 (Some(source_url), None)
                             }
                             Ok(source_url) => (
@@ -1493,7 +1517,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                         git_root: None,
                         source_url,
                         source_revision: homeboy_core::extension_update_check::read_source_revision(&extension_id),
-                        source_update: homeboy_core::ExtensionSourceUpdate {
+                        source_update: homeboy_core::extension::ExtensionSourceUpdate {
                             update_note,
                             ..Default::default()
                         },
@@ -1508,7 +1532,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                     git_root: None,
                     source_url: None,
                     source_revision: None,
-                    source_update: homeboy_core::ExtensionSourceUpdate {
+                    source_update: homeboy_core::extension::ExtensionSourceUpdate {
                         update_note: Some(format!(
                             "unrefreshable extension manifest: {}",
                             err.message
@@ -2034,12 +2058,12 @@ fn git_commits_behind_upstream(git_root: &Path) -> Option<u32> {
     count.trim().parse::<u32>().ok()
 }
 
-fn portable_extension_source_url(result: &homeboy_core::UpdateResult) -> Option<String> {
+fn portable_extension_source_url(result: &homeboy_core::extension::UpdateResult) -> Option<String> {
     if let Some(git_root) = result.git_root.as_ref() {
         return git::remote_origin_url(git_root);
     }
 
-    if extension::is_git_url(&result.url) {
+    if is_git_url(&result.url) {
         Some(result.url.clone())
     } else {
         None
@@ -2299,7 +2323,7 @@ mod runner_source_upgrade_tests {
             Vec::new(),
             || {
                 events.borrow_mut().push("runner manifest revalidation");
-                let compatible = homeboy_core::evaluate_core_compatibility_for_version(
+                let compatible = homeboy_core::extension::evaluate_core_compatibility_for_version(
                     Some(changed_manifest_requires_homeboy),
                     None,
                     "2.1.0",
@@ -3641,6 +3665,44 @@ mod pinned_release_tests {
                 "refusal must offer the method that honors a pin: {:?}",
                 error.hints
             );
+        }
+    }
+
+    #[test]
+    fn a_pin_infers_binary_for_a_cargo_installed_controller() {
+        let (method, inferred) = resolve_install_method(None, Some("v0.332.0"), || {
+            panic!("a release pin must not use the detected cargo install method")
+        });
+
+        assert_eq!(method, InstallMethod::Binary);
+        assert!(inferred);
+        assert!(validate_pinned_version(Some("v0.332.0"), method).is_ok());
+    }
+
+    #[test]
+    fn omitted_method_without_a_pin_uses_detection() {
+        let (method, inferred) = resolve_install_method(None, None, || InstallMethod::Secondary);
+
+        assert_eq!(method, InstallMethod::Secondary);
+        assert!(!inferred);
+    }
+
+    #[test]
+    fn an_explicit_incompatible_method_with_a_pin_fails_closed() {
+        for method in [
+            InstallMethod::Source,
+            InstallMethod::Homebrew,
+            InstallMethod::Secondary,
+        ] {
+            let (resolved, inferred) =
+                resolve_install_method(Some(method), Some("v0.332.0"), || {
+                    panic!("explicit methods must not trigger detection")
+                });
+
+            assert_eq!(resolved, method);
+            assert!(!inferred);
+            validate_pinned_version(Some("v0.332.0"), resolved)
+                .expect_err("an explicit incompatible method must reject the pin");
         }
     }
 

@@ -280,7 +280,7 @@ mod tests {
             // requirement because dev iteration may lag the published constraint.
             let source = home.join("source/wordpress");
             write_extension_manifest(&source, "wordpress", "1.0.0");
-            crate::install(&source.to_string_lossy(), Some("wordpress"))
+            crate::extension::install(&source.to_string_lossy(), Some("wordpress"))
                 .expect("install linked extension");
             assert!(super::is_extension_linked("wordpress"));
 

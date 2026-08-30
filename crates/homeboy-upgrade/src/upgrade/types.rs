@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use homeboy_core::ExtensionSourceUpdate;
+use homeboy_core::extension::ExtensionSourceUpdate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMethod {

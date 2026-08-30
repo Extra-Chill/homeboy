@@ -25,13 +25,11 @@ use super::load_extension;
 use super::manifest::{ExtensionManifest, RuntimeConfig};
 use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
+use homeboy_core::extension_execution::ExtensionExecutionContext;
 use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
 
 pub use action::execute_action;
-pub use homeboy_core::extension_readiness::{
-    extension_ready_status, extension_ready_status_with, is_extension_compatible,
-    ExtensionReadinessMode, ExtensionReadinessState, ExtensionReadyStatus,
-};
+use homeboy_core::extension_readiness::extension_ready_status;
 use settings::serialize_settings;
 pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
 
@@ -523,12 +521,12 @@ pub(crate) struct CapabilityScriptOptions {
 }
 
 pub(crate) struct PreparedCapabilityRun {
-    pub execution: super::ExtensionExecutionContext,
+    pub execution: ExtensionExecutionContext,
     pub settings_json: String,
 }
 
 pub(crate) fn resolve_capability_component(
-    execution_context: &super::ExtensionExecutionContext,
+    execution_context: &ExtensionExecutionContext,
     pre_loaded_component: Option<&Component>,
     path_override: Option<&str>,
 ) -> Result<Component> {
@@ -546,10 +544,10 @@ pub(crate) fn resolve_capability_component(
 }
 
 pub(crate) fn build_capability_execution_context(
-    execution_context: &super::ExtensionExecutionContext,
+    execution_context: &ExtensionExecutionContext,
     component: Component,
     path_override: Option<&str>,
-) -> super::ExtensionExecutionContext {
+) -> ExtensionExecutionContext {
     let mut execution = execution_context.clone();
     execution.component = component;
 
@@ -589,7 +587,7 @@ fn absolutize_path_override(path: &str) -> String {
 }
 
 pub(crate) fn prepare_capability_run(
-    execution_context: &super::ExtensionExecutionContext,
+    execution_context: &ExtensionExecutionContext,
     pre_loaded_component: Option<&Component>,
     path_override: Option<&str>,
     settings_overrides: &[(String, String)],
@@ -943,7 +941,7 @@ fn build_exec_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract_component_extension_settings;
+    use crate::extension_execution::extract_component_extension_settings;
     use homeboy_core::component::Component;
 
     fn make_executable(path: &Path) {
@@ -1681,15 +1679,15 @@ mod tests {
         assert_eq!(output.stderr, "");
     }
 
-    fn lint_execution_context() -> crate::ExtensionExecutionContext {
-        crate::ExtensionExecutionContext {
+    fn lint_execution_context() -> crate::extension_execution::ExtensionExecutionContext {
+        crate::extension_execution::ExtensionExecutionContext {
             component: Component::new(
                 "fixture".to_string(),
                 "/configured/path".to_string(),
                 "fixture-extension".to_string(),
                 None,
             ),
-            capability: crate::ExtensionCapability::Lint,
+            capability: crate::extension::ExtensionCapability::Lint,
             extension_id: "fixture-extension".to_string(),
             extension_path: std::path::PathBuf::from("/tmp/fixture-extension"),
             script_path: "lint.sh".to_string(),

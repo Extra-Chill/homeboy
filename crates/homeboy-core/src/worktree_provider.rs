@@ -103,6 +103,8 @@ pub struct WorktreeCleanupRequest {
     pub cleanup_branches: bool,
     pub allow_unmerged_branches: bool,
     pub timeout: Option<std::time::Duration>,
+    pub provider_run_id: Option<String>,
+    pub provider_plan_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +125,8 @@ impl Default for WorktreeCleanupRequest {
             cleanup_branches: false,
             allow_unmerged_branches: false,
             timeout: None,
+            provider_run_id: None,
+            provider_plan_id: None,
         }
     }
 }
@@ -899,6 +903,8 @@ impl WorktreeCleanupProvider for CommandWorktreeProvider<'_> {
                 all_providers: request.all_configured_providers,
                 apply: request.apply,
                 timeout: request.timeout,
+                provider_run_id: request.provider_run_id.clone(),
+                provider_plan_id: request.provider_plan_id.clone(),
             },
             self.config.clone(),
         )
@@ -2032,6 +2038,8 @@ mod tests {
                 cleanup_branches: false,
                 allow_unmerged_branches: false,
                 timeout: None,
+                provider_run_id: None,
+                provider_plan_id: None,
             })
             .expect("cleanup preview");
         match cleanup {

@@ -11,10 +11,10 @@ pub use types::{
     RigBenchEntry,
 };
 
-use crate::bench::diagnostic::BenchDiagnostic;
-use crate::bench::distribution::BenchRunDistribution;
-use crate::bench::parsing::{BenchResults, BenchScenario};
-use crate::bench::side_by_side::build_side_by_side_report;
+use crate::extension::bench::diagnostic::BenchDiagnostic;
+use crate::extension::bench::distribution::BenchRunDistribution;
+use crate::extension::bench::parsing::{BenchResults, BenchScenario};
+use crate::extension::bench::side_by_side::build_side_by_side_report;
 
 impl BenchComparisonDiff {
     /// Build the diff table from a reference rig's results plus zero or

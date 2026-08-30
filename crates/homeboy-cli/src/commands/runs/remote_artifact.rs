@@ -65,9 +65,8 @@ fn runner_id_from_artifact_ref(path: &str) -> Option<&str> {
     path.split('/').next()
 }
 
-pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    runs_service::require_run(&store, &args.run_id)?;
+pub fn attach(store: &ObservationStore, args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
+    runs_service::require_run(store, &args.run_id)?;
     validate_artifact_name(&args.name)?;
     let runner = runner::load(&args.runner)?;
     // The root that authorizes the path and the root the bytes are copied under
@@ -141,9 +140,8 @@ fn metadata_with_resource_lifecycle(
     metadata
 }
 
-pub fn preview(args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
+pub fn preview(store: &ObservationStore, args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
+    let artifact = runs_service::resolve_artifact_for_run(store, &args.run_id, &args.artifact_id)?;
     preview_artifact(artifact, args.port)
 }
 
@@ -212,9 +210,8 @@ pub fn preview_artifact(artifact: ArtifactRecord, port: Option<u16>) -> CmdResul
     ))
 }
 
-pub fn capture(args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
+pub fn capture(store: &ObservationStore, args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
+    let artifact = runs_service::resolve_artifact_for_run(store, &args.run_id, &args.artifact_id)?;
     if artifact.artifact_type != "directory" {
         return Err(Error::validation_invalid_argument(
             "artifact_id",
@@ -582,12 +579,15 @@ mod tests {
                 )
                 .expect("run");
 
-            let output = attach(RunsArtifactAttachArgs {
-                run_id: run.id.clone(),
-                runner: "issue-6403-local".to_string(),
-                path: source.display().to_string(),
-                name: "runner-report".to_string(),
-            })
+            let output = attach(
+                &store,
+                RunsArtifactAttachArgs {
+                    run_id: run.id.clone(),
+                    runner: "issue-6403-local".to_string(),
+                    path: source.display().to_string(),
+                    name: "runner-report".to_string(),
+                },
+            )
             .expect("attach")
             .0;
             let RunsOutput::ArtifactAttach(output) = output else {
@@ -654,12 +654,15 @@ mod tests {
                 )
                 .expect("run");
 
-            let output = attach(RunsArtifactAttachArgs {
-                run_id: run.id.clone(),
-                runner: "issue-6462-local".to_string(),
-                path: site.display().to_string(),
-                name: "generated-site".to_string(),
-            })
+            let output = attach(
+                &store,
+                RunsArtifactAttachArgs {
+                    run_id: run.id.clone(),
+                    runner: "issue-6462-local".to_string(),
+                    path: site.display().to_string(),
+                    name: "generated-site".to_string(),
+                },
+            )
             .expect("attach")
             .0;
             let RunsOutput::ArtifactAttach(output) = output else {
@@ -726,12 +729,15 @@ mod tests {
                 .start_run(NewRunRecord::builder("runner-exec").build())
                 .expect("run");
 
-            let result = attach(RunsArtifactAttachArgs {
-                run_id: run.id,
-                runner: "issue-6403-guard".to_string(),
-                path: outside.display().to_string(),
-                name: "outside".to_string(),
-            });
+            let result = attach(
+                &store,
+                RunsArtifactAttachArgs {
+                    run_id: run.id,
+                    runner: "issue-6403-guard".to_string(),
+                    path: outside.display().to_string(),
+                    name: "outside".to_string(),
+                },
+            );
             let Err(err) = result else {
                 panic!("outside path should fail");
             };
@@ -763,12 +769,15 @@ mod tests {
                 .start_run(NewRunRecord::builder("runner-exec").build())
                 .expect("run");
 
-            let result = attach(RunsArtifactAttachArgs {
-                run_id: run.id,
-                runner: "issue-6403-parent".to_string(),
-                path: workspace.join("../outside.txt").display().to_string(),
-                name: "outside".to_string(),
-            });
+            let result = attach(
+                &store,
+                RunsArtifactAttachArgs {
+                    run_id: run.id,
+                    runner: "issue-6403-parent".to_string(),
+                    path: workspace.join("../outside.txt").display().to_string(),
+                    name: "outside".to_string(),
+                },
+            );
             let Err(err) = result else {
                 panic!("parent-dir path should fail");
             };
@@ -810,11 +819,14 @@ mod tests {
                 )
                 .expect("artifact");
 
-            let output = preview(RunsArtifactPreviewArgs {
-                run_id: run.id.clone(),
-                artifact_id: artifact.id.clone(),
-                port: None,
-            })
+            let output = preview(
+                &store,
+                RunsArtifactPreviewArgs {
+                    run_id: run.id.clone(),
+                    artifact_id: artifact.id.clone(),
+                    port: None,
+                },
+            )
             .expect("preview")
             .0;
             let RunsOutput::ArtifactPreview(output) = output else {
@@ -858,11 +870,14 @@ mod tests {
                 .record_artifact(&run.id, "summary", &file)
                 .expect("artifact");
 
-            let result = preview(RunsArtifactPreviewArgs {
-                run_id: run.id,
-                artifact_id: artifact.id,
-                port: None,
-            });
+            let result = preview(
+                &store,
+                RunsArtifactPreviewArgs {
+                    run_id: run.id,
+                    artifact_id: artifact.id,
+                    port: None,
+                },
+            );
             let Err(err) = result else {
                 panic!("file artifact should fail");
             };
@@ -912,15 +927,18 @@ mod tests {
                 .expect("artifact");
             let output_dir = home.path().join("captures");
 
-            let result = capture(RunsArtifactCaptureArgs {
-                run_id: run.id.clone(),
-                artifact_id: artifact.id.clone(),
-                entrypoints: vec!["fse-pilot-build-theme/index.html".to_string()],
-                output_dir: output_dir.clone(),
-                port: None,
-                viewport_width: 390,
-                viewport_height: 844,
-            })
+            let result = capture(
+                &store,
+                RunsArtifactCaptureArgs {
+                    run_id: run.id.clone(),
+                    artifact_id: artifact.id.clone(),
+                    entrypoints: vec!["fse-pilot-build-theme/index.html".to_string()],
+                    output_dir: output_dir.clone(),
+                    port: None,
+                    viewport_width: 390,
+                    viewport_height: 844,
+                },
+            )
             .expect("capture");
             match old_provider {
                 Some(value) => env::set_var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND", value),
@@ -966,15 +984,18 @@ mod tests {
                 .record_directory_artifact(&run.id, "generated_site", &site)
                 .expect("artifact");
 
-            let result = capture(RunsArtifactCaptureArgs {
-                run_id: run.id,
-                artifact_id: artifact.id,
-                entrypoints: vec!["index.html".to_string()],
-                output_dir: home.path().join("captures"),
-                port: None,
-                viewport_width: 390,
-                viewport_height: 844,
-            })
+            let result = capture(
+                &store,
+                RunsArtifactCaptureArgs {
+                    run_id: run.id,
+                    artifact_id: artifact.id,
+                    entrypoints: vec!["index.html".to_string()],
+                    output_dir: home.path().join("captures"),
+                    port: None,
+                    viewport_width: 390,
+                    viewport_height: 844,
+                },
+            )
             .expect("capture manifest");
             match old_provider {
                 Some(value) => env::set_var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND", value),

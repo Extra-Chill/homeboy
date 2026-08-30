@@ -3,13 +3,14 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::bench::baseline;
-use crate::bench::diagnostic::{self, BenchDiagnostic};
-use crate::bench::failure_diagnostic::bench_failure_stderr_tail;
-use crate::bench::parsing::{BenchRunMetadata, BenchRunnerMetadata};
-use crate::bench::responsiveness::{memory_sample, read_responsiveness_summary};
-use crate::bench::run_metadata::stamp_run_metadata;
-use crate::{resolve_execution_context, ExtensionCapability};
+use crate::extension::bench::baseline;
+use crate::extension::bench::diagnostic::{self, BenchDiagnostic};
+use crate::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
+use crate::extension::bench::parsing::{BenchRunMetadata, BenchRunnerMetadata};
+use crate::extension::bench::responsiveness::{memory_sample, read_responsiveness_summary};
+use crate::extension::bench::run_metadata::stamp_run_metadata;
+use crate::extension::ExtensionCapability;
+use crate::extension_execution::resolve_execution_context;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
@@ -106,7 +107,7 @@ pub fn run_main_bench_workflow(
     if component.has_script(ExtensionCapability::Bench) && args.extra_workloads.is_empty() {
         clear_responsiveness_file(run_dir)?;
         let component_env = bench_component_script_env(&args, run_dir)?;
-        let script_output = crate::component_script::run_component_scripts_with_run_dir(
+        let script_output = crate::extension::component_script::run_component_scripts_with_run_dir(
             component,
             ExtensionCapability::Bench,
             source_path,
@@ -172,14 +173,14 @@ pub fn run_main_bench_workflow(
         }
         let mut gate_failures = parsed
             .as_mut()
-            .map(crate::bench::gate::evaluate_gates)
+            .map(crate::extension::bench::gate::evaluate_gates)
             .unwrap_or_default();
         if let Some(results) = parsed.as_ref() {
             gate_failures.extend(workload_status_failures(results));
         }
         let gate_results = parsed
             .as_ref()
-            .map(crate::bench::gate::normalized_gate_results)
+            .map(crate::extension::bench::gate::normalized_gate_results)
             .unwrap_or_default();
         let gates_passed = gate_failures.is_empty();
         let status = if script_output.success && gates_passed {
@@ -324,14 +325,14 @@ pub fn run_main_bench_workflow(
     }
     let mut gate_failures = parsed
         .as_mut()
-        .map(crate::bench::gate::evaluate_gates)
+        .map(crate::extension::bench::gate::evaluate_gates)
         .unwrap_or_default();
     if let Some(results) = parsed.as_ref() {
         gate_failures.extend(workload_status_failures(results));
     }
     let gate_results = parsed
         .as_ref()
-        .map(crate::bench::gate::normalized_gate_results)
+        .map(crate::extension::bench::gate::normalized_gate_results)
         .unwrap_or_default();
     let gates_passed = gate_failures.is_empty();
     let diagnostics = diagnostic::collect_diagnostics(parsed.as_ref());
@@ -494,7 +495,7 @@ pub(crate) fn bench_component_script_env(
         ),
         (
             "HOMEBOY_BENCH_RESPONSIVENESS_MISSED_MS".to_string(),
-            crate::bench::responsiveness::missed_ping_window_ms().to_string(),
+            crate::extension::bench::responsiveness::missed_ping_window_ms().to_string(),
         ),
         (
             "HOMEBOY_BENCH_SCENARIOS".to_string(),
@@ -511,7 +512,7 @@ pub(crate) fn bench_component_script_env(
         ),
         (
             "HOMEBOY_SETTINGS_JSON".to_string(),
-            crate::build_settings_json_from_manifest(
+            crate::extension::build_settings_json_from_manifest(
                 &serde_json::json!({}),
                 &[],
                 &args.settings,
