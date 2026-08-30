@@ -124,19 +124,18 @@ use uuid::Uuid;
 /// This is the preferred entry point for callers - it handles project loading
 /// and SSH context resolution, keeping those details encapsulated.
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
-    let mut release_artifacts =
-        homeboy_core::git::release_download::ReleaseArtifactStore::default();
+    let mut artifacts = preparation::DeploymentArtifactStore::default();
     // Single-project deploy is its own unit of work: resolve once here so the
     // receipt read, write, and invalidation below all address one home (#7505).
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
-    run_with_release_artifacts(roots.data(), project_id, config, &mut release_artifacts)
+    run_with_artifact_store(roots.data(), project_id, config, &mut artifacts)
 }
 
-fn run_with_release_artifacts(
+fn run_with_artifact_store(
     data_root: &std::path::Path,
     project_id: &str,
     config: &DeployConfig,
-    release_artifacts: &mut homeboy_core::git::release_download::ReleaseArtifactStore,
+    artifacts: &mut preparation::DeploymentArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
     let project = project::load(project_id)?;
     let source =
@@ -189,7 +188,7 @@ fn run_with_release_artifacts(
         &project,
         &ctx,
         &base_path,
-        release_artifacts,
+        artifacts,
         observation.as_mut(),
     )
     .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
@@ -462,8 +461,10 @@ pub fn run_multi(
     let mut failed: u32 = 0;
     let mut skipped: u32 = unknown_projects.len() as u32;
     let mut planned: u32 = 0;
-    let mut release_artifacts =
-        homeboy_core::git::release_download::ReleaseArtifactStore::default();
+    // Payload ownership spans the complete fanout. Equal target-independent
+    // preparation requests therefore build or download once, while requests
+    // with genuinely different source inputs retain separate payloads.
+    let mut artifacts = preparation::DeploymentArtifactStore::default();
     // Record skipped results for unknown projects
     for pid in &unknown_projects {
         project_results.push(ProjectDeployResult {
@@ -545,12 +546,7 @@ pub fn run_multi(
         }
         let mut timer = PhaseTimer::new();
         let result = timer.time("resolve_source", || {
-            run_with_release_artifacts(
-                roots.data(),
-                project_id,
-                &project_config,
-                &mut release_artifacts,
-            )
+            run_with_artifact_store(roots.data(), project_id, &project_config, &mut artifacts)
         });
         let timings = timer.into_report();
 

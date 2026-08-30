@@ -6,15 +6,15 @@ use homeboy_core::project::Project;
 
 use super::super::binding::bind_project_payloads;
 use super::super::execution::{prepare_component_deploy, PreparedComponentDeploy};
-use super::super::preparation::{ComponentPayloadPreparationRequest, PreparedPayloadCollection};
+use super::super::preparation::{ComponentPayloadPreparationRequest, DeploymentArtifactStore};
 use super::super::provenance::record_payload_preparation_build;
 use super::super::types::{ComponentDeployResult, DeployConfig};
-use homeboy_core::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
+use homeboy_core::git::release_download::ReleaseArtifactLease;
 
 pub(super) struct PreparedDeployments {
     deployments: Vec<PreparedComponentDeploy>,
-    // Retains payload copies and release leases through every transfer.
-    _payloads: PreparedPayloadCollection,
+    #[cfg(test)]
+    _payloads: Option<super::super::preparation::PreparedPayloadCollection>,
 }
 
 impl std::ops::Deref for PreparedDeployments {
@@ -25,19 +25,31 @@ impl std::ops::Deref for PreparedDeployments {
     }
 }
 
-pub(super) fn prepare_component_deployments(
-    components: &[Component],
-    config: &DeployConfig,
-    project: &Project,
-    base_path: &str,
-    local_versions: &HashMap<String, String>,
-    remote_versions: &HashMap<String, String>,
-    release_artifacts: &HashMap<String, ReleaseArtifactLease>,
+pub(super) struct PrepareDeploymentsInput<'a> {
+    pub(super) components: &'a [Component],
+    pub(super) config: &'a DeployConfig,
+    pub(super) project: &'a Project,
+    pub(super) base_path: &'a str,
+    pub(super) local_versions: &'a HashMap<String, String>,
+    pub(super) remote_versions: &'a HashMap<String, String>,
+    pub(super) release_artifacts: &'a HashMap<String, ReleaseArtifactLease>,
+}
+
+pub(super) fn prepare_component_deployments_with_payloads(
+    input: PrepareDeploymentsInput<'_>,
+    artifacts: &mut DeploymentArtifactStore,
 ) -> std::result::Result<PreparedDeployments, Vec<ComponentDeployResult>> {
+    let PrepareDeploymentsInput {
+        components,
+        config,
+        project,
+        base_path,
+        local_versions,
+        remote_versions,
+        release_artifacts,
+    } = input;
     let mut prepared_deployments = Vec::new();
     let mut failures = Vec::new();
-    let mut payloads = PreparedPayloadCollection::default();
-    let mut release_artifact_store = ReleaseArtifactStore::default();
 
     let mut binding_payloads = config
         .prepared_artifact
@@ -66,7 +78,10 @@ pub(super) fn prepare_component_deployments(
                 ComponentPayloadPreparationRequest::new(&component, &preparation_config);
             request.config.exact_ref_materialized =
                 config.requested_ref_for(&component.id).is_some();
-            match payloads.prepare(request, &mut release_artifact_store) {
+            match artifacts
+                .payloads
+                .prepare(request, &mut artifacts.release_artifacts)
+            {
                 Ok(payload) => {
                     binding_payloads.insert(component.id.clone(), payload.artifact.clone());
                     let payload_build_ran = payload.build_ran;
@@ -142,11 +157,39 @@ pub(super) fn prepare_component_deployments(
     if failures.is_empty() {
         Ok(PreparedDeployments {
             deployments: prepared_deployments,
-            _payloads: payloads,
+            #[cfg(test)]
+            _payloads: None,
         })
     } else {
         Err(failures)
     }
+}
+
+#[cfg(test)]
+pub(super) fn prepare_component_deployments(
+    components: &[Component],
+    config: &DeployConfig,
+    project: &Project,
+    base_path: &str,
+    local_versions: &HashMap<String, String>,
+    remote_versions: &HashMap<String, String>,
+    release_artifacts: &HashMap<String, ReleaseArtifactLease>,
+) -> std::result::Result<PreparedDeployments, Vec<ComponentDeployResult>> {
+    let mut artifacts = DeploymentArtifactStore::default();
+    let mut prepared = prepare_component_deployments_with_payloads(
+        PrepareDeploymentsInput {
+            components,
+            config,
+            project,
+            base_path,
+            local_versions,
+            remote_versions,
+            release_artifacts,
+        },
+        &mut artifacts,
+    )?;
+    prepared._payloads = Some(artifacts.payloads);
+    Ok(prepared)
 }
 
 /// Read the build exit code the preparation step recorded on the structured
@@ -163,6 +206,85 @@ fn preparation_build_exit_code(error: &Error) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_projects_share_one_prepared_payload() {
+        let source = tempfile::tempdir().expect("source");
+        let build_count = source.path().join("build-count");
+        let mut component = Component::new(
+            "fixture".to_string(),
+            source.path().display().to_string(),
+            "plugins/fixture".to_string(),
+            Some("build/fixture.bin".to_string()),
+        );
+        component.scripts = Some(homeboy_core::component::ComponentScriptsConfig {
+            build: vec![format!(
+                "mkdir -p build && printf payload > build/fixture.bin && printf build >> {}",
+                build_count.display()
+            )],
+            ..Default::default()
+        });
+        let config = DeployConfig {
+            component_ids: vec![component.id.clone()],
+            head: true,
+            ..Default::default()
+        };
+        let mut artifacts = DeploymentArtifactStore::default();
+        let versions = HashMap::new();
+        let canonical_artifacts = HashMap::new();
+
+        let first = prepare_component_deployments_with_payloads(
+            PrepareDeploymentsInput {
+                components: std::slice::from_ref(&component),
+                config: &config,
+                project: &Project {
+                    id: "first".to_string(),
+                    ..Default::default()
+                },
+                base_path: "/srv/first",
+                local_versions: &versions,
+                remote_versions: &versions,
+                release_artifacts: &canonical_artifacts,
+            },
+            &mut artifacts,
+        )
+        .expect("first target preparation");
+        let first_artifact = first[0]
+            .config
+            .prepared_artifact
+            .clone()
+            .expect("first prepared artifact");
+        drop(first);
+
+        let second = prepare_component_deployments_with_payloads(
+            PrepareDeploymentsInput {
+                components: &[component],
+                config: &config,
+                project: &Project {
+                    id: "second".to_string(),
+                    ..Default::default()
+                },
+                base_path: "/srv/second",
+                local_versions: &versions,
+                remote_versions: &versions,
+                release_artifacts: &canonical_artifacts,
+            },
+            &mut artifacts,
+        )
+        .expect("second target preparation");
+        let second_artifact = second[0]
+            .config
+            .prepared_artifact
+            .as_ref()
+            .expect("second prepared artifact");
+
+        assert_eq!(
+            std::fs::read_to_string(build_count).expect("build count"),
+            "build"
+        );
+        assert_eq!(first_artifact.sha256, second_artifact.sha256);
+        assert_eq!(first_artifact.durable_path, second_artifact.durable_path);
+    }
 
     /// Mirrors what the preparation build-failure producer records, without
     /// depending on the wording of the failure message.

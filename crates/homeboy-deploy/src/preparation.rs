@@ -315,6 +315,13 @@ pub(crate) struct PreparedPayloadCollection {
     entries: HashMap<String, PreparedPayloadEntry>,
 }
 
+/// Owns reusable artifacts for the complete deployment fanout.
+#[derive(Default)]
+pub(crate) struct DeploymentArtifactStore {
+    pub(crate) payloads: PreparedPayloadCollection,
+    pub(crate) release_artifacts: ReleaseArtifactStore,
+}
+
 struct PreparedPayloadEntry {
     payload: PreparedComponentPayload,
 }

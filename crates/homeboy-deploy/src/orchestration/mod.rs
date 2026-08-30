@@ -36,7 +36,9 @@ use preflight::{
     guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
     sync_components, verify_expected_version, warn_non_default_branch,
 };
+#[cfg(test)]
 use prepared_payloads::prepare_component_deployments;
+use prepared_payloads::{prepare_component_deployments_with_payloads, PrepareDeploymentsInput};
 use smoke_check::run_post_deploy_smoke;
 
 /// Main deploy orchestration entry point.
@@ -47,7 +49,7 @@ pub(super) fn deploy_components(
     project: &Project,
     ctx: &RemoteProjectContext,
     base_path: &str,
-    release_artifacts: &mut ReleaseArtifactStore,
+    artifacts: &mut super::preparation::DeploymentArtifactStore,
     mut observation: Option<&mut DeployObservation>,
 ) -> Result<DeployOrchestrationResult> {
     if let Some(observation) = observation.as_deref_mut() {
@@ -154,7 +156,11 @@ pub(super) fn deploy_components(
     }
 
     let (resolved_release_artifacts, unavailable_canonical_packages) =
-        resolve_release_artifacts_for_deploy(&components, config, release_artifacts)?;
+        resolve_release_artifacts_for_deploy(
+            &components,
+            config,
+            &mut artifacts.release_artifacts,
+        )?;
 
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
@@ -401,14 +407,17 @@ pub(super) fn deploy_components(
         // completed package work that was still in progress.
         observation.phase("package", false)?;
     }
-    let prepared_deployments = match prepare_component_deployments(
-        &components,
-        config,
-        &project,
-        base_path,
-        &local_versions,
-        &remote_versions,
-        &resolved_release_artifacts,
+    let prepared_deployments = match prepare_component_deployments_with_payloads(
+        PrepareDeploymentsInput {
+            components: &components,
+            config,
+            project: &project,
+            base_path,
+            local_versions: &local_versions,
+            remote_versions: &remote_versions,
+            release_artifacts: &resolved_release_artifacts,
+        },
+        artifacts,
     ) {
         Ok(prepared) => prepared,
         Err(failures) => {
