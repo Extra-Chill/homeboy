@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.22] - 2026-08-30
+
+### Fixed
+- reconcile shared evidence defects
+
 ## [2.15.21] - 2026-08-30
 
 ### Fixed
