@@ -42,9 +42,10 @@ fn run_single_rig_bench_fails_fast_on_active_resource_lease() {
         set_rig_resources(home, "studio", resources.clone());
         set_rig_resources(home, "studio-bfb", resources);
 
-        let active_spec = crate::rig::load(home.path(), "studio").expect("load active rig");
+        let config_root = test_config_root();
+        let active_spec = crate::rig::load(&config_root, "studio").expect("load active rig");
         let _lease =
-            crate::rig::lease::acquire_active_run_lease(home.path(), &active_spec, "bench")
+            crate::rig::lease::acquire_active_run_lease(&config_root, &active_spec, "bench")
                 .expect("acquire active lease")
                 .expect("resourceful rig leases");
 
@@ -72,7 +73,7 @@ fn run_single_rig_bench_without_resources_does_not_create_lease() {
             .expect("non-resourceful rig bench should run");
 
         assert_eq!(exit_code, 0);
-        assert!(crate::rig::lease::active_run_leases(home.path())
+        assert!(crate::rig::lease::active_run_leases(&test_config_root())
             .expect("list active leases")
             .is_empty());
         assert!(!crate::core::paths::rig_leases_dir_in_root(&test_config_root()).exists());
