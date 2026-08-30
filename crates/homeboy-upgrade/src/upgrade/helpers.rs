@@ -5,11 +5,16 @@ use homeboy_core::{build_identity, git};
 use semver::Version;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use super::constants::{GITHUB_RELEASES_API, VERSION};
 use super::execution::{
     execute_upgrade, installed_target_build_identity, prepare_source_workspace_for_upgrade,
     resolve_source_workspace,
+};
+use super::operation::{
+    persist_extension_progress, run_with_upgrade_heartbeats, UpgradeOperation,
+    UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
 };
 use super::release_catalog::{self, InstallableSelection, ReleaseEntry, SelectedRelease};
 use super::services;
@@ -381,10 +386,13 @@ pub fn run_upgrade_with_method(
             check.update_available,
         ) {
             // Even when no binary update is needed, still run extension updates.
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
             let (extensions_updated, extension_skips) = if skip_extensions {
+                operation.mark_extensions("skipped", "extension refresh skipped");
                 (vec![], vec![])
             } else {
-                update_all_extensions()
+                operation.set_phase("refreshing installed extensions");
+                update_all_extensions(operation.id())
             };
             let promotion_lease = homeboy_core::runtime_promotion::acquire(
                 "controller upgrade completion",
@@ -423,7 +431,7 @@ pub fn run_upgrade_with_method(
                 &extensions_updated,
                 &extension_skips,
             );
-            return Ok(UpgradeResult {
+            let result = UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
                 previous_version: previous_version.clone(),
@@ -477,7 +485,9 @@ pub fn run_upgrade_with_method(
                 // current binary and need no restart.
                 services_restarted: Vec::new(),
                 services_pending_restart: Vec::new(),
-            });
+                operation_id: None,
+            };
+            return Ok(complete_upgrade_operation(operation, result));
         }
     }
 
@@ -499,6 +509,8 @@ pub fn run_upgrade_with_method(
             extension_revalidation,
         ));
     }
+    let mut operation = UpgradeOperation::start("homeboy upgrade");
+    operation.set_phase("mutating controller");
     let controller_upgrade = run_controller_mutation_after_runner_preflight(
         runner_preflight,
         || {
@@ -547,15 +559,29 @@ pub fn run_upgrade_with_method(
         // before it retain their immutable runtime pin and remain executable.
         let installed_executable = super::execution::active_binary_path()?;
         homeboy_core::controller_runtime::activate_installed_generation(&installed_executable)?;
+        if success {
+            operation.mark_controller_promoted("controller installation completed");
+        }
+    } else if superseded {
+        operation.mark_controller(
+            "superseded",
+            "controller promotion was superseded by the active build",
+        );
+    } else {
+        operation.mark_controller("failed", "controller installation did not complete");
     }
 
     // Auto-update all installed extensions after the upgrade command completes.
     // This prevents CI/local extension version drift that causes baseline
     // mismatches and inconsistent audit findings.
     let (extensions_updated, extension_skips) = if upgrade_completed && !skip_extensions {
-        upgrade_phase("refreshing installed extensions");
-        update_all_extensions()
+        operation.set_phase("refreshing installed extensions");
+        update_all_extensions(operation.id())
+    } else if skip_extensions {
+        operation.mark_extensions("skipped", "extension refresh skipped");
+        (vec![], vec![])
     } else {
+        operation.mark_extensions("not_run", "extension refresh was not attempted");
         (vec![], vec![])
     };
 
@@ -565,7 +591,7 @@ pub fn run_upgrade_with_method(
     )?;
     promotion_lease.assert_generation()?;
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
-        upgrade_phase("refreshing configured runners");
+        operation.set_phase("refreshing configured runners");
         super::with_runner_upgrade(|p| {
             p.upgrade_configured_runners_with_explicit_source_path(
                 force,
@@ -603,7 +629,7 @@ pub fn run_upgrade_with_method(
         &extension_skips,
     );
 
-    Ok(UpgradeResult {
+    let result = UpgradeResult {
         command: "upgrade".to_string(),
         install_method,
         previous_version,
@@ -671,7 +697,9 @@ pub fn run_upgrade_with_method(
         runners_skipped,
         services_restarted,
         services_pending_restart,
-    })
+        operation_id: None,
+    };
+    Ok(complete_upgrade_operation(operation, result))
 }
 
 fn source_upgrade_noop_result(
@@ -710,6 +738,7 @@ fn source_upgrade_noop_result(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+        operation_id: None,
     }
 }
 
@@ -769,6 +798,7 @@ fn runner_preflight_failure_result(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+        operation_id: None,
     }
 }
 
@@ -817,6 +847,7 @@ fn extension_preflight_failure_result(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+        operation_id: None,
     }
 }
 
@@ -1228,6 +1259,7 @@ fn run_targeted_runner_upgrade(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+        operation_id: None,
     })
 }
 
@@ -1642,10 +1674,21 @@ pub(crate) fn should_sync_after_upgrade(new_version: Option<&str>) -> bool {
     new_version.is_some()
 }
 
+fn complete_upgrade_operation(
+    mut operation: UpgradeOperation,
+    mut result: UpgradeResult,
+) -> UpgradeResult {
+    operation.finish_completed(&result);
+    result.operation_id = operation.id().map(str::to_string);
+    result
+}
+
 /// Update all installed extensions. Best-effort — failures are logged, and the
 /// extension is added to the skipped list carrying its error reason so the
 /// structured result can say *why* it was skipped (#12181).
-fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeSkip>) {
+fn update_all_extensions(
+    operation_id: Option<&str>,
+) -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeSkip>) {
     let extension_ids = extension::available_extension_ids();
     if extension_ids.is_empty() {
         return (vec![], vec![]);
@@ -1660,13 +1703,22 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeS
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
 
-    for id in &extension_ids {
+    for (index, id) in extension_ids.iter().enumerate() {
         let old_version = extension::load_extension(id)
             .ok()
             .map(|m| m.version.clone())
             .unwrap_or_default();
 
-        match extension::update(id, false) {
+        let current = index + 1;
+        let total = extension_ids.len();
+        report_extension_progress(operation_id, id, current, total, Duration::ZERO);
+        let update_result = run_with_upgrade_heartbeats(
+            UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
+            |elapsed| report_extension_progress(operation_id, id, current, total, elapsed),
+            || extension::update(id, false),
+        );
+
+        match update_result {
             Ok(result) => {
                 let new_version = extension::load_extension(id)
                     .ok()
@@ -1735,6 +1787,25 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeS
     }
 
     (updated, skipped)
+}
+
+fn report_extension_progress(
+    operation_id: Option<&str>,
+    extension_id: &str,
+    current: usize,
+    total: usize,
+    elapsed: Duration,
+) {
+    if let Some(run_id) = operation_id {
+        persist_extension_progress(run_id, extension_id, current, total, elapsed);
+        return;
+    }
+    upgrade_phase(&super::operation::upgrade_extension_progress_message(
+        extension_id,
+        current,
+        total,
+        elapsed,
+    ));
 }
 
 /// Detect unrefreshed symlinked extension clones and log a loud, actionable

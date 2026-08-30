@@ -22,6 +22,7 @@ Runner sync uses this contract:
 
 ## Options
 
+- `status [ID]`: Inspect a persisted upgrade operation. Reports whether binary promotion and optional extension/runner refresh completed. Omit `ID` to read the latest upgrade run. Also available as `homeboy runs show <id>`.
 - `--check`: Check for updates without installing. Returns version information without making changes.
 - `--force`: Force upgrade even if already at the latest version.
 - `--skip-extensions`: Skip automatic extension updates.
@@ -125,9 +126,20 @@ homeboy upgrade --skip-runners
 - `uninstallable_versions`: Releases newer than `latest_version` passed over for want of a `target` asset, newest first
 - `notice`: Plain-language explanation when `latest_version` is not the newest release, when nothing installable was found, or when the target could not be determined
 
+`homeboy upgrade status [ID]` data payload:
+
+- `command`: `upgrade.status`
+- `operation_id`: Persisted observation-run id
+- `status`: Observation run status (`running`, `pass`, `error`, ...)
+- `phase`: Current or terminal upgrade phase
+- `elapsed_seconds`: Bounded elapsed time for the recorded phase
+- `controller` / `extensions` / `runners`: Independent component statuses
+- `note`: Present when a running record's owner process is no longer alive
+
 `homeboy upgrade` data payload:
 
 - `command`: `upgrade`
+- `operation_id`: Durable observation-run id persisted before mutation. Inspect later with `homeboy upgrade status <id>`
 - `install_method`: Installation method used for upgrade
 - `previous_version`: Version before upgrade
 - `new_version`: Version after upgrade (may be null)
@@ -152,6 +164,7 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 
 - Version checking queries the GitHub Releases API. Network failures are handled gracefully.
 - On Unix platforms, successful source installs automatically restart into the new binary. Binary and package-manager installs do not require a restart.
+- Upgrade persists a durable operation before controller mutation. Long extension refresh emits bounded `[upgrade] phase=... elapsed=Ns` heartbeats. If the client times out, `homeboy upgrade status` still reports whether binary promotion completed; optional refresh may continue or show as interrupted.
 
 ## Related
 

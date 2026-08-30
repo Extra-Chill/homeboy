@@ -1069,6 +1069,12 @@ const CLEANUP_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     "default output is a non-mutating cleanup plan; pass --apply to remove artifacts",
 )];
 
+const UPGRADE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["status"],
+    CommandSafetySpec::read_only(),
+    "inspects a persisted upgrade operation without mutating the controller",
+)];
+
 const SELF_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
         &["docs map"],
