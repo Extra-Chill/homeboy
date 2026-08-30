@@ -36,6 +36,7 @@ pub(super) fn recipe_run(
         runner_id,
         None,
         Some(sync_workspace),
+        None,
         false,
         None,
         false,

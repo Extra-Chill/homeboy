@@ -308,21 +308,21 @@ fn workspace_snapshots_ssh(
     Ok((snapshots, skipped_invalid_metadata))
 }
 
-pub(super) fn workspace_snapshot_for_lease(
+pub(super) fn workspace_metadata_for_lease(
     runner: &super::super::super::Runner,
     root: &str,
     lease: &str,
-) -> Result<Option<RunnerWorkspaceSnapshotEntry>> {
+) -> Result<Option<(String, RunnerWorkspaceMetadata)>> {
     match runner.kind {
-        RunnerKind::Local => workspace_snapshot_for_lease_local(Path::new(root), lease),
-        RunnerKind::Ssh => workspace_snapshot_for_lease_ssh(runner, root, lease),
+        RunnerKind::Local => workspace_metadata_for_lease_local(Path::new(root), lease),
+        RunnerKind::Ssh => workspace_metadata_for_lease_ssh(runner, root, lease),
     }
 }
 
-fn workspace_snapshot_for_lease_local(
+fn workspace_metadata_for_lease_local(
     root: &Path,
     lease: &str,
-) -> Result<Option<RunnerWorkspaceSnapshotEntry>> {
+) -> Result<Option<(String, RunnerWorkspaceMetadata)>> {
     if !root.is_dir() {
         return Ok(None);
     }
@@ -343,24 +343,27 @@ fn workspace_snapshot_for_lease_local(
             continue;
         };
         if metadata.workspace_lease.as_deref() == Some(lease) {
-            return Ok(workspace_snapshot_entry(metadata));
+            return Ok(Some((entry.path().display().to_string(), metadata)));
         }
     }
     Ok(None)
 }
 
-fn workspace_snapshot_for_lease_ssh(
+fn workspace_metadata_for_lease_ssh(
     runner: &super::super::super::Runner,
     root: &str,
     lease: &str,
-) -> Result<Option<RunnerWorkspaceSnapshotEntry>> {
+) -> Result<Option<(String, RunnerWorkspaceMetadata)>> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
     let output = client.execute(&workspace_snapshot_lease_command(root, lease));
     if !output.success || output.stdout.trim().is_empty() {
         return Ok(None);
     }
-    let decoded = match base64::engine::general_purpose::STANDARD.decode(output.stdout.trim()) {
+    let Some((physical_path, encoded)) = output.stdout.trim().split_once('\t') else {
+        return Ok(None);
+    };
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(encoded) {
         Ok(decoded) => decoded,
         Err(_) => return Ok(None),
     };
@@ -369,8 +372,7 @@ fn workspace_snapshot_for_lease_ssh(
         Err(_) => return Ok(None),
     };
     Ok((metadata.workspace_lease.as_deref() == Some(lease))
-        .then(|| workspace_snapshot_entry(metadata))
-        .flatten())
+        .then(|| (physical_path.to_string(), metadata)))
 }
 
 fn invalid_workspace_metadata(
@@ -411,14 +413,14 @@ fn workspace_snapshot_lease_command(root: &str, lease: &str) -> String {
     let lease = serde_json::to_string(lease).expect("serialize workspace lease");
     let needle = format!("\"workspace_lease\":{lease}");
     format!(
-        "root={root}; meta_rel={meta}; needle={needle}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; tr -d '[:space:]' < \"$meta\" | grep -Fq -- \"$needle\" || continue; base64 < \"$meta\" 2>/dev/null | tr -d '\\n'; exit 0; done; fi",
+        "root={root}; meta_rel={meta}; needle={needle}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] && [ ! -L \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; tr -d '[:space:]' < \"$meta\" | grep -Fq -- \"$needle\" || continue; encoded=$(base64 < \"$meta\" 2>/dev/null | tr -d '\\n') || continue; printf '%s\\t%s\\n' \"$dir\" \"$encoded\"; exit 0; done; fi",
         root = shell::quote_arg(root),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
         needle = shell::quote_arg(&needle),
     )
 }
 
-fn workspace_snapshot_entry(
+pub(super) fn workspace_snapshot_entry(
     metadata: RunnerWorkspaceMetadata,
 ) -> Option<RunnerWorkspaceSnapshotEntry> {
     if metadata.schema != "homeboy/runner-workspace/v1" {
@@ -429,10 +431,21 @@ fn workspace_snapshot_entry(
         .clone()
         .unwrap_or_else(|| workspace_repo_from_path(&metadata.local_path));
     Some(RunnerWorkspaceSnapshotEntry {
-        exec_command: format!(
-            "homeboy runner exec --cwd {} {} -- <command>",
-            shell_arg(&metadata.remote_path),
-            shell_arg(&metadata.runner_id)
+        exec_command: metadata.workspace_lease.as_ref().map_or_else(
+            || {
+                format!(
+                    "homeboy runner exec --cwd {} {} -- <command>",
+                    shell_arg(&metadata.remote_path),
+                    shell_arg(&metadata.runner_id)
+                )
+            },
+            |workspace_ref| {
+                format!(
+                    "homeboy runner exec --workspace-ref {} {} -- <command>",
+                    shell_arg(workspace_ref),
+                    shell_arg(&metadata.runner_id)
+                )
+            },
         ),
         runner_id: metadata.runner_id,
         repo,
@@ -442,6 +455,7 @@ fn workspace_snapshot_entry(
         actual_materialization_mode: metadata.actual_materialization_mode,
         fallback_reason: metadata.fallback_reason,
         snapshot_identity: metadata.snapshot_identity,
+        workspace_ref: metadata.workspace_lease.clone(),
         workspace_lease: metadata.workspace_lease,
         workspace_generation: metadata.workspace_generation,
         original_prepared_snapshot_identity: metadata.original_prepared_snapshot_identity,

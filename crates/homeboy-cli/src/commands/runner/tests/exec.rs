@@ -37,6 +37,7 @@ fn runner_exec_generates_a_persisted_run_for_declared_outputs() {
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
+            None,
             false,
             None,
             false,
@@ -128,6 +129,7 @@ fn synced_node_workload_receives_runner_extension_environment() {
             "lab-node",
             None,
             Some(project.path().display().to_string()),
+            None,
             false,
             None,
             false,
@@ -156,6 +158,171 @@ fn synced_node_workload_receives_runner_extension_environment() {
 
         assert_eq!(code, 0, "{}", output.stderr);
         assert_eq!(output.stdout, "");
+    });
+}
+
+#[test]
+fn workspace_ref_inspects_hydrates_and_executes_one_physical_snapshot() {
+    use std::fs;
+
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let project = tempfile::tempdir().expect("project");
+        let shim_root = tempfile::tempdir().expect("shim root");
+        let hydration_log = shim_root.path().join("hydration.log");
+        let sh_shim = shim_root.path().join("sh");
+        fs::write(
+            &sh_shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec /bin/sh \"$@\"\n",
+                hydration_log.display()
+            ),
+        )
+        .expect("write sh shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sh_shim, fs::Permissions::from_mode(0o755))
+                .expect("make sh shim executable");
+        }
+        fs::write(
+            project.path().join("homeboy-deps.json"),
+            r#"{"provider":"fixture","commands":{"install":{"argv":["false"]}},"outputs":[{"path":"node_modules","kind":"directory"}]}"#,
+        )
+        .expect("dependency manifest");
+        fs::write(project.path().join("tracked.txt"), "tracked snapshot\n")
+            .expect("tracked source");
+        fs::create_dir(project.path().join("node_modules")).expect("dependency output");
+        fs::write(
+            project.path().join("node_modules/build.txt"),
+            "sealed build\n",
+        )
+        .expect("built dependency output");
+        let runner_spec = serde_json::json!({
+            "id": "workspace-ref-local",
+            "kind": "local",
+            "workspace_root": runner_root.path().display().to_string(),
+            "env": {
+                "PATH": format!(
+                    "{}:{}",
+                    shim_root.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                )
+            },
+            "policy": { "snapshot_excludes": ["node_modules", "node_modules/**"] }
+        });
+        runner::create(&runner_spec.to_string(), false).expect("create local runner");
+
+        let (synced, _) = runner::sync_workspace(
+            "workspace-ref-local",
+            runner::RunnerWorkspaceSyncOptions {
+                path: project.path().display().to_string(),
+                mode: runner::RunnerWorkspaceSyncMode::Snapshot,
+                ..Default::default()
+            },
+        )
+        .expect("sync exact snapshot");
+        assert_eq!(
+            synced.prepared_workspace_lease.as_deref(),
+            Some(synced.workspace_ref.as_str())
+        );
+        let materializations_before = fs::read_dir(runner_root.path().join("_lab_workspaces"))
+            .expect("materialized workspace root")
+            .count();
+
+        let (inspection, _) = runner::workspace_snapshots(
+            "workspace-ref-local",
+            runner::RunnerWorkspaceSnapshotFilters {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .expect("inspect synced workspace");
+        let inspected = inspection
+            .snapshots
+            .iter()
+            .find(|snapshot| snapshot.workspace_ref.as_deref() == Some(&synced.workspace_ref))
+            .expect("inspect returned workspace ref");
+        assert_eq!(inspected.remote_path, synced.remote_path);
+        assert!(inspected.exec_command.contains("--workspace-ref"));
+
+        let remote = std::path::Path::new(&synced.remote_path);
+        assert_eq!(
+            fs::read_to_string(remote.join("tracked.txt")).expect("inspect tracked snapshot asset"),
+            "tracked snapshot\n"
+        );
+        assert!(
+            !remote.join("node_modules").exists(),
+            "snapshot sync must not transfer excluded dependency outputs"
+        );
+        fs::create_dir_all(remote.join(".homeboy")).expect("prepared marker directory");
+        fs::write(remote.join(".homeboy/prepared-source-ready"), "").expect("prepared marker");
+        fs::create_dir_all(remote.join("node_modules")).expect("prepared dependency output");
+        fs::write(remote.join("node_modules/build.txt"), "sealed build\n")
+            .expect("prepared build output");
+
+        // The install command deliberately fails. The exec invocation itself
+        // must probe and reuse this prepared view before starting the workload.
+        let (output, exit_code) = exec_with_hydration(
+            "workspace-ref-local",
+            None,
+            None,
+            Some(synced.workspace_ref.clone()),
+            true,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "test -f node_modules/build.txt && printf '%s' \"$PWD\"".to_string(),
+            ],
+            Vec::new(),
+        )
+        .expect("hydrate and execute resolved snapshot");
+
+        assert_eq!(exit_code, 0, "{}", output.stderr);
+        assert_eq!(output.remote_cwd, synced.remote_path);
+        assert_eq!(output.stdout, synced.remote_path);
+        let hydration_probe = fs::read_to_string(&hydration_log).expect("hydration probe log");
+        assert!(hydration_probe.contains(".homeboy/prepared-source-ready"));
+        assert!(hydration_probe.contains(&synced.remote_path));
+        let source_snapshot = output.source_snapshot.expect("source provenance");
+        assert_eq!(
+            source_snapshot.workspace_snapshot_identity.as_deref(),
+            Some(synced.snapshot_identity.as_str())
+        );
+        assert_eq!(
+            source_snapshot.remote_path.as_deref(),
+            Some(synced.remote_path.as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(
+                std::path::Path::new(&synced.remote_path).join("node_modules/build.txt")
+            )
+            .expect("hydrated build output"),
+            "sealed build\n"
+        );
+        assert_eq!(
+            fs::read_dir(runner_root.path().join("_lab_workspaces"))
+                .expect("materialized workspace root")
+                .count(),
+            materializations_before,
+            "workspace-ref execution must not rematerialize"
+        );
     });
 }
 
@@ -344,6 +511,8 @@ fn sync_workspace_exec_rejects_explicit_cwd() {
         "lab",
         Some("/runner/workspace/project".to_string()),
         Some("/local/project".to_string()),
+        None,
+        false,
         false,
     )
     .expect_err("cwd and sync-workspace must conflict");
@@ -600,6 +769,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
+            None,
             false,
             None,
             false,
@@ -681,6 +851,7 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
+            None,
             false,
             None,
             false,
@@ -761,7 +932,7 @@ fn runner_exec_structured_summary_is_independent_of_large_stdout() {
             )
             .expect("run");
 
-        let (output, exit_code) = exec_with_hydration("lab-local", Some(workspace.path().display().to_string()), None, false, None, false, false, Vec::new(), None, Vec::new(), Vec::new(), None, None, false, Some(run.id.clone()), Vec::new(), Vec::new(), vec!["summary.json".to_string()], false, false, vec![
+        let (output, exit_code) = exec_with_hydration("lab-local", Some(workspace.path().display().to_string()), None, None, false, None, false, false, Vec::new(), None, Vec::new(), Vec::new(), None, None, false, Some(run.id.clone()), Vec::new(), Vec::new(), vec!["summary.json".to_string()], false, false, vec![
                 "sh".to_string(),
                 "-c".to_string(),
                 r#"yes noisy | head -n 2000; printf '{"status":"pass","count":2000}' > summary.json"#.to_string(),
@@ -1189,6 +1360,7 @@ fn read_only_artifact_exec_rejects_capture_patch() {
         "lab-local",
         None,
         None,
+        None,
         false,
         None,
         false,
@@ -1223,6 +1395,7 @@ fn read_only_artifact_exec_rejects_capture_patch() {
 fn read_only_artifact_exec_rejects_declared_outputs() {
     let err = exec_with_hydration(
         "lab-local",
+        None,
         None,
         None,
         false,

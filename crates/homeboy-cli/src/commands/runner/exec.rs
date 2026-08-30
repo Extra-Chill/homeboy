@@ -18,6 +18,7 @@ pub(super) fn exec_with_hydration(
     runner_id: &str,
     cwd: Option<String>,
     sync_workspace: Option<String>,
+    workspace_ref: Option<String>,
     hydrate_deps: bool,
     project_id: Option<String>,
     allow_diagnostic_ssh: bool,
@@ -76,7 +77,8 @@ pub(super) fn exec_with_hydration(
     }
 
     if dry_run {
-        let (cwd, _) = exec_workspace_context(runner_id, cwd, sync_workspace, true)?;
+        let (cwd, _, _) =
+            exec_workspace_context(runner_id, cwd, sync_workspace, workspace_ref, false, true)?;
         return runner_exec_dry_run(
             runner_id,
             cwd,
@@ -89,13 +91,19 @@ pub(super) fn exec_with_hydration(
 
     let validated_run_id =
         validate_runner_exec_run_id(persisted_runner_exec_run_id(run_id, has_declared_outputs))?;
-    let hydration_source = sync_workspace.clone();
-    let (cwd, source_snapshot) = exec_workspace_context(runner_id, cwd, sync_workspace, false)?;
+    let (cwd, source_snapshot, hydration_source) = exec_workspace_context(
+        runner_id,
+        cwd,
+        sync_workspace,
+        workspace_ref,
+        hydrate_deps,
+        false,
+    )?;
     if hydrate_deps {
         let local_path = hydration_source.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "hydrate_deps",
-                "--hydrate-deps requires --sync-workspace",
+                "--hydrate-deps requires --sync-workspace or --workspace-ref",
                 None,
                 None,
             )
@@ -359,10 +367,32 @@ pub(super) fn exec_workspace_context(
     runner_id: &str,
     cwd: Option<String>,
     sync_workspace: Option<String>,
+    workspace_ref: Option<String>,
+    verify_hydration_source: bool,
     dry_run: bool,
-) -> homeboy::core::Result<(Option<String>, Option<SourceSnapshot>)> {
+) -> homeboy::core::Result<(Option<String>, Option<SourceSnapshot>, Option<String>)> {
+    if let Some(workspace_ref) = workspace_ref {
+        if cwd.is_some() || sync_workspace.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "workspace_ref",
+                "--workspace-ref is mutually exclusive with --cwd and --sync-workspace",
+                Some(workspace_ref),
+                None,
+            ));
+        }
+        let resolved = runner::resolve_workspace_ref(runner_id, &workspace_ref)?;
+        if verify_hydration_source {
+            runner::verify_workspace_ref_hydration_source(&resolved)?;
+        }
+        return Ok((
+            Some(resolved.remote_path),
+            Some(resolved.source_snapshot),
+            Some(resolved.local_path),
+        ));
+    }
+
     let Some(local_path) = sync_workspace else {
-        return Ok((cwd, None));
+        return Ok((cwd, None, None));
     };
 
     if cwd.is_some() {
@@ -378,7 +408,7 @@ pub(super) fn exec_workspace_context(
     }
 
     if dry_run {
-        return Ok((None, None));
+        return Ok((None, None, Some(local_path)));
     }
 
     let (synced, _) = runner::sync_workspace(
@@ -394,14 +424,19 @@ pub(super) fn exec_workspace_context(
             run_isolation_token: None,
         },
     )?;
-    let source_snapshot = homeboy::core::source_snapshot::collect_local(
+    let mut source_snapshot = homeboy::core::source_snapshot::collect_local(
         runner_id,
         Path::new(&synced.local_path),
         Some(&synced.remote_path),
         synced.sync_mode.as_str(),
     );
+    source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
 
-    Ok((Some(synced.remote_path), Some(source_snapshot)))
+    Ok((
+        Some(synced.remote_path),
+        Some(source_snapshot),
+        Some(synced.local_path),
+    ))
 }
 
 fn validate_runner_exec_run_id(run_id: Option<String>) -> homeboy::core::Result<Option<String>> {

@@ -3360,6 +3360,7 @@ mod tests {
             ),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot:primary".to_string(),
+            workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
             prepared_workspace_lease: None,
             counts: crate::ByteFileCounts::default(),
             excludes: Vec::new(),

@@ -442,6 +442,10 @@ pub(super) enum RunnerCommand {
         #[arg(long = "sync-workspace")]
         sync_workspace: Option<String>,
 
+        /// Opaque ref returned by runner workspace sync. Resolves the exact existing snapshot without rematerializing it.
+        #[arg(long = "workspace-ref", conflicts_with_all = ["cwd", "sync_workspace"])]
+        workspace_ref: Option<String>,
+
         /// Hydrate detected dependencies from a matching runner cache or sealed controller package before execution. This offline-safe mode never invokes a runner package manager.
         #[arg(long)]
         hydrate_deps: bool,
@@ -956,5 +960,38 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("--provider"));
         assert!(!rendered.contains("--runner_id"));
+    }
+
+    #[test]
+    fn runner_exec_accepts_workspace_ref_and_rejects_raw_path_combinations() {
+        let workspace_ref = "workspace:00000000-0000-0000-0000-000000000001";
+        Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "exec",
+            "--workspace-ref",
+            workspace_ref,
+            "--hydrate-deps",
+            "lab",
+            "--",
+            "true",
+        ])
+        .expect("workspace-ref hydrated exec parses");
+
+        for conflicting in [
+            ["--cwd", "/runner/path"],
+            ["--sync-workspace", "/local/path"],
+        ] {
+            let mut args = vec![
+                "homeboy",
+                "runner",
+                "exec",
+                "--workspace-ref",
+                workspace_ref,
+            ];
+            args.extend(conflicting);
+            args.extend(["lab", "--", "true"]);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 }
