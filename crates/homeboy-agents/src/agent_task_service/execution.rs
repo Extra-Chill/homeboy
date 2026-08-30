@@ -984,7 +984,7 @@ fn continuation_skip(
     });
     AgentTaskRunNextSkip {
         remediation: format!(
-            "inspect retained diagnostics with: homeboy agent-task diagnose <run-id> --full"
+            "inspect retained diagnostics with: homeboy agent-task diagnose {run_id} --full"
         ),
         run_id,
         submitted_at,
