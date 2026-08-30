@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.18] - 2026-08-30
+
+### Changed
+- remove dead retry handoff helper
+- remove stale scheduler and retry fixtures
+- drop fabricated dependency evidence paths
+- remove stale promotion review fixtures
+
+### Fixed
+- preserve gitignore reinclusions
+- keep job logs concise
+- preserve observation creator version
+- scope staging handles to owners
+- reconcile idle queued runner residue
+- Fix Lab linked worktree materialization
+
 ## [0.364.17] - 2026-08-30
 
 ### Changed
