@@ -8377,7 +8377,12 @@ fn bind_materialized_cook_component_workspace(
         .pointer("/cook_repository_identity/provenance")
         .and_then(Value::as_str)
         == Some("--repo:requested-repository");
-    if requested_repository {
+    let component_registered = plan
+        .metadata
+        .pointer("/cook_repository_identity/component_registered")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if requested_repository || !component_registered {
         return Ok(());
     }
     let Some(component) = homeboy_core::component::registered_by_id(&component_id)? else {

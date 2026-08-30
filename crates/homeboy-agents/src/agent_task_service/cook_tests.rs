@@ -142,6 +142,16 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
         let error = bind_materialized_cook_component_workspace(&mut stale, repository.path())
             .expect_err("stale component registration must fail closed");
         assert!(error.message.contains("no longer registered"));
+
+        let mut unregistered = plan.clone();
+        unregistered.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "standalone-repository",
+            "component_id": null,
+            "component_registered": false,
+            "provenance": "--cwd:git-remote:origin"
+        });
+        bind_materialized_cook_component_workspace(&mut unregistered, repository.path())
+            .expect("an attested standalone repository uses its root workspace");
     });
 }
 
