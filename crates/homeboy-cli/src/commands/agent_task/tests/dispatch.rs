@@ -708,7 +708,7 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
 }
 
 #[test]
-fn cook_infers_repo_from_an_explicit_git_workspace_and_persists_its_provenance() {
+fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_provenance() {
     with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source checkout");
         init_runtime_component_checkout(source.path());
@@ -737,15 +737,15 @@ fn cook_infers_repo_from_an_explicit_git_workspace_and_persists_its_provenance()
             "cook".to_string(),
             "--prompt".to_string(),
             "implement the fix".to_string(),
-            "--workspace".to_string(),
-            source.path().display().to_string(),
-            "--to-worktree".to_string(),
+            "--cwd".to_string(),
             destination.display().to_string(),
+            "--task-url".to_string(),
+            "https://github.com/example/inferred/issues/13947".to_string(),
             "--backend".to_string(),
             "fixture".to_string(),
             "--no-finalize".to_string(),
         ]))
-        .expect("infer repository from workspace");
+        .expect("infer repository from linked worktree cwd");
         assert_eq!(args.dispatch.repo.as_deref(), Some("inferred"));
         assert_eq!(
             args.repository_identity.as_ref().expect("identity")["remote_identity"],
@@ -753,7 +753,7 @@ fn cook_infers_repo_from_an_explicit_git_workspace_and_persists_its_provenance()
         );
         assert_eq!(
             args.repository_identity.as_ref().expect("identity")["provenance"],
-            "--workspace:git-remote:origin"
+            "--cwd:git-remote:origin"
         );
 
         let plan = super::super::run::compile_cook_plan(&args, json!({ "path": destination }))
@@ -1611,7 +1611,39 @@ fn cook_requires_repo_for_an_explicit_non_git_workspace() {
         .expect_err("non-Git workspace cannot infer a repository");
         assert_eq!(
             error.details["args"][0],
-            "--repo <repo> is required because the supplied workspace is not a Git checkout with a configured repository remote; provide --repo <configured-component>"
+            "--repo <repo> is required because the supplied workspace is not a Git checkout; provide --repo <repository-or-configured-component>"
+        );
+    });
+}
+
+#[test]
+fn cook_requires_repo_for_an_explicit_git_workspace_without_a_configured_mapping() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        add_remote(
+            workspace.path(),
+            "origin",
+            "https://github.com/example/unconfigured.git",
+        );
+
+        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--cwd".to_string(),
+            workspace.path().display().to_string(),
+            "--to-worktree".to_string(),
+            workspace.path().display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("unmapped Git workspace cannot infer a repository");
+
+        assert_eq!(
+            error.details["args"][0],
+            "--repo <repo> is required because the supplied Git checkout has no configured repository remote mapping; provide --repo <repository-or-configured-component>"
         );
     });
 }
