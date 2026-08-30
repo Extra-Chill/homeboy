@@ -12,6 +12,8 @@ pub const CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA: &str =
     "homeboy/control-plane-empty-action-payload/v1";
 pub const CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-cancel-parameters/v1";
+pub const CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA: &str = "homeboy/control-plane-retry-parameters/v1";
+pub const CONTROL_PLANE_RETRY_RESULT_SCHEMA: &str = "homeboy/control-plane-retry-result/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +37,15 @@ impl ControlPlaneActionPayload {
 pub struct ControlPlaneCancelParameters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneRetryParameters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_run_id: Option<String>,
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

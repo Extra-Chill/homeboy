@@ -1473,6 +1473,7 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
                 new_run_id: None,
                 run: true,
                 force: false,
+                idempotency_key: Some("historical-retry-1".to_string()),
             },
             executor.clone(),
             |_| Ok(None),
@@ -4495,14 +4496,31 @@ fn retry_command_submits_new_queued_run() {
             new_run_id: Some("run-retry-cli".to_string()),
             run: false,
             force: false,
+            idempotency_key: Some("retry-cli-1".to_string()),
         })
         .expect("retry queued");
+        let action_acknowledgement = value["action_acknowledgement"].clone();
         let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
 
         assert_eq!(exit_code, 0);
         assert_eq!(record.run_id, "run-retry-cli");
         assert_eq!(record.state, AgentTaskRunState::Queued);
         assert_eq!(record.metadata["retry_of"], json!("run-retry-source"));
+        let replay = retry(RetryArgs {
+            run_id: "run-retry-source".to_string(),
+            new_run_id: Some("run-retry-cli".to_string()),
+            run: false,
+            force: false,
+            idempotency_key: Some("retry-cli-1".to_string()),
+        })
+        .expect("replayed retry")
+        .0;
+        assert_eq!(replay["action_acknowledgement"], action_acknowledgement);
+        assert_eq!(
+            agent_task_lifecycle::list_records().expect("records").len(),
+            2,
+            "replay must not reserve another successor"
+        );
     });
 }
 
@@ -4575,6 +4593,7 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
                 new_run_id: None,
                 run: true,
                 force: false,
+                idempotency_key: Some("cook-retry-run-1".to_string()),
             },
             executor.clone(),
             |_| Ok(Some(Arc::new(RetryRunDispatcher))),

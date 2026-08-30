@@ -65,7 +65,7 @@ pub fn lifecycle_action_eligibility(
                 retry,
                 ControlPlaneActionConfirmation::Required,
                 Vec::new(),
-                false,
+                true,
                 "agent_task_run",
             ),
             action(

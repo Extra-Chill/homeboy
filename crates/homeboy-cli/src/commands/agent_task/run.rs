@@ -1,7 +1,7 @@
 //! Durable run lifecycle handlers: cook, run-plan, run, run-next, submit,
 //! resume, and retry.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
@@ -14,6 +14,7 @@ use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord;
 use homeboy::agents::agent_tasks::provider;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::scheduler::{
@@ -29,6 +30,7 @@ use homeboy::core::worktree_provider::{
     WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent, WorktreeProvisionPlan,
     WorktreeTaskAttachmentStatus,
 };
+use homeboy::core::Error;
 
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
@@ -8536,17 +8538,54 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
-    let result = agent_task_service::retry(
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
-        args.new_run_id.as_deref(),
-        args.run,
-        args.force,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+            idempotency_key: args
+                .idempotency_key
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({
+                    "new_run_id": args.new_run_id,
+                    "force": args.force,
+                }),
+            },
+            confirmed: true,
+        },
     )?;
-    if result.run {
-        if result.record.metadata["cook_id"].is_string() {
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Err(Error::validation_invalid_argument(
+            "retry",
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "retry action failed".to_string()),
+            Some(args.run_id),
+            None,
+        ));
+    }
+    let record: AgentTaskRunRecord =
+        serde_json::from_value(acknowledgement.result.data["record"].clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode retry action result".to_string()),
+            )
+        })?;
+    let execute = args.run
+        && acknowledgement.result.data["runnable"]
+            .as_bool()
+            .unwrap_or(false);
+    if execute {
+        if record.metadata["cook_id"].is_string() {
             return continue_cook_with_queued_execution(
                 CookContinueArgs {
-                    cook_or_attempt_id: result.record.run_id,
+                    cook_or_attempt_id: record.run_id,
                     preflight: false,
                     rearm: false,
                     artifact_id: None,
@@ -8559,12 +8598,12 @@ where
                 true,
             );
         }
-        return run_submitted_with_executor(result.record.run_id, None, executor);
+        return run_submitted_with_executor(record.run_id, None, executor);
     }
-    Ok((
-        serde_json::to_value(result.record).unwrap_or(Value::Null),
-        0,
-    ))
+    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
+    value["action_acknowledgement"] = json!(acknowledgement.acknowledgement);
+    value["idempotency_key"] = json!(acknowledgement.idempotency_key);
+    Ok((value, 0))
 }
 
 #[cfg(test)]

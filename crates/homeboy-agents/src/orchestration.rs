@@ -5,6 +5,7 @@
 //! projection. Construct with an explicit lookup — the service does not
 //! resolve ambient stores or providers itself.
 
+use homeboy_control_plane_contract::ControlPlaneRetryParameters;
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneBlocker,
@@ -14,7 +15,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId,
     ProviderSessionId, RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
     CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
+    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_RETRY_RESULT_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 
@@ -159,6 +161,28 @@ impl OrchestrationService<LifecycleStoreLookup> {
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        self.execute_action_with_retry(requested_id, request, |parameters| {
+            crate::agent_task_service::retry(
+                requested_id.as_str(),
+                parameters.new_run_id.as_deref(),
+                true,
+                parameters.force,
+            )
+        })
+    }
+
+    fn execute_action_with_retry<F>(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+        retry: F,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError>
+    where
+        F: FnOnce(
+            &ControlPlaneRetryParameters,
+        )
+            -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
+    {
         validate_action_request(request)?;
         let resolved = resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
             .map_err(map_lifecycle_error)?;
@@ -282,6 +306,52 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 ),
                             }
                         }
+                        ControlPlaneAction::Retry => {
+                            let mut parameters: ControlPlaneRetryParameters =
+                                serde_json::from_value(request.parameters.data.clone()).map_err(
+                                    |error| {
+                                        ControlPlaneError::invalid_argument(format!(
+                                            "retry parameters: {error}"
+                                        ))
+                                    },
+                                )?;
+                            if parameters.new_run_id.is_none() {
+                                let identity = uuid::Uuid::new_v5(
+                                    &uuid::Uuid::NAMESPACE_OID,
+                                    format!("{}:retry:{}", record.run_id, request.idempotency_key)
+                                        .as_bytes(),
+                                );
+                                parameters.new_run_id = Some(format!("retry-{identity}"));
+                            }
+                            match retry(&parameters) {
+                                Ok(retry) => {
+                                    let outcome = if retry.created {
+                                        ControlPlaneActionOutcome::Succeeded
+                                    } else {
+                                        ControlPlaneActionOutcome::AlreadySatisfied
+                                    };
+                                    (
+                                        outcome,
+                                        project_record(&retry.record, None)?,
+                                        ControlPlaneActionPayload {
+                                            schema: CONTROL_PLANE_RETRY_RESULT_SCHEMA.to_string(),
+                                            data: serde_json::json!({
+                                                "record": retry.record,
+                                                "runnable": retry.run,
+                                                "created": retry.created,
+                                            }),
+                                        },
+                                        None,
+                                    )
+                                }
+                                Err(error) => (
+                                    ControlPlaneActionOutcome::Failed,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                ),
+                            }
+                        }
                         _ => {
                             return Err(ControlPlaneError::invalid_argument(format!(
                                 "{} is not wired through the canonical action executor",
@@ -339,6 +409,7 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
     let expected_parameters_schema = match request.action {
         ControlPlaneAction::Cancel => CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
         ControlPlaneAction::Reconcile => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
+        ControlPlaneAction::Retry => CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
         _ => {
             return Err(ControlPlaneError::invalid_argument(format!(
                 "{} is not wired through the canonical action executor",
@@ -367,7 +438,11 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
             )));
         }
     }
-    if matches!(request.action, ControlPlaneAction::Cancel) && !request.confirmed {
+    if matches!(
+        request.action,
+        ControlPlaneAction::Cancel | ControlPlaneAction::Retry
+    ) && !request.confirmed
+    {
         return Err(ControlPlaneError::invalid_argument(
             "cancel requires explicit confirmation",
         ));
@@ -454,6 +529,48 @@ pub fn execute_action_from_current_environment(
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .execute_action(&requested_id, request)
+        .map_err(|error| match error.class {
+            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
+                homeboy_core::Error::validation_invalid_argument(
+                    "action",
+                    error.message,
+                    None,
+                    None,
+                )
+            }
+            ControlPlaneErrorClass::Unavailable => {
+                homeboy_core::Error::internal_unexpected(error.message)
+            }
+        })
+}
+
+pub fn execute_retry_action_from_current_environment_with_preflight<F>(
+    run_id: &str,
+    request: &ControlPlaneActionRequest,
+    preflight: F,
+) -> homeboy_core::Result<ControlPlaneActionAcknowledgement>
+where
+    F: Fn(&AgentTaskPlan) -> homeboy_core::Result<()>,
+{
+    let requested_id = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    OrchestrationService::new(LifecycleStoreLookup::new(store))
+        .execute_action_with_retry(&requested_id, request, |parameters| {
+            crate::agent_task_service::retry_with_preflight(
+                run_id,
+                parameters.new_run_id.as_deref(),
+                true,
+                parameters.force,
+                &preflight,
+            )
+        })
         .map_err(|error| match error.class {
             ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
                 homeboy_core::Error::validation_invalid_argument(

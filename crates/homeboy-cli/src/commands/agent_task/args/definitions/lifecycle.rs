@@ -456,6 +456,9 @@ pub struct RetryArgs {
     /// Permit a new retry after every prior retry in this lineage is terminal.
     #[arg(long, visible_alias = "allow-duplicate")]
     pub force: bool,
+    /// Stable caller key for safely replaying this retry reservation.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct CancelArgs {

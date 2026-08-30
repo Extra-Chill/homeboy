@@ -712,6 +712,7 @@ Submit a fresh durable run from an existing run's plan
 | `--new-run-id` | `<ID>` | Durable ID to assign to the new retry run |
 | `--run` | flag | Execute the retry immediately after creating it |
 | `--force` | flag | Permit a new retry after every prior retry in this lineage is terminal |
+| `--idempotency-key` | `<KEY>` | Stable caller key for safely replaying this retry reservation |
 
 ## `homeboy agent-task fanout`
 
