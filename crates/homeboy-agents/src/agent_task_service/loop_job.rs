@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use homeboy_core::daemon::controller_job_driver::ControllerJobPublicError;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, ProcessIdentityState, ProcessStartIdentity,
 };
@@ -158,13 +157,6 @@ impl WorkJobHandler for LoopWorkHandler {
 
     fn public_result(&self, result: &Value) -> Result<Value> {
         self.public_progress(result)
-    }
-
-    fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
-        ControllerJobPublicError {
-            message: "controller-owned loop supervision failed".to_string(),
-            data: json!({ "code": format!("{:?}", error.code) }),
-        }
     }
 
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
