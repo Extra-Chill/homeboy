@@ -14623,6 +14623,95 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
 }
 
 #[test]
+fn promotion_recovers_from_durable_executor_outcome_when_aggregate_is_missing() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-missing-aggregate";
+        let plan = batch_cook_options(run_id, Arc::new(AcceptedDetachedAttemptDispatcher))
+            .identity
+            .initial_plan;
+        let lifecycle_store = test_lifecycle_store();
+        let mut record = lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("persist lifecycle record");
+        record.aggregate_path = Some(lifecycle_store.aggregate_path(run_id).display().to_string());
+
+        let evidence_dir = lifecycle_store
+            .artifact_root()
+            .join("agent-task/executor-evidence")
+            .join(run_id)
+            .join("provider");
+        std::fs::create_dir_all(&evidence_dir).expect("create evidence directory");
+        let outcome_path = evidence_dir.join("executor-result.json");
+        let outcome = crate::agent_task::AgentTaskOutcome {
+            task_id: "provider".to_string(),
+            status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+            ..Default::default()
+        };
+        let source = serde_json::to_string(&outcome).expect("encode executor outcome");
+        std::fs::write(&outcome_path, &source).expect("persist executor outcome");
+        lifecycle_store
+            .write_record(&record)
+            .expect("persist missing aggregate state");
+
+        assert!(super::super::recover_missing_promotion_aggregate(run_id)
+            .expect("repair promotion aggregate before pinned-runtime delegation"));
+        assert!(!super::super::recover_missing_promotion_aggregate(run_id)
+            .expect("aggregate recovery is idempotent"));
+        let (recovered, source_path) =
+            super::super::promotion_source(run_id).expect("read reconstructed promotion source");
+
+        let aggregate: crate::agent_task_scheduler::AgentTaskAggregate =
+            serde_json::from_str(&recovered).expect("decode reconstructed aggregate");
+        assert_eq!(aggregate.plan_id, plan.plan_id);
+        assert_eq!(aggregate.outcomes, vec![outcome]);
+        assert_eq!(source_path, Some(lifecycle_store.aggregate_path(run_id)));
+        assert_eq!(
+            lifecycle_store
+                .read_record(run_id)
+                .expect("read recovered record")
+                .aggregate_path,
+            source_path.map(|path| path.display().to_string())
+        );
+    });
+}
+
+#[test]
+fn promotion_reports_actionable_error_when_aggregate_and_executor_evidence_are_missing() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-no-promotion-source";
+        let plan = batch_cook_options(run_id, Arc::new(AcceptedDetachedAttemptDispatcher))
+            .identity
+            .initial_plan;
+        let lifecycle_store = test_lifecycle_store();
+        let mut record = lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("persist lifecycle record");
+        record.aggregate_path = Some(lifecycle_store.aggregate_path(run_id).display().to_string());
+        lifecycle_store
+            .write_record(&record)
+            .expect("persist missing aggregate state");
+
+        let error =
+            super::super::cook_promotion::promotion_source_in_store(&lifecycle_store, run_id)
+                .expect_err("missing promotion source must fail");
+
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(error.message, "promotion source is unavailable");
+        assert_eq!(error.details["run_id"], run_id);
+        assert_eq!(
+            error.details["executor_evidence_error"],
+            "the lifecycle record has no persisted executor outcome evidence"
+        );
+        assert!(error.details["remediation"]
+            .as_str()
+            .is_some_and(|value| value.contains("executor-result evidence")));
+    });
+}
+
+#[test]
 fn cook_alias_continuation_starts_from_failed_gate_feedback_attempt() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("candidate artifacts");
