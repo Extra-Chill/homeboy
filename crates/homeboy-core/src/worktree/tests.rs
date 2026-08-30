@@ -418,7 +418,7 @@ fn import_records_an_exact_existing_worktree_without_changing_git_and_replays_id
             handle: handle.to_string(),
             path: path.display().to_string(),
             branch: branch.to_string(),
-            base_ref: "origin/main".to_string(),
+            base_ref: "HEAD~0".to_string(),
             task_url: Some("https://example.com/tasks/import".to_string()),
             owner_run_ref: Some("run-import".to_string()),
             cleanup_policy: CleanupPolicy::PreserveOnFailure,
@@ -434,6 +434,19 @@ fn import_records_an_exact_existing_worktree_without_changing_git_and_replays_id
         assert_eq!(imported.record.created_at, "2026-01-02T03:04:05Z");
         assert_eq!(imported.record.run_id.as_deref(), Some("run-import"));
         assert_eq!(
+            list()
+                .expect("list imported worktree")
+                .worktrees
+                .into_iter()
+                .find(|record| record.id == handle)
+                .expect("imported record is listed"),
+            imported.record
+        );
+        assert_eq!(
+            status(handle).expect("status imported worktree").record,
+            imported.record
+        );
+        assert_eq!(
             git::run_git(&path, &["rev-parse", "HEAD"], "git head").unwrap(),
             head_before
         );
@@ -441,6 +454,23 @@ fn import_records_an_exact_existing_worktree_without_changing_git_and_replays_id
             git::run_git(&path, &["status", "--porcelain"], "git status").unwrap(),
             status_before
         );
+
+        let finalized = finalize_provider_lifecycle(
+            handle,
+            "run-import",
+            crate::worktree_provider::WorktreeTerminalDisposition::Failed,
+        )
+        .expect("finalize imported worktree");
+        assert_eq!(finalized.terminal_disposition.as_deref(), Some("failed"));
+        let cleanup = cleanup(WorktreeCleanupOptions {
+            force: false,
+            dry_run: true,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        })
+        .expect("preview imported worktree cleanup");
+        assert!(cleanup.dry_run);
+        assert!(path.exists(), "cleanup preview must preserve the worktree");
     });
 }
 
@@ -480,6 +510,9 @@ fn import_refuses_primary_mismatched_handle_and_conflicting_replay() {
         let mut wrong_handle = options.clone();
         wrong_handle.handle = "import-conflict@wrong".to_string();
         assert!(import(wrong_handle).is_err());
+        let mut malformed = options.clone();
+        malformed.created_at = Some("not-a-timestamp".to_string());
+        assert!(import(malformed).is_err());
         import(options.clone()).expect("initial import");
         let mut conflicting = options;
         conflicting.base_ref = "origin/main".to_string();

@@ -47,6 +47,32 @@ pub(super) fn import_with_store(
     store_dir: &Path,
 ) -> Result<WorktreeImportOutput> {
     with_task_worktree_registry_write_lock(|| {
+        if options.branch.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "branch",
+                "Imported worktree branch must not be empty",
+                None,
+                None,
+            ));
+        }
+        if options.base_ref.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "base_ref",
+                "Imported worktree base ref must not be empty",
+                None,
+                None,
+            ));
+        }
+        if let Some(created_at) = &options.created_at {
+            chrono::DateTime::parse_from_rfc3339(created_at).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "created_at",
+                    "Imported worktree creation timestamp must be RFC 3339",
+                    Some(format!("{created_at} ({error})")),
+                    None,
+                )
+            })?;
+        }
         let target = component::resolve_target(TargetSpec {
             component_id: Some(&options.component_id),
             path_override: None,
