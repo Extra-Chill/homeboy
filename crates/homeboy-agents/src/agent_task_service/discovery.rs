@@ -720,6 +720,9 @@ fn classify_liveness(
     if agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now) {
         return AgentTaskLiveness::Active;
     }
+    if record.has_planned_runner_execution() && record.has_fresh_update() {
+        return AgentTaskLiveness::Active;
+    }
 
     match record.local_owner_liveness() {
         // Heartbeats are a projection, while a verified owner is authoritative.
