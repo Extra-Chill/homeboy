@@ -362,6 +362,57 @@ fn aggregate_totals(total_tasks: usize, outcomes: &[AgentTaskOutcome]) -> AgentT
     totals
 }
 
+/// Restore the terminal aggregate only when one persisted executor outcome maps
+/// exactly to the run's one planned task.
+pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    outcome: AgentTaskOutcome,
+) -> Result<PathBuf> {
+    let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+    if plan.tasks.len() != 1
+        || record.tasks.len() != 1
+        || plan.tasks[0].task_id != outcome.task_id
+        || record.tasks[0].task_id != outcome.task_id
+    {
+        return Err(Error::new(
+            ErrorCode::ValidationInvalidArgument,
+            "executor outcome cannot reconstruct an unambiguous aggregate",
+            json!({
+                "run_id": record.run_id,
+                "outcome_task_id": outcome.task_id,
+                "plan_task_ids": plan.tasks.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>(),
+                "record_task_ids": record.tasks.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+
+    let outcomes = vec![outcome];
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: aggregate_status(&outcomes),
+        totals: aggregate_totals(plan.tasks.len(), &outcomes),
+        events: events_for_outcomes(&outcomes),
+        outcomes,
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: AgentTaskQueueStatus {
+            max_concurrency: plan.options.max_concurrency,
+            completed: 1,
+            ..AgentTaskQueueStatus::default()
+        },
+    };
+    let mut recovered_record = record.clone();
+    let aggregate_path = lifecycle_store
+        .aggregate_path(&record.run_id)
+        .display()
+        .to_string();
+    apply_aggregate_to_record(&mut recovered_record, &plan, &aggregate, aggregate_path);
+    lifecycle_store.write_aggregate_and_record(&recovered_record, &aggregate)
+}
+
 pub fn submit_plan(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,

@@ -1885,9 +1885,15 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
             // and any live stderr progress would be stranded behind a later
             // routing boundary.
             crate::commands::agent_task::AgentTaskCommand::Promote(args) => {
-                crate::agents::agent_tasks::lifecycle::status(&args.source)
-                    .ok()
-                    .map(|record| record.run_id)
+                let record = crate::agents::agent_tasks::lifecycle::status(&args.source).ok();
+                if let Some(record) = record.as_ref() {
+                    // Repair immutable evidence before handing mutation back to
+                    // the historical controller that admitted this run.
+                    crate::agents::agent_tasks::service::recover_missing_promotion_aggregate(
+                        &record.run_id,
+                    )?;
+                }
+                record.map(|record| record.run_id)
             }
             crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
                 if matches!(cli.placement, crate::cli_surface::Placement::Local) {

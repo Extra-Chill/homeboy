@@ -401,6 +401,14 @@ fn executor_evidence_dir(
         .join(sanitize_task_id(task_id))
 }
 
+pub(crate) fn executor_result_evidence_path(
+    artifact_store_root: &Path,
+    run_id: &str,
+    task_id: &str,
+) -> PathBuf {
+    executor_evidence_dir(artifact_store_root, Some(run_id), task_id).join(EXECUTOR_RESULT_FILE)
+}
+
 fn sanitize_task_id(task_id: &str) -> String {
     let sanitized: String = task_id
         .chars()

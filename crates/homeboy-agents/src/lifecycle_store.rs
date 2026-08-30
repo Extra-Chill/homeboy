@@ -1020,15 +1020,11 @@ impl AgentTaskLifecycleStore {
         record: &AgentTaskRunRecord,
         aggregate: &AgentTaskAggregate,
     ) -> Result<PathBuf> {
-        self.write_record_with_aggregate(record, Some(aggregate.clone()))?;
-        #[cfg(test)]
-        if INTERRUPT_AFTER_TERMINAL_COMMIT.swap(false, Ordering::SeqCst) {
-            return Err(Error::internal_io(
-                "injected interruption after terminal lifecycle commit",
-                Some(record.run_id.clone()),
-            ));
-        }
-        self.write_aggregate(&record.run_id, aggregate)
+        let committed = self.with_config_lock(|| {
+            self.write_aggregate_and_record_locked_without_terminal_projection(record, aggregate)
+        })?;
+        self.project_terminal_record_after_unlock(&committed.run_id)?;
+        Ok(self.aggregate_path(&committed.run_id))
     }
 
     fn write_record_with_aggregate(
