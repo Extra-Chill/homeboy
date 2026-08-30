@@ -4,11 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent_task::{AgentTaskComponentContract, AgentTaskRequest};
-use crate::agent_task_controller_service::AgentTaskRepoLoopSpec;
-use crate::agent_task_repo_loop_compile::{
-    compile_repo_loop_spec, merge_json_objects, merge_workflow_inputs,
-    validate_repo_loop_artifact_references,
-};
+use crate::agent_task_controller_service::{validate_loop_spec, AgentTaskRepoLoopSpec};
 use crate::agent_task_schedule::{
     AgentTaskArtifactOutputDeclaration, AgentTaskOutputBinding, AgentTaskOutputDependencies,
     AgentTaskPlan, AgentTaskScheduleOptions,
@@ -129,7 +125,7 @@ pub struct AgentTaskLoopSpecMaterialization {
 pub fn materialize_repo_loop_spec(
     request: AgentTaskLoopSpecMaterializationRequest<'_>,
 ) -> Result<AgentTaskLoopSpecMaterialization> {
-    validate_repo_loop_artifact_references(request.spec)?;
+    validate_loop_spec(request.spec)?;
 
     let mut spec = request.spec.clone();
     let explicit_inputs = request.run_inputs.get("inputs").or_else(|| {
@@ -167,6 +163,33 @@ pub fn materialize_repo_loop_spec(
         schema: AGENT_TASK_LOOP_SPEC_MATERIALIZATION_SCHEMA.to_string(),
         spec,
     })
+}
+
+fn merge_workflow_inputs(target: &mut Value, explicit_inputs: &Value) {
+    if !explicit_inputs.is_object() {
+        return;
+    }
+    if !target.is_object() {
+        let mut wrapped = serde_json::Map::new();
+        if !target.is_null() {
+            wrapped.insert("workflow_inputs".to_string(), target.clone());
+        }
+        *target = Value::Object(wrapped);
+    }
+    merge_json_objects(target, explicit_inputs);
+}
+
+fn merge_json_objects(target: &mut Value, source: &Value) {
+    let Some(source) = source.as_object() else {
+        return;
+    };
+    if !target.is_object() {
+        *target = Value::Object(serde_json::Map::new());
+    }
+    let target = target.as_object_mut().expect("target object");
+    for (key, value) in source {
+        target.insert(key.clone(), value.clone());
+    }
 }
 
 fn materialize_policy_results(
@@ -305,36 +328,6 @@ pub fn compile_loop_definition(definition: AgentTaskLoopDefinition) -> Result<Ag
 
     plan.rebuild_homeboy_plan();
     Ok(plan)
-}
-
-pub fn compile_loop_spec_value(value: Value) -> Result<AgentTaskPlan> {
-    if value.get("tasks").is_some_and(|tasks| tasks.is_array())
-        && value
-            .get("tasks")
-            .and_then(Value::as_array)
-            .is_some_and(|tasks| tasks.iter().any(|task| task.get("request").is_some()))
-    {
-        let definition: AgentTaskLoopDefinition =
-            serde_json::from_value(value).map_err(|error| {
-                Error::validation_invalid_argument(
-                    "definition",
-                    error.to_string(),
-                    Some("agent-task loop definition".to_string()),
-                    None,
-                )
-            })?;
-        return compile_loop_definition(definition);
-    }
-
-    let spec: AgentTaskRepoLoopSpec = serde_json::from_value(value).map_err(|error| {
-        Error::validation_invalid_argument(
-            "definition",
-            error.to_string(),
-            Some("repo loop spec".to_string()),
-            None,
-        )
-    })?;
-    compile_repo_loop_spec(spec)
 }
 
 fn validate_loop_definition(definition: &AgentTaskLoopDefinition) -> Result<()> {
@@ -533,298 +526,6 @@ mod tests {
             materialized.spec.workflows[0].inputs["run_id"],
             json!("rerun-41")
         );
-    }
-
-    #[test]
-    fn compiles_repo_loop_entity_fanout_into_concrete_agent_tasks() {
-        let spec: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/agent_task_loop/wpsg_controller_fanout.json"
-        ))
-        .expect("fixture parses");
-
-        let plan = compile_loop_spec_value(spec).expect("fanout repo loop spec compiles");
-
-        let task_ids: Vec<&str> = plan
-            .tasks
-            .iter()
-            .map(|task| task.task_id.as_str())
-            .collect();
-        assert_eq!(
-            task_ids,
-            vec![
-                "plan-page__home",
-                "plan-page__about",
-                "build-page__home",
-                "build-page__about"
-            ]
-        );
-        assert_eq!(
-            plan.tasks[0].inputs["repo_loop"],
-            json!({ "entity_id": "home", "workflow_id": "plan-page" })
-        );
-        assert_eq!(
-            plan.output_dependencies["build-page__home"].depends_on,
-            vec!["plan-page__home"]
-        );
-        assert_eq!(
-            plan.output_dependencies["build-page__home"].bindings["page_spec"].task_id,
-            "plan-page__home"
-        );
-        assert_eq!(
-            plan.output_dependencies["build-page__about"].depends_on,
-            vec!["plan-page__about"]
-        );
-        assert_eq!(
-            plan.artifact_outputs["plan-page__home"][0].name,
-            "page_spec"
-        );
-        assert_eq!(
-            plan.artifact_outputs["build-page__about"][0].name,
-            "page_blocks"
-        );
-    }
-
-    #[test]
-    fn compiles_repo_loop_workflow_fan_out_items_into_concrete_agent_tasks() {
-        let plan = compile_loop_spec_value(json!({
-            "loop_id": "example/fan-out-items",
-            "workflows": [
-                {
-                    "workflow_id": "review-page",
-                    "prompt": "Review each page.",
-                    "fan_out": { "items": ["home", "about"] }
-                }
-            ]
-        }))
-        .expect("fan_out items repo loop spec compiles");
-
-        let task_ids: Vec<&str> = plan
-            .tasks
-            .iter()
-            .map(|task| task.task_id.as_str())
-            .collect();
-        assert_eq!(task_ids, vec!["review-page__home", "review-page__about"]);
-        assert_eq!(
-            plan.tasks[0].inputs["repo_loop"],
-            json!({ "entity_id": "home", "workflow_id": "review-page" })
-        );
-    }
-
-    #[test]
-    fn rejects_repo_loop_dynamic_fan_out_with_controller_diagnostic() {
-        let error = compile_loop_spec_value(json!({
-            "loop_id": "example/dynamic-fan-out",
-            "workflows": [
-                {
-                    "workflow_id": "iterator",
-                    "prompt": "Route each finding group.",
-                    "fan_out": {
-                        "mode": "per_artifact",
-                        "artifact": "finding_group",
-                        "group_by": ["owner_repo", "root_cause", "group_id"],
-                        "requires_non_empty": true
-                    }
-                }
-            ]
-        }))
-        .expect_err("dynamic fan_out requires controller artifact expansion");
-
-        assert!(error.message.contains("controller-only sections"));
-        let tried = error.details["tried"]
-            .as_array()
-            .expect("diagnostics are tried values")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(tried.contains("workflows[iterator].fan_out"));
-        assert!(tried.contains("expand artifacts into concrete entity ids"));
-    }
-
-    #[test]
-    fn compiles_repo_loop_artifact_graph_edges_into_output_dependencies() {
-        let plan = compile_loop_spec_value(json!({
-            "loop_id": "example/artifact-graph",
-            "artifacts": {
-                "site_plan": { "kind": "example/SitePlan/v1", "required": true }
-            },
-            "artifact_graph": {
-                "edges": [
-                    {
-                        "artifact_id": "site_plan",
-                        "from_workflow_id": "plan-site",
-                        "to_workflow_id": "build-site",
-                        "required": true
-                    }
-                ]
-            },
-            "workflows": [
-                {
-                    "workflow_id": "plan-site",
-                    "prompt": "Plan the site.",
-                    "emits": ["site_plan"]
-                },
-                {
-                    "workflow_id": "build-site",
-                    "prompt": "Build the site.",
-                    "consumes": ["site_plan"]
-                }
-            ]
-        }))
-        .expect("artifact graph spec compiles");
-
-        assert_eq!(plan.artifact_outputs["plan-site"][0].name, "site_plan");
-        assert_eq!(
-            plan.output_dependencies["build-site"].depends_on,
-            vec!["plan-site"]
-        );
-        let binding = &plan.output_dependencies["build-site"].bindings["site_plan"];
-        assert_eq!(binding.task_id, "plan-site");
-        assert_eq!(binding.path, "/typed_artifacts/site_plan");
-        assert_eq!(
-            binding
-                .artifact
-                .as_ref()
-                .and_then(|artifact| artifact.artifact_id.as_deref()),
-            Some("site_plan")
-        );
-    }
-
-    #[test]
-    fn rejects_repo_loop_artifact_graph_undeclared_artifacts() {
-        let error = compile_loop_spec_value(json!({
-            "loop_id": "example/artifact-graph-missing-artifact",
-            "artifact_graph": [
-                {
-                    "artifact_id": "missing_packet",
-                    "from_workflow_id": "produce",
-                    "to_workflow_id": "consume"
-                }
-            ],
-            "workflows": [
-                { "workflow_id": "produce", "prompt": "Produce.", "emits": ["missing_packet"] },
-                { "workflow_id": "consume", "prompt": "Consume.", "consumes": ["missing_packet"] }
-            ]
-        }))
-        .expect_err("undeclared artifact is rejected");
-
-        assert!(error.message.contains("artifact_graph edges"));
-        let tried = error.details["tried"]
-            .as_array()
-            .expect("diagnostics are tried values")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(tried.contains(
-            "artifact_graph[0].artifact_id references undeclared artifact 'missing_packet'"
-        ));
-    }
-
-    #[test]
-    fn rejects_repo_loop_artifact_graph_fanout_with_deterministic_diagnostic() {
-        let error = compile_loop_spec_value(json!({
-            "loop_id": "example/artifact-graph-fanout",
-            "artifacts": {
-                "page_plan": { "kind": "example/PagePlan/v1" }
-            },
-            "artifact_graph": [
-                {
-                    "artifact_id": "page_plan",
-                    "from_workflow_id": "plan-page",
-                    "to_workflow_id": "build-site"
-                }
-            ],
-            "workflows": [
-                {
-                    "workflow_id": "plan-page",
-                    "prompt": "Plan pages.",
-                    "entity_ids": ["home", "about"],
-                    "emits": ["page_plan"]
-                },
-                {
-                    "workflow_id": "build-site",
-                    "prompt": "Build the site.",
-                    "consumes": ["page_plan"]
-                }
-            ]
-        }))
-        .expect_err("artifact graph fanout requires later compiler support");
-
-        assert!(error.message.contains("artifact_graph edges"));
-        let tried = error.details["tried"]
-            .as_array()
-            .expect("diagnostics are tried values")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(tried.contains("producer workflow 'plan-page' uses fan-out"));
-        assert!(tried.contains("only supports one task per graph edge"));
-    }
-
-    #[test]
-    fn rejects_repo_loop_join_over_fanout_with_controller_diagnostic() {
-        let error = compile_loop_spec_value(json!({
-            "loop_id": "wpsg/join",
-            "artifacts": {
-                "page_blocks": { "kind": "wpsg/PageBlocks/v1" }
-            },
-            "workflows": [
-                {
-                    "workflow_id": "build-page",
-                    "prompt": "Build blocks.",
-                    "entity_ids": ["home", "about"],
-                    "emits": ["page_blocks"]
-                },
-                {
-                    "workflow_id": "assemble-site",
-                    "prompt": "Assemble the site.",
-                    "consumes": ["page_blocks"]
-                }
-            ]
-        }))
-        .expect_err("join over fanout requires controller path");
-
-        assert!(error.message.contains("controller-only sections"));
-        let tried = error.details["tried"]
-            .as_array()
-            .expect("diagnostics are tried values")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(tried.contains("join over fan-out artifact 'page_blocks'"));
-        assert!(tried.contains("requires the controller path"));
-    }
-
-    #[test]
-    fn rejects_repo_loop_gates_with_controller_diagnostic() {
-        let error = compile_loop_spec_value(json!({
-            "loop_id": "wpsg/gated",
-            "gates": {
-                "visual-parity": { "description": "Check visual parity" }
-            },
-            "workflows": [
-                {
-                    "workflow_id": "build-page",
-                    "prompt": "Build blocks.",
-                    "gates": ["visual-parity"]
-                }
-            ]
-        }))
-        .expect_err("gates require controller path");
-
-        assert!(error.message.contains("controller-only sections"));
-        let tried = error.details["tried"]
-            .as_array()
-            .expect("diagnostics are tried values")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(tried.contains("workflows[build-page].gates"));
-        assert!(tried.contains("gate execution belongs to the controller path"));
     }
 
     #[test]

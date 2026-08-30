@@ -38,7 +38,6 @@ mod agent_task_process_containment;
 pub mod agent_task_promotion;
 pub mod agent_task_prompts;
 pub mod agent_task_provider;
-pub(crate) mod agent_task_repo_loop_compile;
 pub(crate) mod agent_task_review_dossier;
 pub(crate) mod agent_task_runtime_dependency_graph;
 pub mod agent_task_schedule;
