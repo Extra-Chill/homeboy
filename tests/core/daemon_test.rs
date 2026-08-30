@@ -2766,6 +2766,7 @@ fn routes_read_only_http_api_contract() {
     assert_eq!(findings.body["error"], "validation.invalid_argument");
 }
 
+#[cfg(unix)]
 #[test]
 fn cancelling_daemon_exec_job_terminates_process_tree() {
     super::tests::register_enqueue_test_driver();
@@ -2774,6 +2775,10 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
     let cwd = std::env::temp_dir().join(format!("homeboy-daemon-cancel-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).expect("test cwd");
     let marker = cwd.join("orphan-marker");
+    let child_pid_file = cwd.join("child.pid");
+    let child_pid_path =
+        homeboy_engine_primitives::shell::quote_path(&child_pid_file.display().to_string());
+    let marker_path = homeboy_engine_primitives::shell::quote_path(&marker.display().to_string());
 
     let response = route_with_job_store_and_body(
         "POST",
@@ -2782,9 +2787,8 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
             "runner_id": "lab-local",
             "cwd": cwd.display().to_string(),
             "command": [
-                "sh",
-                "-c",
-                format!("sleep 1; touch {}", marker.display()),
+                "__homeboy_test_process_tree__",
+                format!("sleep 30 & echo $! > {child_pid_path}; wait; touch {marker_path}"),
             ],
         })),
         &store,
@@ -2798,10 +2802,18 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
         "store.get(job_id).expect( job ).status == JobStatus::Running",
         || store.get(job_id).expect("job").status == JobStatus::Running,
     );
+    wait_for("daemon exec child pid file", || child_pid_file.exists());
+    let child_pid = std::fs::read_to_string(&child_pid_file)
+        .expect("child pid fixture")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric child pid");
     store
         .cancel(job_id, "test cancellation")
         .expect("cancel job");
-    std::thread::sleep(std::time::Duration::from_millis(1600));
+    wait_for("cancelled daemon exec child to exit", || {
+        !crate::process::pid_is_running(child_pid)
+    });
 
     assert_eq!(store.get(job_id).expect("job").status, JobStatus::Cancelled);
     assert!(

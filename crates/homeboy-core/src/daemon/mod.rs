@@ -5541,7 +5541,20 @@ mod tests {
             #[cfg(unix)]
             {
                 let mut command = Command::new("sh");
-                command.args(["-c", "sleep 0.1"]);
+                let script = if prepared
+                    .command
+                    .first()
+                    .is_some_and(|command| command == "__homeboy_test_process_tree__")
+                {
+                    prepared
+                        .command
+                        .get(1)
+                        .expect("process-tree test script")
+                        .as_str()
+                } else {
+                    "sleep 0.1"
+                };
+                command.args(["-c", script]);
                 unsafe {
                     command.pre_exec(|| {
                         if libc::setpgid(0, 0) != 0 {
