@@ -7,7 +7,7 @@ pub mod build;
 pub mod catalog;
 mod compiler_warning_contract;
 pub mod component_script;
-mod fingerprint;
+pub mod fingerprint;
 pub mod invoke;
 pub mod lifecycle;
 pub mod lint;
@@ -28,7 +28,6 @@ pub use compiler_warning_contract::{
 };
 pub(crate) use homeboy_core::extension::resolve::{extension_guidance_hints, stderr_tail};
 
-pub use fingerprint::run_fingerprint_script;
 pub(crate) use invoke::build_settings_json_from_manifest;
 pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,

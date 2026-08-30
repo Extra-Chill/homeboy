@@ -27,7 +27,7 @@ impl FingerprintScriptProvider for ExtensionFingerprintScriptProvider {
             file_extension,
             crate::extension::resolve::FileExtensionCapability::Fingerprint,
         )?;
-        super::run_fingerprint_script(&matched, relative_path, content)
+        super::fingerprint::run_fingerprint_script(&matched, relative_path, content)
     }
 }
 

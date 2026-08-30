@@ -659,6 +659,15 @@
         "forbid": {
           "glob": "crates/**",
           "patterns": [
+            "\\bextension::run_fingerprint_script\\b"
+          ]
+        },
+        "name": "extensions-use-canonical-fingerprint-api"
+      },
+      {
+        "forbid": {
+          "glob": "crates/**",
+          "patterns": [
             "\\bextension_execution\\b",
             "\\bfind_extension_for_file_ext\\b"
           ]
