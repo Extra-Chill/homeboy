@@ -27,7 +27,7 @@ const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
 const artifacts = process.env.HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR || path.join(directory, 'artifacts');
 const scenarioIds = selectedScenarioIds(process.env.HOMEBOY_BENCH_SCENARIOS);
-const rigInputs = rigWorkloadInputs(process.env.HOMEBOY_BENCH_EXTRA_WORKLOADS, scenarioIds, slug);
+const rigInputs = rigWorkloadInputs(process.env.HOMEBOY_BENCH_EXTRA_WORKLOADS, scenarioIds, slug, componentPath);
 const options = clean({
   wordpressVersion: settings.wordpress_runtime_version,
   blueprint: settings.wordpress_runtime_blueprint,

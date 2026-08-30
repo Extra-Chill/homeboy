@@ -1,10 +1,14 @@
+/**
+ * External dependencies
+ */
 import path from 'node:path';
+import { realpathSync } from 'node:fs';
 
 export function selectedScenarioIds(raw = '') {
   return [...new Set(String(raw).split(',').map((id) => id.trim()).filter(Boolean))];
 }
 
-export function rigWorkloadInputs(raw = '', selectedIds = [], pluginSlug = '') {
+export function rigWorkloadInputs(raw = '', selectedIds = [], pluginSlug = '', componentPath = '') {
   const selected = new Set(selectedIds);
   const workloads = [];
   const mounts = [];
@@ -12,9 +16,12 @@ export function rigWorkloadInputs(raw = '', selectedIds = [], pluginSlug = '') {
   for (const source of String(raw).split(path.delimiter).map((entry) => entry.trim()).filter(Boolean)) {
     const filename = path.basename(source);
     const id = scenarioId(filename);
-    if (selected.size > 0 && !selected.has(id)) continue;
+    if (selected.size > 0 && !selected.has(id)) {
+      continue;
+    }
 
-    const relativeFile = `.homeboy/bench-rig/${filename}`;
+    const componentRelativeFile = relativeComponentFile(source, componentPath);
+    const relativeFile = componentRelativeFile || `.homeboy/bench-rig/${filename}`;
     workloads.push({
       id,
       source: 'rig',
@@ -30,6 +37,27 @@ export function rigWorkloadInputs(raw = '', selectedIds = [], pluginSlug = '') {
   }
 
   return { workloads, mounts };
+}
+
+function relativeComponentFile(source, componentPath) {
+  if (!componentPath) {
+    return undefined;
+  }
+
+  const relative = path.relative(canonicalPath(componentPath), canonicalPath(source));
+  if (!relative || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+    return undefined;
+  }
+
+  return relative.split(path.sep).join('/');
+}
+
+function canonicalPath(value) {
+  try {
+    return realpathSync.native(value);
+  } catch {
+    return path.resolve(value);
+  }
 }
 
 function scenarioId(filename) {

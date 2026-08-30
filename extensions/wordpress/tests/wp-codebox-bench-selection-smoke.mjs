@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { rigWorkloadInputs, selectedScenarioIds } from '../scripts/bench/wp-codebox-bench-selection.mjs';
 
@@ -23,5 +25,51 @@ assert.deepEqual(inputs.mounts, [{
   type: 'file',
   mode: 'readonly',
 }]);
+
+const componentRoot = path.join(path.sep, 'tmp', 'markdown-database-integration');
+const componentInputs = rigWorkloadInputs(
+  path.join(componentRoot, 'tests', 'bench', 'boot-timing.php'),
+  ['boot-timing'],
+  'markdown-database-integration',
+  componentRoot,
+);
+
+assert.deepEqual(componentInputs.workloads, [{
+  id: 'boot-timing',
+  source: 'rig',
+  overridesDiscovered: true,
+  run: [{ type: 'php', file: 'tests/bench/boot-timing.php' }],
+}]);
+assert.deepEqual(componentInputs.mounts, [{
+  source: path.join(componentRoot, 'tests', 'bench', 'boot-timing.php'),
+  target: '/wordpress/wp-content/plugins/markdown-database-integration/tests/bench/boot-timing.php',
+  type: 'file',
+  mode: 'readonly',
+}]);
+
+const materializedRoot = mkdtempSync(path.join(tmpdir(), 'homeboy-bench-selection-'));
+try {
+  const actualRoot = path.join(materializedRoot, 'actual');
+  const linkedRoot = path.join(materializedRoot, 'workspace');
+  const workload = path.join(linkedRoot, 'tests', 'bench', 'boot-timing.php');
+  mkdirSync(path.join(actualRoot, 'tests', 'bench'), { recursive: true });
+  writeFileSync(path.join(actualRoot, 'tests', 'bench', 'boot-timing.php'), '<?php');
+  symlinkSync(actualRoot, linkedRoot);
+
+  const symlinkInputs = rigWorkloadInputs(
+    workload,
+    ['boot-timing'],
+    'markdown-database-integration',
+    realpathSync(linkedRoot),
+  );
+
+  assert.equal(symlinkInputs.workloads[0].run[0].file, 'tests/bench/boot-timing.php');
+  assert.equal(
+    symlinkInputs.mounts[0].target,
+    '/wordpress/wp-content/plugins/markdown-database-integration/tests/bench/boot-timing.php',
+  );
+} finally {
+  rmSync(materializedRoot, { recursive: true, force: true });
+}
 
 console.log('wp-codebox bench selection smoke ok');
