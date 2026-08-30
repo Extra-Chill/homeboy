@@ -47,6 +47,32 @@ pub(super) fn import_with_store(
     store_dir: &Path,
 ) -> Result<WorktreeImportOutput> {
     with_task_worktree_registry_write_lock(|| {
+        if options.branch.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "branch",
+                "Imported worktree branch must not be empty",
+                None,
+                None,
+            ));
+        }
+        if options.base_ref.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "base_ref",
+                "Imported worktree base ref must not be empty",
+                None,
+                None,
+            ));
+        }
+        if let Some(created_at) = &options.created_at {
+            chrono::DateTime::parse_from_rfc3339(created_at).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "created_at",
+                    "Imported worktree creation timestamp must be RFC 3339",
+                    Some(format!("{created_at} ({error})")),
+                    None,
+                )
+            })?;
+        }
         let target = component::resolve_target(TargetSpec {
             component_id: Some(&options.component_id),
             path_override: None,
@@ -110,8 +136,12 @@ pub(super) fn import_with_store(
                 && record.branch == options.branch
                 && record.base_ref == options.base_ref
                 && record.task_url == options.task_url
-                && record.run_id == options.run_id
+                && record.run_id == options.owner_run_ref
                 && record.cleanup_policy == options.cleanup_policy
+                && options
+                    .created_at
+                    .as_ref()
+                    .is_none_or(|created_at| &record.created_at == created_at)
                 && record.state == TaskWorktreeState::Active
                 && record.terminal_disposition.is_none()
                 && record.effective_workspace_identity()? == identity;
@@ -138,11 +168,13 @@ pub(super) fn import_with_store(
             base_ref: options.base_ref,
             workspace_identity: Some(identity),
             task_url: options.task_url,
-            run_id: options.run_id,
+            run_id: options.owner_run_ref,
             cleanup_policy: options.cleanup_policy,
             terminal_disposition: None,
             branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: options
+                .created_at
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             state: TaskWorktreeState::Active,
             lifecycle_revision: 0,
             terminal_workspace_authority: None,

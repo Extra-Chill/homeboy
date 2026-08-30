@@ -363,8 +363,9 @@ pub struct WorktreeImportOptions {
     pub branch: String,
     pub base_ref: String,
     pub task_url: Option<String>,
-    pub run_id: Option<String>,
+    pub owner_run_ref: Option<String>,
     pub cleanup_policy: CleanupPolicy,
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
