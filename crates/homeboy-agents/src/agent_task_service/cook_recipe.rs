@@ -16,7 +16,8 @@ use uuid::Uuid;
 use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::AgentTaskPlan;
 use crate::agent_task_service::cook::{
-    AgentTaskCookAttemptDispatcher, AgentTaskCookServiceOptions, CookMode,
+    AgentTaskCookAttemptDispatcher, CookAiDisclosure, CookFinalization, CookIdentity, CookMode,
+    CookProviderTransport, CookRequest, CookRetryPolicy, CookWorkspace,
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::{paths, Error, Result};
@@ -183,25 +184,19 @@ impl CookRecipeStore {
         load_recipe_for_attempt_from(&self.recipe_root(), run_id)
     }
 
-    pub fn persist_initial_recipe(
-        &self,
-        options: &AgentTaskCookServiceOptions,
-    ) -> Result<AgentTaskCookRecipe> {
+    pub fn persist_initial_recipe(&self, options: &CookRequest) -> Result<AgentTaskCookRecipe> {
         self.persist_initial_recipe_with_outcome(options)
             .map(|materialization| materialization.recipe)
     }
 
     pub(crate) fn persist_initial_recipe_with_outcome(
         &self,
-        options: &AgentTaskCookServiceOptions,
+        options: &CookRequest,
     ) -> Result<InitialRecipeMaterialization> {
         persist_initial_recipe_in_store(self, options)
     }
 
-    pub fn validate_initial_recipe_compatibility(
-        &self,
-        options: &AgentTaskCookServiceOptions,
-    ) -> Result<()> {
+    pub fn validate_initial_recipe_compatibility(&self, options: &CookRequest) -> Result<()> {
         validate_initial_recipe_compatibility_in_store(self, options)
     }
 
@@ -286,7 +281,7 @@ impl CookRecipeStore {
         &self,
         claim: ClaimedCookContinuation,
         dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-        execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+        execute: impl FnOnce(CookRequest) -> Result<i32>,
     ) -> Result<i32> {
         let queue_root = self.queue_root();
         if !paths::local_path_is_contained(&queue_root, &claim.path) {
@@ -451,17 +446,15 @@ pub trait AgentTaskCookContinuationScheduler {
     fn enqueue(&self, continuation: &AgentTaskCookContinuation) -> Result<bool>;
 }
 
-pub fn persist_initial_recipe(
-    options: &AgentTaskCookServiceOptions,
-) -> Result<AgentTaskCookRecipe> {
+pub fn persist_initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
     default_store()?.persist_initial_recipe(options)
 }
 
 pub fn persist_initial_recipe_in_store(
     store: &CookRecipeStore,
-    options: &AgentTaskCookServiceOptions,
+    options: &CookRequest,
 ) -> Result<InitialRecipeMaterialization> {
-    recover_pending_supersession(store, &options.cook_id)?;
+    recover_pending_supersession(store, &options.identity.cook_id)?;
     let mut recipe = initial_recipe(options)?;
     validate_recipe(&recipe)?;
     #[cfg(test)]
@@ -621,18 +614,18 @@ fn sync_directory(directory: &Path) -> Result<()> {
 /// Validate a Cook recipe against durable state without writing it. Fanout
 /// uses this before creating worktrees so incompatible replays fail before any
 /// lifecycle resources are mutated.
-pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptions) -> Result<()> {
+pub fn validate_initial_recipe_compatibility(options: &CookRequest) -> Result<()> {
     default_store()?.validate_initial_recipe_compatibility(options)
 }
 
 pub fn validate_initial_recipe_compatibility_in_store(
     store: &CookRecipeStore,
-    options: &AgentTaskCookServiceOptions,
+    options: &CookRequest,
 ) -> Result<()> {
-    if !store.recipe_exists(&options.cook_id) {
+    if !store.recipe_exists(&options.identity.cook_id) {
         return Ok(());
     }
-    let existing = store.load_recipe(&options.cook_id)?;
+    let existing = store.load_recipe(&options.identity.cook_id)?;
     let mut recipe = initial_recipe(options)?;
     // The attempt plan is compiled only after the target worktree exists. Use
     // the durable plan here so preflight compares every input already known
@@ -657,8 +650,9 @@ pub fn validate_initial_recipe_compatibility_in_store(
     Ok(())
 }
 
-fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCookRecipe> {
+fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
     let attempt_dispatch = options
+        .provider_transport
         .attempt_dispatcher
         .as_ref()
         .map(|dispatcher| dispatcher.durable_recipe())
@@ -666,15 +660,15 @@ fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCook
         .unwrap_or_else(|| serde_json::json!({ "kind": "local" }));
     let recipe = AgentTaskCookRecipe {
         schema: COOK_RECIPE_SCHEMA.to_string(),
-        cook_id: options.cook_id.clone(),
+        cook_id: options.identity.cook_id.clone(),
         attempts: vec![AgentTaskCookRecipeAttempt {
             attempt: 1,
-            run_id: options.initial_run_id.clone(),
-            plan: options.initial_plan.clone(),
+            run_id: options.identity.initial_run_id.clone(),
+            plan: options.identity.initial_plan.clone(),
         }],
         promotion_transport: serde_json::json!({
-            "provider_command": options.provider_command,
-            "provider_invocation": options.provider_invocation,
+            "provider_command": options.provider_transport.provider_command,
+            "provider_invocation": options.provider_transport.provider_invocation,
             "attempt_dispatch": attempt_dispatch,
         }),
         gate_policy: serde_json::to_value(&options.gates).map_err(|error| {
@@ -684,29 +678,29 @@ fn initial_recipe(options: &AgentTaskCookServiceOptions) -> Result<AgentTaskCook
             )
         })?,
         retry_budget: serde_json::json!({
-            "max_attempts": options.max_attempts,
-            "execution_budget": options.initial_plan.options.execution_budget,
-            "policy": options.initial_plan.metadata["cook_retry_policy"],
-            "timeouts": cook_recipe_timeout_disclosure(&options.initial_plan),
+            "max_attempts": options.retry_policy.max_attempts,
+            "execution_budget": options.identity.initial_plan.options.execution_budget,
+            "policy": options.identity.initial_plan.metadata["cook_retry_policy"],
+            "timeouts": cook_recipe_timeout_disclosure(&options.identity.initial_plan),
         }),
         finalization: serde_json::json!({
-            "no_finalize": options.no_finalize,
-            "draft_pr": options.draft_pr,
-            "base": options.base,
-            "head": options.head,
-            "title": options.title,
-            "commit_message": options.commit_message,
-            "protected_branches": options.protected_branches,
-            "ai_tool": options.ai_tool,
-            "ai_model": options.ai_model,
-            "ai_used_for": options.ai_used_for,
-            "to_worktree": options.to_worktree,
-            "source_worktree_path": options.source_worktree_path,
-            "task_base_sha": options.task_base_sha,
+            "no_finalize": options.finalization.no_finalize,
+            "draft_pr": options.finalization.draft_pr,
+            "base": options.finalization.base,
+            "head": options.finalization.head,
+            "title": options.finalization.title,
+            "commit_message": options.finalization.commit_message,
+            "protected_branches": options.finalization.protected_branches,
+            "ai_tool": options.ai_disclosure.ai_tool,
+            "ai_model": options.ai_disclosure.ai_model,
+            "ai_used_for": options.ai_disclosure.ai_used_for,
+            "to_worktree": options.workspace.to_worktree,
+            "source_worktree_path": options.workspace.source_worktree_path,
+            "task_base_sha": options.workspace.task_base_sha,
         }),
-        source_refs: options.source_refs.clone(),
+        source_refs: options.workspace.source_refs.clone(),
         runtime_generation: homeboy_core::build_identity::current().display,
-        sensitive_mappings: sensitive_mappings(&options.initial_plan)?,
+        sensitive_mappings: sensitive_mappings(&options.identity.initial_plan)?,
         harvest_context: options.harvest_context.clone(),
     };
     Ok(recipe)
@@ -1908,14 +1902,14 @@ fn read_claimed_continuation(
     })
 }
 
-pub fn reconstruct_options(recipe: &AgentTaskCookRecipe) -> Result<AgentTaskCookServiceOptions> {
+pub fn reconstruct_options(recipe: &AgentTaskCookRecipe) -> Result<CookRequest> {
     reconstruct_options_with_dispatcher(recipe, None)
 }
 
 pub fn reconstruct_options_with_dispatcher(
     recipe: &AgentTaskCookRecipe,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
-) -> Result<AgentTaskCookServiceOptions> {
+) -> Result<CookRequest> {
     reconstruct_recipe_options(recipe, attempt_dispatcher, true, true)
 }
 
@@ -1924,7 +1918,7 @@ pub fn reconstruct_options_with_dispatcher(
 /// this only relaxes reconstruction of the superseded Lab transport.
 pub fn reconstruct_options_with_local_placement_override(
     recipe: &AgentTaskCookRecipe,
-) -> Result<AgentTaskCookServiceOptions> {
+) -> Result<CookRequest> {
     reconstruct_recipe_options(recipe, None, true, false)
 }
 
@@ -1933,7 +1927,7 @@ pub fn reconstruct_options_with_local_placement_override(
 /// replace the stale runtime and local dispatcher under continuation admission.
 pub fn reconstruct_options_for_pre_execution_recovery(
     recipe: &AgentTaskCookRecipe,
-) -> Result<AgentTaskCookServiceOptions> {
+) -> Result<CookRequest> {
     reconstruct_recipe_options(recipe, None, false, false)
 }
 
@@ -1972,9 +1966,7 @@ pub fn local_pre_execution_runtime_recovery_is_eligible(
 /// Reconstruct the policy used to adopt an already-prepared candidate. Adoption
 /// never replays provider work, so it may use a validated historical recipe
 /// after a controller runtime upgrade.
-pub fn reconstruct_adoption_options(
-    recipe: &AgentTaskCookRecipe,
-) -> Result<AgentTaskCookServiceOptions> {
+pub fn reconstruct_adoption_options(recipe: &AgentTaskCookRecipe) -> Result<CookRequest> {
     reconstruct_recipe_options(recipe, None, false, false)
 }
 
@@ -2061,7 +2053,7 @@ pub fn resolve_cook_continuation_run_id_in_store(
 pub fn reconstruct_adoption_options_with_dispatcher(
     recipe: &AgentTaskCookRecipe,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
-) -> Result<AgentTaskCookServiceOptions> {
+) -> Result<CookRequest> {
     reconstruct_recipe_options(recipe, attempt_dispatcher, false, true)
 }
 
@@ -2070,7 +2062,7 @@ fn reconstruct_recipe_options(
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
     require_current_runtime: bool,
     require_attempt_dispatcher: bool,
-) -> Result<AgentTaskCookServiceOptions> {
+) -> Result<CookRequest> {
     validate_recipe(recipe)?;
     if require_current_runtime
         && recipe.runtime_generation != homeboy_core::build_identity::current().display
@@ -2157,57 +2149,69 @@ fn reconstruct_recipe_options(
             None,
         ));
     }
-    Ok(AgentTaskCookServiceOptions {
-        cook_id: recipe.cook_id.clone(),
-        initial_run_id: initial.run_id.clone(),
-        initial_plan: initial.plan.clone(),
-        to_worktree: serde_json::from_value(field("to_worktree")?)
-            .map_err(recipe_value_error("to_worktree"))?,
-        source_worktree_path: serde_json::from_value(field("source_worktree_path")?)
-            .map_err(recipe_value_error("source_worktree_path"))?,
-        provider_command,
-        provider_invocation,
+    Ok(CookRequest {
+        identity: CookIdentity {
+            cook_id: recipe.cook_id.clone(),
+            initial_run_id: initial.run_id.clone(),
+            initial_plan: initial.plan.clone(),
+        },
+        workspace: CookWorkspace {
+            to_worktree: serde_json::from_value(field("to_worktree")?)
+                .map_err(recipe_value_error("to_worktree"))?,
+            source_worktree_path: serde_json::from_value(field("source_worktree_path")?)
+                .map_err(recipe_value_error("source_worktree_path"))?,
+            task_base_sha: serde_json::from_value(field("task_base_sha")?)
+                .map_err(recipe_value_error("task_base_sha"))?,
+            source_refs: recipe.source_refs.clone(),
+        },
+        provider_transport: CookProviderTransport {
+            provider_command,
+            provider_invocation,
+            attempt_dispatcher,
+        },
         gates,
-        max_attempts: recipe
-            .retry_budget
-            .get("max_attempts")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "cook_recipe.retry_budget",
-                    "missing max_attempts",
-                    None,
-                    None,
-                )
-            })? as u32,
-        no_finalize: serde_json::from_value(field("no_finalize")?)
-            .map_err(recipe_value_error("no_finalize"))?,
-        // Recipes persisted before draft publication existed retain ready-PR behavior.
-        draft_pr: recipe
-            .finalization
-            .get("draft_pr")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(recipe_value_error("draft_pr"))?
-            .unwrap_or(false),
-        base: serde_json::from_value(field("base")?).map_err(recipe_value_error("base"))?,
-        task_base_sha: serde_json::from_value(field("task_base_sha")?)
-            .map_err(recipe_value_error("task_base_sha"))?,
-        head: serde_json::from_value(field("head")?).map_err(recipe_value_error("head"))?,
-        title: serde_json::from_value(field("title")?).map_err(recipe_value_error("title"))?,
-        commit_message: serde_json::from_value(field("commit_message")?)
-            .map_err(recipe_value_error("commit_message"))?,
-        source_refs: recipe.source_refs.clone(),
-        protected_branches: serde_json::from_value(field("protected_branches")?)
-            .map_err(recipe_value_error("protected_branches"))?,
-        ai_tool: serde_json::from_value(field("ai_tool")?)
-            .map_err(recipe_value_error("ai_tool"))?,
-        ai_model: serde_json::from_value(field("ai_model")?)
-            .map_err(recipe_value_error("ai_model"))?,
-        ai_used_for: serde_json::from_value(field("ai_used_for")?)
-            .map_err(recipe_value_error("ai_used_for"))?,
-        attempt_dispatcher,
+        retry_policy: CookRetryPolicy {
+            max_attempts: recipe
+                .retry_budget
+                .get("max_attempts")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "cook_recipe.retry_budget",
+                        "missing max_attempts",
+                        None,
+                        None,
+                    )
+                })? as u32,
+        },
+        finalization: CookFinalization {
+            no_finalize: serde_json::from_value(field("no_finalize")?)
+                .map_err(recipe_value_error("no_finalize"))?,
+            // Recipes persisted before draft publication existed retain ready-PR behavior.
+            draft_pr: recipe
+                .finalization
+                .get("draft_pr")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(recipe_value_error("draft_pr"))?
+                .unwrap_or(false),
+            base: serde_json::from_value(field("base")?).map_err(recipe_value_error("base"))?,
+            head: serde_json::from_value(field("head")?).map_err(recipe_value_error("head"))?,
+            title: serde_json::from_value(field("title")?).map_err(recipe_value_error("title"))?,
+            commit_message: serde_json::from_value(field("commit_message")?)
+                .map_err(recipe_value_error("commit_message"))?,
+            protected_branches: serde_json::from_value(field("protected_branches")?)
+                .map_err(recipe_value_error("protected_branches"))?,
+        },
+        ai_disclosure: CookAiDisclosure {
+            ai_tool: serde_json::from_value(field("ai_tool")?)
+                .map_err(recipe_value_error("ai_tool"))?,
+            ai_model: serde_json::from_value(field("ai_model")?)
+                .map_err(recipe_value_error("ai_model"))?,
+            ai_used_for: serde_json::from_value(field("ai_used_for")?)
+                .map_err(recipe_value_error("ai_used_for"))?,
+        },
         harvest_context: recipe.harvest_context.clone(),
     })
 }
@@ -2215,7 +2219,7 @@ fn reconstruct_recipe_options(
 pub fn consume_claimed_with_dispatcher(
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+    execute: impl FnOnce(CookRequest) -> Result<i32>,
 ) -> Result<i32> {
     default_store()?.consume_claimed_with_dispatcher(claim, dispatcher, execute)
 }
@@ -2223,7 +2227,7 @@ pub fn consume_claimed_with_dispatcher(
 pub fn consume_claimed_terminal_with_dispatcher(
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+    execute: impl FnOnce(CookRequest) -> Result<i32>,
 ) -> Result<i32> {
     consume_claimed_with_dispatcher_policy(
         &default_store()?,
@@ -2238,7 +2242,7 @@ fn consume_claimed_with_dispatcher_policy(
     store: &CookRecipeStore,
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+    execute: impl FnOnce(CookRequest) -> Result<i32>,
     mode: CookMode,
 ) -> Result<i32> {
     let lifecycle_store =
@@ -2276,7 +2280,7 @@ fn consume_claimed_with_dispatcher_policy(
     if matches!(mode, CookMode::ContinueTerminal | CookMode::Adopt) {
         // A newer coordinator may finish an accepted terminal candidate, but it
         // must never replay provider work under a different runtime generation.
-        options.max_attempts = recipe
+        options.retry_policy.max_attempts = recipe
             .attempts
             .last()
             .map(|attempt| attempt.attempt)
@@ -2305,8 +2309,8 @@ fn consume_claimed_with_dispatcher_policy(
         .iter()
         .find(|attempt| attempt.run_id == claim.continuation().run_id)
     {
-        options.initial_run_id = attempt.run_id.clone();
-        options.initial_plan = attempt.plan.clone();
+        options.identity.initial_run_id = attempt.run_id.clone();
+        options.identity.initial_plan = attempt.plan.clone();
     } else {
         let error = Error::validation_invalid_argument(
             "cook_continuation.run_id",
@@ -2655,6 +2659,29 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct LabLikeDispatcher;
+
+    impl AgentTaskCookAttemptDispatcher for LabLikeDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({
+                "kind": "lab",
+                "queue": "cook-lab",
+            }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            _plan: AgentTaskPlan,
+            _run_id: &str,
+            _derived_cook_baseline: Option<
+                &crate::agent_task_service::cook_baseline::DerivedCookBaselineCapability,
+            >,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
     fn recipe() -> AgentTaskCookRecipe {
         let request = AgentTaskRequest {
             schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -2742,7 +2769,7 @@ mod tests {
                 claim.claim.expect("left claim"),
                 |_| Ok(None),
                 |options| {
-                    assert_eq!(options.source_refs, ["issue"]);
+                    assert_eq!(options.workspace.source_refs, ["issue"]);
                     Ok(0)
                 },
             )?;
@@ -2758,7 +2785,7 @@ mod tests {
                 claim,
                 |_| Ok(None),
                 |options| {
-                    assert_eq!(options.source_refs, ["other-issue"]);
+                    assert_eq!(options.workspace.source_refs, ["other-issue"]);
                     Ok(0)
                 },
             )?;
@@ -2797,11 +2824,11 @@ mod tests {
 
         let mutate = |store: CookRecipeStore, source_ref: &str, plan_id: &str| {
             let mut options = reconstruct_options(&recipe()).expect("recipe options");
-            options.source_refs = vec![source_ref.to_string()];
+            options.workspace.source_refs = vec![source_ref.to_string()];
             store.persist_initial_recipe(&options)?;
             store.validate_initial_recipe_compatibility(&options)?;
 
-            let mut retry_plan = options.initial_plan;
+            let mut retry_plan = options.identity.initial_plan;
             retry_plan.plan_id = plan_id.to_string();
             store.record_recipe_attempt("cook", 2, "run-2", &retry_plan)?;
             store.record_recipe_attempt_replacement("cook", "run-2", "run-2-replacement")?;
@@ -2896,7 +2923,7 @@ mod tests {
     /// injected normal-cook boundary.
     fn consume_next_from(
         store: &CookRecipeStore,
-        execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+        execute: impl FnOnce(CookRequest) -> Result<i32>,
     ) -> Result<Option<i32>> {
         let Some(claim) = store.claim_continuation_with_budget(usize::MAX)?.claim else {
             return Ok(None);
@@ -3086,10 +3113,158 @@ mod tests {
             Some(Arc::new(ReconstructedDispatcher)),
         )
         .expect("durable dispatcher reconstruction permits normal cook gates");
-        assert!(options.attempt_dispatcher.is_some());
+        assert!(options.provider_transport.attempt_dispatcher.is_some());
         assert_eq!(options.gates.verify, Vec::<String>::new());
-        assert_eq!(options.to_worktree, "target");
-        assert_eq!(options.base, "main");
+        assert_eq!(options.workspace.to_worktree, "target");
+        assert_eq!(options.finalization.base, "main");
+    }
+
+    #[test]
+    fn continuation_reconstructs_lab_dispatcher_and_grouped_request_fields() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let dispatcher: Arc<dyn AgentTaskCookAttemptDispatcher> = Arc::new(LabLikeDispatcher);
+        let mut request = reconstruct_adoption_options(&recipe()).expect("reconstruct fixture");
+        request.identity.cook_id = "lab-cook".to_string();
+        request.identity.initial_run_id = "lab-run".to_string();
+        request.workspace.to_worktree = "fixture@lab".to_string();
+        request.workspace.source_worktree_path = Some("/tmp/lab-source".into());
+        request.workspace.task_base_sha = Some("lab-base".to_string());
+        request.workspace.source_refs = vec!["issue:lab".to_string()];
+        request.provider_transport.provider_command = Some("lab-agent".to_string());
+        request.provider_transport.attempt_dispatcher = Some(dispatcher.clone());
+        request.retry_policy.max_attempts = 2;
+        request.finalization.draft_pr = true;
+        request.finalization.head = Some("lab-head".to_string());
+        request.ai_disclosure.ai_model = Some("lab-model".to_string());
+
+        store
+            .persist_initial_recipe(&request)
+            .expect("persist Lab dispatcher recipe");
+        store
+            .enqueue_terminal_continuation("lab-cook", "lab-run")
+            .expect("enqueue persisted continuation");
+        let claim = store
+            .claim_continuation_for("lab-cook", "lab-run")
+            .expect("claim continuation")
+            .expect("persisted continuation claim");
+
+        let exit_code = store
+            .consume_claimed_with_dispatcher(
+                claim,
+                |durable_recipe| {
+                    assert_eq!(durable_recipe["kind"], "lab");
+                    assert_eq!(durable_recipe["queue"], "cook-lab");
+                    Ok(Some(dispatcher))
+                },
+                |request| {
+                    assert_eq!(
+                        request
+                            .provider_transport
+                            .attempt_dispatcher
+                            .expect("injected Lab dispatcher")
+                            .durable_recipe()?,
+                        serde_json::json!({ "kind": "lab", "queue": "cook-lab" })
+                    );
+                    assert_eq!(request.identity.cook_id, "lab-cook");
+                    assert_eq!(request.identity.initial_run_id, "lab-run");
+                    assert_eq!(request.workspace.to_worktree, "fixture@lab");
+                    assert_eq!(request.workspace.task_base_sha.as_deref(), Some("lab-base"));
+                    assert_eq!(request.workspace.source_refs, ["issue:lab"]);
+                    assert_eq!(
+                        request.provider_transport.provider_command.as_deref(),
+                        Some("lab-agent")
+                    );
+                    assert_eq!(request.retry_policy.max_attempts, 2);
+                    assert!(request.finalization.draft_pr);
+                    assert_eq!(request.finalization.head.as_deref(), Some("lab-head"));
+                    assert_eq!(request.ai_disclosure.ai_model.as_deref(), Some("lab-model"));
+                    Ok(0)
+                },
+            )
+            .expect("consume Lab continuation");
+
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn request_sections_round_trip_through_the_v1_recipe_without_a_dispatcher() {
+        let mut options = reconstruct_adoption_options(&recipe()).expect("reconstruct fixture");
+        options.identity.cook_id = "nested-cook".to_string();
+        options.identity.initial_run_id = "nested-run".to_string();
+        options.workspace.to_worktree = "fixture@nested".to_string();
+        options.workspace.source_worktree_path = Some("/tmp/nested".into());
+        options.workspace.task_base_sha = Some("base-sha".to_string());
+        options.workspace.source_refs = vec!["issue:nested".to_string()];
+        options.provider_transport.provider_command = Some("provider".to_string());
+        options.retry_policy.max_attempts = 3;
+        options.finalization.draft_pr = true;
+        options.finalization.head = Some("nested-head".to_string());
+        options.finalization.protected_branches = vec!["main".to_string()];
+        options.ai_disclosure.ai_model = Some("nested-model".to_string());
+
+        let persisted = initial_recipe(&options).expect("serialize request sections");
+        assert_eq!(persisted.schema, COOK_RECIPE_SCHEMA);
+        assert_eq!(persisted.cook_id, "nested-cook");
+        assert_eq!(persisted.attempts[0].run_id, "nested-run");
+        assert_eq!(persisted.source_refs, ["issue:nested"]);
+        assert_eq!(
+            persisted.promotion_transport["provider_command"],
+            "provider"
+        );
+        assert_eq!(persisted.retry_budget["max_attempts"], 3);
+        assert_eq!(persisted.finalization["to_worktree"], "fixture@nested");
+        assert_eq!(
+            persisted.finalization["source_worktree_path"],
+            "/tmp/nested"
+        );
+        assert_eq!(persisted.finalization["task_base_sha"], "base-sha");
+        assert_eq!(persisted.finalization["head"], "nested-head");
+        assert_eq!(persisted.finalization["ai_model"], "nested-model");
+        assert_eq!(persisted.finalization["draft_pr"], true);
+
+        let reconstructed =
+            reconstruct_adoption_options(&persisted).expect("reconstruct persisted recipe");
+        assert_eq!(reconstructed.identity.cook_id, options.identity.cook_id);
+        assert_eq!(
+            reconstructed.workspace.to_worktree,
+            options.workspace.to_worktree
+        );
+        assert_eq!(
+            reconstructed.workspace.source_worktree_path,
+            options.workspace.source_worktree_path
+        );
+        assert_eq!(
+            reconstructed.workspace.task_base_sha,
+            options.workspace.task_base_sha
+        );
+        assert_eq!(
+            reconstructed.workspace.source_refs,
+            options.workspace.source_refs
+        );
+        assert_eq!(
+            reconstructed.provider_transport.provider_command,
+            options.provider_transport.provider_command
+        );
+        assert!(reconstructed
+            .provider_transport
+            .attempt_dispatcher
+            .is_none());
+        assert_eq!(reconstructed.retry_policy.max_attempts, 3);
+        assert_eq!(reconstructed.finalization.base, options.finalization.base);
+        assert_eq!(reconstructed.finalization.head, options.finalization.head);
+        assert_eq!(
+            reconstructed.finalization.draft_pr,
+            options.finalization.draft_pr
+        );
+        assert_eq!(
+            reconstructed.finalization.protected_branches,
+            options.finalization.protected_branches
+        );
+        assert_eq!(
+            reconstructed.ai_disclosure.ai_model,
+            options.ai_disclosure.ai_model
+        );
     }
 
     #[test]
@@ -3119,10 +3294,10 @@ mod tests {
 
         let adoption =
             reconstruct_adoption_options(&historical).expect("adoption reads historical policy");
-        assert_eq!(adoption.cook_id, historical.cook_id);
+        assert_eq!(adoption.identity.cook_id, historical.cook_id);
         assert!(adoption.gates.verify.is_empty());
-        assert!(adoption.no_finalize);
-        assert!(adoption.attempt_dispatcher.is_none());
+        assert!(adoption.finalization.no_finalize);
+        assert!(adoption.provider_transport.attempt_dispatcher.is_none());
     }
 
     #[test]
@@ -3182,8 +3357,8 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         let options = observed.expect("terminal continuation reached normal cook boundary");
-        assert_eq!(options.max_attempts, 1);
-        assert_eq!(options.initial_run_id, "run");
+        assert_eq!(options.retry_policy.max_attempts, 1);
+        assert_eq!(options.identity.initial_run_id, "run");
     }
 
     #[test]
@@ -3212,9 +3387,10 @@ mod tests {
 
         let options = reconstruct_options(&store.load_recipe("cook").unwrap())
             .expect("continuation reconstructs persisted policy");
-        assert_eq!(options.max_attempts, 2);
+        assert_eq!(options.retry_policy.max_attempts, 2);
         assert_eq!(
             options
+                .identity
                 .initial_plan
                 .options
                 .execution_budget
@@ -3252,7 +3428,7 @@ mod tests {
             .expect("record provider execution");
 
             let mut options = reconstruct_options(&persisted).expect("old recipe reconstructs");
-            options.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
+            options.identity.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
                 "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null, "max_provider_rotations": null },
                 "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
                 "requested": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
@@ -3263,7 +3439,7 @@ mod tests {
             validate_initial_recipe_compatibility(&options)
                 .expect("descriptive retry-policy additions preserve the frozen recipe");
 
-            options.initial_plan.metadata["cook_retry_policy"]["resolved"]
+            options.identity.initial_plan.metadata["cook_retry_policy"]["resolved"]
                 ["max_provider_executions"] = serde_json::json!(2);
             assert!(
                 validate_initial_recipe_compatibility(&options).is_err(),
@@ -3285,7 +3461,7 @@ mod tests {
             .expect("record legacy provider execution");
 
             let mut options = reconstruct_options(&legacy).expect("legacy recipe reconstructs");
-            options.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
+            options.identity.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
                 "operator_intent": { "max_attempts": 1 },
                 "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
             });
@@ -3438,8 +3614,8 @@ mod tests {
             Some(0)
         );
         let options = observed.expect("normal cook hook received options");
-        assert_eq!(options.cook_id, "cook");
-        assert_eq!(options.initial_run_id, "run");
+        assert_eq!(options.identity.cook_id, "cook");
+        assert_eq!(options.identity.initial_run_id, "run");
         assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
         assert!(
             consume_next_from(&store, |_| panic!("completed continuation replayed"))
@@ -3972,7 +4148,7 @@ mod tests {
         store
             .validate_initial_recipe_compatibility(&options)
             .expect("new recipe is compatible");
-        assert!(!store.recipe_exists(&options.cook_id));
+        assert!(!store.recipe_exists(&options.identity.cook_id));
 
         store
             .persist_initial_recipe(&options)
@@ -3982,12 +4158,15 @@ mod tests {
             .expect("exact replay is compatible");
 
         let mut changed = options;
-        changed.title = "different title".to_string();
+        changed.finalization.title = "different title".to_string();
         store
             .validate_initial_recipe_compatibility(&changed)
             .expect("pre-provider correction is compatible");
         assert_eq!(
-            store.load_recipe(&changed.cook_id).unwrap().finalization["title"],
+            store
+                .load_recipe(&changed.identity.cook_id)
+                .unwrap()
+                .finalization["title"],
             "title"
         );
     }
@@ -3996,22 +4175,25 @@ mod tests {
     fn recipe_correction_transitions_from_pre_provider_supersede_to_frozen_boundaries() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut original = reconstruct_options(&recipe()).expect("canonical options");
-            original.initial_run_id = "run-1".to_string();
+            original.identity.initial_run_id = "run-1".to_string();
             persist_initial_recipe(&original).expect("persist original recipe");
-            crate::agent_task_lifecycle::submit_plan(&original.initial_plan, Some("run-1"))
-                .expect("materialize pre-provider attempt");
+            crate::agent_task_lifecycle::submit_plan(
+                &original.identity.initial_plan,
+                Some("run-1"),
+            )
+            .expect("materialize pre-provider attempt");
             crate::agent_task_lifecycle::record_pre_execution_failure(
                 "run-1",
-                &original.initial_plan,
+                &original.identity.initial_plan,
                 "provider_missing",
                 &Error::internal_unexpected("provider executable is unavailable"),
             )
             .expect("record pre-provider failure");
 
             let mut corrected = original.clone();
-            corrected.initial_run_id = "run-2".to_string();
-            corrected.to_worktree = "corrected-target".to_string();
-            corrected.title = "Corrected Cook".to_string();
+            corrected.identity.initial_run_id = "run-2".to_string();
+            corrected.workspace.to_worktree = "corrected-target".to_string();
+            corrected.finalization.title = "Corrected Cook".to_string();
             let superseded =
                 persist_initial_recipe(&corrected).expect("supersede pre-provider recipe");
             assert_eq!(superseded.attempts.len(), 2);
@@ -4039,8 +4221,11 @@ mod tests {
                 .iter()
                 .any(|field| field == "finalization.to_worktree"));
 
-            crate::agent_task_lifecycle::submit_plan(&corrected.initial_plan, Some("run-2"))
-                .expect("materialize provider attempt");
+            crate::agent_task_lifecycle::submit_plan(
+                &corrected.identity.initial_plan,
+                Some("run-2"),
+            )
+            .expect("materialize provider attempt");
             crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
                 record.metadata["provider_executions_consumed"] = serde_json::json!(1);
             })
@@ -4144,7 +4329,10 @@ mod tests {
             .expect("record provider execution");
 
             let mut corrected = reconstruct_options(&original).expect("reconstruct options");
-            corrected.source_refs.push("corrected-source".to_string());
+            corrected
+                .workspace
+                .source_refs
+                .push("corrected-source".to_string());
 
             assert!(
                 store
