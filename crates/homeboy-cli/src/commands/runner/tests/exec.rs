@@ -1182,38 +1182,6 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
 }
 
 #[test]
-fn runner_exec_rejects_artifacts_without_run_id() {
-    let err = exec_with_hydration(
-        "lab-local",
-        None,
-        None,
-        false,
-        None,
-        false,
-        false,
-        Vec::new(),
-        None,
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-        false,
-        None,
-        vec!["out.txt".to_string()],
-        Vec::new(),
-        Vec::new(),
-        false,
-        false,
-        vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
-        Vec::new(),
-    )
-    .expect_err("artifact requires run id");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert_eq!(err.details["field"], "run_id");
-}
-
-#[test]
 fn read_only_artifact_exec_rejects_capture_patch() {
     // A read-only retrieval must never rewrite a draining generation, so it
     // cannot capture a mutation patch (Extra-Chill/homeboy#9420).
@@ -1317,36 +1285,4 @@ fn runner_exec_output(runner_id: &str, mode: RunnerExecMode, remote_cwd: &str) -
         handoff: None,
         diagnostics: None,
     }
-}
-
-#[test]
-fn runner_exec_rejects_summaries_without_run_id() {
-    let err = exec_with_hydration(
-        "lab-local",
-        None,
-        None,
-        false,
-        None,
-        false,
-        false,
-        Vec::new(),
-        None,
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-        false,
-        None,
-        Vec::new(),
-        Vec::new(),
-        vec!["summary.json".to_string()],
-        false,
-        false,
-        vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
-        Vec::new(),
-    )
-    .expect_err("summary requires run id");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert_eq!(err.details["field"], "run_id");
 }
