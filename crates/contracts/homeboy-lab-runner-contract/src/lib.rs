@@ -612,8 +612,7 @@ pub const fn unleased_candidate_reconciliation_supported() -> bool {
 /// recovery contracts negotiated only when a controller must repair a remote
 /// daemon, not admission requirements every ordinary handoff needs. A runner
 /// that omits them can still execute work; controllers that need the recovery
-/// path fall back to scraping the long-option help text when the typed list is
-/// absent. Keep these names protocol-focused.
+/// path require the typed capability. Keep these names protocol-focused.
 pub fn daemon_recovery_capabilities() -> Vec<LabCapabilityVersion> {
     let mut capabilities = vec![
         DAEMON_RECOVERY_LEASELESS_CAPABILITY,
@@ -632,68 +631,16 @@ pub fn daemon_recovery_capabilities() -> Vec<LabCapabilityVersion> {
         .collect()
 }
 
-/// The bare long options rendered by a clap help `Options:` heading.
-///
-/// This is the last-resort contract for daemon-recovery negotiation against a
-/// remote that does not advertise the typed [`LabCapabilityVersion`] list. It
-/// only accepts an option whose trailing tokens are all value placeholders, so
-/// a `/// doc comment` rendering prose after the flag name silently removes it
-/// from the advertised contract. Kept here (rather than in the runner crate)
-/// so the CLI crate can assert the same predicate against real rendered help.
-pub fn declared_long_options(help: &str) -> std::collections::BTreeSet<&str> {
-    let mut options = std::collections::BTreeSet::new();
-    let mut in_options = false;
-    for line in help.lines() {
-        let trimmed = line.trim();
-        if line == trimmed && trimmed.ends_with(':') {
-            in_options = trimmed.eq_ignore_ascii_case("options:");
-            continue;
-        }
-        if !in_options || line == trimmed {
-            continue;
-        }
-        let mut tokens = trimmed.split_whitespace();
-        let Some(option) = tokens.next() else {
-            continue;
-        };
-        let option = option.trim_end_matches(',');
-        if option.starts_with("--") && tokens.all(is_option_value_placeholder) {
-            options.insert(option);
-        }
-    }
-    options
-}
-
-/// Whether a clap help token is a value placeholder (`<NAME>` or `[<NAME>]`).
-pub fn is_option_value_placeholder(token: &str) -> bool {
-    (token.starts_with('<') && token.ends_with('>'))
-        || (token.starts_with("[<") && token.ends_with(">]"))
-}
-
 /// Decide whether a remote daemon advertises a recovery capability.
-///
-/// `advertised` is the typed capability list parsed from the remote's
-/// self-identity report. `None` means the remote is an older binary that never
-/// advertised the field, so the caller's `scrape` (long-option help text) is
-/// consulted. `Some(list)` is authoritative: the scrape is never executed.
-///
-/// The three daemon-recovery negotiations each call this with their own
-/// capability id and their own scrape closure, so the decision is defined once
-/// instead of copied at every site.
-pub fn daemon_recovery_capability_negotiated<Scrape>(
+pub fn daemon_recovery_capability_advertised(
     advertised: Option<&[LabCapabilityVersion]>,
     capability_id: &str,
-    scrape: Scrape,
-) -> std::result::Result<bool, String>
-where
-    Scrape: FnOnce() -> std::result::Result<bool, String>,
-{
-    match advertised {
-        Some(capabilities) => Ok(capabilities
+) -> bool {
+    advertised.is_some_and(|capabilities| {
+        capabilities
             .iter()
-            .any(|capability| capability.id == capability_id)),
-        None => scrape(),
-    }
+            .any(|capability| capability.id == capability_id)
+    })
 }
 
 /// Immutable runtime provenance supplied by a controller, runner command, or
@@ -1085,84 +1032,22 @@ mod daemon_recovery_capability_tests {
     }
 
     #[test]
-    fn declared_long_options_accepts_only_bare_value_placeholders() {
-        let options = declared_long_options(
-            "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n    --addr <ADDR>\n",
-        );
-        assert!(options.contains("--confirm-no-daemon-owner"));
-        assert!(options.contains("--replacement-operation-id"));
-        assert!(options.contains("--addr"));
-
-        let prose =
-            declared_long_options("Options:\n    --confirm-no-daemon-owner after inspection\n");
-        assert!(!prose.contains("--confirm-no-daemon-owner"));
-        assert!(prose.is_empty());
-
-        let examples = declared_long_options("Examples:\n    --confirm-no-daemon-owner\n");
-        assert!(examples.is_empty());
-
-        let lowercase = declared_long_options("options:\n    --confirm-no-daemon-owner\n");
-        assert!(lowercase.contains("--confirm-no-daemon-owner"));
-    }
-
-    #[test]
-    fn is_option_value_placeholder_matches_only_value_shaped_tokens() {
-        assert!(is_option_value_placeholder("<ID>"));
-        assert!(is_option_value_placeholder("[<ID>]"));
-        assert!(!is_option_value_placeholder("ID"));
-        assert!(!is_option_value_placeholder("after inspection"));
-    }
-
-    #[test]
-    fn typed_capability_advertisement_is_authoritative_and_skips_the_scrape() {
+    fn recovery_capability_requires_typed_advertisement() {
         let advertised: [LabCapabilityVersion; 1] = [LabCapabilityVersion {
             id: DAEMON_RECOVERY_LEASELESS_CAPABILITY.to_string(),
             version: 1,
         }];
-        let mut scraped = false;
-        let negotiated = daemon_recovery_capability_negotiated(
+        assert!(daemon_recovery_capability_advertised(
             Some(advertised.as_slice()),
             DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-            || {
-                scraped = true;
-                Ok(false)
-            },
-        );
-        assert_eq!(negotiated, Ok(true));
-        assert!(!scraped, "the typed list must replace the help scrape");
-    }
-
-    #[test]
-    fn typed_advertisement_missing_the_capability_is_an_authoritative_no() {
-        let advertised: [LabCapabilityVersion; 1] = [LabCapabilityVersion {
-            id: DAEMON_RECOVERY_STATE_LOSS_CAPABILITY.to_string(),
-            version: 1,
-        }];
-        let mut scraped = false;
-        let negotiated = daemon_recovery_capability_negotiated(
+        ));
+        assert!(!daemon_recovery_capability_advertised(
             Some(advertised.as_slice()),
-            DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-            || {
-                scraped = true;
-                Ok(true)
-            },
-        );
-        assert_eq!(negotiated, Ok(false));
-        assert!(!scraped, "a typed no must not be overridden by the scrape");
-    }
-
-    #[test]
-    fn absent_advertisement_falls_back_to_the_scrape() {
-        let mut scraped = false;
-        let negotiated = daemon_recovery_capability_negotiated::<_>(
+            DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
+        ));
+        assert!(!daemon_recovery_capability_advertised(
             None,
             DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-            || {
-                scraped = true;
-                Ok(true)
-            },
-        );
-        assert_eq!(negotiated, Ok(true));
-        assert!(scraped, "an older binary must fall back to the help scrape");
+        ));
     }
 }

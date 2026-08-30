@@ -1963,118 +1963,27 @@ fn state_loss_recovery_delegation_uses_the_canonical_exact_contract() {
 }
 
 #[test]
-fn leaseless_recovery_uses_confirm_no_daemon_owner_contract() {
-    let contract = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n",
-        false,
-    ))
-    .expect("one-flag contract");
+fn leaseless_recovery_evidence_records_selected_contract_and_command_identity() {
+    let evidence = leaseless_recovery_evidence(
+        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
+        "homeboy 0.284.1+abc123",
+        sample_leaseless_recovery(),
+    );
 
     assert_eq!(
-        contract,
+        evidence.contract,
         RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
     );
-    let command =
-        remote_leaseless_recovery_command("/opt/homeboy", "127.0.0.1:0", contract, "operation-1");
-    assert!(command.contains("--confirm-no-daemon-owner"));
-    assert!(!command.contains("--reconcile-leaseless-orphans"));
-    assert!(!command.contains("--confirm-control-plane-lost"));
-}
-
-#[test]
-fn leaseless_recovery_rejects_legacy_two_flag_contract() {
-    let error = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n",
-        false,
-    ))
-    .expect_err("legacy two-flag contract is unsupported");
-    assert!(error.contains("canonical"));
-}
-
-#[test]
-fn leaseless_recovery_rejects_control_plane_lost_contract() {
-    let error = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --confirm-control-plane-lost\n",
-        false,
-    ))
-    .expect_err("legacy control-plane-lost contract is unsupported");
-    assert!(error.contains("canonical"));
-}
-
-#[test]
-fn leaseless_recovery_refuses_unsupported_or_ambiguous_help() {
-    let unsupported = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --addr <ADDR>\n",
-        false,
-    ))
-    .expect_err("unsupported contract");
-    assert!(unsupported.contains("did not advertise"));
-
-    let ambiguous = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --confirm-control-plane-lost\n",
-        false,
-    ))
-    .expect_err("mixed legacy flags are unsupported");
-    assert!(ambiguous.contains("canonical"));
-}
-
-#[test]
-fn leaseless_recovery_parses_only_exact_option_declarations() {
-    let options = declared_long_options(
-        "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --addr <ADDR>\n",
+    assert_eq!(evidence.remote_command_identity, "homeboy 0.284.1+abc123");
+    assert_eq!(
+        evidence
+            .recovery
+            .as_ref()
+            .expect("recovery result")
+            .replacement
+            .lease_id,
+        "lease-new"
     );
-    assert!(options.contains("--reconcile-leaseless-orphans"));
-    assert!(options.contains("--confirm-no-daemon-owner"));
-    assert!(options.contains("--addr"));
-
-    let prose = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "Examples:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n",
-        false,
-    ))
-    .expect_err("example lines must not advertise a contract");
-    assert!(prose.contains("did not advertise"));
-
-    let prose = negotiate_leaseless_recovery_contract(&command_output(
-        true,
-        "Options:\n    --reconcile-leaseless-orphans after inspection\n    --confirm-no-daemon-owner after inspection\n",
-        false,
-    ))
-    .expect_err("prose in the options section must not advertise a contract");
-    assert!(prose.contains("did not advertise"));
-}
-
-#[test]
-fn leaseless_recovery_evidence_records_selected_contract_and_command_identity() {
-    for (help, expected_contract) in [(
-        "Options:\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n",
-        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
-    )] {
-        let contract = negotiate_leaseless_recovery_contract(&command_output(true, help, false))
-            .expect("advertised contract");
-        let evidence = leaseless_recovery_evidence(
-            contract,
-            "homeboy 0.284.1+abc123",
-            sample_leaseless_recovery(),
-        );
-
-        assert_eq!(evidence.contract, expected_contract);
-        assert_eq!(evidence.remote_command_identity, "homeboy 0.284.1+abc123");
-        assert_eq!(
-            evidence
-                .recovery
-                .as_ref()
-                .expect("recovery result")
-                .replacement
-                .lease_id,
-            "lease-new"
-        );
-    }
 }
 
 // NOTE: the test asserting generated recovery commands parse against the real
@@ -2152,35 +2061,15 @@ fn hanging_ssh_connect_is_classified_as_a_timeout() {
 }
 
 #[test]
-fn leaseless_recovery_refuses_failed_or_timed_out_probe() {
-    let failed =
-        negotiate_leaseless_recovery_contract(&command_output(false, String::new(), false))
-            .expect_err("failed probe");
-    assert!(failed.contains("capability probe failed"));
-
-    let timed_out =
-        negotiate_leaseless_recovery_contract(&command_output(false, String::new(), true))
-            .expect_err("timed out probe");
-    assert!(timed_out.contains("timed out"));
-}
-
-#[test]
-fn leaseless_recovery_does_not_mutate_before_successful_negotiation() {
-    let events = std::cell::RefCell::new(Vec::new());
-    let result = execute_remote_leaseless_recovery(
-        None,
-        || {
-            events.borrow_mut().push("probe");
-            command_output(true, "OPTIONS:\n    --addr <ADDR>\n", false)
-        },
-        |_| {
-            events.borrow_mut().push("recover");
-            command_output(true, String::new(), false)
-        },
-    );
+fn leaseless_recovery_requires_typed_capability_before_mutation() {
+    let recovered = std::cell::Cell::new(false);
+    let result = execute_remote_leaseless_recovery(None, |_| {
+        recovered.set(true);
+        command_output(true, String::new(), false)
+    });
 
     assert!(result.is_err());
-    assert_eq!(*events.borrow(), vec!["probe"]);
+    assert!(!recovered.get());
 }
 
 #[test]
@@ -2484,23 +2373,11 @@ fn stale_replacement_force_stop_rejects_a_success_envelope_without_stop_action()
 
 #[test]
 fn unleased_candidate_reconciliation_requires_a_negotiated_contract() {
-    let output = || {
-        homeboy_core::server::CommandOutput {
-        success: true,
-        stdout: "Options:\n    --apply\n    --addr <ADDR>\n    --replacement-operation-id <REPLACEMENT_OPERATION_ID>\n".to_string(),
-        stderr: String::new(),
-        exit_code: 0,
-        timed_out: false,
-        observation: Default::default(),
-        child_resource: None,
-    }
-    };
-    negotiate_unleased_candidate_reconciliation(None, output)
-        .expect("legacy help advertises the canonical contract");
+    let error = negotiate_unleased_candidate_reconciliation(None)
+        .expect_err("remote without typed capabilities requires upgrade");
+    assert!(error.contains("must be upgraded"));
 
-    let error = negotiate_unleased_candidate_reconciliation(Some(&[]), || {
-        unreachable!("typed capability absence must not fall back to help")
-    })
-    .expect_err("current remote without capability requires upgrade");
+    let error = negotiate_unleased_candidate_reconciliation(Some(&[]))
+        .expect_err("typed capability absence requires upgrade");
     assert!(error.contains("must be upgraded"));
 }

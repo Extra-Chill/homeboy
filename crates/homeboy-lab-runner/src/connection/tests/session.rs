@@ -542,8 +542,7 @@ fn parses_self_identity_json_envelope() {
         identity.build_identity.as_deref(),
         Some("homeboy 0.228.13+19a41cd5102d")
     );
-    // An envelope with no capability field is an older binary: absent, not
-    // "advertises none", so the caller keeps the help-scrape fallback (#11102).
+    // An envelope with no capability field cannot perform typed recovery.
     assert_eq!(identity.daemon_recovery_capabilities, None);
 }
 
@@ -619,18 +618,16 @@ fn unknown_ids_and_future_versions_are_preserved() {
         .expect("forward-compatible list parses");
     assert_eq!(advertised.len(), 2);
     assert!(
-        homeboy_lab_runner_contract::daemon_recovery_capability_negotiated(
+        homeboy_lab_runner_contract::daemon_recovery_capability_advertised(
             Some(advertised.as_slice()),
             homeboy_lab_runner_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-            || Err("the scrape must not run when a typed list is present".to_string()),
         )
-        .expect("negotiation succeeds")
     );
 }
 
 /// The drift this issue is about: the envelope and the parser are written in
 /// different crates. Bind them, so renaming the field on one side fails here
-/// rather than silently reverting every controller to scraping help text.
+/// rather than silently disabling remote daemon recovery.
 #[test]
 fn the_advertised_capability_set_round_trips_through_the_parser() {
     let advertised = homeboy_lab_runner_contract::daemon_recovery_capabilities();
