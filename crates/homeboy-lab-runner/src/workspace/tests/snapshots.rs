@@ -415,6 +415,45 @@ fn clean_snapshot_reuse_preserves_exact_source_provenance_without_git_materializ
 }
 
 #[test]
+fn clean_snapshot_reuse_ignores_legacy_metadata_without_a_lease() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        create_local_runner("lab-local-legacy-reuse", runner_root.path());
+        let source = git_source("homeboy@legacy-reuse", "fix/legacy-reuse", "source\n");
+        let (synced, _) = sync_workspace(
+            "lab-local-legacy-reuse",
+            sync_options(source.path().display().to_string(), None),
+        )
+        .expect("initial snapshot sync");
+        let metadata_path =
+            std::path::Path::new(&synced.remote_path).join(".homeboy/runner-workspace.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).expect("workspace metadata"))
+                .expect("workspace metadata JSON");
+        metadata
+            .as_object_mut()
+            .expect("workspace metadata object")
+            .remove("workspace_lease");
+        fs::write(
+            metadata_path,
+            serde_json::to_vec_pretty(&metadata).expect("legacy metadata JSON"),
+        )
+        .expect("write legacy metadata");
+
+        let reused = reuse_compatible_snapshot_workspace(
+            "lab-local-legacy-reuse",
+            &sync_options(source.path().display().to_string(), None),
+        )
+        .expect("legacy snapshot lookup must not panic");
+
+        assert!(
+            reused.is_none(),
+            "lease-less snapshots are not ref-addressable"
+        );
+    });
+}
+
+#[test]
 fn same_commit_prepared_source_cache_creates_private_job_views() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");

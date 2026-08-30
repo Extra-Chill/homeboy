@@ -386,6 +386,7 @@ fn fake_synced_file(remote_spec: &str, role: &str) -> (String, LabWorkspaceMappi
         ),
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: "snapshot".to_string(),
+        workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
         prepared_workspace_lease: None,
         counts: crate::ByteFileCounts {
             files: 1,
