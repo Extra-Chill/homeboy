@@ -20,6 +20,30 @@ pub enum TaskWorktreeState {
     Removed,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeLeaseActivity {
+    Live,
+    Stale,
+    Stopped,
+}
+
+/// Deterministic local view of the write authority protecting a managed checkout.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeOwnershipProbe {
+    pub handle: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    pub lifecycle_state: String,
+    pub activity: WorktreeLeaseActivity,
+    pub heartbeat_fresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_holders: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupPolicy {

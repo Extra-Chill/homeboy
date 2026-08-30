@@ -1213,7 +1213,9 @@ fn store() -> Result<WorkspaceClaimStore> {
 /// Construct the controller-local claim authority below an explicit lifecycle
 /// data root. Lifecycle commits use this rather than resolving ambient paths.
 pub(crate) fn workspace_claim_store_at(data_root: std::path::PathBuf) -> WorkspaceClaimStore {
-    WorkspaceClaimStore::new(data_root.join("agent-task-workspace-claims"))
+    WorkspaceClaimStore::new(
+        data_root.join(homeboy_core::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    )
 }
 
 /// Return the durable controller binding for a workspace-owning run. Callers

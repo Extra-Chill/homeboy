@@ -21,6 +21,7 @@ pub const WORKSPACE_CLAIM_SCHEMA: &str = "homeboy/workspace-claim/v2";
 pub const WORKSPACE_OWNER_LEASE_SCHEMA: &str = "homeboy/workspace-owner-lease/v2";
 pub const WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA: &str =
     "homeboy/workspace-owner-release-recovery/v1";
+pub const LOCAL_WORKSPACE_CLAIMS_DIR: &str = "agent-task-workspace-claims";
 const WORKSPACE_AUTHORITY_SCHEMA: &str = "homeboy/workspace-authority/v2";
 pub const MAX_WORKSPACE_CLAIM_TTL_MS: u64 = 300_000;
 
@@ -156,6 +157,15 @@ pub struct WorkspaceAuthorityStatus {
     pub live_owner_count: usize,
     pub live_owners: Vec<RedactedWorkspaceOwnerIdentity>,
     pub clear: bool,
+}
+
+/// Token-free local owner details for operator diagnostics and write admission.
+/// Unlike transport-safe authority status, this intentionally names owner IDs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceOwnerStatus {
+    pub owner_id: String,
+    pub lifecycle_revision: u64,
+    pub expires_at_ms: u64,
 }
 
 pub const WORKSPACE_AUTHORITY_STATUS_SCHEMA: &str = "homeboy/workspace-authority-status/v2";
@@ -663,6 +673,30 @@ impl WorkspaceClaimStore {
                 clear: state.reconciliation.is_none() && live_owners.is_empty(),
                 live_owners,
             })
+        })
+    }
+    /// Return exact live owner identities after pruning expiry under the
+    /// workspace lock. This local-only probe never exposes authority tokens.
+    pub fn owner_status(
+        &self,
+        workspace: &WorkspaceIdentity,
+        now_ms: u64,
+    ) -> Result<Vec<WorkspaceOwnerStatus>> {
+        workspace.verify()?;
+        self.with_lock(workspace, || {
+            let mut state = self.read_or_empty(workspace)?;
+            if state.prune(now_ms) {
+                self.commit(&mut state)?;
+            }
+            Ok(state
+                .owners
+                .iter()
+                .map(|owner| WorkspaceOwnerStatus {
+                    owner_id: owner.owner_id.clone(),
+                    lifecycle_revision: owner.lifecycle_revision,
+                    expires_at_ms: owner.expires_at_ms,
+                })
+                .collect())
         })
     }
     /// Exact reconciliation release is idempotent; a different live token fails.

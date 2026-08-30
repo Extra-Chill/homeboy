@@ -9,8 +9,9 @@ use homeboy::core::cleanup::{
 use homeboy::core::worktree::{
     self, CleanupPolicy, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions, WorktreeAdoptOutput,
     WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeInventoryOptions,
-    WorktreeInventoryOutput, WorktreeListOutput, WorktreeQueueCreateOptions,
-    WorktreeQueueCreateOutput, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
+    WorktreeInventoryOutput, WorktreeListOutput, WorktreeOwnershipProbe,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 use homeboy::core::worktree_provider::{
     self, ConfiguredWorktreeCleanupOutput as WorktreeProviderCleanupOutput,
@@ -122,6 +123,11 @@ enum WorktreeCommand {
         /// Task worktree ID, e.g. component@branch-slug
         id: String,
     },
+    /// Report the session currently holding a managed checkout's write lease
+    Holder {
+        /// Managed worktree handle or any path inside the checkout
+        target: String,
+    },
     /// Remove one task worktree after safety checks
     Remove {
         /// Task worktree ID, e.g. component@branch-slug
@@ -202,6 +208,7 @@ pub enum WorktreeOutput {
     List(WorktreeListCommandOutput),
     Inventory(WorktreeInventoryOutput),
     Status(WorktreeStatusCommandOutput),
+    Holder(WorktreeOwnershipProbe),
     Remove(WorktreeRemoveOutput),
     Cleanup(WorktreeCleanupCommandOutput),
     QuarantineList(Vec<TaskWorktreeRegistryQuarantine>),
@@ -558,6 +565,22 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                 }
             };
             WorktreeOutput::Status(status)
+        }
+        WorktreeCommand::Holder { target } => {
+            let path = PathBuf::from(&target);
+            let path = if path.exists() {
+                path
+            } else {
+                PathBuf::from(worktree::resolve(&target)?.worktree_path)
+            };
+            WorktreeOutput::Holder(worktree::ownership_probe(&path)?.ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "worktree",
+                    "path is not inside a managed task worktree",
+                    Some(target),
+                    None,
+                )
+            })?)
         }
         WorktreeCommand::Remove {
             id,
@@ -947,6 +970,18 @@ mod tests {
         assert!(cursor.is_none());
         assert!(adopted_cursor.is_none());
         assert!(!apply);
+    }
+
+    #[test]
+    fn worktree_holder_accepts_a_checkout_path() {
+        let cli = Cli::parse_from(["homeboy", "worktree", "holder", "/tmp/managed-checkout"]);
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Holder { target } = args.command else {
+            panic!("expected holder command");
+        };
+        assert_eq!(target, "/tmp/managed-checkout");
     }
 
     #[test]
