@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.39.7] - 2026-08-30
+
+### Fixed
+- expose Codebox bench failures
+
 ## [3.39.6] - 2026-08-30
 
 ### Fixed
