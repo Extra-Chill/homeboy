@@ -14,7 +14,7 @@ homeboy_require_package_json "$PROJECT_PATH" >/dev/null
 homeboy_detect_package_manager "$PROJECT_PATH" >/dev/null
 
 LOCKFILES=()
-for lockfile in pnpm-lock.yaml yarn.lock package-lock.json; do
+for lockfile in pnpm-lock.yaml yarn.lock npm-shrinkwrap.json package-lock.json; do
     if [ -f "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/${lockfile}" ]; then
         LOCKFILES+=("$lockfile")
     fi
@@ -48,7 +48,7 @@ dependency_command() {
             printf '%s\n' "yarn install --frozen-lockfile"
             ;;
         npm|*)
-            if [ -f "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/package-lock.json" ]; then
+            if [ -f "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/npm-shrinkwrap.json" ] || [ -f "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/package-lock.json" ]; then
                 printf '%s\n' "npm ci"
             else
                 printf '%s\n' "npm install --no-audit --no-fund"

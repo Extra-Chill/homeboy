@@ -141,11 +141,16 @@ for (const file of exampleFiles) {
 }
 
 const nodeManifest = JSON.parse(fs.readFileSync(path.join(exampleDir, 'nodejs.json'), 'utf8'));
-assert.deepEqual(nodeManifest.lockfile_priority, ['pnpm-lock.yaml', 'yarn.lock', 'package-lock.json']);
+assert.deepEqual(nodeManifest.lockfile_priority, ['pnpm-lock.yaml', 'yarn.lock', 'npm-shrinkwrap.json', 'package-lock.json']);
 assert.deepEqual(
 	nodeManifest.package_managers.map((manager) => manager.id),
 	['pnpm', 'yarn', 'npm'],
 	'Node.js adapter documents the current deterministic package-manager priority'
+);
+assert.deepEqual(
+	nodeManifest.package_managers.find((manager) => manager.id === 'npm').selection.files,
+	['npm-shrinkwrap.json', 'package-lock.json'],
+	'npm recognizes both authoritative lockfile names'
 );
 
 const composerManifest = JSON.parse(fs.readFileSync(path.join(exampleDir, 'composer.json'), 'utf8'));
