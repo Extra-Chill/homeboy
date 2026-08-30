@@ -8,6 +8,8 @@ artifact_root="${PHASE_ARTIFACT_ROOT:?PHASE_ARTIFACT_ROOT is required}"
 command="${COMMAND:?COMMAND is required}"
 artifact_key="${ARTIFACT_KEY:?ARTIFACT_KEY is required}"
 action_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${action_root}/scripts/core/lib.sh"
 
 fail_closed() {
   echo "::error::$1"
