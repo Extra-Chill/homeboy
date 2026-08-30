@@ -4,9 +4,11 @@
 //! boundaries. Execution behavior and service ownership remain outside this
 //! crate.
 
+mod artifact;
 mod capability;
 mod lifecycle;
 
+pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
 pub use capability::{
     RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
     RunnerToolchainReadinessProbe,

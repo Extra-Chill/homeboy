@@ -23,7 +23,8 @@ use crate::runner_execution_envelope::{
 };
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
-use homeboy_lab_runner_contract::{RunnerMutationArtifacts, RunnerResourceMetrics};
+use homeboy_lab_runner_contract::RunnerResourceMetrics;
+use homeboy_runner_contract::RunnerMutationArtifacts;
 
 /// Broker metadata is durable queue input. Keep command-file payloads bounded
 /// before they can be persisted or decoded by a worker.
