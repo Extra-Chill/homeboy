@@ -231,7 +231,6 @@ fn homeboy_version_skew_check_is_absent_for_matching_build_identities() {
     .is_none());
 }
 
-#[test]
 /// The prose and the typed action must name the same ref.
 ///
 /// They are two vocabularies of one fix -- a sentence an operator reads and
