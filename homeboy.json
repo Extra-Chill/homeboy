@@ -640,6 +640,16 @@
         "forbid": {
           "glob": "crates/**",
           "patterns": [
+            "\\bextension::validation::",
+            "\\bextension::(?:extension_provides_build|validate_extension_requirements|validate_required_extensions)\\b"
+          ]
+        },
+        "name": "extensions-use-owned-validation-api"
+      },
+      {
+        "forbid": {
+          "glob": "crates/**",
+          "patterns": [
             "\\bextension_execution\\b",
             "\\bfind_extension_for_file_ext\\b"
           ]

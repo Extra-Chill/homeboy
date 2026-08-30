@@ -812,7 +812,7 @@ pub(super) fn load_project_components_with_projection(
         // Validate required extensions are installed before attempting artifact resolution.
         // Without this check, missing extensions cause resolve_artifact() to silently
         // return None, and the component gets skipped with a vague "no artifact" message.
-        if let Err(err) = extension::validate_required_extensions(&loaded) {
+        if let Err(err) = extension::resolve::validate_required_extensions(&loaded) {
             if check {
                 // Read-only diff: a missing extension must not poison the whole pass.
                 // Skip-and-warn so operators still see the diff for the components they
