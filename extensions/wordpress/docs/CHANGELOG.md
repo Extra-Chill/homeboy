@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.39.6] - 2026-08-30
+
+### Fixed
+- Fix slow WP Codebox descriptor preflight
+
 ## [3.39.5] - 2026-08-29
 
 ### Changed
