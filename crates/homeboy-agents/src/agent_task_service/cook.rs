@@ -3079,10 +3079,12 @@ where
             });
             continue;
         }
-        // The persisted batch child `run_id` is the cook id (`cook-<id>`), which
-        // is exactly the durable recipe key. Reconstruct from that recipe so the
-        // resumed cook re-runs its own gates and finalization contract.
-        let cook_id = child.run_id.clone();
+        // Roster `run_id` is the canonical durable attempt, including transport
+        // replacements. Resolve the recipe from that attempt so resume still
+        // finds the cook after lineage moves off the synthesized cook id.
+        let cook_id = super::load_recipe_for_attempt(&child.run_id)?
+            .map(|recipe| recipe.cook_id)
+            .unwrap_or_else(|| child.run_id.clone());
         let cell = match resume_batch_child(
             batch_id,
             &cook_id,
@@ -3094,7 +3096,7 @@ where
                 let exit_code = cook_report_exit_code(&report);
                 AgentTaskCookBatchCellReport {
                     cook_id: report.cook_id.clone(),
-                    initial_run_id: cook_id,
+                    initial_run_id: child.run_id.clone(),
                     status: report.status.clone(),
                     exit_code,
                     result: Some(report),
@@ -3103,7 +3105,7 @@ where
             }
             Err(error) => AgentTaskCookBatchCellReport {
                 cook_id: child.task_id.clone(),
-                initial_run_id: cook_id,
+                initial_run_id: child.run_id.clone(),
                 status: "failed".to_string(),
                 exit_code: 1,
                 result: None,
@@ -3114,7 +3116,7 @@ where
         // repeated resume (or a crash mid-batch) converges idempotently.
         crate::agent_task_batch::record_child_finalization(
             batch_id,
-            &cell.initial_run_id,
+            &child.run_id,
             child_finalization_value(&cell),
         )?;
         cells.push(cell);
