@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.21] - 2026-08-30
+
+### Fixed
+- load differential reconciler helpers
+
 ## [2.15.20] - 2026-08-29
 
 ### Changed
