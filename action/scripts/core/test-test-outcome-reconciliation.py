@@ -179,6 +179,27 @@ def main() -> None:
         assert "candidate: " + reason in completed.stderr, completed.stderr
         assert "baseline" not in completed.stderr.split("provenance-mismatched")[1], completed.stderr
 
+        for directory in (current, baseline):
+            for kind, schema in (("outcomes", "homeboy/test-outcomes/v1"), ("inventory", "homeboy/test-inventory/v1")):
+                (directory / f"{STEM}.test-{kind}.json").write_text(
+                    json.dumps({
+                        "schema": schema,
+                        "command": COMMAND,
+                        "invalid_evidence": {"type": "invalid_evidence", "reason": reason},
+                    }),
+                    encoding="utf-8",
+                )
+        completed = run_gate(current, baseline)
+        assert json.loads(completed.stdout) == {COMMAND: "inconclusive"}, "identical declared producer defects are shared infrastructure"
+        assert "candidate and baseline declared the same" in completed.stderr, completed.stderr
+        assert reason in completed.stderr, completed.stderr
+
+        baseline_outcomes = baseline / f"{STEM}.test-outcomes.json"
+        payload = json.loads(baseline_outcomes.read_text(encoding="utf-8"))
+        payload["invalid_evidence"]["reason"] = reason + " on baseline"
+        baseline_outcomes.write_text(json.dumps(payload), encoding="utf-8")
+        assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "different producer defects must fail closed"
+
     print("PASS: Test outcome/inventory reconciliation fixtures")
 
 

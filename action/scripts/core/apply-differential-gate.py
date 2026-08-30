@@ -263,6 +263,13 @@ def invalid_evidence_detail(command: str, sides: list[tuple[str, str, str]]) -> 
     return f" ({'; '.join(described)})" if described else ""
 
 
+def shared_test_evidence_defect(command: str, current_dir: str, base_dir: str) -> str | None:
+    """Return a producer-declared defect only when both sides report it exactly."""
+    current = test_evidence_defect(command, current_dir)
+    baseline = test_evidence_defect(command, base_dir)
+    return current if current and current == baseline else None
+
+
 def command_label(command: str, metadata: dict[str, Any]) -> str:
     full = metadata.get("command")
     if isinstance(full, str) and full:
@@ -317,6 +324,19 @@ def main() -> int:
             current_evidence, current_inventory, current_failed = test_outcomes(command, current_dir)
             base_evidence, base_inventory, base_failed = test_outcomes(command, base_dir)
             if "invalid" in {current_evidence, base_evidence}:
+                shared_defect = None
+                if current_evidence == base_evidence == "invalid":
+                    shared_defect = shared_test_evidence_defect(command, current_dir, base_dir)
+                if shared_defect:
+                    adjusted[command] = "inconclusive"
+                    run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+                    retry = f" Retry after repairing the producer: gh run rerun {run_id} --failed." if run_id else ""
+                    print(
+                        f"::warning::Differential gate marked {command} inconclusive: candidate and baseline "
+                        f"declared the same test evidence producer defect: {shared_defect}.{retry}",
+                        file=sys.stderr,
+                    )
+                    continue
                 adjusted[command] = "invalid_evidence"
                 detail = invalid_evidence_detail(
                     command,
