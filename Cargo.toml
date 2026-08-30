@@ -96,6 +96,7 @@ homeboy-agents = { version = "0.1.0", path = "crates/homeboy-agents", features =
 # rather than restating its rule, so the test cannot drift from the gate it
 # guards.
 homeboy-code-audit = { version = "0.1.0", path = "crates/homeboy-code-audit" }
+homeboy-extension-contract = { version = "0.1.0", path = "crates/contracts/homeboy-extension-contract" }
 
 [features]
 default = []

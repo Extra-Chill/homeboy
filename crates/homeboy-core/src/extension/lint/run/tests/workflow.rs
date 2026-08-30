@@ -737,16 +737,17 @@ exit 0
 
 #[test]
 fn lint_config_deserializes_changed_file_routes() {
-    let config: crate::extension::LintConfig = serde_json::from_str(
-        r#"{
+    let config: homeboy_extension_contract::manifest_toolchain_config::LintConfig =
+        serde_json::from_str(
+            r#"{
                 "extension_script": "scripts/lint.sh",
                 "changed_file_routes": [
                     { "extensions": ["php"], "step": "phpcs,phpstan" },
                     { "globs": ["assets/**/*.css"], "step": "stylelint" }
                 ]
             }"#,
-    )
-    .expect("parse lint config");
+        )
+        .expect("parse lint config");
 
     assert_eq!(config.changed_file_routes.len(), 2);
     assert_eq!(config.changed_file_routes[0].extensions, vec!["php"]);

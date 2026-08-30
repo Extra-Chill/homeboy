@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use homeboy::core::component;
+use homeboy_extension_contract::manifest_capability_config::RuntimeRequirementsConfig;
+use homeboy_extension_contract::ExtensionManifest;
 
 use super::{CmdResult, ComponentOutput};
 
@@ -62,9 +64,8 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
         if let Ok(raw) = std::fs::read_to_string(&config_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(ext_obj) = json.get("extensions").and_then(|e| e.get(ext_id.as_str())) {
-                    if let Ok(requirements) = serde_json::from_value::<
-                        homeboy_core::extension::RuntimeRequirementsConfig,
-                    >(ext_obj.clone())
+                    if let Ok(requirements) =
+                        serde_json::from_value::<RuntimeRequirementsConfig>(ext_obj.clone())
                     {
                         apply_component_runtime_requirements(
                             requirements,
@@ -79,7 +80,7 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
     }
 
     let extension = if let Some(ref ext_id) = extension_id {
-        homeboy_core::extension::load_extension(ext_id).ok()
+        homeboy_core::extension_store::load_extension(ext_id).ok()
     } else {
         None
     };
@@ -124,9 +125,9 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
 }
 
 fn run_component_env_detector(
-    extension: &homeboy_core::extension::ExtensionManifest,
+    extension: &ExtensionManifest,
     component_path: &Path,
-) -> homeboy::core::Result<Option<homeboy_core::extension::RuntimeRequirementsConfig>> {
+) -> homeboy::core::Result<Option<RuntimeRequirementsConfig>> {
     let Some(component_env) = extension.component_env.as_ref() else {
         return Ok(None);
     };
@@ -175,24 +176,22 @@ fn run_component_env_detector(
         return Ok(None);
     }
 
-    let detected =
-        serde_json::from_str::<homeboy_core::extension::RuntimeRequirementsConfig>(trimmed)
-            .map_err(|error| {
-                homeboy::core::Error::validation_invalid_json(
-                    error,
-                    Some(format!(
-                        "parse component env detector output for extension '{}'",
-                        extension.id
-                    )),
-                    Some(trimmed.chars().take(200).collect()),
-                )
-            })?;
+    let detected = serde_json::from_str::<RuntimeRequirementsConfig>(trimmed).map_err(|error| {
+        homeboy::core::Error::validation_invalid_json(
+            error,
+            Some(format!(
+                "parse component env detector output for extension '{}'",
+                extension.id
+            )),
+            Some(trimmed.chars().take(200).collect()),
+        )
+    })?;
 
     Ok(Some(detected))
 }
 
 fn apply_component_env_detector_output(
-    detected: homeboy_core::extension::RuntimeRequirementsConfig,
+    detected: RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
 ) {
     apply_component_runtime_requirements(detected, runtimes, "component", true);
@@ -200,7 +199,7 @@ fn apply_component_env_detector_output(
 
 fn apply_extension_runtime_requirements(
     extension_id: &str,
-    runtime: &homeboy_core::extension::RuntimeRequirementsConfig,
+    runtime: &RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
 ) {
     let source = format!("extension:{}", extension_id);
@@ -208,7 +207,7 @@ fn apply_extension_runtime_requirements(
 }
 
 fn apply_component_runtime_requirements(
-    requirements: homeboy_core::extension::RuntimeRequirementsConfig,
+    requirements: RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
     source: &str,
     overwrite: bool,
@@ -255,14 +254,13 @@ mod tests {
 
     #[test]
     fn extension_runtime_requirements_fill_missing_component_versions() {
-        let runtime: homeboy_core::extension::RuntimeRequirementsConfig =
-            serde_json::from_value(serde_json::json!({
-                "runtimes": {
-                    "node": { "version": "24" },
-                    "php": { "version": "8.3" }
-                }
-            }))
-            .expect("runtime requirements");
+        let runtime: RuntimeRequirementsConfig = serde_json::from_value(serde_json::json!({
+            "runtimes": {
+                "node": { "version": "24" },
+                "php": { "version": "8.3" }
+            }
+        }))
+        .expect("runtime requirements");
         let mut runtimes = BTreeMap::new();
 
         apply_extension_runtime_requirements("fixture-runtime", &runtime, &mut runtimes);
@@ -293,13 +291,12 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script, perms).expect("chmod detector");
 
-        let mut extension: homeboy_core::extension::ExtensionManifest =
-            serde_json::from_value(serde_json::json!({
-                "name": "Demo",
-                "version": "1.0.0",
-                "component_env": { "detect_script": "scripts/env/detect.sh" }
-            }))
-            .expect("extension manifest");
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Demo",
+            "version": "1.0.0",
+            "component_env": { "detect_script": "scripts/env/detect.sh" }
+        }))
+        .expect("extension manifest");
         extension.id = "demo".to_string();
         extension.extension_path = Some(extension_dir.to_string_lossy().to_string());
 
@@ -313,14 +310,13 @@ mod tests {
 
     #[test]
     fn runtime_requirements_accept_canonical_shape_only() {
-        let generic: homeboy_core::extension::RuntimeRequirementsConfig =
-            serde_json::from_value(serde_json::json!({
-                "runtimes": {
-                    "python": { "version": "3.12" },
-                    "ruby": { "version": "3.3" }
-                }
-            }))
-            .expect("generic requirements");
+        let generic: RuntimeRequirementsConfig = serde_json::from_value(serde_json::json!({
+            "runtimes": {
+                "python": { "version": "3.12" },
+                "ruby": { "version": "3.3" }
+            }
+        }))
+        .expect("generic requirements");
 
         assert_eq!(generic.runtimes["python"].version, "3.12");
         assert_eq!(generic.runtimes["ruby"].version, "3.3");
@@ -328,14 +324,13 @@ mod tests {
 
     #[test]
     fn component_env_detector_output_overrides_component_values_before_runtime_defaults() {
-        let runtime: homeboy_core::extension::RuntimeRequirementsConfig =
-            serde_json::from_value(serde_json::json!({
-                "runtimes": {
-                    "node": { "version": "24" },
-                    "php": { "version": "8.4" }
-                }
-            }))
-            .expect("runtime requirements");
+        let runtime: RuntimeRequirementsConfig = serde_json::from_value(serde_json::json!({
+            "runtimes": {
+                "node": { "version": "24" },
+                "php": { "version": "8.4" }
+            }
+        }))
+        .expect("runtime requirements");
         let mut runtimes = BTreeMap::from([
             (
                 "node".to_string(),
@@ -370,14 +365,13 @@ mod tests {
 
     #[test]
     fn component_versions_win_over_extension_runtime_requirements() {
-        let runtime: homeboy_core::extension::RuntimeRequirementsConfig =
-            serde_json::from_value(serde_json::json!({
-                "runtimes": {
-                    "node": { "version": "24" },
-                    "php": { "version": "8.3" }
-                }
-            }))
-            .expect("runtime requirements");
+        let runtime: RuntimeRequirementsConfig = serde_json::from_value(serde_json::json!({
+            "runtimes": {
+                "node": { "version": "24" },
+                "php": { "version": "8.3" }
+            }
+        }))
+        .expect("runtime requirements");
         let mut runtimes = BTreeMap::from([
             (
                 "node".to_string(),

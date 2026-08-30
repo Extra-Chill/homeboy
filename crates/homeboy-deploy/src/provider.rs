@@ -201,7 +201,7 @@ fn run_component(
     let target_input = project_attachment.deployment_provider_input.as_ref();
     let layered = match layered {
         Some(layered)
-            if layered.schema == homeboy_core::extension::DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA =>
+            if layered.schema == homeboy_extension_contract::DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA =>
         {
             Some(layered)
         }
@@ -389,7 +389,7 @@ fn layered_payload(
         .map_err(|error| Error::from_json_error(&error, Some(ENCODE_POLICY_CONTEXT.to_string())))?;
     let revision = clean_head_revision(component)?;
     let payload = serde_json::json!({
-        "schema": homeboy_core::extension::DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA,
+        "schema": homeboy_extension_contract::DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA,
         "policy": {
             "value": policy,
             "reference": {

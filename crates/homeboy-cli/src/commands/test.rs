@@ -14,9 +14,9 @@ use homeboy_core::extension::test::{
     run_self_check_test_workflow_with_progress, test_failure_summary_items, TestAnalysisInput,
     TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
-use homeboy_core::extension::ExtensionCapability;
 #[cfg(test)]
 use homeboy_extension_contract::test_results::TestInventoryRejection;
+use homeboy_extension_contract::ExtensionCapability;
 use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -2042,7 +2042,7 @@ mod tests {
                 test_scope: None,
                 summary: None,
                 raw_output: None,
-                extension_phase_timings: vec![homeboy_core::extension::ExtensionPhaseTiming {
+                extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
                     name: "provider-test".to_string(),
                     duration_ms: 1,
                     status: Some("failed".to_string()),
@@ -2282,7 +2282,7 @@ mod tests {
                 start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
                     .expect("observation");
             let run_id = observation.active.run_id().to_string();
-            let timing = homeboy_core::extension::ExtensionPhaseTiming {
+            let timing = homeboy_audit_contract::ExtensionPhaseTiming {
                 name: "provider-test".to_string(),
                 duration_ms: 1,
                 status: Some("failed".to_string()),
@@ -2469,7 +2469,7 @@ mod tests {
                     test_scope: None,
                     summary: None,
                     raw_output: None,
-                    extension_phase_timings: vec![homeboy_core::extension::ExtensionPhaseTiming {
+                    extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
                         name: "provider-test".to_string(),
                         duration_ms: 1,
                         status: Some("completed".to_string()),
@@ -2550,7 +2550,7 @@ mod tests {
                 stdout_limit_bytes: 0,
                 stderr_limit_bytes: 0,
             }),
-            extension_phase_timings: vec![homeboy_core::extension::ExtensionPhaseTiming {
+            extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
                 name: "provider".to_string(),
                 duration_ms: 0,
                 status: None,

@@ -20,13 +20,14 @@ mod action;
 mod settings;
 
 use super::env_provider;
-use super::exec_context;
-use super::load_extension;
-use super::manifest::{ExtensionManifest, RuntimeConfig};
-use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
+use crate::extension_store::load_extension;
 use homeboy_core::extension_execution::ExtensionExecutionContext;
 use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
+use homeboy_extension_contract::exec_context;
+use homeboy_extension_contract::manifest_action_config::RuntimeConfig;
+use homeboy_extension_contract::runner_contract::RunnerStepFilter;
+use homeboy_extension_contract::ExtensionManifest;
 
 pub use action::execute_action;
 use homeboy_core::extension_readiness::extension_ready_status;
@@ -340,7 +341,7 @@ fn build_args_string(
 pub(crate) fn validate_capability_script_exists(
     extension_path: &Path,
     script_path: &str,
-    capability: super::ExtensionCapability,
+    capability: homeboy_extension_contract::ExtensionCapability,
 ) -> Result<()> {
     let script_path = extension_path.join(script_path);
     if !script_path.exists() {
@@ -609,7 +610,7 @@ pub(crate) fn prepare_capability_run(
     }
 
     let manifest = load_extension_manifest_from_dir(&execution.extension_path)?;
-    super::validate_core_compatibility(
+    homeboy_extension_contract::validate_core_compatibility(
         "extension",
         &execution.extension_id,
         manifest
@@ -786,7 +787,7 @@ fn execute_extension_runtime(
     // - Direct execution cannot handle bash scripts or shell features
     // See executor.rs for detailed execution strategy decision tree
     let extension = load_extension(extension_id)?;
-    super::validate_core_compatibility(
+    homeboy_extension_contract::validate_core_compatibility(
         "extension",
         extension_id,
         extension
@@ -1687,7 +1688,7 @@ mod tests {
                 "fixture-extension".to_string(),
                 None,
             ),
-            capability: crate::extension::ExtensionCapability::Lint,
+            capability: homeboy_extension_contract::ExtensionCapability::Lint,
             extension_id: "fixture-extension".to_string(),
             extension_path: std::path::PathBuf::from("/tmp/fixture-extension"),
             script_path: "lint.sh".to_string(),

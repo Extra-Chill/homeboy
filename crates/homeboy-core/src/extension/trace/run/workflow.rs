@@ -3,11 +3,12 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::extension::{stderr_tail, ExtensionCapability};
+use crate::extension::stderr_tail;
 use crate::extension_execution::{resolve_execution_context, ExtensionExecutionContext};
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
+use homeboy_extension_contract::ExtensionCapability;
 use homeboy_lifecycle_contract::RigStateSnapshot;
 
 use super::super::attach::{append_attach_observations, observe_trace_attachments};

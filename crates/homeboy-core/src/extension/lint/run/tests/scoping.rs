@@ -4,8 +4,8 @@ use super::super::scoping::{
 };
 use super::super::types::ScopedLintRun;
 use super::{component, split_lint_routes};
-use crate::extension::LintChangedFileRoute;
 use homeboy_core::component::Component;
+use homeboy_extension_contract::LintChangedFileRoute;
 
 #[test]
 fn manifest_changed_php_files_route_to_php_steps_only() {

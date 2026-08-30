@@ -1,12 +1,12 @@
 //! Structured-sidecar declaration resolution.
 //!
 //! The pure contract types live in `homeboy-extension-contract`; this module
-//! re-exports them and provides the resolution logic that depends on core's
+//! This module provides the resolution logic that depends on core's
 //! run-dir file constants and `structured_sidecar` defaults.
 
 use homeboy_core::structured_sidecar;
 
-pub use homeboy_extension_contract::sidecar_config::{
+use homeboy_extension_contract::sidecar_config::{
     StructuredSidecarContract, StructuredSidecarDeclaration,
 };
 

@@ -46,7 +46,7 @@ use homeboy::fuzz::{
 };
 use homeboy::rig::RigSpec;
 use homeboy::test_support::with_isolated_home;
-use homeboy_core::extension::FuzzConfig;
+use homeboy_extension_contract::fuzz_config::FuzzConfig;
 use std::fs;
 use std::path::{Path, PathBuf};
 

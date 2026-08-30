@@ -7,9 +7,9 @@ use crate::release::types::{
     ReleaseSemverRecommendation,
 };
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
-use homeboy_core::extension::ExtensionManifest;
 use homeboy_core::plan::{PlanStep, PlanStepStatus};
 use homeboy_core::Result;
+use homeboy_extension_contract::ExtensionManifest;
 
 /// Test-local shim: production callers pass their own reconciliation input,
 /// so the no-reconciliation default only ever existed for these assertions.
@@ -604,7 +604,7 @@ fn release_plan_runs_package_preflight_before_mutating_release_steps() {
         }))
         .expect("extension manifest");
         extension.id = "fixture-packager".to_string();
-        homeboy_core::extension::save_manifest(&extension).expect("save extension manifest");
+        homeboy_core::extension_store::save_manifest(&extension).expect("save extension manifest");
         let mut warnings = Vec::new();
         let mut hints = Vec::new();
         let release_scope =
@@ -1230,7 +1230,8 @@ fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
             ScopedExtensionConfig::default(),
         )]));
         let extension = release_extension("wordpress", &["release.package"]);
-        homeboy_core::extension::save_manifest(&extension).expect("install extension manifest");
+        homeboy_core::extension_store::save_manifest(&extension)
+            .expect("install extension manifest");
         let mut warnings = Vec::new();
         let mut hints = Vec::new();
         let release_scope =

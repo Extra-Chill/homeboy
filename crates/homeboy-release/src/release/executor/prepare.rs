@@ -1,6 +1,7 @@
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
-use homeboy_core::{self, extension::ExtensionManifest};
+use homeboy_core::{self};
+use homeboy_extension_contract::ExtensionManifest;
 
 use super::{build_release_payload, publish_response_output, step_failed, step_success};
 use crate::release::types::{ReleaseState, ReleaseStepResult};

@@ -5,7 +5,7 @@ use homeboy_engine_primitives::identifier;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::load_extension;
+use crate::extension_store::load_extension;
 
 pub(crate) const EXTENSION_SOURCE_PREPARE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -34,8 +34,9 @@ pub struct UpdateResult {
     pub linked: bool,
     pub source_path: Option<PathBuf>,
     pub git_root: Option<PathBuf>,
-    pub source_update: super::ExtensionSourceUpdate,
-    pub repaired_source_metadata: Option<source_metadata::SourceMetadataRepair>,
+    pub source_update: homeboy_extension_contract::update_output::ExtensionSourceUpdate,
+    pub repaired_source_metadata:
+        Option<homeboy_extension_contract::source_metadata_repair::SourceMetadataRepair>,
 }
 
 pub mod source_metadata;

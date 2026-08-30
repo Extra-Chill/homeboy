@@ -32,8 +32,9 @@ use homeboy_core::engine::symbol_graph::module_path_from_file;
 use homeboy_core::Result;
 use homeboy_core::{
     self,
-    extension::{AdjustedItem, ExtensionManifest, ParsedItem, RelatedTests, ResolvedImports},
+    extension::{AdjustedItem, ParsedItem, RelatedTests, ResolvedImports},
 };
+use homeboy_extension_contract::ExtensionManifest;
 
 impl ItemKind {
     fn from_str(s: &str) -> Self {

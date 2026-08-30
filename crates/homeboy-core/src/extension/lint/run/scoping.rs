@@ -2,10 +2,9 @@
 //! flags into runner-compatible globbed lint runs via extension routes.
 
 use super::types::{LintRunWorkflowArgs, ScopedLintPlan, ScopedLintRun};
-use crate::extension;
-use crate::extension::LintChangedFileRoute;
 use homeboy_core::component::Component;
 use homeboy_core::git;
+use homeboy_extension_contract::LintChangedFileRoute;
 use std::path::Path;
 
 /// An extension-declared lint fixer route selected for a concrete file scope.
@@ -183,7 +182,7 @@ fn changed_file_routes_for_component(component: &Component) -> Vec<LintChangedFi
 
     extensions
         .keys()
-        .filter_map(|extension_id| extension::load_extension(extension_id).ok())
+        .filter_map(|extension_id| crate::extension_store::load_extension(extension_id).ok())
         .filter_map(|manifest| manifest.lint)
         .flat_map(|lint| lint.changed_file_routes)
         .collect()

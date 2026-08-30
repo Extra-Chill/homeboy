@@ -1,7 +1,7 @@
 //! Formatting-finding extraction and harness-failure classification.
 
 use super::types::FormattingFindings;
-use crate::extension;
+use homeboy_extension_contract::GENERIC_INFRASTRUCTURE_FAILURE_MARKERS;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -96,6 +96,6 @@ pub(crate) fn self_check_output_is_harness_failure(
         "command not found",
     ]
     .iter()
-    .chain(extension::GENERIC_INFRASTRUCTURE_FAILURE_MARKERS.iter())
+    .chain(GENERIC_INFRASTRUCTURE_FAILURE_MARKERS.iter())
     .any(|needle| combined.contains(needle))
 }

@@ -1,11 +1,10 @@
-use crate::extension::ExtensionCapability;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::observation::ActiveObservation;
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
-pub use homeboy_extension_contract::SelfCheckCaptureMetadata;
+use homeboy_extension_contract::{ExtensionCapability, SelfCheckCaptureMetadata};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};

@@ -16,7 +16,7 @@ use homeboy_core::extension::trace::{
     TraceListWorkflowArgs, TraceOverlayRequest, TraceRunWorkflowArgs, TraceRunnerInputs,
     TraceSpanDefinition,
 };
-use homeboy_core::extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use super::CmdResult;

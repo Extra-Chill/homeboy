@@ -170,9 +170,9 @@ fn source_revision_at(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::extension::bench::parsing::{self, BenchRunExecution};
-    use crate::extension::ExtensionCapability;
     use homeboy_core::engine::invocation::InvocationRequirements;
     use homeboy_engine_primitives::baseline::BaselineFlags;
+    use homeboy_extension_contract::ExtensionCapability;
 
     #[test]
     fn run_metadata_captures_reproducible_bench_context() {

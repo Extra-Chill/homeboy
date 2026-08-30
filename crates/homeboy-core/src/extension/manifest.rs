@@ -1,80 +1,9 @@
-pub use homeboy_audit_contract::test_mapping::{
-    BehaviorScenarioNames, IncludeWrapperPolicy, PackageNameSource, TestMappingConfig,
-    TestVacuityPolicy,
-};
 use homeboy_core::error::{Error, Result};
-pub use homeboy_extension_contract::extension_contract_producer::{
-    ExtensionContractProducer, ExtensionContractProducerInvocation,
-    ExtensionContractProducerOutput, ExtensionContractProducerOutputKind,
-    ExtensionContractProducerPhase, ExtensionMaterializationHelperManifestRef,
-    ExtensionMaterializationSourceContract, ExtensionMaterializationSourceKind,
-    EXTENSION_CONTRACT_PRODUCER_SCHEMA, EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
+use homeboy_extension_contract::sidecar_config::{
+    StructuredSidecarContract, StructuredSidecarDeclaration,
 };
-pub use homeboy_extension_contract::manifest_capability_config::{
-    AgentRuntimeManifestConfig, ComponentEnvConfig, DiscoveryMarkerConfig, DocTarget,
-    ExtensionToolDiagnosticDeclaration, FeatureContextRule, ProvidesConfig, ReleasePreflightConfig,
-    RuntimeRequirementsConfig, ScriptsConfig,
-};
-
-// Keep broad manifest wiring here while leaf config structs live in focused files.
-pub use super::manifest_config::{
-    AutofixVerifyConfig, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
-    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
-};
-pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
-pub use homeboy_extension_contract::ci_config::{
-    CiCachePath, CiCachePathRoot, CiCacheSpec, CiCapability, CiJobFidelity, CiJobMapping,
-    CiJobSpec, CiLocalContext, CiProfileSpec,
-};
-pub use homeboy_extension_contract::fuzz_config::FuzzConfig;
-pub use homeboy_extension_contract::manifest_action_config::{
-    ActionConfig, InputConfig, RuntimeConfig, SelectOption, SettingConfig,
-};
-pub use homeboy_extension_contract::manifest_capabilities::{
-    AuditCapability, DeployCapability, ExecutableCapability, PlatformCapability,
-};
-pub use homeboy_extension_contract::manifest_toolchain_config::{
-    BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig,
-    DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint, DeployVerification,
-    DepsConfig, DiscoveryConfig, FileContainsCondition, LintChangedFileRoute, LintConfig,
-    PortableEnvConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig,
-    SinceTagConfig, SourceSnapshotConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
-    TestChangedFileRoutingStrategy, TestConfig, TestNoTestsApplicablePolicy,
-    TestSecretEnvProjection, TestSettingStringPredicate, VersionPatternConfig,
-};
-pub use homeboy_extension_contract::{TestPassthroughFilter, TestPassthroughFilterStrategy};
-
-pub use homeboy_extension_contract::action_types::{ActionType, HttpMethod};
-
-// ============================================================================
-// Capability Groups
-// ============================================================================
-
-/// Test mapping convention: how source files map to test files.
-pub use homeboy_extension_contract::test_drift::TestDriftConfig;
-pub use homeboy_extension_contract::test_inventory_config::{
-    TestInventoryConfig, TestInventoryRunner,
-};
-
-// ============================================================================
-// ExtensionManifest
-// ============================================================================
-
-pub use homeboy_extension_contract::external_check_detail_resolver::{
-    ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig, ExternalCheckDetailResponse,
-    EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA,
-    EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
-};
-pub use homeboy_extension_contract::manifest_capability_config::ExtensionDiagnosticsConfig;
-pub use homeboy_extension_contract::notification_transport_config::{
-    NotificationTransportConfig, NotificationTransportDescriptor, NOTIFICATION_TRANSPORT_SCHEMA,
-};
-
-pub use homeboy_extension_contract::ExtensionManifest;
-
-pub use homeboy_extension_contract::{
-    DeploymentProviderLayeredInputManifest, DeploymentProviderManifest,
-    DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA,
+use homeboy_extension_contract::{
+    DeploymentProviderLayeredInputManifest, DeploymentProviderManifest, ExtensionManifest,
 };
 
 /// Deployment providers declared by an extension manifest.
@@ -86,7 +15,7 @@ pub fn deployment_provider_layered_input(
     extension_id: &str,
     provider_id: &str,
 ) -> Result<Option<DeploymentProviderLayeredInputManifest>> {
-    let extension = super::load_extension(extension_id)?;
+    let extension = crate::extension_store::load_extension(extension_id)?;
     let provider = deployment_providers(&extension)
         .iter()
         .find(|provider| provider.id == provider_id)
@@ -102,6 +31,7 @@ pub fn deployment_provider_layered_input(
 #[cfg(test)]
 mod deployment_provider_tests {
     use super::*;
+    use homeboy_extension_contract::DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA;
 
     #[test]
     fn reads_multiple_generic_provider_descriptors() {
@@ -201,7 +131,9 @@ pub fn structured_sidecar_schema_version<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use homeboy_audit_contract::TestMappingConfig;
+    use homeboy_extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA;
+    use homeboy_extension_contract::NotificationTransportConfig;
 
     #[test]
     fn notification_transport_requires_versioned_literal_argv_contract() {

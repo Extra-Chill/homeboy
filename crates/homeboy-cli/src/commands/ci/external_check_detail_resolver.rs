@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 
 use homeboy::core::process::{force_terminate_process_tree_bounded, ProcessContainment};
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy::extension::{
-    load_all_extensions, ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig,
-    ExternalCheckDetailResponse, EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA,
-    EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
-};
+use homeboy_core::extension_store::load_all_extensions;
 #[cfg(not(windows))]
 use homeboy_engine_primitives::command::terminate_process_tree_and_reap;
 use homeboy_engine_primitives::command::{terminate_remaining_process_group, ControllerChildGuard};
+use homeboy_extension_contract::external_check_detail_resolver::{
+    ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig, ExternalCheckDetailResponse,
+    EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
+};
 use serde::Serialize;
 use tempfile::NamedTempFile;
 
@@ -1038,7 +1038,7 @@ mod tests {
         let outside = tempfile::NamedTempFile::new().unwrap();
         symlink(outside.path(), extension.path().join("resolve")).unwrap();
         let config = ExternalCheckDetailResolverConfig {
-            schema: homeboy::extension::EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA.into(),
+            schema: homeboy_extension_contract::external_check_detail_resolver::EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA.into(),
             provider: "fixture".into(),
             command: vec!["resolve".into()],
             public_env: vec![],

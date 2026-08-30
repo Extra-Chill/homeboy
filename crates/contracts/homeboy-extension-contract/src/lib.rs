@@ -6,8 +6,8 @@
 //! lightweight crate that others can depend on without pulling in the whole
 //! core compile unit.
 //!
-//! Modules and types are re-exported from `homeboy_core::extension` for the
-//! product-facing API.
+//! Consumers import shared contracts from this crate directly. Core extension
+//! workflow modules expose only the result types that are part of those workflows.
 
 pub use action_types::HttpMethod;
 pub use ci_config::{

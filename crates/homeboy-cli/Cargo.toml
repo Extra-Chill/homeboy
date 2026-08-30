@@ -24,6 +24,7 @@ homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
 homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
+homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-release = { version = "0.1.0", path = "../homeboy-release" }
 homeboy-deploy = { version = "0.1.0", path = "../homeboy-deploy" }

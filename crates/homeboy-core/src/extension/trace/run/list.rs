@@ -1,11 +1,12 @@
 //! Trace scenario discovery (list-only) workflow.
 
-use crate::extension::{ExtensionCapability, RunnerOutput};
+use crate::extension::RunnerOutput;
 use crate::extension_execution::resolve_execution_context;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
 use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::super::canonicality::TraceCanonicalPolicy;
 use super::super::parsing::{parse_trace_list_str, TraceList};

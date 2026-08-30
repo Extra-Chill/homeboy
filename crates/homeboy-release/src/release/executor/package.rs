@@ -7,8 +7,8 @@
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
-use homeboy_core::extension::ExtensionCapability;
-use homeboy_core::{self, extension::ExtensionManifest};
+use homeboy_core::{self};
+use homeboy_extension_contract::{ExtensionCapability, ExtensionManifest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;

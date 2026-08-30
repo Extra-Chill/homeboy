@@ -5,9 +5,11 @@ use homeboy_core::project;
 use homeboy_core::server::http::ApiClient;
 use homeboy_engine_primitives::validation;
 
-use super::{build_action_env, execute_extension_command, load_extension, ExtensionExecutionMode};
-use crate::extension::manifest::{ActionConfig, ActionType, HttpMethod};
+use super::{build_action_env, execute_extension_command, ExtensionExecutionMode};
 use crate::extension_scope::ExtensionScope;
+use crate::extension_store::load_extension;
+use homeboy_extension_contract::action_types::{ActionType, HttpMethod};
+use homeboy_extension_contract::manifest_action_config::ActionConfig;
 
 pub fn execute_action(
     extension_id: &str,
@@ -17,7 +19,7 @@ pub fn execute_action(
     payload: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let extension = load_extension(extension_id)?;
-    crate::extension::validate_core_compatibility(
+    homeboy_extension_contract::validate_core_compatibility(
         "extension",
         extension_id,
         extension

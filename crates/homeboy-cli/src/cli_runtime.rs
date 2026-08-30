@@ -21,14 +21,15 @@ use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
-use homeboy::extension::{
-    list_summaries_with, load_all_extensions, CliConfig,
-    ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
-};
+use homeboy::extension::{list_summaries_with, ExtensionSummary};
 use homeboy_agents::agent_task_service::cook_continue_command;
 use homeboy_core::extension_readiness::ExtensionReadinessMode;
 #[cfg(test)]
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
+use homeboy_core::extension_store::load_all_extensions;
+use homeboy_extension_contract::{
+    CliConfig, ExtensionCapability, ExtensionManifest as InstalledExtensionManifest,
+};
 use homeboy_upgrade::upgrade;
 
 /// A typed command package installed by a product composition root.
@@ -3129,9 +3130,7 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.args,
     );
     if args.should_use_self_check_dispatch(&passthrough_args)
-        && source
-            .component
-            .has_script(homeboy_core::extension::ExtensionCapability::Test)
+        && source.component.has_script(ExtensionCapability::Test)
     {
         return Ok(());
     }
@@ -3140,12 +3139,12 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.comp,
         &args.setting_args,
         &args.extension_override,
-        Some(homeboy_core::extension::ExtensionCapability::Test),
+        Some(ExtensionCapability::Test),
     )
 	.and_then(|context| {
 		homeboy::core::extension_execution::resolve_execution_context(
 			&context.component,
-			homeboy_core::extension::ExtensionCapability::Test,
+            ExtensionCapability::Test,
 		)
 		.map(|_| ())
 	})

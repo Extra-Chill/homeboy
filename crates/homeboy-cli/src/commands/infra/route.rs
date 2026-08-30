@@ -4148,7 +4148,7 @@ fn portable_test_env(
         &args.comp,
         &args.setting_args,
         &args.extension_override,
-        Some(homeboy_core::extension::ExtensionCapability::Test),
+        Some(homeboy_extension_contract::ExtensionCapability::Test),
     )?;
     homeboy_core::extension::test::portable_env(&context.component)
 }

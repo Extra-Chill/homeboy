@@ -27,9 +27,9 @@ pub mod run;
 mod span_summary;
 pub mod spans;
 
-use crate::extension::ExtensionCapability;
 use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
+use homeboy_extension_contract::ExtensionCapability;
 
 pub use aggregate_report::TraceAggregateSpanSampleOutput;
 pub use attach::TraceAttachment;

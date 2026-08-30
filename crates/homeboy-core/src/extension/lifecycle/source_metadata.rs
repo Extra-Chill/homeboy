@@ -1,11 +1,11 @@
-use super::{load_extension, write_source_metadata};
+use super::write_source_metadata;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension_store::is_extension_linked;
+use homeboy_core::extension_store::{is_extension_linked, load_extension};
 use homeboy_core::extension_update_check::read_source_url;
 use homeboy_core::git;
 use homeboy_core::paths;
 
-pub use homeboy_extension_contract::source_metadata_repair::SourceMetadataRepair;
+use homeboy_extension_contract::source_metadata_repair::SourceMetadataRepair;
 
 #[derive(Debug)]
 pub struct SourceMetadataResolution {
@@ -74,7 +74,9 @@ pub fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution
     ))
 }
 
-fn manifest_source_url(extension: &crate::extension::ExtensionManifest) -> Option<String> {
+fn manifest_source_url(
+    extension: &homeboy_extension_contract::ExtensionManifest,
+) -> Option<String> {
     extension
         .source_url
         .clone()
