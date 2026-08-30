@@ -511,6 +511,7 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
                     available_runner_ids: vec!["admitted-lab".to_string()],
                     reasons: Vec::new(),
                     remediation_commands: Vec::new(),
+                    repair_admitted_runner_ids: Vec::new(),
                 },
             ),
             homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,

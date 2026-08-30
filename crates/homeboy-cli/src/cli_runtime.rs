@@ -1299,7 +1299,9 @@ impl CliRuntime {
                     resource_admission_evidence:
                         crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable,
                     resource_policy: None,
-                    lab_readiness: lab_readiness.as_ref().map(resource_policy::lab_readiness_snapshot),
+                    lab_readiness: lab_readiness
+                        .as_ref()
+                        .map(|readiness| parsed_lab_readiness_snapshot(&cli, readiness)),
                     selected_runner_id: selected_runner_id.clone(),
                     generic_route: generic_route_policy_snapshot(&cli, selected_runner_id.clone()),
                     deferred_pressure_refusal: false,
@@ -2713,6 +2715,7 @@ fn resolve_composed_capability_preflight(
             available_runner_ids: context.runner_selection.available_runner_ids.clone(),
             reasons: context.runner_selection.readiness_reasons.clone(),
             remediation_commands: context.runner_selection.remediation_commands.clone(),
+            repair_admitted_runner_ids: Vec::new(),
         })
         .or_else(|| {
             (options.placement != crate::cli_surface::Placement::Local)
@@ -2960,7 +2963,7 @@ fn preflight_hot_command_with_input(
                         resource_policy: Some(resource_policy_context),
                         lab_readiness: lab_readiness
                             .as_ref()
-                            .map(resource_policy::lab_readiness_snapshot),
+                            .map(|readiness| parsed_lab_readiness_snapshot(cli, readiness)),
                         selected_runner_id: selected_runner_id.clone(),
                         generic_route: generic_route_policy_snapshot(
                             cli,
@@ -3024,6 +3027,21 @@ fn preflight_hot_command_with_input(
     None
 }
 
+fn parsed_lab_readiness_snapshot(
+    cli: &Cli,
+    readiness: &crate::runner::runners::LabRunnerReadiness,
+) -> crate::core::parsed_command_preflight::LabReadinessSnapshot {
+    let mut snapshot = resource_policy::lab_readiness_snapshot(readiness);
+    if let (Some(runner_id), Commands::Extension(args)) = (&cli.runner, &cli.command) {
+        if args.is_readiness_repair_command()
+            && crate::runner::runners::runner_readiness_repair_admitted(runner_id).unwrap_or(false)
+        {
+            snapshot.repair_admitted_runner_ids.push(runner_id.clone());
+        }
+    }
+    snapshot
+}
+
 #[cfg(test)]
 pub(crate) fn placement_directive(
     cli: &Cli,
@@ -3046,6 +3064,7 @@ pub(crate) fn placement_directive(
                     available_runner_ids: vec![runner_id.to_string()],
                     reasons: Vec::new(),
                     remediation_commands: Vec::new(),
+                    repair_admitted_runner_ids: Vec::new(),
                 }
             }),
             selected_runner_id: selected_runner_id.map(str::to_string),

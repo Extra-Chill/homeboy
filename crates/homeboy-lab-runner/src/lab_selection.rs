@@ -209,12 +209,93 @@ pub fn compile_lab_admission_plan(
             .map(|capability| capability.name.clone())
             .collect(),
     });
+    let mut toolchain = crate::lab_capabilities::toolchain_readiness_preflight(command)?;
+    if let Some(workload) = command.workload.as_ref() {
+        for rig_id in &workload.rig_ids {
+            let Some(rig) = load_admission_rig(source_path, rig_id)? else {
+                continue;
+            };
+            merge_runner_capability_preflight(
+                &mut toolchain,
+                homeboy_rig::runner_capability_preflight(&rig, command.hot_label),
+            );
+        }
+    }
     Ok(LabAdmissionPlan {
         source_path: source_path.to_path_buf(),
-        toolchain: crate::lab_capabilities::toolchain_readiness_preflight(command)?,
+        toolchain,
         capability,
         executable_probe_required: false,
     })
+}
+
+fn load_admission_rig(
+    source_path: &std::path::Path,
+    rig_id: &str,
+) -> Result<Option<homeboy_rig::RigSpec>> {
+    if !source_path.join("rig.json").is_file() && !source_path.join("rigs").is_dir() {
+        return Ok(None);
+    }
+    let Some(discovered) = homeboy_rig::discover_rigs(source_path)?
+        .into_iter()
+        .find(|candidate| candidate.id == rig_id)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(homeboy_rig::load_local_source(
+        &discovered.rig_path.to_string_lossy(),
+        Some(discovered.id.as_str()),
+    )?))
+}
+
+pub(crate) fn merge_runner_capability_preflight(
+    target: &mut Option<super::RunnerCapabilityPreflight>,
+    incoming: Option<super::RunnerCapabilityPreflight>,
+) {
+    let Some(incoming) = incoming else {
+        return;
+    };
+    let target = target.get_or_insert_with(|| super::RunnerCapabilityPreflight {
+        command: incoming.command.clone(),
+        ..Default::default()
+    });
+    if target.command.is_empty() {
+        target.command = incoming.command;
+    }
+    for tool in incoming.required_tools {
+        if !target.required_tools.contains(&tool) {
+            target.required_tools.push(tool);
+        }
+    }
+    for command in incoming.required_commands {
+        if !target.required_commands.contains(&command) {
+            target.required_commands.push(command);
+        }
+    }
+    for requirement in incoming.required_tool_capabilities {
+        if !target.required_tool_capabilities.contains(&requirement) {
+            target.required_tool_capabilities.push(requirement);
+        }
+    }
+    for probe in incoming.required_toolchain_probes {
+        if !target.required_toolchain_probes.contains(&probe) {
+            target.required_toolchain_probes.push(probe);
+        }
+    }
+    for component in incoming.required_components {
+        if !target.required_components.contains(&component) {
+            target.required_components.push(component);
+        }
+    }
+    for name in incoming.required_env {
+        if !target.required_env.contains(&name) {
+            target.required_env.push(name);
+        }
+    }
+    target.timeout = match (target.timeout, incoming.timeout) {
+        (Some(current), Some(incoming)) => Some(current.min(incoming)),
+        (current, incoming) => current.or(incoming),
+    };
 }
 
 pub(crate) fn compile_execution_lab_admission_plan(

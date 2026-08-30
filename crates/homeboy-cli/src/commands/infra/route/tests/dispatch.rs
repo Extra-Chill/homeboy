@@ -3103,6 +3103,7 @@ fn local_fanout_warning_carries_lab_readiness_reasons_and_remediation() {
         available_runner_ids: vec!["lab-a".to_string()],
         reasons: vec!["lab-a daemon is stale".to_string()],
         remediation_commands: vec!["homeboy runner refresh-homeboy lab-a".to_string()],
+        repair_admitted_runner_ids: Vec::new(),
     };
     let warning = agent_task_local_fanout_warning(&cli.command, Some(&readiness))
         .expect("batch fanout warns locally");
@@ -3212,6 +3213,7 @@ fn unmaterialized_cook_admission_keeps_stale_unavailable_and_capacity_distinct()
         available_runner_ids: Vec::new(),
         reasons: Vec::new(),
         remediation_commands: Vec::new(),
+        repair_admitted_runner_ids: Vec::new(),
     };
     assert_eq!(
         unmaterialized_admission_state(Some(&readiness("stale"))),
@@ -3731,6 +3733,7 @@ fn split_placement_cook_without_a_runner_reports_readiness_not_a_placement_contr
             available_runner_ids: Vec::new(),
             reasons: vec![reason.to_string()],
             remediation_commands: vec![remediation.to_string()],
+            repair_admitted_runner_ids: Vec::new(),
         };
 
         let error = split_placement_lab_runner_unavailable_error(
