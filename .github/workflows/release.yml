@@ -64,6 +64,10 @@ jobs:
   # Fast exit if nothing to release (e.g. chore-only commits).
   check:
     name: Check for releasable commits
+    # The originating run owns publication of the release commit it creates.
+    # A later ordinary push can still recover a stranded tag, and explicit tag
+    # recovery remains available through workflow_dispatch.
+    if: "${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release: v') }}"
     runs-on: ubuntu-latest
     # Coalesce only the read-only planning phase. A new main push interrupts an
     # in-flight dry run before gates or mutation begin; the latest push retains
