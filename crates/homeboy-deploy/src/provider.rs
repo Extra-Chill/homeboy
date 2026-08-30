@@ -9,12 +9,44 @@ use super::lifecycle::DeployObservation;
 use super::route::DeployTarget;
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 
+pub(super) struct PreparedProviderDeployment {
+    components: Vec<PreparedProviderComponent>,
+    unresolvable: Vec<UnresolvableComponent>,
+}
+
+struct PreparedProviderComponent {
+    project_id: String,
+    component: Component,
+    extension: String,
+    provider: String,
+    input: PreparedProviderInput,
+    result_schema: Option<String>,
+    explicit_route: bool,
+    dry_run: bool,
+}
+
+enum PreparedProviderInput {
+    Layered(tempfile::NamedTempFile),
+    Repository(PathBuf),
+}
+
+#[cfg(test)]
 pub(super) fn run_if_configured(
     project_id: &str,
     project: &Project,
     config: &DeployConfig,
-    mut observation: Option<&mut DeployObservation>,
+    observation: Option<&mut DeployObservation>,
 ) -> Result<Option<DeployOrchestrationResult>> {
+    prepare_if_configured(project_id, project, config)?
+        .map(|prepared| apply_prepared(prepared, observation))
+        .transpose()
+}
+
+pub(super) fn prepare_if_configured(
+    project_id: &str,
+    project: &Project,
+    config: &DeployConfig,
+) -> Result<Option<PreparedProviderDeployment>> {
     let component_ids = if config.component_ids.is_empty() && config.check {
         project
             .components
@@ -68,32 +100,13 @@ pub(super) fn run_if_configured(
         ));
     }
     if provider_count == components.len() {
-        let mut results = Vec::with_capacity(components.len() + unresolvable.len());
-        for component in &components {
-            results.push(run_component(
-                project_id,
-                project,
-                component,
-                config,
-                observation.as_deref_mut(),
-            )?);
-        }
-        results.extend(unresolvable_results(&unresolvable));
-        let failed = results
+        let components = components
             .iter()
-            .filter(|result| result.status == "failed")
-            .count() as u32;
-        let skipped = unresolvable.len() as u32;
-        let total = results.len() as u32;
-        return Ok(Some(DeployOrchestrationResult {
-            results,
-            summary: DeploySummary {
-                total,
-                succeeded: total - failed - skipped,
-                failed,
-                skipped,
-            },
-            deploy_run_id: None,
+            .map(|component| prepare_component(project_id, project, component, config))
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(Some(PreparedProviderDeployment {
+            components,
+            unresolvable,
         }));
     }
     Ok(None)
@@ -158,13 +171,12 @@ fn unresolvable_results(unresolvable: &[UnresolvableComponent]) -> Vec<Component
         .collect()
 }
 
-fn run_component(
+fn prepare_component(
     project_id: &str,
     project: &Project,
     component: &Component,
     config: &DeployConfig,
-    mut observation: Option<&mut DeployObservation>,
-) -> Result<ComponentDeployResult> {
+) -> Result<PreparedProviderComponent> {
     let project_attachment = project
         .components
         .iter()
@@ -256,51 +268,96 @@ fn run_component(
 
     validate_repository_policy(component, layered.is_some(), attachment)?;
 
-    let is_layered = layered.is_some();
-    let layered_result_schema = layered
+    let result_schema = layered
         .as_ref()
-        .and_then(|layered| layered.result_schema.as_deref());
+        .and_then(|layered| layered.result_schema.clone());
     let dry_run = config.dry_run || config.check;
-    if !dry_run {
-        // Provider execution is the generic contract's first operation that may
-        // mutate a provider-owned target; provider internals remain opaque.
-        if let Some(observation) = observation.as_deref_mut() {
-            observation.phase("provider_execute", true)?;
-        }
-    }
-    let run = if layered.is_some() {
-        let payload = layered_payload(
+    let input = if layered.is_some() {
+        PreparedProviderInput::Layered(layered_payload(
             component,
             attachment.policy.as_ref().expect("validated inline policy"),
             target_input,
-        )?;
-        homeboy_core::extension::run_deployment_provider(
-            &attachment.extension,
-            &attachment.provider,
-            project_id,
-            &component.id,
-            &component.local_path,
-            payload.path(),
-            dry_run,
-        )
+        )?)
     } else {
-        let contract = repository_contract(
+        PreparedProviderInput::Repository(repository_contract(
             component,
             attachment
                 .contract
                 .as_deref()
                 .expect("validated legacy contract"),
-        )?;
-        homeboy_core::extension::run_deployment_provider(
-            &attachment.extension,
-            &attachment.provider,
-            project_id,
-            &component.id,
-            &component.local_path,
-            &contract,
-            dry_run,
-        )
-    }?;
+        )?)
+    };
+    Ok(PreparedProviderComponent {
+        project_id: project_id.to_string(),
+        component: component.clone(),
+        extension: attachment.extension.clone(),
+        provider: attachment.provider.clone(),
+        input,
+        result_schema,
+        explicit_route: config.target == Some(DeployTarget::Provider),
+        dry_run,
+    })
+}
+
+pub(super) fn apply_prepared(
+    prepared: PreparedProviderDeployment,
+    mut observation: Option<&mut DeployObservation>,
+) -> Result<DeployOrchestrationResult> {
+    let skipped = prepared.unresolvable.len() as u32;
+    let mut results = Vec::with_capacity(prepared.components.len() + prepared.unresolvable.len());
+    for component in prepared.components {
+        results.push(apply_component(component, observation.as_deref_mut())?);
+    }
+    results.extend(unresolvable_results(&prepared.unresolvable));
+    let failed = results
+        .iter()
+        .filter(|result| result.status == "failed")
+        .count() as u32;
+    let total = results.len() as u32;
+    Ok(DeployOrchestrationResult {
+        results,
+        summary: DeploySummary {
+            total,
+            succeeded: total - failed - skipped,
+            failed,
+            skipped,
+        },
+        deploy_run_id: None,
+    })
+}
+
+fn apply_component(
+    prepared: PreparedProviderComponent,
+    mut observation: Option<&mut DeployObservation>,
+) -> Result<ComponentDeployResult> {
+    let PreparedProviderComponent {
+        project_id,
+        component,
+        extension,
+        provider,
+        input,
+        result_schema,
+        explicit_route,
+        dry_run,
+    } = prepared;
+    if !dry_run {
+        if let Some(observation) = observation.as_deref_mut() {
+            observation.phase("provider_execute", true)?;
+        }
+    }
+    let (input, is_layered) = match &input {
+        PreparedProviderInput::Layered(payload) => (payload.path(), true),
+        PreparedProviderInput::Repository(contract) => (contract.as_path(), false),
+    };
+    let run = homeboy_core::extension::run_deployment_provider(
+        &extension,
+        &provider,
+        &project_id,
+        &component.id,
+        &component.local_path,
+        input,
+        dry_run,
+    )?;
     if !dry_run {
         if let Some(observation) = observation {
             observation.phase("verify", true)?;
@@ -310,14 +367,14 @@ fn run_component(
     let output = format!("{}{}", evidence.stdout, evidence.stderr);
     // Layered input can contain target secrets. Provider output is therefore not
     // promoted into deploy evidence or errors on that path.
-    let provider_result = match (is_layered, layered_result_schema) {
+    let provider_result = match (is_layered, result_schema.as_deref()) {
         (true, Some(schema)) => layered_provider_evidence(&evidence.stdout, schema),
         (true, None) => serde_json::json!({ "status": "opaque" }),
         (false, _) => serde_json::from_str::<serde_json::Value>(&evidence.stdout)
             .unwrap_or_else(|_| serde_json::json!({ "status": "unstructured", "output": output })),
     };
     let status = if run.exit_code == 0 {
-        if config.dry_run || config.check {
+        if dry_run {
             "validated"
         } else {
             "deployed"
@@ -325,12 +382,10 @@ fn run_component(
     } else {
         "failed"
     };
-    let mut result = ComponentDeployResult::new(component, "").with_status(status);
+    let mut result = ComponentDeployResult::new(&component, "").with_status(status);
     result.warnings.push(
-        match config.target {
-            Some(DeployTarget::Provider) => {
-                "deployment route: provider (selected by --target provider)"
-            }
+        match explicit_route {
+            true => "deployment route: provider (selected by --target provider)",
             _ => "deployment route: provider (selected by project deployment provider target)",
         }
         .to_string(),

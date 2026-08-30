@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use homeboy_core::component::{resolve_component_scope, Component, ScopeCommand};
 use homeboy_core::context::RemoteProjectContext;
@@ -19,8 +19,8 @@ use super::orchestration_tag_checkout::{
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{load_project_components_with_projection, plan_components};
 use super::types::{
-    ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary, VersionSource,
-    VersionSources,
+    ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary,
+    DeploymentProvenanceEvidence, VersionSource, VersionSources,
 };
 use super::version_overrides::fetch_remote_versions_for_project;
 use homeboy_core::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
@@ -36,20 +36,38 @@ use preflight::{
     guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
     sync_components, verify_expected_version, warn_non_default_branch,
 };
+#[cfg(test)]
 use prepared_payloads::prepare_component_deployments;
+use prepared_payloads::{prepare_component_deployments_with_payloads, PrepareDeploymentsInput};
 use smoke_check::run_post_deploy_smoke;
 
-/// Main deploy orchestration entry point.
-/// Handles component selection, building, and deployment.
-pub(super) fn deploy_components(
+pub(super) enum PreparedDeployment {
+    Complete(DeployOrchestrationResult),
+    Apply(Box<PreparedDeploymentPlan>),
+}
+
+pub(super) struct PreparedDeploymentPlan {
+    project: Project,
+    components: Vec<Component>,
+    config: DeployConfig,
+    prepared_deployments: prepared_payloads::PreparedDeployments,
+    deployment_provenance: BTreeMap<String, DeploymentProvenanceEvidence>,
+    exact_ref_identities: HashMap<String, ExactRefIdentity>,
+    deployed_refs: HashMap<String, String>,
+    built_from_commits: HashMap<String, String>,
+    _exact_ref_checkouts: Vec<ExactRefCheckout>,
+    _tag_ref_checkouts: Vec<ExactRefCheckout>,
+}
+
+pub(super) fn prepare_components(
     data_root: &std::path::Path,
     config: &DeployConfig,
     project: &Project,
     ctx: &RemoteProjectContext,
     base_path: &str,
-    release_artifacts: &mut ReleaseArtifactStore,
+    artifacts: &mut super::preparation::DeploymentArtifactStore,
     mut observation: Option<&mut DeployObservation>,
-) -> Result<DeployOrchestrationResult> {
+) -> Result<PreparedDeployment> {
     if let Some(observation) = observation.as_deref_mut() {
         observation.phase("source_resolution", false)?;
     }
@@ -70,7 +88,7 @@ pub(super) fn deploy_components(
     if config.check && loaded.deployable.is_empty() && !loaded.extension_skipped.is_empty() {
         let results = extension_skipped_results(&loaded.extension_skipped, project, base_path);
         let skipped = results.len() as u32;
-        return Ok(DeployOrchestrationResult {
+        return Ok(PreparedDeployment::Complete(DeployOrchestrationResult {
             results,
             summary: DeploySummary {
                 total: skipped,
@@ -79,7 +97,7 @@ pub(super) fn deploy_components(
                 skipped,
             },
             deploy_run_id: None,
-        });
+        }));
     }
 
     if loaded.deployable.is_empty() {
@@ -123,7 +141,7 @@ pub(super) fn deploy_components(
     )?;
 
     if components.is_empty() {
-        return Ok(DeployOrchestrationResult {
+        return Ok(PreparedDeployment::Complete(DeployOrchestrationResult {
             results: vec![],
             summary: DeploySummary {
                 total: 0,
@@ -132,7 +150,7 @@ pub(super) fn deploy_components(
                 skipped: 0,
             },
             deploy_run_id: None,
-        });
+        }));
     }
 
     // This must precede artifact resolution and every source operation below.
@@ -154,7 +172,11 @@ pub(super) fn deploy_components(
     }
 
     let (resolved_release_artifacts, unavailable_canonical_packages) =
-        resolve_release_artifacts_for_deploy(&components, config, release_artifacts)?;
+        resolve_release_artifacts_for_deploy(
+            &components,
+            config,
+            &mut artifacts.release_artifacts,
+        )?;
 
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
@@ -250,7 +272,7 @@ pub(super) fn deploy_components(
             unavailable_canonical_packages: &unavailable_canonical_packages,
         });
         attach_version_sources(&mut result, &components);
-        return Ok(result);
+        return Ok(PreparedDeployment::Complete(result));
     }
     if config.dry_run {
         let mut result = run_dry_run_mode(
@@ -262,7 +284,7 @@ pub(super) fn deploy_components(
             config,
         )?;
         attach_version_sources(&mut result, &components);
-        return Ok(result);
+        return Ok(PreparedDeployment::Complete(result));
     }
 
     // Only local builds require mutable checkout safety checks. Release assets are
@@ -392,23 +414,24 @@ pub(super) fn deploy_components(
     )?;
 
     // Build and validate every local artifact before the first remote write.
-    if let Some(observation) = observation.as_deref_mut() {
+    if let Some(observation) = observation {
         observation.phase("build", false)?;
-    }
-    if let Some(observation) = observation.as_deref_mut() {
         // Payload preparation owns package construction and validation. Persist
         // its checkpoint before that work begins so interruption never reports
         // completed package work that was still in progress.
         observation.phase("package", false)?;
     }
-    let prepared_deployments = match prepare_component_deployments(
-        &components,
-        config,
-        &project,
-        base_path,
-        &local_versions,
-        &remote_versions,
-        &resolved_release_artifacts,
+    let prepared_deployments = match prepare_component_deployments_with_payloads(
+        PrepareDeploymentsInput {
+            components: &components,
+            config,
+            project: &project,
+            base_path,
+            local_versions: &local_versions,
+            remote_versions: &remote_versions,
+            release_artifacts: &resolved_release_artifacts,
+        },
+        artifacts,
     ) {
         Ok(prepared) => prepared,
         Err(failures) => {
@@ -427,7 +450,7 @@ pub(super) fn deploy_components(
                 deploy_run_id: None,
             };
             attach_version_sources(&mut result, &components);
-            return Ok(result);
+            return Ok(PreparedDeployment::Complete(result));
         }
     };
 
@@ -479,6 +502,108 @@ pub(super) fn deploy_components(
         }
     }
 
+    let mut deployed_refs = HashMap::new();
+    let mut built_from_commits = HashMap::new();
+    for prepared in prepared_deployments.iter() {
+        let component = &prepared.component;
+        let exact_ref_identity = exact_ref_identities.get(&component.id);
+        let deployed_ref = if let Some(identity) = exact_ref_identity {
+            Some(identity.requested_ref.clone())
+        } else if let Some(artifact) = resolved_release_artifacts.get(&component.id) {
+            Some(match artifact.commit.as_deref() {
+                Some(commit) => format!("{} ({commit})", artifact.tag),
+                None => artifact.tag.clone(),
+            })
+        } else if let Some(checkout) = tag_checkouts
+            .iter()
+            .find(|checkout| checkout.component_id == component.id)
+        {
+            Some(checkout.provenance_ref())
+        } else if let Some(tag_ref) = materialized_tag_refs.get(&component.id) {
+            Some(tag_ref.clone())
+        } else if config.head {
+            homeboy_core::engine::command::run_in_optional(
+                &component.local_path,
+                "git",
+                &["rev-parse", "--abbrev-ref", "HEAD"],
+            )
+            .map(|branch| format!("{} (HEAD)", branch))
+        } else {
+            config
+                .prepared_artifact
+                .as_ref()
+                .map(|prepared_artifact| prepared_artifact.tag.clone())
+        };
+        if let Some(deployed_ref) = deployed_ref {
+            deployed_refs.insert(component.id.clone(), deployed_ref);
+        }
+
+        let built_from_commit = exact_ref_identity
+            .map(|identity| identity.resolved_sha.clone())
+            .or_else(|| {
+                resolved_release_artifacts
+                    .get(&component.id)
+                    .and_then(|artifact| artifact.commit.clone())
+            })
+            .or_else(|| {
+                tag_ref_checkouts
+                    .iter()
+                    .find(|checkout| checkout.component.id == component.id)
+                    .map(|checkout| checkout.identity.resolved_sha.clone())
+            })
+            .or_else(|| {
+                config
+                    .prepared_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.source_commit.clone())
+            });
+        if let Some(commit) = built_from_commit {
+            built_from_commits.insert(component.id.clone(), commit);
+        }
+    }
+
+    // In-place tag checkouts contend across project preparation. Payload bytes
+    // are durable now, so restore the source before preparing the next target.
+    if !tag_checkouts.is_empty() {
+        restore_branches(&tag_checkouts);
+    }
+
+    Ok(PreparedDeployment::Apply(Box::new(
+        PreparedDeploymentPlan {
+            project,
+            components,
+            config: config.clone(),
+            prepared_deployments,
+            deployment_provenance,
+            exact_ref_identities,
+            deployed_refs,
+            built_from_commits,
+            _exact_ref_checkouts: exact_ref_checkouts,
+            _tag_ref_checkouts: tag_ref_checkouts,
+        },
+    )))
+}
+
+pub(super) fn apply_prepared_components(
+    data_root: &std::path::Path,
+    plan: PreparedDeploymentPlan,
+    ctx: &RemoteProjectContext,
+    base_path: &str,
+    mut observation: Option<&mut DeployObservation>,
+) -> Result<DeployOrchestrationResult> {
+    let PreparedDeploymentPlan {
+        project,
+        components,
+        config,
+        prepared_deployments,
+        deployment_provenance,
+        exact_ref_identities,
+        deployed_refs,
+        built_from_commits,
+        _exact_ref_checkouts,
+        _tag_ref_checkouts,
+    } = plan;
+
     // Execute deployments only after every component passed the local preflight.
     let mut results: Vec<ComponentDeployResult> = vec![];
     let mut succeeded: u32 = 0;
@@ -518,37 +643,8 @@ pub(super) fn deploy_components(
             observation.as_deref_mut(),
         );
 
-        // Record which git ref was deployed. The same label feeds build provenance
-        // so `deployed_ref` and `build_provenance.built_from_ref` never disagree.
         let exact_ref_identity = exact_ref_identities.get(&component.id);
-        let deployed_ref = if let Some(identity) = exact_ref_identity {
-            Some(identity.requested_ref.clone())
-        } else if let Some(artifact) = resolved_release_artifacts.get(&component.id) {
-            Some(match artifact.commit.as_deref() {
-                Some(commit) => format!("{} ({commit})", artifact.tag),
-                None => artifact.tag.clone(),
-            })
-        } else if let Some(checkout) = tag_checkouts
-            .iter()
-            .find(|c| c.component_id == component.id)
-        {
-            Some(checkout.provenance_ref())
-        } else if let Some(tag_ref) = materialized_tag_refs.get(&component.id) {
-            Some(tag_ref.clone())
-        } else if config.head {
-            // Deploying from HEAD — record the current branch
-            homeboy_core::engine::command::run_in_optional(
-                &component.local_path,
-                "git",
-                &["rev-parse", "--abbrev-ref", "HEAD"],
-            )
-            .map(|branch| format!("{} (HEAD)", branch))
-        } else {
-            config
-                .prepared_artifact
-                .as_ref()
-                .map(|prepared_artifact| prepared_artifact.tag.clone())
-        };
+        let deployed_ref = deployed_refs.get(&component.id).cloned();
 
         if let Some(ref git_ref) = deployed_ref {
             result = result.with_deployed_ref(git_ref.clone());
@@ -571,18 +667,7 @@ pub(super) fn deploy_components(
         // Attach explicit build provenance to every result, regardless of strategy.
         let mut build_provenance = prepared.build_provenance.clone();
         build_provenance.built_from_ref = deployed_ref;
-        if let Some(identity) = exact_ref_identity {
-            build_provenance.built_from_commit = Some(identity.resolved_sha.clone());
-        } else if let Some(artifact) = resolved_release_artifacts.get(&component.id) {
-            build_provenance.built_from_commit = artifact.commit.clone();
-        } else if let Some(checkout) = tag_ref_checkouts
-            .iter()
-            .find(|checkout| checkout.component.id == component.id)
-        {
-            build_provenance.built_from_commit = Some(checkout.identity.resolved_sha.clone());
-        } else if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
-            build_provenance.built_from_commit = Some(prepared_artifact.source_commit.clone());
-        }
+        build_provenance.built_from_commit = built_from_commits.get(&component.id).cloned();
         result = result.with_build_provenance(build_provenance.clone());
 
         if result.status == "deployed" {
@@ -622,11 +707,6 @@ pub(super) fn deploy_components(
         results.push(result);
     }
 
-    // Restore original branches after deployment
-    if !tag_checkouts.is_empty() {
-        restore_branches(&tag_checkouts);
-    }
-
     // Post-deploy front-end smoke check (opt-in, project-scoped). Runs only when
     // something actually deployed — a runtime-fataling release that returns 500
     // to fresh visitors should fail the deploy here so it gets rolled back
@@ -651,10 +731,6 @@ pub(super) fn deploy_components(
             }
         }
     }
-
-    // Isolated tag worktrees delete themselves on drop. Hold them until every
-    // payload has been built, transferred, and smoke-checked.
-    drop(tag_ref_checkouts);
 
     let mut result = DeployOrchestrationResult {
         results,
