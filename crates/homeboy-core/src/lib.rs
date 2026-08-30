@@ -173,7 +173,6 @@ pub mod rig_toolchain_provider;
 pub use homeboy_lifecycle_contract::run_lifecycle_record;
 pub mod run_lifecycle_status;
 pub mod run_outcome_envelope;
-pub mod runner;
 pub mod runner_download_cache;
 pub mod runner_execution_envelope;
 pub mod runner_job_execution_context;

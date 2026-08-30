@@ -923,7 +923,6 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor-contract",
  "homeboy-release-contract",
- "homeboy-runner-contract",
  "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
  "keyring",

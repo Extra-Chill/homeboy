@@ -1,8 +1,8 @@
 //! Transport-neutral runner execution request and record contracts.
 //!
-//! These behavior-free values cross the controller, runner service, and runner
-//! implementations. Execution behavior belongs to `homeboy-core::runner`; local,
-//! daemon, SSH, and reverse-broker mechanics belong to runner implementations.
+//! These behavior-free values cross controller and runner implementation
+//! boundaries. Execution behavior and service ownership remain outside this
+//! crate.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -50,7 +50,6 @@ pub mod direct_lab_handoff;
 mod evidence;
 mod execution;
 mod execution_bundle;
-mod execution_provider;
 mod extension_materialization;
 mod generation_store;
 pub mod lab_staging_controller;
@@ -387,7 +386,6 @@ pub use execution::{
     RunnerExecRecoveryChildSchedule, RunnerExecRecoveryDiagnostic, RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
-pub use execution_provider::register as register_runner_execution_provider;
 pub(crate) use extension_materialization::extension_source_content_hash;
 pub(crate) use extension_materialization::{
     materialize_runner_extension_with_env, materialize_runner_extension_with_exec,
