@@ -749,6 +749,20 @@ fn strict_ancestor_refresh_candidate_is_rejected_while_owner_keeps_selection() {
 #[test]
 fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
     test_support::with_isolated_home(|_| {
+        let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stale_probes = std::sync::Arc::clone(&probes);
+        let cached: String = crate::runner_probe_gate::deduplicated_probe(
+            "lab-local",
+            "refresh-invalidation",
+            "same-runtime-probe",
+            move || {
+                stale_probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("missing".to_string())
+            },
+        )
+        .expect("cache pre-refresh capability answer");
+        assert_eq!(cached, "missing");
+
         let fixture = tempfile::tempdir().expect("fixture");
         let binary = fixture.path().join("homeboy");
         let commit = homeboy_product_identity::build_identity()
@@ -800,6 +814,19 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
                 .as_deref(),
             binary.to_str()
         );
+        let fresh_probes = std::sync::Arc::clone(&probes);
+        let refreshed: String = crate::runner_probe_gate::deduplicated_probe(
+            "lab-local",
+            "refresh-invalidation",
+            "same-runtime-probe",
+            move || {
+                fresh_probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("present".to_string())
+            },
+        )
+        .expect("probe refreshed capability answer");
+        assert_eq!(refreshed, "present");
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
 
         let (repeated, exit_code) = refresh_homeboy_binary(options).expect("repeat selection");
         assert_eq!(exit_code, 0);

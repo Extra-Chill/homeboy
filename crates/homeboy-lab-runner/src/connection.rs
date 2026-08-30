@@ -552,6 +552,7 @@ pub(crate) fn rotate_daemon_generation(
         );
         return Err(error);
     }
+    super::runner_probe_gate::invalidate_runner_probes(runner_id);
     Ok(())
 }
 
@@ -1468,6 +1469,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // registered orchestration driver belongs to the controller process; builds
     // without agent-task support resolve this as an inert no-op.
     drop(promotion_lease);
+    super::runner_probe_gate::invalidate_runner_probes(runner_id);
     wake_unmaterialized_admission_reconciliation();
     Ok((
         RunnerConnectReport {

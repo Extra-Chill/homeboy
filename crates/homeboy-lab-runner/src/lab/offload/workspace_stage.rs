@@ -1569,8 +1569,12 @@ mod tests {
             "wordpress-fixture".to_string(),
         ];
 
+        let command_prefix = lab_offload_command_prefix(
+            Path::new("/runner/workspaces/node-project"),
+            "/runner/bin/homeboy",
+        );
         let command = build_lab_offload_remote_command(
-            &["/runner/bin/homeboy".to_string()],
+            &command_prefix.argv,
             &args,
             "/runner/workspaces/node-project",
             &[],
@@ -1582,6 +1586,8 @@ mod tests {
             command,
             vec![
                 "/runner/bin/homeboy".to_string(),
+                "--placement".to_string(),
+                "local".to_string(),
                 "bench".to_string(),
                 "--extension".to_string(),
                 "wordpress".to_string(),

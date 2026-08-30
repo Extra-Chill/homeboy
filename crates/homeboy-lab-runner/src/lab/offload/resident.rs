@@ -78,7 +78,8 @@ pub(crate) fn run_runner_resident_lab_offload(
         None,
     )
     .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
-    let mut command = vec![homeboy_path.to_string()];
+    let mut command =
+        lab_offload_command_prefix(std::path::Path::new(runner_workspace_root), homeboy_path).argv;
     if remote_output_file.is_some() && !args_contain_output_file(request.normalized_args) {
         command.push("--output".to_string());
         command.push(remote_output_file.clone().expect("remote output path"));
