@@ -471,7 +471,9 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     // A terminal coordinator failure is the authoritative outcome even when it
     // happened before the first child record existed. Reconciling children first
     // would turn that diagnostic into a misleading "run record not found".
-    let observations = if report.admission_blocker.is_some() {
+    let admission_pending =
+        report.batch.state == batch::AgentTaskBatchState::Admitting && report.admission.absent > 0;
+    let observations = if report.admission_blocker.is_some() || admission_pending {
         BTreeMap::new()
     } else {
         reconcile_fanout_pr_states(&args.batch_id, false)?
@@ -494,7 +496,11 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     // envelope's success/exit_code.
     // The mutating `resume` command keeps the aggregate exit policy, and
     // durable reconciliation / child continuation stay limited to it.
-    let portfolio = reconcile_portfolio(&report.batch)?;
+    let portfolio = if admission_pending {
+        load_portfolio(&report.batch)?.status(&BTreeMap::new())
+    } else {
+        reconcile_portfolio(&report.batch)?
+    };
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-fanout-status/v2",
@@ -1976,6 +1982,8 @@ fn compile_batch_cooks(
                 options.identity.initial_plan.metadata["cook_repository_identity"] =
                     cook.repository_identity.clone();
             }
+            options.identity.initial_plan.metadata["batch_id"] =
+                Value::String(plan.fanout_id.clone());
             if let (Some(workspace), Some(component_id)) = (
                 options.workspace.source_worktree_path.as_deref(),
                 cook.component_id.as_deref(),
@@ -10977,6 +10985,112 @@ fi
                     .metadata["coordinator"]["admission_deadline_at"],
                 before
             );
+        });
+    }
+
+    #[test]
+    fn public_status_reports_admitting_before_the_first_child_exists() {
+        with_isolated_home(|_| {
+            let batch_id = "status-during-admission";
+            batch::persist_fanout_run_batch(
+                batch_id,
+                batch_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id: "child".to_string(),
+                    run_id: "synthesized-child-run".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist batch before child admission");
+            batch::claim_fanout_run_batch(batch_id)
+                .expect("claim batch")
+                .expect("coordinator claim");
+
+            let (value, exit_code) = batch_status(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: batch_id.to_string(),
+                },
+                Placement::Lab,
+            )
+            .expect("admission window remains a readable fanout status");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["batch"]["status"], "admitting");
+            assert_eq!(value["batch"]["batch"]["state"], "admitting");
+            assert_eq!(value["batch"]["admission"]["admitted"], 0);
+            assert_eq!(value["batch"]["admission"]["absent"], 1);
+            assert!(value["batch"]["unavailable_child_runs"]
+                .as_array()
+                .is_none_or(Vec::is_empty));
+        });
+    }
+
+    #[test]
+    fn detached_lab_transport_retry_replaces_the_canonical_fanout_child() {
+        with_isolated_home(|_| {
+            let mut plan = test_batch_plan();
+            plan.cooks.truncate(1);
+            plan.rekey("detached-lab-transport-retry".to_string());
+            let cook = &plan.cooks[0];
+            let task_id = cook.cook_id.clone();
+            let mut options = cook
+                .to_cook_invocation(&plan)
+                .expect("compile child invocation")
+                .options;
+            materialize_test_child(&mut options);
+            options.identity.initial_plan.metadata["batch_id"] = json!(plan.fanout_id);
+            options.provider_transport.attempt_dispatcher = Some(Arc::new(LabRecipeDispatcher));
+            agent_task_service::persist_initial_recipe(&options)
+                .expect("persist detached Lab recipe");
+            let initial_run_id = options.identity.initial_run_id.clone();
+            batch::persist_fanout_run_batch(
+                &plan.fanout_id,
+                &plan.fanout_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id,
+                    run_id: initial_run_id.clone(),
+                }],
+                json!({}),
+            )
+            .expect("persist fanout roster");
+
+            let retry_run_id = format!("{initial_run_id}-transport-retry");
+            let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()
+                .expect("recipe store");
+            let recipe = recipe_store
+                .record_recipe_attempt_replacement(
+                    &options.identity.cook_id,
+                    &initial_run_id,
+                    &retry_run_id,
+                )
+                .expect("record transport replacement");
+            assert_eq!(
+                recipe.promotion_transport["attempt_dispatch"]["kind"],
+                "lab"
+            );
+            agent_task_lifecycle::submit_plan(
+                &recipe.attempts.last().expect("replacement attempt").plan,
+                Some(&retry_run_id),
+            )
+            .expect("materialize replacement child");
+
+            let (value, exit_code) = batch_status(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: plan.fanout_id.clone(),
+                },
+                Placement::Lab,
+            )
+            .expect("original fanout id resolves replacement child");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                value["batch"]["batch"]["child_runs"][0]["run_id"],
+                retry_run_id
+            );
+            assert_eq!(value["batch"]["admission"]["admitted"], 1);
+            assert!(value["batch"]["unavailable_child_runs"]
+                .as_array()
+                .is_none_or(Vec::is_empty));
         });
     }
 
