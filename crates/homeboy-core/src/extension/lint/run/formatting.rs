@@ -1,7 +1,7 @@
 //! Formatting-finding extraction and harness-failure classification.
 
 use super::types::FormattingFindings;
-use crate as extension;
+use crate::extension;
 use std::collections::BTreeSet;
 use std::path::Path;
 

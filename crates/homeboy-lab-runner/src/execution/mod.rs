@@ -201,9 +201,14 @@ pub(crate) fn resolve_provider_env_with_execution_context(
     cwd: &std::path::Path,
     env: &HashMap<String, String>,
     explicit_run_id: Option<&str>,
-) -> Result<Vec<homeboy_core::EnvProviderContribution>> {
+) -> Result<Vec<homeboy_core::extension::EnvProviderContribution>> {
     let env = provider_resolution_env(env, explicit_run_id);
-    homeboy_core::resolve_installed_env_providers(execution_context, provider_ids, cwd, &env)
+    homeboy_core::extension::resolve_installed_env_providers(
+        execution_context,
+        provider_ids,
+        cwd,
+        &env,
+    )
 }
 
 /// Environment visible to extension providers before they contribute their
@@ -566,7 +571,7 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
     let mut extensions = required_extensions
         .iter()
         .filter_map(|extension_id| {
-            let manifest = homeboy_core::load_extension(extension_id).ok()?;
+            let manifest = homeboy_core::extension::load_extension(extension_id).ok()?;
             let path = manifest.extension_path.clone().unwrap_or_else(|| {
                 homeboy_core::paths::extension(extension_id)
                     .map(|path| path.display().to_string())
@@ -579,7 +584,7 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
             Some(ExtensionProvenance {
                 extension_id: extension_id.clone(),
                 path,
-                install_mode: if homeboy_core::is_extension_linked(extension_id) {
+                install_mode: if homeboy_core::extension::is_extension_linked(extension_id) {
                     "linked".to_string()
                 } else {
                     "copied".to_string()
@@ -972,7 +977,7 @@ fn exec_with_status_snapshot_attempt(
         let provider_secret_names = options
             .extension_env_providers
             .iter()
-            .map(|id| homeboy_core::env_provider_secret_names(id))
+            .map(|id| homeboy_core::extension::env_provider_secret_names(id))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()

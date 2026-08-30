@@ -1,8 +1,8 @@
 //! Shared workflow types — args, results, and summary structures.
 
-use crate::lint::baseline as lint_baseline;
-use crate::self_check::SelfCheckCaptureMetadata;
-use crate::ExtensionPhaseTiming;
+use crate::extension::lint::baseline as lint_baseline;
+use crate::extension::self_check::SelfCheckCaptureMetadata;
+use crate::extension::ExtensionPhaseTiming;
 use homeboy_core::finding::{FindingProducerSummary, HomeboyFinding};
 use homeboy_engine_primitives::baseline::BaselineFlags;
 pub use homeboy_extension_contract::FormattingFindings;

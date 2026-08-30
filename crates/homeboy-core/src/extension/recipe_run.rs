@@ -3,7 +3,7 @@
 use homeboy_core::error::{Error, Result};
 
 use crate::extension::manifest::ExtensionManifest;
-use crate::DiscoveredExtension;
+use crate::extension_store::DiscoveredExtension;
 
 const AVAILABLE_ID_LIMIT: usize = 20;
 
@@ -135,7 +135,7 @@ impl RecipeRunProviderInventoryEntry {
 }
 
 fn discover_recipe_run_providers() -> Vec<DiscoveredProvider> {
-    let mut providers = crate::discover_extensions()
+    let mut providers = crate::extension_store::discover_extensions()
         .into_iter()
         .flat_map(|extension| match extension {
             DiscoveredExtension::Valid(manifest) => declarations_from_manifest(&manifest),
@@ -296,7 +296,7 @@ mod tests {
                 .to_string(),
             )
             .expect("manifest");
-            crate::install(&source.path().display().to_string(), Some("fixture"))
+            crate::extension::install(&source.path().display().to_string(), Some("fixture"))
                 .expect("install extension");
 
             let provider = resolve_recipe_run_provider("fixture.recipe-run").expect("discover");
@@ -347,7 +347,7 @@ mod tests {
                 .to_string(),
             )
             .expect("manifest");
-            crate::install(&source.path().display().to_string(), Some("fixture"))
+            crate::extension::install(&source.path().display().to_string(), Some("fixture"))
                 .expect("a malformed provider must not make the manifest unreadable");
 
             let inventory = recipe_run_provider_inventory();
@@ -392,7 +392,8 @@ mod tests {
                 .to_string(),
             )
             .expect("manifest");
-            crate::install(&source.path().display().to_string(), Some("fixture")).expect("install");
+            crate::extension::install(&source.path().display().to_string(), Some("fixture"))
+                .expect("install");
             let duplicate_source = tempfile::tempdir().expect("duplicate extension source");
             std::fs::write(
                 duplicate_source.path().join("duplicate.json"),
@@ -403,7 +404,7 @@ mod tests {
                 .to_string(),
             )
             .expect("duplicate manifest");
-            crate::install(
+            crate::extension::install(
                 &duplicate_source.path().display().to_string(),
                 Some("duplicate"),
             )

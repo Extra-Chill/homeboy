@@ -764,7 +764,7 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
             "HEAD"
         );
 
-        let install = homeboy_core::install(
+        let install = homeboy_core::extension::install(
             &remote.join("wordpress").display().to_string(),
             Some("wordpress"),
         )

@@ -3,7 +3,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::trace::baseline::TraceBaselineComparison;
+use crate::extension::trace::baseline::TraceBaselineComparison;
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_engine_primitives::baseline::BaselineFlags;
 use homeboy_extension_contract::TraceDependencySpec;

@@ -396,7 +396,8 @@ pub(super) fn run_lint_stage(
             runner.run()?;
         }
 
-        homeboy_core::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
+        homeboy_core::extension::lint::baseline::parse_findings_file(&findings_file)
+            .unwrap_or_default()
     };
 
     let lint_source_result = serde_json::json!({
@@ -524,7 +525,8 @@ pub(super) fn run_lint_stage(
         } else {
             runner.run()?;
         }
-        let remaining_findings = homeboy_core::lint::baseline::parse_findings_file(&findings_file)?;
+        let remaining_findings =
+            homeboy_core::extension::lint::baseline::parse_findings_file(&findings_file)?;
         reject_remaining_lint_fix_findings(&remaining_findings)?;
 
         let fix_results = fix_sidecars.consume_fix_results();

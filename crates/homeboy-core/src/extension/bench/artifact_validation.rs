@@ -134,7 +134,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::bench::parsing::{BenchMetrics, BenchRunSnapshot};
+    use crate::extension::bench::parsing::{BenchMetrics, BenchRunSnapshot};
 
     #[test]
     fn test_validate_artifact_paths() {

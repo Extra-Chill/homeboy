@@ -10,7 +10,10 @@ use homeboy::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::runner::runners::is_retrievable_runner_artifact;
-use homeboy_core::{self, ExtensionCapability, ExtensionRunner};
+use homeboy_core::{
+    self,
+    extension::{ExtensionCapability, ExtensionRunner},
+};
 
 use super::super::utils::args::PositionalComponentArgs;
 use super::types::{
@@ -307,7 +310,7 @@ impl ReplayLikeMode {
 
 #[derive(Clone)]
 struct ResolvedReplayContext {
-    execution_context: homeboy_core::ExtensionExecutionContext,
+    execution_context: homeboy_core::extension::ExtensionExecutionContext,
     component: homeboy::core::component::Component,
     command: Option<String>,
 }

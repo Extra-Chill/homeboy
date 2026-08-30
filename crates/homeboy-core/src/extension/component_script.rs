@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::runner::ExtensionRunner;
 use crate::extension::env_provider;
-use crate::{exec_context, load_extension, ExtensionCapability, RunnerOutput};
+use crate::extension::{exec_context, load_extension, ExtensionCapability, RunnerOutput};
 use homeboy_core::component::Component;
 pub use homeboy_core::component_script_provider::ComponentScriptOutput;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};

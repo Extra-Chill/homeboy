@@ -553,7 +553,7 @@ impl DifferentialReport {
 }
 
 /// Exit status assigned to a child terminated for exhausting its execution
-/// budget. Duplicated from `crate::test::report` deliberately: this module must
+/// budget. Duplicated from `crate::extension::test::report` deliberately: this module must
 /// be usable without pulling in the report envelope.
 pub const TIMEOUT_EXIT_CODE: i32 = 124;
 

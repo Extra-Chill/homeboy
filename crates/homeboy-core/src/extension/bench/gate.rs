@@ -130,7 +130,7 @@ mod normalization_tests {
 
     #[test]
     fn normalized_gate_results_are_scenario_scoped_and_agent_actionable() {
-        let mut results = crate::bench::parsing::parse_bench_results_str(
+        let mut results = crate::extension::bench::parsing::parse_bench_results_str(
             r#"{
                 "component_id": "homeboy",
                 "iterations": 1,

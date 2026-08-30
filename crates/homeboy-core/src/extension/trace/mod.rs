@@ -27,7 +27,7 @@ pub mod run;
 mod span_summary;
 pub mod spans;
 
-use crate::{ExtensionCapability, ExtensionExecutionContext};
+use crate::extension::{ExtensionCapability, ExtensionExecutionContext};
 use homeboy_core::component::Component;
 
 pub use aggregate_report::TraceAggregateSpanSampleOutput;
@@ -80,5 +80,5 @@ pub use span_summary::{
 pub fn resolve_trace_command(
     component: &Component,
 ) -> homeboy_core::error::Result<ExtensionExecutionContext> {
-    crate::resolve_execution_context(component, ExtensionCapability::Trace)
+    crate::extension_execution::resolve_execution_context(component, ExtensionCapability::Trace)
 }

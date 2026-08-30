@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::{
+use crate::extension::{
     resolve_execution_context, stderr_tail, ExtensionCapability, ExtensionExecutionContext,
 };
 use homeboy_core::component::Component;
@@ -97,7 +97,7 @@ fn run_trace_workflow_with_component_script(
         ("HOMEBOY_TRACE_LIST_ONLY".to_string(), "0".to_string()),
     ];
     script_env.extend(args.runner_inputs.env.clone());
-    let script_output = crate::component_script::run_component_scripts_with_run_dir(
+    let script_output = crate::extension::component_script::run_component_scripts_with_run_dir(
         component,
         ExtensionCapability::Trace,
         source_path,

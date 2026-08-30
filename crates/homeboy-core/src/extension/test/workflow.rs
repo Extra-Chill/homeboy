@@ -1,6 +1,6 @@
-use crate::test::drift::{detect_drift, generate_transform_rules};
-use crate::test::resolve_drift_options;
-use crate::test::ChangeType;
+use crate::extension::test::drift::{detect_drift, generate_transform_rules};
+use crate::extension::test::resolve_drift_options;
+use crate::extension::test::ChangeType;
 use homeboy_core::component::Component;
 pub use homeboy_extension_contract::test_results::{
     AutoFixDriftWorkflowResult, DriftWorkflowResult, MainTestWorkflowResult,

@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::TestDriftConfig;
+use crate::extension::TestDriftConfig;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_engine_primitives::test_path::is_test_path;
@@ -1609,7 +1609,7 @@ class FooTest extends TestCase {
 #[cfg(test)]
 mod workspace_layout_tests {
     use super::*;
-    use crate::TestDriftConfig;
+    use crate::extension::TestDriftConfig;
 
     fn run_git(root: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")

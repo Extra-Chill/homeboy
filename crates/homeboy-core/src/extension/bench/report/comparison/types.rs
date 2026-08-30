@@ -5,10 +5,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::super::BenchArtifactRef;
-use crate::bench::diagnostic::BenchDiagnostic;
-use crate::bench::parsing::{BenchMetricPhase, BenchMetricPolicy, BenchResults};
-use crate::bench::run::BenchRunFailure;
-use crate::bench::side_by_side::BenchSideBySideReport;
+use crate::extension::bench::diagnostic::BenchDiagnostic;
+use crate::extension::bench::parsing::{BenchMetricPhase, BenchMetricPolicy, BenchResults};
+use crate::extension::bench::run::BenchRunFailure;
+use crate::extension::bench::side_by_side::BenchSideBySideReport;
 use homeboy_lifecycle_contract::RigStateSnapshot;
 
 /// Cross-rig comparison envelope.

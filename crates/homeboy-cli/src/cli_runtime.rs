@@ -379,16 +379,16 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     // behavior through the hook. Moves out with deploy/release when they
     // become the homeboy-release crate.
     crate::release::provider_impl::register();
-    homeboy_core::audit_manifest_provider::register();
-    homeboy_core::component_script::register_component_script_runner();
-    homeboy_core::build::register_component_build_runner();
+    homeboy_core::extension::audit_manifest_provider::register();
+    homeboy_core::extension::component_script::register_component_script_runner();
+    homeboy_core::extension::build::register_component_build_runner();
     homeboy_core::extension::lifecycle::register_component_install_runner();
     // Register extension-backed audit providers so code_audit can load
     // grammars, run fallback fingerprint scripts, and collect compiler
     // warnings without depending on the extension registry or script runner.
-    homeboy_core::audit_fingerprint_script_provider::register();
-    homeboy_core::audit_grammar_source_provider::register();
-    homeboy_core::audit_compiler_warning_provider::register();
+    homeboy_core::extension::audit_fingerprint_script_provider::register();
+    homeboy_core::extension::audit_grammar_source_provider::register();
+    homeboy_core::extension::audit_compiler_warning_provider::register();
     // Register the audit recorded-artifact provider so the artifact-portability
     // detector can read past runs' artifacts from the observation store without
     // code_audit depending on observation — the last seam before audit becomes
@@ -2288,7 +2288,8 @@ fn extension_command_health_from_summary(summary: &ExtensionSummary) -> Extensio
     // An extension whose `ready_check` was never run is `unknown`, not `ready`.
     // A command-health contract that treated an absent measurement as ready
     // would reproduce the fail-open defect class in #10685. (#10616)
-    let readiness_unknown = summary.readiness == homeboy_core::ExtensionReadinessState::Unknown;
+    let readiness_unknown =
+        summary.readiness == homeboy_core::extension::ExtensionReadinessState::Unknown;
 
     let status = if summary.error.is_some() {
         "error"
@@ -2298,7 +2299,7 @@ fn extension_command_health_from_summary(summary: &ExtensionSummary) -> Extensio
         "unknown"
     } else if summary.ready == Some(true) {
         "ready"
-    } else if summary.readiness == homeboy_core::ExtensionReadinessState::TimedOut {
+    } else if summary.readiness == homeboy_core::extension::ExtensionReadinessState::TimedOut {
         "timed_out"
     } else {
         "not_ready"
@@ -3129,7 +3130,7 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
     if args.should_use_self_check_dispatch(&passthrough_args)
         && source
             .component
-            .has_script(homeboy_core::ExtensionCapability::Test)
+            .has_script(homeboy_core::extension::ExtensionCapability::Test)
     {
         return Ok(());
     }
@@ -3138,12 +3139,12 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.comp,
         &args.setting_args,
         &args.extension_override,
-        Some(homeboy_core::ExtensionCapability::Test),
+        Some(homeboy_core::extension::ExtensionCapability::Test),
     )
 	.and_then(|context| {
 		homeboy::core::extension_execution::resolve_execution_context(
 			&context.component,
-			homeboy_core::ExtensionCapability::Test,
+			homeboy_core::extension::ExtensionCapability::Test,
 		)
 		.map(|_| ())
 	})
@@ -3241,7 +3242,7 @@ fn run_startup_update_checks(command: &Commands) {
         Commands::Upgrade(_) | Commands::Daemon(_) | Commands::SelfCmd(_)
     ) {
         homeboy_upgrade::upgrade::update_check::run_startup_check();
-        homeboy_core::update_check::run_startup_check();
+        homeboy_core::extension::update_check::run_startup_check();
     }
 }
 
