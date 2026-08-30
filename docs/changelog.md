@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.15] - 2026-08-30
+
+### Changed
+- prune stale lifecycle assertions
+- Preserve root release tag namespaces
+- Recover fanout planning, placement, and convergence contracts
+- Preserve detached Lab staging ownership
+- read the blocker from normalized full status
+
+### Fixed
+- canonicalize staging worktree handles
+- materialize executable Lab retries
+- protect live managed worktrees from foreign writes
+
 ## [0.364.14] - 2026-08-29
 
 ### Changed
