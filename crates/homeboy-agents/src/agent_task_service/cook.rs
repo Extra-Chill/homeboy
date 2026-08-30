@@ -7490,6 +7490,36 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             if error.details["workspace_base_ancestry"]["direction"] == "behind"
                 && options.workspace.task_base_sha.is_some() =>
         {
+            if let Some(native) =
+                homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
+                    &options.workspace.to_worktree,
+                    homeboy_core::worktree_provider::WorktreeMutationContext::default(),
+                )?
+            {
+                // Homeboy owns this task worktree directly, so it can converge
+                // the clean, pinned checkout without requiring an external provider.
+                homeboy_core::git::run_git(
+                    target,
+                    &["merge", "--ff-only", base],
+                    "converge Homeboy task worktree to pinned Cook base",
+                )?;
+                let snapshot = preflight_cook_workspace_base_ancestry(
+                    target,
+                    base,
+                    &ignored_evidence,
+                    adopted_dirty_candidate,
+                )?;
+                return Ok(Some(match snapshot {
+                    Some(snapshot) => CookWorkspaceBaseValidation::Snapshot(snapshot),
+                    None => CookWorkspaceBaseValidation::Convergence(serde_json::json!({
+                        "schema": "homeboy/cook-workspace-base-convergence/v1",
+                        "planned_base_sha": base,
+                        "provider_id": "native",
+                        "handle": native.handle,
+                        "path": native.path,
+                    })),
+                }));
+            }
             let config = homeboy_core::defaults::load_config();
             let handle = if std::path::Path::new(&options.workspace.to_worktree).is_dir() {
                 let Some(target) =
