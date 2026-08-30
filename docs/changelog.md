@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.20] - 2026-08-30
+
+### Changed
+- Remove extension update-check re-exports
+- Remove dead extension scope aliases
+- Remove extension readiness re-exports
+- Remove extension grammar re-exports
+- Remove core extension glob re-export
+- Unify control-plane event streams
+
+### Fixed
+- persist canonical child lineage
+- preserve shared child root cause
+- honor snapshot excludes during harvest
+- persist inspectable operation progress
+- report child execution placement
+- persist interrupted local owner cause
+
 ## [0.364.19] - 2026-08-30
 
 ### Changed
