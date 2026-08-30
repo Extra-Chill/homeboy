@@ -986,6 +986,7 @@ Promote a completed generic patch artifact into a managed worktree
 | `--artifact-id` | `<ARTIFACT_ID>` | Restrict promotion to this artifact ID |
 | `--dry-run` | flag | Validate the promotion without applying it |
 | `--full` | flag | Include complete promotion and gate evidence |
+| `--idempotency-key` | `<KEY>` | Stable key used to replay this promotion without applying it twice |
 | `--gates-from-cook-recipe` | flag | Replay the exact gate policy from the source run's durable Cook recipe. Homeboy-generated review commands use this reference so private gate programs remain outside reviewer-facing command output |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |

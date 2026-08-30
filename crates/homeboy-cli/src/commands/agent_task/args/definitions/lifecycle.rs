@@ -419,6 +419,8 @@ mod tests {
             "--to-worktree",
             "repo@task",
             "--full",
+            "--idempotency-key",
+            "promote-1",
         ])
         .expect("promote full parses");
         let Commands::AgentTask(agent_task) = cli.command else {
@@ -428,6 +430,7 @@ mod tests {
             panic!("promote")
         };
         assert!(args.full);
+        assert_eq!(args.idempotency_key.as_deref(), Some("promote-1"));
 
         let cli = Cli::try_parse_from([
             "homeboy",
@@ -560,6 +563,9 @@ pub struct PromoteArgs {
     /// Include complete promotion and gate evidence.
     #[arg(long)]
     pub full: bool,
+    /// Stable key used to replay this promotion without applying it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
     /// Replay the exact gate policy from the source run's durable Cook recipe.
     /// Homeboy-generated review commands use this reference so private gate
     /// programs remain outside reviewer-facing command output.

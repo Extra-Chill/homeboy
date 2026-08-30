@@ -15,7 +15,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId,
     ProviderSessionId, RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
     CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
@@ -164,31 +165,19 @@ impl OrchestrationService<LifecycleStoreLookup> {
         self.execute_action_with_delegates(
             requested_id,
             request,
-            |parameters| {
-                crate::agent_task_service::retry(
-                    requested_id.as_str(),
-                    parameters.new_run_id.as_deref(),
-                    true,
-                    parameters.force,
-                )
-            },
-            || {
-                crate::agent_task_service::resume(
-                    requested_id.as_str().to_string(),
-                    std::sync::Arc::new(
-                        crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
-                    ),
-                )
-            },
+            |parameters| default_retry(requested_id.as_str(), parameters),
+            || default_resume(requested_id.as_str()),
+            default_promote,
         )
     }
 
-    fn execute_action_with_delegates<F, R>(
+    fn execute_action_with_delegates<F, R, P>(
         &self,
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
         retry: F,
         resume: R,
+        promote: P,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError>
     where
         F: FnOnce(
@@ -200,6 +189,10 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 crate::agent_task_schedule::AgentTaskAggregate,
             >,
         >,
+        P: FnOnce(
+            &crate::agent_task_service::AgentTaskPromotionRequest,
+        )
+            -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
     {
         validate_action_request(request)?;
         let resolved = resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
@@ -358,6 +351,40 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                                 "runnable": retry.run,
                                                 "created": retry.created,
                                             }),
+                                        },
+                                        None,
+                                    )
+                                }
+                                Err(error) => (
+                                    ControlPlaneActionOutcome::Failed,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                ),
+                            }
+                        }
+                        ControlPlaneAction::Promote => {
+                            let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
+                                serde_json::from_value(request.parameters.data.clone()).map_err(
+                                    |error| {
+                                        ControlPlaneError::invalid_argument(format!(
+                                            "promote parameters: {error}"
+                                        ))
+                                    },
+                                )?;
+                            match promote(&parameters) {
+                                Ok(report) => {
+                                    let current = self
+                                        .lookup
+                                        .store
+                                        .read_record(&resolved)
+                                        .map_err(map_lifecycle_error)?;
+                                    (
+                                        ControlPlaneActionOutcome::Succeeded,
+                                        project_record(&current, None)?,
+                                        ControlPlaneActionPayload {
+                                            schema: CONTROL_PLANE_PROMOTE_RESULT_SCHEMA.to_string(),
+                                            data: serde_json::to_value(report).unwrap_or_default(),
                                         },
                                         None,
                                     )
@@ -542,6 +569,7 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
     }
     let expected_parameters_schema = match request.action {
         ControlPlaneAction::Cancel => CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        ControlPlaneAction::Promote => CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
         ControlPlaneAction::Reconcile => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
         ControlPlaneAction::Resume => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
         ControlPlaneAction::Retry => CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
@@ -653,30 +681,13 @@ pub fn execute_action_from_current_environment(
     run_id: &str,
     request: &ControlPlaneActionRequest,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
-    let requested_id = RunId::new(run_id).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
-    OrchestrationService::new(LifecycleStoreLookup::new(store))
-        .execute_action(&requested_id, request)
-        .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
-                homeboy_core::Error::validation_invalid_argument(
-                    "action",
-                    error.message,
-                    None,
-                    None,
-                )
-            }
-            ControlPlaneErrorClass::Unavailable => {
-                homeboy_core::Error::internal_unexpected(error.message)
-            }
-        })
+    execute_action_from_current_environment_with_delegates(
+        run_id,
+        request,
+        |parameters| default_retry(run_id, parameters),
+        || default_resume(run_id),
+        default_promote,
+    )
 }
 
 pub fn execute_retry_action_from_current_environment_with_preflight<F>(
@@ -686,6 +697,73 @@ pub fn execute_retry_action_from_current_environment_with_preflight<F>(
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement>
 where
     F: Fn(&AgentTaskPlan) -> homeboy_core::Result<()>,
+{
+    execute_action_from_current_environment_with_delegates(
+        run_id,
+        request,
+        |parameters| {
+            crate::agent_task_service::retry_with_preflight(
+                run_id,
+                parameters.new_run_id.as_deref(),
+                true,
+                parameters.force,
+                &preflight,
+            )
+        },
+        || default_resume(run_id),
+        default_promote,
+    )
+}
+
+pub fn execute_resume_action_from_current_environment(
+    run_id: &str,
+    request: &ControlPlaneActionRequest,
+    executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
+) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    execute_action_from_current_environment_with_delegates(
+        run_id,
+        request,
+        |parameters| default_retry(run_id, parameters),
+        || crate::agent_task_service::resume(run_id.to_string(), executor),
+        default_promote,
+    )
+}
+
+pub fn execute_promotion_action_from_current_environment(
+    run_id: &str,
+    request: &ControlPlaneActionRequest,
+    progress: Option<crate::agent_task_promotion::PromotionProgressCallback>,
+) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    execute_action_from_current_environment_with_delegates(
+        run_id,
+        request,
+        |parameters| default_retry(run_id, parameters),
+        || default_resume(run_id),
+        |promotion| {
+            crate::agent_task_service::execute_promotion_with_progress(promotion.clone(), progress)
+        },
+    )
+}
+
+fn execute_action_from_current_environment_with_delegates<F, R, P>(
+    run_id: &str,
+    request: &ControlPlaneActionRequest,
+    retry: F,
+    resume: R,
+    promote: P,
+) -> homeboy_core::Result<ControlPlaneActionAcknowledgement>
+where
+    F: FnOnce(
+        &ControlPlaneRetryParameters,
+    ) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
+    R: FnOnce() -> homeboy_core::Result<
+        crate::agent_task_service::AgentTaskRunResult<
+            crate::agent_task_schedule::AgentTaskAggregate,
+        >,
+    >,
+    P: FnOnce(
+        &crate::agent_task_service::AgentTaskPromotionRequest,
+    ) -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
 {
     let requested_id = RunId::new(run_id).map_err(|error| {
         homeboy_core::Error::validation_invalid_argument(
@@ -697,27 +775,7 @@ where
     })?;
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
-        .execute_action_with_delegates(
-            &requested_id,
-            request,
-            |parameters| {
-                crate::agent_task_service::retry_with_preflight(
-                    run_id,
-                    parameters.new_run_id.as_deref(),
-                    true,
-                    parameters.force,
-                    &preflight,
-                )
-            },
-            || {
-                crate::agent_task_service::resume(
-                    run_id.to_string(),
-                    std::sync::Arc::new(
-                        crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
-                    ),
-                )
-            },
-        )
+        .execute_action_with_delegates(&requested_id, request, retry, resume, promote)
         .map_err(|error| match error.class {
             ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
                 homeboy_core::Error::validation_invalid_argument(
@@ -733,47 +791,35 @@ where
         })
 }
 
-pub fn execute_resume_action_from_current_environment(
+fn default_retry(
     run_id: &str,
-    request: &ControlPlaneActionRequest,
-    executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
-) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
-    let requested_id = RunId::new(run_id).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
-    OrchestrationService::new(LifecycleStoreLookup::new(store))
-        .execute_action_with_delegates(
-            &requested_id,
-            request,
-            |parameters| {
-                crate::agent_task_service::retry(
-                    run_id,
-                    parameters.new_run_id.as_deref(),
-                    true,
-                    parameters.force,
-                )
-            },
-            || crate::agent_task_service::resume(run_id.to_string(), executor),
-        )
-        .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
-                homeboy_core::Error::validation_invalid_argument(
-                    "action",
-                    error.message,
-                    None,
-                    None,
-                )
-            }
-            ControlPlaneErrorClass::Unavailable => {
-                homeboy_core::Error::internal_unexpected(error.message)
-            }
-        })
+    parameters: &ControlPlaneRetryParameters,
+) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult> {
+    crate::agent_task_service::retry(
+        run_id,
+        parameters.new_run_id.as_deref(),
+        true,
+        parameters.force,
+    )
+}
+
+fn default_resume(
+    run_id: &str,
+) -> homeboy_core::Result<
+    crate::agent_task_service::AgentTaskRunResult<crate::agent_task_schedule::AgentTaskAggregate>,
+> {
+    crate::agent_task_service::resume(
+        run_id.to_string(),
+        std::sync::Arc::new(
+            crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+        ),
+    )
+}
+
+fn default_promote(
+    promotion: &crate::agent_task_service::AgentTaskPromotionRequest,
+) -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport> {
+    crate::agent_task_service::execute_promotion(promotion.clone())
 }
 
 /// Project a durable record and optional plan the caller already loaded.
@@ -1255,7 +1301,8 @@ mod tests {
         ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState,
         EventCursor, EventId, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
         CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
@@ -1556,6 +1603,7 @@ mod tests {
                             exit_code: 0,
                         })
                     },
+                    |_| panic!("promote delegate must not run"),
                 )
             };
 
@@ -1568,6 +1616,56 @@ mod tests {
                 "{first:?}"
             );
             assert_eq!(first.result.schema, CONTROL_PLANE_RESUME_RESULT_SCHEMA);
+            assert_eq!(replay, first);
+            assert_eq!(executions.get(), 1);
+        });
+    }
+
+    #[test]
+    fn failed_promotion_action_replays_without_reexecuting() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Promote,
+                idempotency_key: "promote-request-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({
+                        "source": "{}",
+                        "source_run_id": AGENT_TASK_RUN,
+                        "to_worktree": "repo@candidate",
+                        "dry_run": true,
+                    }),
+                },
+                confirmed: true,
+            };
+            let executions = std::rc::Rc::new(std::cell::Cell::new(0));
+            let execute = || {
+                let executions = std::rc::Rc::clone(&executions);
+                service.execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_| panic!("retry delegate must not run"),
+                    || panic!("resume delegate must not run"),
+                    move |_| {
+                        executions.set(executions.get() + 1);
+                        Err(homeboy_core::Error::internal_unexpected(
+                            "promotion fixture failed",
+                        ))
+                    },
+                )
+            };
+
+            let first = execute().expect("failed acknowledgement");
+            let replay = execute().expect("failed replay");
+
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::Failed);
             assert_eq!(replay, first);
             assert_eq!(executions.get(), 1);
         });
