@@ -1,5 +1,5 @@
 use crate::extension;
-use crate::extension::runner::tail_lines;
+use crate::extension::invoke::{tail_lines, RunnerOutput, WRITE_TEST_RESULTS_ENV};
 use crate::extension::test::analyze::{analyze, TestAnalysisInput};
 use crate::extension::test::baseline::{self, TestCounts};
 use crate::extension::test::durations::{
@@ -793,7 +793,7 @@ fn unlink_test_inventory(binding: &TestInventoryBinding) -> bool {
 /// an unattributable evidence failure into a named producer defect. Bounded on
 /// purpose — this is a diagnosis, not a log.
 #[cfg(unix)]
-fn producer_failure_detail(output: &crate::extension::runner::RunnerOutput) -> String {
+fn producer_failure_detail(output: &RunnerOutput) -> String {
     const DETAIL_LINES: usize = 3;
     const DETAIL_CHARS: usize = 400;
 
@@ -1692,7 +1692,7 @@ fn run_main_test_workflow_inner(
             results_file.to_string_lossy().as_ref(),
         )
         .env(
-            crate::extension::runtime_helper::WRITE_TEST_RESULTS_ENV,
+            WRITE_TEST_RESULTS_ENV,
             write_results_helper.to_string_lossy().as_ref(),
         )
         .env_if(
@@ -2428,7 +2428,7 @@ fn run_declared_result_parser(
     )?;
     let write_results_helper = write_test_results_helper(run_dir)?;
     env_vars.push((
-        crate::extension::runtime_helper::WRITE_TEST_RESULTS_ENV.to_string(),
+        WRITE_TEST_RESULTS_ENV.to_string(),
         write_results_helper.to_string_lossy().to_string(),
     ));
     env_vars.push((

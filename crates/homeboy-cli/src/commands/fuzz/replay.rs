@@ -9,7 +9,7 @@ use homeboy::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::runner::runners::is_retrievable_runner_artifact;
-use homeboy_core::{self, extension::ExtensionRunner};
+use homeboy_core::{self, extension::invoke::ExtensionRunner};
 use homeboy_extension_contract::ExtensionCapability;
 
 use super::super::utils::args::PositionalComponentArgs;

@@ -18,7 +18,7 @@ use homeboy::fuzz::{
     FUZZ_RESULTS_FILE_PRODUCER_CONTRACT,
 };
 use homeboy::rig::{self, FuzzPrepareReport, RigSpec};
-use homeboy_core::{self, extension::ExtensionRunner};
+use homeboy_core::{self, extension::invoke::ExtensionRunner};
 use homeboy_extension_contract::fuzz_config::FuzzConfig;
 use homeboy_extension_contract::ExtensionCapability;
 use uuid::Uuid;
@@ -1432,7 +1432,9 @@ pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerCon
                 env.push(key.to_string());
             }
         }
-        for key in homeboy_core::extension::declared_helper_env_names(&config.runtime_helpers) {
+        for key in
+            homeboy_core::extension::invoke::declared_helper_env_names(&config.runtime_helpers)
+        {
             if !env.iter().any(|existing| existing == &key) {
                 env.push(key);
             }
@@ -1458,7 +1460,7 @@ fn run_fuzz_extension_script(
     execution_request_path: &Path,
     sequence_plan_path: Option<&Path>,
     runtime_helpers: &[homeboy_extension_contract::RuntimeHelperRequirement],
-) -> homeboy::core::Result<homeboy_core::extension::RunnerOutput> {
+) -> homeboy::core::Result<homeboy_core::extension::invoke::RunnerOutput> {
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let env = fuzz_runner_env(
         args,
@@ -1469,7 +1471,8 @@ fn run_fuzz_extension_script(
         Some(execution_request_path),
         sequence_plan_path,
     )?;
-    let helper_provenance = homeboy_core::extension::provision_declared_helpers(runtime_helpers)?;
+    let helper_provenance =
+        homeboy_core::extension::invoke::provision_declared_helpers(runtime_helpers)?;
     let mut helper_env = helper_provenance
         .iter()
         .map(|helper| (helper.env_var.clone(), helper.path.clone()))

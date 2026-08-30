@@ -469,7 +469,7 @@ fn scoped_skip_guidance(field: &str) -> Vec<String> {
     }
 }
 
-fn code_quality_failure_message(check: &str, output: &extension::RunnerOutput) -> String {
+fn code_quality_failure_message(check: &str, output: &extension::invoke::RunnerOutput) -> String {
     if is_runner_infrastructure_failure(output) {
         format!(
             "{} runner infrastructure failure (exit code {})",
@@ -480,7 +480,7 @@ fn code_quality_failure_message(check: &str, output: &extension::RunnerOutput) -
     }
 }
 
-fn is_runner_infrastructure_failure(output: &extension::RunnerOutput) -> bool {
+fn is_runner_infrastructure_failure(output: &extension::invoke::RunnerOutput) -> bool {
     if output.exit_code >= 2 || output.exit_code < 0 {
         return true;
     }
@@ -502,7 +502,7 @@ mod tests {
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
     use homeboy_core::error::Error;
-    use homeboy_core::extension::RunnerOutput;
+    use homeboy_core::extension::invoke::RunnerOutput;
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;

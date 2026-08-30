@@ -598,7 +598,7 @@ fn run_lint_fix_phase(
     progress: &mut ValidationProgressRecorder<'_>,
     index: usize,
     phase: &str,
-    runner: extension::ExtensionRunner,
+    runner: extension::invoke::ExtensionRunner,
     run_dir: &RunDir,
     timeout: Duration,
 ) -> homeboy_core::Result<()> {

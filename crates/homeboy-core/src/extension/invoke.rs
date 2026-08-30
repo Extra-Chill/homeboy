@@ -18,11 +18,12 @@ use std::time::Duration;
 mod action;
 mod context;
 mod environment;
+mod runner;
+mod runtime_helper;
 mod scope;
 mod settings;
 
 use super::env_provider;
-use super::runtime_helper;
 use crate::extension::catalog::load_extension;
 use homeboy_core::extension::resolve::ExtensionExecutionContext;
 use homeboy_extension_contract::exec_context;
@@ -37,6 +38,14 @@ use environment::{
     build_action_env, build_exec_env, execute_extension_command, execute_extension_runtime,
 };
 use homeboy_core::extension::readiness::extension_ready_status;
+pub(crate) use runner::{read_extension_phase_timings, tail_lines};
+pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
+pub(crate) use runtime_helper::WRITE_TEST_RESULTS_ENV;
+pub use runtime_helper::{
+    declared_helper_env_names, helper_path, provision_declared_helpers, RuntimeHelperProvision,
+    BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
+    RUNTIME_SETTINGS_HELPER_ENV, RUNTIME_SETTINGS_HELPER_ID,
+};
 use settings::serialize_settings;
 pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
 

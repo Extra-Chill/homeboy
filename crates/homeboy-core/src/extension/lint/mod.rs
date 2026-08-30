@@ -2,8 +2,8 @@ pub mod baseline;
 pub mod report;
 pub mod run;
 
+use crate::extension::invoke::ExtensionRunner;
 use crate::extension::resolve::ExtensionExecutionContext;
-use crate::extension::ExtensionRunner;
 use homeboy_core::component::Component;
 use homeboy_extension_contract::ExtensionCapability;
 

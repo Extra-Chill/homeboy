@@ -21,8 +21,6 @@ pub mod recipe_run;
 mod refactor_protocol;
 pub mod registry;
 pub mod resolve;
-mod runner;
-mod runtime_helper;
 pub mod self_check;
 mod setup_env;
 mod summary;
@@ -58,12 +56,6 @@ pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
     RewrittenImport,
-};
-pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
-pub use runtime_helper::{
-    declared_helper_env_names, helper_path, provision_declared_helpers, RuntimeHelperProvision,
-    BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
-    RUNTIME_SETTINGS_HELPER_ENV, RUNTIME_SETTINGS_HELPER_ID,
 };
 pub use summary::{list_summaries, list_summaries_with, ActionSummary, ExtensionSummary};
 pub use validation::{

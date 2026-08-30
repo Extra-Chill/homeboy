@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::extension::invoke::{read_extension_phase_timings, RunnerOutput};
 use crate::extension::resolve::path_list_env_value;
-use crate::extension::RunnerOutput;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
@@ -94,9 +94,7 @@ pub(super) fn run_generic_trace_runner(
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         timed_out: false,
         child_resource: None,
-        extension_phase_timings: super::super::runner::read_extension_phase_timings(
-            run_dir.path(),
-        )?,
+        extension_phase_timings: read_extension_phase_timings(run_dir.path())?,
         cargo_target: None,
     })
 }

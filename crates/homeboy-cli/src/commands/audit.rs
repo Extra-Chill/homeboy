@@ -11,7 +11,7 @@ use homeboy::core::observation::{
     finding_records_from_audit, ActiveObservation, NewFindingRecord, NewRunRecord, RunStatus,
 };
 
-use homeboy_core::extension::ExtensionRunner;
+use homeboy_core::extension::invoke::ExtensionRunner;
 use homeboy_extension_contract::ExtensionCapability;
 
 use super::source_command::resolve_source_context;

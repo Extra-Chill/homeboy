@@ -10,9 +10,9 @@ pub mod report;
 pub mod run;
 pub mod workflow;
 
+use crate::extension::invoke::ExtensionRunner;
 use crate::extension::resolve::ExtensionExecutionContext;
 use crate::extension::test::drift::DriftOptions;
-use crate::extension::ExtensionRunner;
 use homeboy_core::component::Component;
 use homeboy_core::git;
 use homeboy_extension_contract::manifest_toolchain_config::{

@@ -5,6 +5,7 @@ use std::fs;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
+use crate::extension::invoke::RunnerOutput;
 use crate::extension::resolve::ExtensionExecutionContext;
 use crate::extension::trace::attach::TraceAttachment;
 use crate::extension::trace::canonicality::TraceCanonicalPolicy;
@@ -13,7 +14,6 @@ use crate::extension::trace::generic_runner::{
 };
 use crate::extension::trace::overlay::{apply_trace_overlays, TraceOverlayRequest};
 use crate::extension::trace::probes::TraceProbeConfig;
-use crate::extension::RunnerOutput;
 use homeboy_core::component::{Component, ScopedExtensionConfig};
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_core::engine::run_dir::RunDir;

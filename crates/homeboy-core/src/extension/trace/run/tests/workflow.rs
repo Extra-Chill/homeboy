@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::extension::invoke::RunnerOutput;
 use crate::extension::resolve::ExtensionExecutionContext;
 use crate::extension::trace::attach::TraceAttachment;
 use crate::extension::trace::canonicality::TraceCanonicalPolicy;
 use crate::extension::trace::parsing::{TraceGitProvenance, TraceResults, TraceStatus};
 use crate::extension::trace::probes::TraceProbeConfig;
-use crate::extension::RunnerOutput;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, ErrorCode};
