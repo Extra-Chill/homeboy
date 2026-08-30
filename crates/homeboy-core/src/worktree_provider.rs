@@ -244,7 +244,7 @@ pub struct WorktreeProvisionIntent {
     pub repo: String,
     pub base: String,
     pub head: String,
-    pub task_url: String,
+    pub task_url: Option<String>,
 }
 
 /// Lifecycle ownership bound before a provisioning mutation is allowed.
@@ -734,7 +734,7 @@ impl WorktreeProvisionProvider for NativeWorktreeProvider {
                     path: worktree::planned_create_path(&intent.repo, &intent.head, &intent.base)?,
                     kind: WorktreeWorkspaceKind::TaskWorktree,
                     branch: Some(intent.head.clone()),
-                    task_url: Some(intent.task_url.clone()),
+                    task_url: intent.task_url.clone(),
                     provenance: None,
                 },
                 exact_identity: None,
@@ -759,7 +759,7 @@ impl WorktreeProvisionProvider for NativeWorktreeProvider {
             component_id: intent.repo.clone(),
             branch: intent.head.clone(),
             from: Some(intent.base.clone()),
-            task_url: Some(intent.task_url.clone()),
+            task_url: intent.task_url.clone(),
             run_id: Some(lifecycle.owner_run_ref.clone()),
             cleanup_policy: Some(match lifecycle.cleanup_policy {
                 WorktreeCleanupPolicy::RemoveOnSuccess => worktree::CleanupPolicy::RemoveWhenSafe,
@@ -1481,10 +1481,15 @@ impl<'a> WorktreeProviderRegistry<'a> {
             repo: options.component_id.clone(),
             base: options.from.clone().unwrap_or_else(|| "HEAD".to_string()),
             head: options.branch.clone(),
-            task_url: options.task_url.clone().unwrap_or_default(),
+            task_url: options.task_url.clone(),
         };
         let configured_creation = configured_provisioning_declared(self.config);
-        if configured_creation && intent.task_url.trim().is_empty() {
+        if configured_creation
+            && intent
+                .task_url
+                .as_deref()
+                .is_none_or(|task_url| task_url.trim().is_empty())
+        {
             return Err(Error::validation_missing_argument(vec![
                 "--task-url is required for configured-provider worktree creation".to_string(),
             ]));
@@ -2164,7 +2169,7 @@ mod tests {
                 repo: "fixture".to_string(),
                 base: "main".to_string(),
                 head: "planned".to_string(),
-                task_url: "https://example.test/issues/8017".to_string(),
+                task_url: Some("https://example.test/issues/8017".to_string()),
             };
             let lifecycle = WorktreeProvisionLifecycle {
                 purpose: "agent_task_cook".to_string(),
@@ -2520,7 +2525,7 @@ mod tests {
                 repo: "fixture".to_string(),
                 base: "main".to_string(),
                 head: "command-lifecycle".to_string(),
-                task_url: "https://example.test/issues/8017".to_string(),
+                task_url: Some("https://example.test/issues/8017".to_string()),
             };
             let lifecycle = WorktreeProvisionLifecycle {
                 purpose: "contract_test".to_string(),
@@ -2590,7 +2595,7 @@ mod tests {
                 repo: "fixture".to_string(),
                 base: "main".to_string(),
                 head: "planned".to_string(),
-                task_url: "https://example.test/issues/8017".to_string(),
+                task_url: Some("https://example.test/issues/8017".to_string()),
             };
             let lifecycle = WorktreeProvisionLifecycle {
                 purpose: "agent_task_cook".to_string(),

@@ -773,7 +773,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                     repo: options.repo.clone(),
                     base: options.from.clone(),
                     head: request.branch.clone(),
-                    task_url,
+                    task_url: Some(task_url),
                 },
                 lifecycle,
                 None,
