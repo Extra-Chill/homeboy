@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::agent_task_lifecycle::{lifecycle_action_eligibility, AgentTaskActionAvailability};
+use crate::agent_task_lifecycle::lifecycle_action_eligibility;
+use homeboy_control_plane_contract::ControlPlaneActionAvailability;
 use homeboy_core::controller_pin_reference::{
     register_controller_pin_reference_provider, ControllerPinProtectionReason,
     ControllerPinReferenceProvider, ReferencedControllerPin,
@@ -95,8 +96,8 @@ fn mutating_lifecycle_action_remains_open(
             eligibility.action.is_mutating()
                 && matches!(
                     eligibility.availability,
-                    AgentTaskActionAvailability::Available
-                        | AgentTaskActionAvailability::Indeterminate
+                    ControlPlaneActionAvailability::Available
+                        | ControlPlaneActionAvailability::Indeterminate
                 )
         })
 }

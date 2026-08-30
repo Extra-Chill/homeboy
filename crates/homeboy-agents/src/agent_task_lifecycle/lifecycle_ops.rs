@@ -5382,7 +5382,6 @@ pub fn run_status_in_store(
             }
         })
     });
-    let action_eligibility = lifecycle_action_eligibility(&record, plan.as_ref());
     let normalized_events = normalize_progress_events(&record.run_id, &events, &artifact_refs);
     let latest_event_cursor = normalized_events
         .last()
@@ -5407,7 +5406,6 @@ pub fn run_status_in_store(
         latest_event_cursor,
         artifact_refs: record.artifact_refs,
         normalized_events,
-        action_eligibility,
         candidate,
     })
 }

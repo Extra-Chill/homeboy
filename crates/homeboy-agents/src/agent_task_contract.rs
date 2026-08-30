@@ -88,7 +88,7 @@ pub struct AgentTaskCoreContractSchemas {
     pub workflow: String,
     pub plan: String,
     pub plan_validation: String,
-    pub lifecycle_action_eligibility: String,
+    pub control_plane_action_eligibility: String,
     pub aggregate: String,
     pub matrix_plan: String,
     pub matrix_aggregate: String,
@@ -202,9 +202,8 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             plan: AGENT_TASK_PLAN_SCHEMA.to_string(),
             plan_validation: crate::agent_task_service::AGENT_TASK_PLAN_VALIDATION_SCHEMA
                 .to_string(),
-            lifecycle_action_eligibility:
-                crate::agent_task_lifecycle::AGENT_TASK_LIFECYCLE_ACTION_ELIGIBILITY_SCHEMA
-                    .to_string(),
+            control_plane_action_eligibility:
+                homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
             aggregate: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             matrix_plan: AGENT_TASK_MATRIX_PLAN_SCHEMA.to_string(),
             matrix_aggregate: AGENT_TASK_MATRIX_AGGREGATE_SCHEMA.to_string(),
@@ -523,8 +522,8 @@ mod tests {
             crate::agent_task_service::AGENT_TASK_PLAN_VALIDATION_SCHEMA
         );
         assert_eq!(
-            contract.schemas.lifecycle_action_eligibility,
-            crate::agent_task_lifecycle::AGENT_TASK_LIFECYCLE_ACTION_ELIGIBILITY_SCHEMA
+            contract.schemas.control_plane_action_eligibility,
+            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA
         );
         assert_eq!(
             contract.schemas.provider,

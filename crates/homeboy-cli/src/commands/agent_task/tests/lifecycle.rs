@@ -2702,8 +2702,8 @@ fn submit_run_status_reports_terminal_state() {
         })
         .expect("bridge status loaded");
         assert_eq!(
-            status_json["action_eligibility"]["schema"],
-            "homeboy/agent-task-lifecycle-action-eligibility/v1"
+            status_json["control_plane_run"]["action_eligibility"]["schema"],
+            "homeboy/control-plane-action-eligibility/v1"
         );
         assert_eq!(run_exit_code, 1);
         assert_eq!(status_exit_code, 0);
@@ -2714,8 +2714,8 @@ fn submit_run_status_reports_terminal_state() {
         );
         assert!(bridge_status_json["normalized_events"].is_array());
         assert_eq!(
-            bridge_status_json["action_eligibility"]["schema"],
-            "homeboy/agent-task-lifecycle-action-eligibility/v1"
+            bridge_status_json["control_plane_run"]["action_eligibility"]["schema"],
+            "homeboy/control-plane-action-eligibility/v1"
         );
         assert_eq!(status_json["outcome"]["state"], "failed");
     });

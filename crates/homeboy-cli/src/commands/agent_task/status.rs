@@ -309,7 +309,9 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         // can also change what a later `activity show` returns. Say so (#W3-15).
         let bridge_status = agent_task_service::run_status(&target.run_id, args.since_cursor)?;
         let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
-        attach_control_plane_identities(&mut value, &target.run_id)?;
+        let record = agent_task_lifecycle::persisted_status(&target.run_id)?;
+        let plan = agent_task_lifecycle::load_plan(&target.run_id).ok();
+        attach_control_plane_run(&mut value, &record, plan.as_ref())?;
         attach_reconciled(&mut value, true);
         if let Some(selection) = target.selection {
             value["candidate_selection"] = selection;
@@ -364,11 +366,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         Err(_) => None,
     };
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
-    attach_control_plane_identities_from_record(&mut value, &record)?;
-    value["action_eligibility"] = serde_json::to_value(
-        agent_task_lifecycle::lifecycle_action_eligibility(&record, eligibility_plan.as_ref()),
-    )
-    .unwrap_or(Value::Null);
+    attach_control_plane_run(&mut value, &record, eligibility_plan.as_ref())?;
     // The default/`--full` status path is a durable-local read: reconciliation
     // has its own explicit command so an unavailable runner cannot hold status
     // hostage. That makes this answer directly comparable to `activity show`,
@@ -916,41 +914,21 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
 /// other (on `--bridge`) is a reconciling read. That is by design and is not
 /// changed here; it is only made visible, so a consumer can tell which kind of
 /// answer it received without inferring it from the command name (#W3-15).
-fn attach_control_plane_identities(value: &mut Value, run_id: &str) -> homeboy::core::Result<()> {
-    let recorded_attempt = value
-        .pointer("/metadata/cook_attempt")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok());
-    attach_resolved_control_plane(value, run_id, recorded_attempt)
-}
-
-fn attach_control_plane_identities_from_record(
+fn attach_control_plane_run(
     value: &mut Value,
     record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
 ) -> homeboy::core::Result<()> {
-    match agent_task_lifecycle::canonical_control_plane_identities(record)? {
-        Some(identities) => {
-            value["control_plane"] = serde_json::to_value(identities).unwrap_or(Value::Null);
-        }
-        None => {}
-    }
-    Ok(())
-}
-
-fn attach_resolved_control_plane(
-    value: &mut Value,
-    run_id: &str,
-    recorded_attempt: Option<u32>,
-) -> homeboy::core::Result<()> {
-    match agent_task_lifecycle::canonical_control_plane_identities_for_run(
-        run_id,
-        recorded_attempt,
-    )? {
-        Some(identities) => {
-            value["control_plane"] = serde_json::to_value(identities).unwrap_or(Value::Null);
-        }
-        None => {}
-    }
+    let projection =
+        homeboy::agents::orchestration::project_record(record, plan).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "run_id",
+                error.message,
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
+    value["control_plane_run"] = serde_json::to_value(projection).unwrap_or(Value::Null);
     Ok(())
 }
 
@@ -1422,7 +1400,7 @@ fn normalized_full_status(
                 }
             })).unwrap_or(Value::Null),
         },
-        "action_eligibility": value.get("action_eligibility").cloned().unwrap_or(Value::Null),
+        "control_plane_run": value.get("control_plane_run").cloned().unwrap_or(Value::Null),
         "outcome": {
             "run_id": bounded_value(value.get("run_id").unwrap_or(&Value::Null)),
             "state": bounded_value(value.get("state").unwrap_or(&Value::Null)),
@@ -2832,7 +2810,7 @@ fn attach_compact_causal_truth(summary: &mut Value, record: &Value, run_id: &str
         "terminal_phase": terminal_phase,
         "root_cause": record.get("diagnostic_summary"),
         "compared_values": record.pointer("/retry_replay/admission/compared_values"),
-        "budget": record.get("action_eligibility"),
+        "budget": record.pointer("/control_plane_run/action_eligibility"),
         "admission": record.pointer("/retry_replay/admission").or_else(|| record.pointer("/metadata/cook_continuation_admission")),
         "next_action": action,
     });
@@ -5950,9 +5928,9 @@ fn compact_status_summary_with_aggregate(
         "liveness": liveness_summary(record, run_id, canonical_candidate.state()),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });
-    if let Some(control_plane) = record.get("control_plane") {
-        if !control_plane.is_null() {
-            summary["control_plane"] = control_plane.clone();
+    if let Some(control_plane_run) = record.get("control_plane_run") {
+        if !control_plane_run.is_null() {
+            summary["control_plane_run"] = control_plane_run.clone();
         }
     }
 
@@ -8139,24 +8117,36 @@ mod tests {
     use homeboy::core::Error;
 
     #[test]
-    fn status_attaches_canonical_control_plane_identities() {
+    fn status_attaches_canonical_control_plane_run() {
         const RUN: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
-        let mut value = json!({
-            "metadata": {
-                "cook_attempt": 1
-            }
-        });
+        let record: AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": RUN,
+            "plan_id": "plan",
+            "state": "succeeded",
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "plan_path": "/plan",
+            "metadata": { "cook_attempt": 1 }
+        }))
+        .expect("record");
+        let mut value = json!({});
 
-        attach_control_plane_identities(&mut value, RUN).expect("attach identities");
+        attach_control_plane_run(&mut value, &record, None).expect("attach run");
 
         assert_eq!(
-            value["control_plane"],
-            json!({
-                "mission": "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e",
-                "run": RUN,
-                "attempt": RUN,
-                "attempt_number": 1
-            })
+            value["control_plane_run"]["schema"],
+            "homeboy/control-plane-run/v1"
+        );
+        assert_eq!(
+            value["control_plane_run"]["mission"],
+            "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e"
+        );
+        assert_eq!(value["control_plane_run"]["run"], RUN);
+        assert_eq!(value["control_plane_run"]["attempt"], RUN);
+        assert_eq!(value["control_plane_run"]["attempt_number"], 1);
+        assert_eq!(
+            value["control_plane_run"]["action_eligibility"]["schema"],
+            "homeboy/control-plane-action-eligibility/v1"
         );
     }
 

@@ -5,10 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{AttemptId, ExecutionId, MissionId, RunId};
+use crate::identity::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunId};
 
 pub const CONTROL_PLANE_RESULT_SCHEMA: &str = "homeboy/control-plane-result/v1";
 pub const CONTROL_PLANE_RUN_SCHEMA: &str = "homeboy/control-plane-run/v1";
+pub const CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA: &str =
+    "homeboy/control-plane-action-eligibility/v1";
 
 /// Shared result envelope for every control-plane operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +121,26 @@ pub struct ControlPlaneRun {
     pub location: Option<ControlPlaneLocation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<ControlPlaneBlocker>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<ControlPlaneOwner>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<ControlPlaneRuntime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ControlPlaneProviderSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<ControlPlaneStateSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<ControlPlaneStateSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication: Option<ControlPlaneStateSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_eligibility: Option<ControlPlaneActionEligibilityReport>,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
@@ -135,17 +157,130 @@ impl ControlPlaneRun {
         Self {
             schema: CONTROL_PLANE_RUN_SCHEMA.to_string(),
             mission: None,
-            run,
+            run: run.clone(),
             attempt: None,
             attempt_number: None,
             state: ControlPlaneRunState::Unknown,
             location: None,
             execution: None,
+            phase: None,
+            blocker: None,
+            owner: None,
+            runtime: None,
+            provider: None,
+            heartbeat_at: None,
+            candidate: None,
+            gates: Vec::new(),
+            publication: None,
+            action_eligibility: None,
             created_at: String::new(),
             updated_at: None,
             finished_at: None,
             evidence: Vec::new(),
             artifacts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneBlocker {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneOwner {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneRuntime {
+    pub build_identity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneProviderSummary {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<ProviderSessionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneStateSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneAction {
+    Cancel,
+    Resume,
+    Retry,
+    Review,
+    Promote,
+    Reconcile,
+}
+
+impl ControlPlaneAction {
+    pub const fn is_mutating(self) -> bool {
+        !matches!(self, Self::Review)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneActionConfirmation {
+    None,
+    Required,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneActionAvailability {
+    Available,
+    Unavailable,
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneActionEligibility {
+    pub action: ControlPlaneAction,
+    pub availability: ControlPlaneActionAvailability,
+    pub reason: String,
+    pub confirmation: ControlPlaneActionConfirmation,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_inputs: Vec<String>,
+    pub idempotent: bool,
+    pub requires_revalidation: bool,
+    pub result_resource_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneActionEligibilityReport {
+    pub schema: String,
+    pub run: RunId,
+    pub actions: Vec<ControlPlaneActionEligibility>,
+}
+
+impl ControlPlaneActionEligibilityReport {
+    pub fn new(run: RunId) -> Self {
+        Self {
+            schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
+            run,
+            actions: Vec::new(),
         }
     }
 }
@@ -195,11 +330,15 @@ pub struct ControlPlaneEvidenceRef {
 #[cfg(test)]
 mod tests {
     use super::{
+        ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
+        ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneBlocker,
         ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation,
-        ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, CONTROL_PLANE_RESULT_SCHEMA,
+        ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult, ControlPlaneRun,
+        ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
+        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
         CONTROL_PLANE_RUN_SCHEMA,
     };
-    use crate::{AttemptId, ExecutionId, MissionId, RunId};
+    use crate::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunId};
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
@@ -217,6 +356,50 @@ mod tests {
             remote_run_id: Some("remote-run-1".to_string()),
         });
         resource.execution = Some(ExecutionId::new("job-1").expect("execution"));
+        resource.phase = Some("terminal".to_string());
+        resource.blocker = Some(ControlPlaneBlocker {
+            code: Some("stale".to_string()),
+            message: "runner_disconnected".to_string(),
+        });
+        resource.owner = Some(ControlPlaneOwner {
+            kind: "runner".to_string(),
+            id: "homeboy-lab".to_string(),
+        });
+        resource.runtime = Some(ControlPlaneRuntime {
+            build_identity: "homeboy 0.1.0+test".to_string(),
+        });
+        resource.provider = Some(ControlPlaneProviderSummary {
+            id: "claude".to_string(),
+            state: Some("succeeded".to_string()),
+            session: Some(ProviderSessionId::new("sess-1").expect("session")),
+        });
+        resource.heartbeat_at = Some("2026-01-01T00:00:30Z".to_string());
+        resource.candidate = Some(ControlPlaneStateSummary {
+            id: Some("review".to_string()),
+            state: "applied".to_string(),
+        });
+        resource.gates = vec![ControlPlaneStateSummary {
+            id: Some("test".to_string()),
+            state: "passed".to_string(),
+        }];
+        resource.publication = Some(ControlPlaneStateSummary {
+            id: Some("https://example.invalid/pr/1".to_string()),
+            state: "published".to_string(),
+        });
+        resource.action_eligibility = Some(ControlPlaneActionEligibilityReport {
+            schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
+            run: run.clone(),
+            actions: vec![ControlPlaneActionEligibility {
+                action: ControlPlaneAction::Review,
+                availability: ControlPlaneActionAvailability::Available,
+                reason: "review is a non-mutating read available for every durable run".to_string(),
+                confirmation: ControlPlaneActionConfirmation::None,
+                required_inputs: Vec::new(),
+                idempotent: true,
+                requires_revalidation: true,
+                result_resource_type: "review".to_string(),
+            }],
+        });
         resource.created_at = "2026-01-01T00:00:00Z".to_string();
         resource.updated_at = Some("2026-01-01T00:01:00Z".to_string());
         resource.finished_at = Some("2026-01-01T00:01:00Z".to_string());
@@ -243,11 +426,77 @@ mod tests {
         assert_eq!(value["attempt"], AGENT_TASK_RUN);
         assert_eq!(value["attempt_number"], 1);
         assert_eq!(value["state"], "succeeded");
+        assert_eq!(value["phase"], "terminal");
+        assert_eq!(value["owner"]["kind"], "runner");
+        assert_eq!(value["runtime"]["build_identity"], "homeboy 0.1.0+test");
+        assert_eq!(value["provider"]["id"], "claude");
+        assert_eq!(value["heartbeat_at"], "2026-01-01T00:00:30Z");
+        assert_eq!(value["candidate"]["state"], "applied");
+        assert_eq!(value["gates"][0]["id"], "test");
+        assert_eq!(value["publication"]["state"], "published");
+        assert_eq!(
+            value["action_eligibility"]["schema"],
+            CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA
+        );
         assert!(value.get("metadata").is_none());
         assert!(value.get("cwd").is_none());
         assert!(value.get("prompt").is_none());
         let decoded: ControlPlaneRun = serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, resource);
+    }
+
+    #[test]
+    fn action_eligibility_report_round_trips_without_agent_task_schema() {
+        let run = RunId::new(AGENT_TASK_RUN).expect("run");
+        let report = ControlPlaneActionEligibilityReport {
+            schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
+            run: run.clone(),
+            actions: vec![ControlPlaneActionEligibility {
+                action: ControlPlaneAction::Cancel,
+                availability: ControlPlaneActionAvailability::Unavailable,
+                reason: "run is terminal".to_string(),
+                confirmation: ControlPlaneActionConfirmation::Required,
+                required_inputs: Vec::new(),
+                idempotent: false,
+                requires_revalidation: true,
+                result_resource_type: "run".to_string(),
+            }],
+        };
+        let value = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(value["schema"], CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
+        assert_eq!(value["run"], AGENT_TASK_RUN);
+        assert!(value.get("run_id").is_none());
+        assert!(value.get("state").is_none());
+        assert!(value.get("location").is_none());
+        assert_eq!(value["actions"][0]["action"], "cancel");
+        let decoded: ControlPlaneActionEligibilityReport =
+            serde_json::from_value(value).expect("deserialize");
+        assert_eq!(decoded, report);
+        assert_eq!(decoded.run, run);
+    }
+
+    #[test]
+    fn additive_run_detail_fields_remain_optional_for_v1_readers() {
+        let mut value = serde_json::to_value(sample_run()).expect("serialize");
+        let fields = value.as_object_mut().expect("run object");
+        for field in [
+            "phase",
+            "blocker",
+            "owner",
+            "runtime",
+            "provider",
+            "heartbeat_at",
+            "candidate",
+            "gates",
+            "publication",
+            "action_eligibility",
+        ] {
+            fields.remove(field);
+        }
+
+        let decoded: ControlPlaneRun = serde_json::from_value(value).expect("older v1 run");
+        assert!(decoded.action_eligibility.is_none());
+        assert!(decoded.gates.is_empty());
     }
 
     #[test]

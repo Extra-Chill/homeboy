@@ -1749,7 +1749,6 @@ pub struct AgentTaskRunStatus {
     pub artifact_refs: Vec<AgentTaskArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normalized_events: Vec<AgentTaskEventEnvelope>,
-    pub action_eligibility: super::AgentTaskLifecycleActionEligibilityReport,
     /// Additive projection for multi-candidate Cook runs. Older consumers retain
     /// the existing status fields and omit this when the plan has one task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
