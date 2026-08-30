@@ -923,6 +923,7 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor-contract",
  "homeboy-release-contract",
+ "homeboy-runner-contract",
  "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
  "keyring",
@@ -1232,6 +1233,17 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
+]
+
+[[package]]
+name = "homeboy-runner-contract"
+version = "0.1.0"
+dependencies = [
+ "homeboy-api-jobs-contract",
+ "homeboy-lab-contract",
+ "homeboy-source-snapshot-contract",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
