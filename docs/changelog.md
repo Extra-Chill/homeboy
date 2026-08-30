@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.0] - 2026-08-30
+
+### Added
+- add canonical discovery service
+
+### Changed
+- Remove flat extension fingerprint export
+- Treat capacity reserves as advisory
+- Remove flat extension recipe-run exports
+- Consolidate persisted runner session contracts
+- Consolidate runner workspace state contracts
+- Remove low-signal build smoke test
+- Remove extension validation facade
+- Consolidate runner resource telemetry contracts
+- Consolidate runner artifact result contracts
+- Consolidate extension catalog projections
+- Consolidate runner capability contracts
+- Complete extension invocation provider ownership
+
+### Fixed
+- Fix native Cook worktree convergence
+- Fix portable rig Lab handoff
+
 ## [0.366.1] - 2026-08-30
 
 ### Changed
