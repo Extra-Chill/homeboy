@@ -103,7 +103,7 @@ Lint a component
 | `--exclude-sniffs` | `<EXCLUDE_SNIFFS>` | Exclude sniffs from checking (comma-separated codes) |
 | `--category` | `<CATEGORY>` | Filter by category: security, i18n, yoda, whitespace |
 | `--fix` | flag | Apply auto-fixable lint findings in place using the lint fixer pipeline |
-| `--force` | flag | Allow --fix to edit the current dirty working tree for unbounded runs |
+| `--force` | flag | Override dirty-tree and foreign live worktree-holder write protection |
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |
 | `--setting` | `<KEY=VALUE>` | String setting override. Repeatable |
 | `--setting-json` | `<SETTING_JSON>` | Typed-JSON setting override. Repeatable |

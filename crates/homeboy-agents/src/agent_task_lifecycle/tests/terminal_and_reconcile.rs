@@ -2770,7 +2770,7 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         assert_eq!(loaded.metadata["remote_run_id"], "remote-run");
         assert_eq!(loaded.metadata["remote_plan_path"], "remote-plan");
         assert_eq!(
-            log.events.events[0].data["message"].as_str(),
+            log.events[0].data["message"].as_str(),
             Some("Remote provider agent task failed.")
         );
         assert_eq!(artifacts.evidence_refs[0].kind, "provider-run");

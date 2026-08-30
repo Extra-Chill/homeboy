@@ -15,7 +15,7 @@ use crate::agent_task::{
     AgentTaskWorkspaceMode,
 };
 use crate::agent_task_lifecycle::{
-    self, AgentTaskRunArtifacts, AgentTaskRunLog, AgentTaskRunRecord, AgentTaskRunStatus,
+    self, AgentTaskRunArtifacts, AgentTaskRunRecord, AgentTaskRunStatus,
 };
 use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
@@ -2308,20 +2308,15 @@ pub fn run_status(
     agent_task_lifecycle::run_status(run_id, cursor)
 }
 
-pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
+pub fn logs(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
     agent_task_lifecycle::logs(run_id)
-}
-
-pub fn logs_with_raw(run_id: &str) -> Result<AgentTaskRunLog> {
-    agent_task_lifecycle::logs_with_raw(run_id, true)
 }
 
 pub fn logs_from_cursor(
     run_id: &str,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
-    include_raw: bool,
-) -> Result<AgentTaskRunLog> {
-    agent_task_lifecycle::logs_from_cursor(run_id, cursor, include_raw)
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
+    agent_task_lifecycle::logs_from_cursor(run_id, cursor)
 }
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {

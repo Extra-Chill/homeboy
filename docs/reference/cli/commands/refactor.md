@@ -41,7 +41,7 @@ Structural refactoring (rename terms across codebase)
 | `--baseline` | flag | Persist the current run as the new baseline |
 | `--ignore-baseline` | flag | Skip baseline comparison for this run |
 | `--ratchet` | flag | Auto-update the baseline when the current run improves on it |
-| `--force` | flag | Skip the clean working tree check (for CI or when you know what you're doing) |
+| `--force` | flag | Override dirty-tree and foreign live worktree-holder write protection |
 | `--write` | flag | _no help text_ |
 | `--commit` | flag | After applying fixes, stage all changes and commit. Only effective with --write. The commit message is built from fix results |
 | `--git-identity` | `<GIT_IDENTITY>` | Git identity for the commit (used with --commit). Use "bot" for the default CI bot identity, or "Name <email>" for custom |
