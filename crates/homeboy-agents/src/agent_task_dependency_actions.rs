@@ -532,14 +532,14 @@ mod tests {
             "resume",
         )
         .unwrap();
-        let first = crate::agent_task_lifecycle::persisted_status("dependent-run").unwrap();
+        let first = crate::agent_task_lifecycle::status("dependent-run").unwrap();
         crate::agent_task_lifecycle::invalidate_cook_finalization_for_dependency(
             "dependent-run",
             "a".repeat(40).as_str(),
             "resume",
         )
         .unwrap();
-        let second = crate::agent_task_lifecycle::persisted_status("dependent-run").unwrap();
+        let second = crate::agent_task_lifecycle::status("dependent-run").unwrap();
 
         assert_eq!(second.updated_at, first.updated_at);
         assert_eq!(

@@ -306,11 +306,10 @@ pub mod gate {
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel_run, cook_index, durable_local_read,
-        fail_detached_cook_handoff_parent, list_records, load_plan, logs, persisted_status,
+        fail_detached_cook_handoff_parent, list_records, load_plan, logs,
         reconcile_terminal_artifact_projection, record_cook_finalization,
         record_execution_placement_outcome, recover_unmaterialized_cook_input_publication, retry,
-        run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, run_status,
-        submit_plan,
+        run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, submit_plan,
     };
     pub use super::super::agent_task_lifecycle::{
         cancel, canonical_control_plane_identities, canonical_control_plane_identities_for_run,
@@ -350,11 +349,11 @@ pub mod lifecycle {
         AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
         AgentTaskRecordReconciliationItem, AgentTaskRecordReconciliationReport,
         AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunProviderHandle,
-        AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus, AgentTaskRunTask,
-        AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe, AgentTaskRunnerProbePlan,
-        AgentTaskStatusOptions, AgentTaskStatusOutcome, CanonicalControlPlaneIdentities,
-        ClaimOutcome, ControllerRuntimePruneResult, DetachedCookMaterializingAttempt,
-        DetachedLabRunRecord, LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
+        AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask, AgentTaskRunnerDiagnosticProbe,
+        AgentTaskRunnerProbe, AgentTaskRunnerProbePlan, AgentTaskStatusOptions,
+        AgentTaskStatusOutcome, CanonicalControlPlaneIdentities, ClaimOutcome,
+        ControllerRuntimePruneResult, DetachedCookMaterializingAttempt, DetachedLabRunRecord,
+        LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
         RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT, RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL,
         RUNNER_PROBE_SKIPPED_NOT_RUNNING,
     };
@@ -502,7 +501,6 @@ pub mod secrets {
 
 /// High-level service entry points combining lifecycle and scheduling.
 pub mod service {
-    pub use super::super::agent_task_service::status;
     pub use super::super::agent_task_service::{
         adopt_cook_candidate, adopt_cook_candidate_with_dispatcher,
         adopt_cook_candidate_with_options_and_dispatcher,
@@ -513,18 +511,18 @@ pub mod service {
         claim_continuation_for_recovery_in_store, compile_cook_attempt,
         compile_cook_attempt_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_readiness_cache, consume_claimed_terminal_with_dispatcher,
-        consume_claimed_with_dispatcher, continuation_state_in_store, cook_batch_job_submission,
-        cook_continuation_requires_model_provenance, cook_request_is_review_form_only,
-        detached_batch_coordinator_control, discover_runs, enqueue_terminal_continuation,
-        evidence_ref_task_id, execute_promotion, execute_promotion_with_progress,
-        hydrate_evidence_ref, hydrate_evidence_summary, load_recipe, load_recipe_for_attempt,
-        local_pre_execution_runtime_recovery_is_eligible, normalize_plan_workspaces,
-        offloaded_status_remediation, persist_manual_finalization_intent,
-        persist_manual_finalization_receipt, persist_manual_finalization_retry_intent,
-        persist_provider_boundary_replay_evidence, preflight_cook_continuation_admission,
-        preflight_recipe_attempt_for_continuation, prepare_manual_finalization_identity,
-        promotion_is_resumable, read_plan, reconcile_recipe_attempt_for_continuation,
-        reconstruct_adoption_options_with_dispatcher,
+        consume_claimed_with_dispatcher, continuation_state_in_store, control_plane_run,
+        cook_batch_job_submission, cook_continuation_requires_model_provenance,
+        cook_request_is_review_form_only, detached_batch_coordinator_control, discover_runs,
+        enqueue_terminal_continuation, evidence_ref_task_id, execute_promotion,
+        execute_promotion_with_progress, hydrate_evidence_ref, hydrate_evidence_summary,
+        load_recipe, load_recipe_for_attempt, local_pre_execution_runtime_recovery_is_eligible,
+        normalize_plan_workspaces, offloaded_status_remediation,
+        persist_manual_finalization_intent, persist_manual_finalization_receipt,
+        persist_manual_finalization_retry_intent, persist_provider_boundary_replay_evidence,
+        preflight_cook_continuation_admission, preflight_recipe_attempt_for_continuation,
+        prepare_manual_finalization_identity, promotion_is_resumable, read_plan,
+        reconcile_recipe_attempt_for_continuation, reconstruct_adoption_options_with_dispatcher,
         reconstruct_options_for_pre_execution_recovery, reconstruct_options_with_dispatcher,
         reconstruct_options_with_local_placement_override, record_replacement_gate_proof,
         recover_cook_pr, recover_missing_promotion_aggregate,
@@ -551,8 +549,8 @@ pub mod service {
         DETACHED_BATCH_COORDINATOR_ENV, MAX_REVIEW_FORM_TIMEOUT_MS,
     };
     pub use super::super::agent_task_service::{
-        artifacts, logs, persist_initial_recipe, persisted_status, promotion_source,
+        artifacts, logs, persist_initial_recipe, promotion_source,
         reconcile_terminal_artifact_projection, resolve_cook_continuation_run_id, retry,
-        run_status, validate_initial_recipe_compatibility,
+        validate_initial_recipe_compatibility,
     };
 }

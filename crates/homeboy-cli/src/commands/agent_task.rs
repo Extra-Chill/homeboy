@@ -698,7 +698,7 @@ mod output_projection_tests {
                 }
             }],
             "artifact_refs": [{ "kind": "patch", "uri": "file:///tmp/change.patch" }],
-            "next_actions": [{ "command": "homeboy agent-task status run-1 --full" }],
+            "next_actions": [{ "command": "homeboy agent-task status run-1" }],
             "identity": { "run_id": "run-1" },
             "gates": [{ "name": "check", "status": "passed" }],
         })
@@ -731,7 +731,7 @@ mod output_projection_tests {
         assert_eq!(content["resource_timeline_projection"]["omitted_items"], 68);
         assert_eq!(
             value["next_actions"][0]["command"],
-            "homeboy agent-task status run-1 --full"
+            "homeboy agent-task status run-1"
         );
         assert_eq!(value["identity"]["run_id"], "run-1");
         assert_eq!(value["gates"][0]["status"], "passed");

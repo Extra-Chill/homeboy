@@ -1870,15 +1870,18 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(args.run_id.clone()),
             crate::commands::agent_task::AgentTaskCommand::Resume(args)
-                if args.bridge
-                    && crate::agents::agent_tasks::service::terminal_transport_recovery_required(
-                        &args.run_id,
-                    ) =>
+                if crate::agents::agent_tasks::service::terminal_transport_recovery_required(
+                    &args.run_id,
+                ) =>
             {
                 None
             }
-            crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(args.run_id.clone()),
-            crate::commands::agent_task::AgentTaskCommand::Accept(args) => Some(args.run_id.clone()),
+            crate::commands::agent_task::AgentTaskCommand::Resume(args) => {
+                Some(args.run_id.clone())
+            }
+            crate::commands::agent_task::AgentTaskCommand::Accept(args) => {
+                Some(args.run_id.clone())
+            }
             // Promotion mutates the durable source run (checkpointing apply and
             // final reports) and must therefore execute under the controller
             // runtime that admitted that run. Without this branch a promoted
@@ -1900,7 +1903,10 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
                 if matches!(cli.placement, crate::cli_surface::Placement::Local) {
                     return Ok(None);
                 }
-                return delegate_cook_continue_to_pinned_runtime(&args.cook_or_attempt_id, normalized_args);
+                return delegate_cook_continue_to_pinned_runtime(
+                    &args.cook_or_attempt_id,
+                    normalized_args,
+                );
             }
             _ => None,
         },
@@ -2023,7 +2029,7 @@ fn current_runtime_owns_terminal_cook_continuation(run_id: &str) -> homeboy::cor
     let Some(recipe) = crate::agents::agent_tasks::service::load_recipe_for_attempt(run_id)? else {
         return Ok(false);
     };
-    let record = crate::agents::agent_tasks::service::persisted_status(run_id)?;
+    let record = crate::agents::agent_tasks::lifecycle::status(run_id)?;
     if !matches!(
         record.state,
         crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded

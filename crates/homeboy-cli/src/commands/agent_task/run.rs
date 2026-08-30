@@ -3440,7 +3440,7 @@ fn cook_terminal_continuation_status(
             "continuation_in_progress",
             serde_json::json!({
                 "action": "await_claimed_continuation",
-                "command": format!("homeboy agent-task status {run_id} --full"),
+                "command": format!("homeboy agent-task status {run_id}"),
             }),
         ),
         agent_task_service::CookContinuationState::Failed => (
@@ -3454,7 +3454,7 @@ fn cook_terminal_continuation_status(
             "continuation_completed",
             serde_json::json!({
                 "action": "inspect_completed_cook",
-                "command": format!("homeboy agent-task status {run_id} --full"),
+                "command": format!("homeboy agent-task status {run_id}"),
             }),
         ),
         agent_task_service::CookContinuationState::Absent => (
@@ -8386,8 +8386,7 @@ pub(super) fn validate_plan(args: ValidatePlanArgs) -> CmdResult<Value> {
     ))
 }
 
-pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
-    let args = args.into();
+pub(super) fn resume(args: LifecycleReadArgs) -> CmdResult<Value> {
     if agent_task_lifecycle::exact_record(&args.run_id)
         .ok()
         .is_some_and(|record| {
@@ -8437,41 +8436,26 @@ pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
             0,
         ));
     }
-    run_resume_with_executor_and_bridge(
+    run_resume_with_executor(
         args.run_id,
-        args.bridge,
-        args.since_cursor,
         args.full,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
-pub(super) fn run_resume_with_executor_and_bridge(
+pub(super) fn run_resume_with_executor(
     run_id: String,
-    bridge: bool,
-    since_cursor: Option<String>,
     full: bool,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
     let needs_transport_recovery =
-        bridge && agent_task_service::terminal_transport_recovery_required(&run_id);
+        agent_task_service::terminal_transport_recovery_required(&run_id);
     if needs_transport_recovery {
-        // Recover the authenticated terminal runner snapshot before `resume`
-        // can short-circuit on a previously persisted lossy aggregate.
         agent_task_service::recover_terminal_transport_proxy_evidence(&run_id)?;
     }
     let result = agent_task_service::resume(run_id.clone(), executor)?;
-    if bridge {
-        // Resume first imports authoritative terminal runner evidence when the
-        // local aggregate is absent. Reproject only after that shared recovery
-        // contract has persisted the aggregate and identity.
+    if needs_transport_recovery {
         agent_task_service::reconcile_terminal_artifact_projection(&run_id)?;
-        let cursor = super::status::parse_event_cursor(since_cursor.as_deref(), "since_cursor")?;
-        let status = agent_task_service::run_status(&run_id, cursor)?;
-        return Ok((
-            serde_json::to_value(status).unwrap_or(Value::Null),
-            result.exit_code,
-        ));
     }
     Ok((
         if full {

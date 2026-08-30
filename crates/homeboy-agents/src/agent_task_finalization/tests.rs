@@ -3134,7 +3134,7 @@ fn changed_files_mismatch_error_reports_missing_and_unexpected_paths() {
         "{message}"
     );
     assert!(
-        message.contains("homeboy agent-task status agent-task-1 --full"),
+        message.contains("homeboy agent-task diagnose agent-task-1 --full"),
         "{message}"
     );
 }

@@ -1357,7 +1357,7 @@ pub fn verify_replacement_gates(
                 "replacement_gate_proof",
                 "operation_in_progress",
                 Some(operation_key),
-                Some(vec![format!("homeboy agent-task status {run_id} --full")]),
+                Some(vec![format!("homeboy agent-task status {run_id}")]),
             );
             error.details["claim"] = serde_json::to_value(claim).unwrap_or(Value::Null);
             Err(error)
@@ -2891,7 +2891,7 @@ pub fn persist_manual_finalization_intent(
     report: &AgentTaskPrFinalizationReport,
 ) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
     let mut report = report.clone();
-    if crate::agent_task_lifecycle::persisted_status(run_id)?.state
+    if crate::agent_task_lifecycle::status(run_id)?.state
         == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
     {
         report.manual_candidate_binding = Some(manual_candidate_binding(run_id, &report)?);
@@ -2952,7 +2952,7 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
                     None,
                 )
             })?;
-        if crate::agent_task_lifecycle::persisted_status(&run_id)?.state
+        if crate::agent_task_lifecycle::status(&run_id)?.state
             == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
         {
             let candidate = crate::agent_task_lifecycle::select_cook_candidate(requested_id)?;
@@ -2990,7 +2990,7 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
 }
 
 fn require_manual_finalization_run(run_id: &str) -> Result<String> {
-    let record = crate::agent_task_lifecycle::persisted_status(run_id)?;
+    let record = crate::agent_task_lifecycle::status(run_id)?;
     if record.metadata["manual_finalization_identity"] == true {
         return Ok(run_id.to_string());
     }
@@ -3033,7 +3033,7 @@ fn manual_candidate_binding(
     run_id: &str,
     report: &AgentTaskPrFinalizationReport,
 ) -> Result<crate::agent_task_finalization::AgentTaskManualCandidateBinding> {
-    let record = crate::agent_task_lifecycle::persisted_status(run_id)?;
+    let record = crate::agent_task_lifecycle::status(run_id)?;
     if record.state != crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
         || record.acceptance.is_some()
         || record.metadata.get("acceptance_requirement").is_some()
@@ -3763,7 +3763,7 @@ fn manual_finalization_intent_for_run(
             None,
         ));
     }
-    let candidate_recoverable = crate::agent_task_lifecycle::persisted_status(run_id)?.state
+    let candidate_recoverable = crate::agent_task_lifecycle::status(run_id)?.state
         == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
     if candidate_recoverable && report.manual_candidate_binding.is_none() {
         return Err(Error::validation_invalid_argument(
@@ -5753,8 +5753,7 @@ mod recovery_action_tests {
                         || action
                             .command
                             .ends_with("cook-state-matrix-attempt-1 --run"))
-                    || action.command
-                        == "homeboy agent-task status cook-state-matrix-attempt-1 --full"
+                    || action.command == "homeboy agent-task status cook-state-matrix-attempt-1"
             }));
             assert_eq!(
                 recovery.legal_actions.iter().any(|action| action.command
@@ -5797,7 +5796,7 @@ mod recovery_action_tests {
             vec![
                 (
                     "status".to_string(),
-                    "homeboy agent-task status checkpoint-mismatch-attempt-1 --full".to_string()
+                    "homeboy agent-task status checkpoint-mismatch-attempt-1".to_string()
                 ),
                 (
                     "diagnose".to_string(),
@@ -5849,7 +5848,7 @@ mod recovery_action_tests {
                 .map(|action| action.command.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "homeboy agent-task status ambiguous-attempt-1 --full",
+                "homeboy agent-task status ambiguous-attempt-1",
                 "homeboy agent-task diagnose ambiguous-attempt-1",
                 "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id first-patch",
                 "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id second-patch",

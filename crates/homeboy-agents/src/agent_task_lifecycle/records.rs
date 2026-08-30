@@ -4,7 +4,6 @@ use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
 
 pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
-    pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v3";
     pub(crate) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
     pub(crate) const COOK_INDEX: &str = "homeboy/agent-task-cook-index/v1";
 }
@@ -1692,31 +1691,6 @@ pub struct AgentTaskRunProviderHandle {
     pub state: Option<AgentTaskState>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskRunStatus {
-    pub schema: String,
-    pub control_plane_run: homeboy_control_plane_contract::ControlPlaneRun,
-    pub plan_id: String,
-    pub totals: AgentTaskAggregateTotals,
-    pub events: homeboy_control_plane_contract::ControlPlaneEventPage,
-    /// Candidate detail for multi-candidate Cook runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate: Option<AgentTaskCandidateStatus>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskCandidateStatus {
-    pub policy: crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_task_id: Option<String>,
-    pub candidates: Vec<AgentTaskRunTask>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline_timeout_ms: Option<u64>,
-    pub cancellation_supervision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub promotion_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

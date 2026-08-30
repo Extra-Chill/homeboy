@@ -2227,7 +2227,7 @@ mod tests {
                     "top_diagnostic": "Agent runtime did not produce required typed artifacts: concept_packet, design_packet.",
                     "hydrated_root_cause": "Provider runtime import failed: module not found",
                     "owner_surface": "agent_runtime",
-                    "next_command": "homeboy agent-task status agent-task-child-1 --full"
+                    "next_command": "homeboy agent-task status agent-task-child-1"
                 }]
             }
         });
@@ -2238,7 +2238,7 @@ mod tests {
         assert!(summary.contains(
             "Last failure: action-1 (agent-task-child-1): Provider runtime import failed: module not found\n"
         ));
-        assert!(summary.contains("Next: homeboy agent-task status agent-task-child-1 --full\n"));
+        assert!(summary.contains("Next: homeboy agent-task status agent-task-child-1\n"));
     }
 
     #[test]
