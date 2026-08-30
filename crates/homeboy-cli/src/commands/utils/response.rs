@@ -817,10 +817,13 @@ fn cook_batch_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
     if data.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-cook-batch/v1") {
         return None;
     }
-    if data.get("status").and_then(Value::as_str) != Some("blocked") {
-        return None;
+    let status = data.get("status").and_then(Value::as_str)?;
+    let primary = data
+        .get("primary_failure")
+        .filter(|value| value.is_object())?;
+    if status != "blocked" {
+        return cook_batch_child_failure_digest(status, data, primary);
     }
-    let primary = data.get("primary_failure")?;
     let phase = primary
         .get("phase")
         .and_then(Value::as_str)
@@ -850,6 +853,58 @@ fn cook_batch_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
     Some(CommandFailureDigest {
         summary: format!(
             "cook-batch blocked in {phase} on worktree {handle} ({blocked_rows} blocked row(s)): {}",
+            bounded_text(cause, 1000)
+        ),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions,
+        retryable: None,
+    })
+}
+
+fn cook_batch_child_failure_digest(
+    status: &str,
+    data: &Value,
+    primary: &Value,
+) -> Option<CommandFailureDigest> {
+    if !matches!(status, "failed" | "partial_failure") {
+        return None;
+    }
+    let phase = primary
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("child_execution");
+    let classification = primary
+        .get("classification")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let cause = primary
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("child cooks failed without a reported reason");
+    let affected = primary
+        .get("affected_child_count")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            data.pointer("/causal_failures/total")
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(1);
+    let next_actions = primary
+        .get("next_action")
+        .and_then(Value::as_str)
+        .or_else(|| primary.pointer("/recovery/command").and_then(Value::as_str))
+        .map(|command| {
+            vec![
+                CommandNextAction::new("repair the shared child failure", command)
+                    .with_kind(CommandNextActionKind::Repair),
+            ]
+        })
+        .unwrap_or_default();
+    Some(CommandFailureDigest {
+        summary: format!(
+            "cook-batch {status} in {phase} classification={classification} ({affected} child(ren)): {}",
             bounded_text(cause, 1000)
         ),
         stdout_tail: None,
@@ -1917,6 +1972,44 @@ mod tests {
         assert_eq!(
             value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
             "homeboy workspace worktrees add homeboy@fix-a"
+        );
+    }
+
+    #[test]
+    fn failed_cook_batch_names_its_shared_child_root_cause() {
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "homeboy/agent-task-cook-batch/v1",
+                "fanout_id": "issue-wave",
+                "status": "failed",
+                "primary_failure": {
+                    "phase": "committed_harvest_preflight",
+                    "classification": "agent_task.committed_harvest_dirty_workspace",
+                    "reason": "refusing committed-change harvest from a workspace with pre-existing uncommitted changes",
+                    "affected_child_count": 3,
+                    "next_action": "homeboy agent-task cook-continue cook-1",
+                },
+                "causal_failures": { "total": 3, "returned": 3, "omitted": 0, "unique_causes": 1 },
+            })),
+            1,
+            &CommandIdentity::with_operation("agent-task", "fanout cook-batch"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["success"], false);
+        let summary = value["summary"].as_str().expect("named cause");
+        assert!(
+            summary.contains("committed_harvest_preflight"),
+            "got: {summary}"
+        );
+        assert!(
+            summary.contains("agent_task.committed_harvest_dirty_workspace"),
+            "got: {summary}"
+        );
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
+            "homeboy agent-task cook-continue cook-1"
         );
     }
 

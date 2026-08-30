@@ -65,9 +65,10 @@ use super::cook_promotion::{
     finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
     moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
     moving_base_recovery_report, next_moving_base_recovery, persisted_promotion_for_attempt,
-    promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
-    refreshed_moving_base_recovery, retryable_provider_discovery_failure,
-    retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
+    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store,
+    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
+    retryable_provider_discovery_failure, retryable_provider_discovery_failure_with_store,
+    CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
@@ -2011,6 +2012,20 @@ impl AgentTaskCookBatchReport {
             retryable: lifecycle_status.is_retryable(),
         }
     }
+}
+
+/// Read the first durable outcome diagnostic for a failed attempt. Batch
+/// coordinators use this bounded projection when a Cook report only retains
+/// generic failure context; expanded evidence remains attached to the run.
+pub fn attempt_primary_failure_diagnostic(run_id: &str) -> Option<Value> {
+    let aggregate = agent_task_lifecycle::read_attempt_aggregate(run_id).ok()?;
+    aggregate
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Failed)
+        .flat_map(|outcome| &outcome.diagnostics)
+        .next()
+        .and_then(|diagnostic| serde_json::to_value(diagnostic).ok())
 }
 
 impl serde::Serialize for AgentTaskCookBatchReport {
@@ -6316,6 +6331,20 @@ fn run_cook_spine(
                 )
                 .unwrap_or(true),
             );
+            if report.value.terminal_phase.is_none() {
+                if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
+                    record.metadata["provider_executions_consumed"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    aggregate
+                        .outcomes
+                        .iter()
+                        .flat_map(|outcome| &outcome.diagnostics),
+                ) {
+                    report.value.terminal_phase = Some(phase);
+                    report.value.terminal_failure_classification = Some(classification);
+                }
+            }
             return Ok(report);
         }
 
