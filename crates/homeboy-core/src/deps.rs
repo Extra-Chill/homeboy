@@ -708,7 +708,7 @@ pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanS
         match provider::resolve_dependency_providers_optional(&component, &resolved_path) {
             Ok(providers) => providers,
             Err(error) => {
-                if !crate::extension_execution::has_linked_extension_for_capability(
+                if !crate::extension::resolve::has_linked_extension_for_capability(
                     &component,
                     homeboy_extension_contract::ExtensionCapability::Deps,
                 )? {

@@ -240,7 +240,7 @@ pub struct ExtensionManifest {
 /// `includes` is the sole ownership signal: when several linked extensions
 /// provide the same capability, an extension that composes all the others is
 /// resolved as the primary owner. See
-/// `homeboy_core::extension_execution::disambiguate_capability_owner`.
+/// `homeboy_core::extension::resolve::disambiguate_capability_owner`.
 ///
 /// Unknown keys are ignored rather than rejected, so manifests still carrying
 /// the retired `roles`/`optional`/`conflicts` metadata continue to load.

@@ -50,7 +50,7 @@ pub trait ComponentScriptRunner: Send + Sync {
     /// Used by dependency-provider extensions that carry their own context.
     fn run_with_context(
         &self,
-        context: &crate::extension_execution::ExtensionExecutionContext,
+        context: &crate::extension::resolve::ExtensionExecutionContext,
         component: &Component,
         path_override: Option<String>,
         script_args: &[String],
@@ -70,7 +70,7 @@ homeboy_engine_primitives::provider_registry! {
 
 /// Run a pre-resolved execution context through the registered provider.
 pub fn run_with_context(
-    context: &crate::extension_execution::ExtensionExecutionContext,
+    context: &crate::extension::resolve::ExtensionExecutionContext,
     component: &Component,
     path_override: Option<String>,
     script_args: &[String],

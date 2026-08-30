@@ -10,9 +10,9 @@ pub mod report;
 pub mod run;
 pub mod workflow;
 
+use crate::extension::resolve::ExtensionExecutionContext;
 use crate::extension::test::drift::DriftOptions;
 use crate::extension::ExtensionRunner;
-use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::git;
 use homeboy_extension_contract::manifest_toolchain_config::{
@@ -63,7 +63,7 @@ pub use workflow::{
 pub fn resolve_test_command(
     component: &Component,
 ) -> homeboy_core::error::Result<ExtensionExecutionContext> {
-    crate::extension_execution::resolve_execution_context(component, ExtensionCapability::Test)
+    crate::extension::resolve::resolve_execution_context(component, ExtensionCapability::Test)
 }
 
 /// Resolve only the process environment explicitly declared portable by the

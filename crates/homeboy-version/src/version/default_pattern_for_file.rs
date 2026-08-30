@@ -10,7 +10,7 @@ use homeboy_core::engine::codebase_scan;
 use homeboy_core::engine::text;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension::catalog::load_all_extensions;
-use homeboy_core::extension_execution::{resolve_owner, SINCE_TAG_SURFACE};
+use homeboy_core::extension::resolve::{resolve_owner, SINCE_TAG_SURFACE};
 use homeboy_core::paths::resolve_path_string;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};

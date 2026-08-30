@@ -22,7 +22,7 @@ mod settings;
 use super::env_provider;
 use super::runtime_helper;
 use crate::extension::catalog::load_extension;
-use homeboy_core::extension_execution::ExtensionExecutionContext;
+use homeboy_core::extension::resolve::ExtensionExecutionContext;
 use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
 use homeboy_extension_contract::exec_context;
 use homeboy_extension_contract::manifest_action_config::RuntimeConfig;
@@ -942,7 +942,7 @@ fn build_exec_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension_execution::extract_component_extension_settings;
+    use crate::extension::resolve::extract_component_extension_settings;
     use homeboy_core::component::Component;
 
     fn make_executable(path: &Path) {
@@ -1680,8 +1680,8 @@ mod tests {
         assert_eq!(output.stderr, "");
     }
 
-    fn lint_execution_context() -> crate::extension_execution::ExtensionExecutionContext {
-        crate::extension_execution::ExtensionExecutionContext {
+    fn lint_execution_context() -> crate::extension::resolve::ExtensionExecutionContext {
+        crate::extension::resolve::ExtensionExecutionContext {
             component: Component::new(
                 "fixture".to_string(),
                 "/configured/path".to_string(),

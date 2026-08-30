@@ -352,7 +352,7 @@ impl homeboy_core::component_script_provider::ComponentScriptRunner
 
     fn run_with_context(
         &self,
-        context: &homeboy_core::extension_execution::ExtensionExecutionContext,
+        context: &homeboy_core::extension::resolve::ExtensionExecutionContext,
         component: &homeboy_core::component::Component,
         path_override: Option<String>,
         script_args: &[String],

@@ -1,5 +1,4 @@
-//! Extension execution-context resolution (core glue over the contract
-//! manifest + Component). Relocated from extension/capability.rs.
+//! Canonical extension ownership and execution-context resolution.
 
 use crate::component::Component;
 use crate::error::{Error, ErrorCode, Result};
@@ -8,6 +7,14 @@ use std::path::{Path, PathBuf};
 use crate::extension::catalog::{extension_path, load_extension, load_extension_in_root};
 use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
 use homeboy_extension_contract::ExtensionCapability;
+
+mod surface;
+
+pub use surface::{
+    find_installed_file_extension, find_installed_file_extension_in_root, resolve_file_extension,
+    resolve_file_extension_in_root, FileExtensionCapability, FILE_EXTENSIONS_SURFACE,
+    REMOTE_PATH_SURFACE, SINCE_TAG_SURFACE,
+};
 
 pub fn stderr_tail(stderr: &str) -> String {
     const MAX_LINES: usize = 20;
@@ -129,14 +136,6 @@ pub fn extension_guidance_hints(
         "The component path resolved correctly; the requested command needs an extension provider.".to_string(),
     ]
 }
-
-/// Ownership surface for `remote_path` auto-resolution.
-pub const REMOTE_PATH_SURFACE: &str = "remote_path";
-/// Ownership surface for `deploy.since_tag` placeholder rewriting.
-pub const SINCE_TAG_SURFACE: &str = "since_tag";
-/// Ownership surface for `provides.file_extensions` (fingerprint / refactor /
-/// audit file-type dispatch).
-pub const FILE_EXTENSIONS_SURFACE: &str = "provides.file_extensions";
 
 /// Ambiguity error for a contested ownership surface.
 ///
@@ -810,6 +809,125 @@ mod tests {
             ),
         )
         .expect("extension manifest");
+    }
+
+    fn write_file_extension_manifest(home: &Path, extension_id: &str, includes: &[&str]) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(extension_id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        let includes_json = includes
+            .iter()
+            .map(|included| format!("\"{included}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(
+            extension_dir.join(format!("{extension_id}.json")),
+            format!(
+                r#"{{"name":"{extension_id}","version":"1.0.0","provides":{{"file_extensions":["js"],"capabilities":["fingerprint"]}},"scripts":{{"fingerprint":"fingerprint.sh"}},"composition":{{"includes":[{includes_json}]}}}}"#
+            ),
+        )
+        .expect("extension manifest");
+    }
+
+    #[test]
+    fn component_file_resolution_considers_only_linked_extensions() {
+        crate::test_support::with_isolated_home(|home| {
+            write_file_extension_manifest(home.path(), "alpha", &[]);
+            write_file_extension_manifest(home.path(), "zulu", &[]);
+
+            let component = component_with_extensions(&["zulu"]);
+            let resolved =
+                resolve_file_extension(&component, "js", FileExtensionCapability::Fingerprint)
+                    .expect("linked provider resolution")
+                    .expect("linked provider");
+
+            assert_eq!(resolved.id, "zulu");
+        });
+    }
+
+    #[test]
+    fn component_file_resolution_uses_composition_and_explicit_ownership() {
+        crate::test_support::with_isolated_home(|home| {
+            write_file_extension_manifest(home.path(), "wordpress", &["nodejs"]);
+            write_file_extension_manifest(home.path(), "nodejs", &[]);
+
+            let mut component = component_with_extensions(&["wordpress", "nodejs"]);
+            let composed =
+                resolve_file_extension(&component, "js", FileExtensionCapability::Fingerprint)
+                    .expect("composition resolution")
+                    .expect("composition owner");
+            assert_eq!(composed.id, "wordpress");
+
+            component
+                .capability_extensions
+                .insert(FILE_EXTENSIONS_SURFACE.to_string(), "nodejs".to_string());
+            let explicit =
+                resolve_file_extension(&component, "js", FileExtensionCapability::Fingerprint)
+                    .expect("explicit resolution")
+                    .expect("explicit owner");
+            assert_eq!(explicit.id, "nodejs");
+        });
+    }
+
+    #[test]
+    fn component_file_resolution_rejects_genuine_ambiguity() {
+        crate::test_support::with_isolated_home(|home| {
+            write_file_extension_manifest(home.path(), "alpha", &[]);
+            write_file_extension_manifest(home.path(), "zulu", &[]);
+
+            let component = component_with_extensions(&["zulu", "alpha"]);
+            let error =
+                resolve_file_extension(&component, "js", FileExtensionCapability::Fingerprint)
+                    .expect_err("unowned providers must remain ambiguous");
+
+            assert!(error
+                .message
+                .contains("multiple linked extensions providing 'provides.file_extensions'"));
+        });
+    }
+
+    #[test]
+    fn installed_file_resolution_retains_deterministic_fallback() {
+        crate::test_support::with_isolated_home(|home| {
+            write_file_extension_manifest(home.path(), "zulu", &[]);
+            write_file_extension_manifest(home.path(), "alpha", &[]);
+
+            let resolved =
+                find_installed_file_extension("js", FileExtensionCapability::Fingerprint)
+                    .expect("installed fallback");
+
+            assert_eq!(resolved.id, "alpha");
+        });
+    }
+
+    #[test]
+    fn rooted_file_resolution_stays_within_the_injected_config_root() {
+        crate::test_support::with_isolated_home(|home| {
+            let injected_home = home.path().join("injected");
+            let config_root = injected_home.join(".config/homeboy");
+            write_file_extension_manifest(&injected_home, "zulu", &[]);
+
+            let component = component_with_extensions(&["zulu"]);
+            let resolved = resolve_file_extension_in_root(
+                &config_root,
+                &component,
+                "js",
+                FileExtensionCapability::Fingerprint,
+            )
+            .expect("rooted provider resolution")
+            .expect("rooted provider");
+            assert_eq!(resolved.id, "zulu");
+
+            let installed = find_installed_file_extension_in_root(
+                &config_root,
+                "js",
+                FileExtensionCapability::Fingerprint,
+            )
+            .expect("rooted installed fallback");
+            assert_eq!(installed.id, "zulu");
+            assert!(
+                find_installed_file_extension("js", FileExtensionCapability::Fingerprint).is_none()
+            );
+        });
     }
 
     #[test]

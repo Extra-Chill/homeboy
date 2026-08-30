@@ -19,8 +19,10 @@ struct ExtensionGrammarSourceProvider;
 
 impl GrammarSourceProvider for ExtensionGrammarSourceProvider {
     fn grammar_dir(&self, file_extension: &str) -> Option<PathBuf> {
-        let matched =
-            crate::extension::catalog::find_extension_for_file_ext(file_extension, "fingerprint")?;
+        let matched = crate::extension::resolve::find_installed_file_extension(
+            file_extension,
+            crate::extension::resolve::FileExtensionCapability::Fingerprint,
+        )?;
         matched.extension_path.map(PathBuf::from)
     }
 }

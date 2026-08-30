@@ -3173,7 +3173,7 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         Some(ExtensionCapability::Test),
     )
 	.and_then(|context| {
-		homeboy::core::extension_execution::resolve_execution_context(
+		homeboy::core::extension::resolve::resolve_execution_context(
 			&context.component,
             ExtensionCapability::Test,
 		)

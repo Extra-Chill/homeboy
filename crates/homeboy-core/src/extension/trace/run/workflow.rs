@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::time::Instant;
 
+use crate::extension::resolve::{resolve_execution_context, ExtensionExecutionContext};
 use crate::extension::stderr_tail;
-use crate::extension_execution::{resolve_execution_context, ExtensionExecutionContext};
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};

@@ -4,7 +4,7 @@ use homeboy_core::error::Result;
 use std::path::{Path, PathBuf};
 
 use super::runner::ExtensionRunner;
-use homeboy_core::extension_execution::{path_list_env_value, ExtensionExecutionContext};
+use homeboy_core::extension::resolve::{path_list_env_value, ExtensionExecutionContext};
 
 pub struct ScenarioRunnerOptions<'a> {
     pub execution_context: &'a ExtensionExecutionContext,
@@ -56,7 +56,7 @@ pub fn build_scenario_runner(options: ScenarioRunnerOptions<'_>) -> Result<Exten
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::extension_execution::resolve_execution_context_for_project;
+    use homeboy_core::extension::resolve::resolve_execution_context_for_project;
     use homeboy_extension_contract::ExtensionCapability;
     use std::path::Path;
 

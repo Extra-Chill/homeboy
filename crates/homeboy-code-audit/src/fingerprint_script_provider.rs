@@ -4,9 +4,8 @@
 //! When the core grammar engine cannot fingerprint a file, audit falls back to
 //! an extension-provided fingerprint script: it finds the extension that handles
 //! the file extension and runs its script, getting back a `FingerprintOutput`.
-//! Audit used to do that by calling `homeboy_core::{find_extension_for_file_ext,
-//! run_fingerprint_script}` directly, coupling `code_audit` to the extension
-//! layer's script runner.
+//! Audit used to resolve this directly through the extension catalog, coupling
+//! `code_audit` to the extension layer's script runner.
 //!
 //! Instead, audit defines the slim view it needs (extension → `FingerprintOutput`)
 //! plus a provider trait; the extension layer registers an implementation at

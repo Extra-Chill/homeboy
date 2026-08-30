@@ -447,7 +447,7 @@ pub fn resolve_target_from_component(
 /// - no provider → `Ok(None)`; the component is simply not artifact-producing
 /// - one distinct pattern → `Ok(Some(pattern))`, however many extensions
 ///   declare it (agreeing extensions are not ambiguous)
-/// - conflicting patterns → [`crate::extension_execution::disambiguate_capability_owner`],
+/// - conflicting patterns → [`crate::extension::resolve::disambiguate_capability_owner`],
 ///   the same ownership rule every other capability uses: explicit
 ///   `capability_extensions.build`, then `composition.includes` primacy, then a
 ///   hard ambiguity error the component author must resolve
@@ -489,14 +489,14 @@ fn resolve_artifact_core(
             let candidates: Vec<String> = providers.keys().cloned().collect();
             let owner = match config_root {
                 Some(config_root) => {
-                    crate::extension_execution::disambiguate_capability_owner_in_root(
+                    crate::extension::resolve::disambiguate_capability_owner_in_root(
                         config_root,
                         component,
                         ExtensionCapability::Build,
                         &candidates,
                     )?
                 }
-                None => crate::extension_execution::disambiguate_capability_owner(
+                None => crate::extension::resolve::disambiguate_capability_owner(
                     component,
                     ExtensionCapability::Build,
                     &candidates,
@@ -1150,7 +1150,7 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
 
     let extension_id = if let Some(capability) = spec.capability {
         Some(
-            crate::extension_execution::resolve_execution_context(&component, capability)?
+            crate::extension::resolve::resolve_execution_context(&component, capability)?
                 .extension_id,
         )
     } else {

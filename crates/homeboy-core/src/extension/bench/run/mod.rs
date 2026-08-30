@@ -33,7 +33,7 @@ mod tests {
     use crate::extension::bench::parsing::{self, BenchResults, BenchRunExecution, BenchScenario};
     use crate::extension::bench::responsiveness::BenchResponsivenessSummary;
     use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
-    use crate::extension_execution::path_list_env_value;
+    use crate::extension::resolve::path_list_env_value;
     use homeboy_core::component::Component;
     use homeboy_core::engine::invocation::InvocationRequirements;
     use homeboy_core::engine::resource::{

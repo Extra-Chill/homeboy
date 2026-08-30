@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::extension_execution::ExtensionExecutionContext;
+use crate::extension::resolve::ExtensionExecutionContext;
 use homeboy_core::error::Result;
 
 use super::super::canonicality::trace_toolchain_provenance_requirements;

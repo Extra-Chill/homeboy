@@ -18,6 +18,7 @@ mod manifest;
 mod manifest_sidecar;
 pub mod recipe_run;
 mod refactor_protocol;
+pub mod resolve;
 mod runner;
 mod runtime_helper;
 pub mod self_check;
@@ -33,7 +34,7 @@ pub use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
-pub(crate) use homeboy_core::extension_execution::{extension_guidance_hints, stderr_tail};
+pub(crate) use homeboy_core::extension::resolve::{extension_guidance_hints, stderr_tail};
 
 pub use env_provider::{
     declared_secret_names as env_provider_secret_names,
