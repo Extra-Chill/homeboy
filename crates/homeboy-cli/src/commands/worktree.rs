@@ -612,6 +612,8 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                     cleanup_branches,
                     allow_unmerged_branches,
                     timeout: None,
+                    provider_run_id: None,
+                    provider_plan_id: None,
                 },
                 &homeboy::core::defaults::load_config(),
             )?;
