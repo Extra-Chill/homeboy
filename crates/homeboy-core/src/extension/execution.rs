@@ -25,6 +25,7 @@ use super::load_extension;
 use super::manifest::{ExtensionManifest, RuntimeConfig};
 use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
+use homeboy_core::extension_execution::ExtensionExecutionContext;
 use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
 
 pub use action::execute_action;
@@ -520,12 +521,12 @@ pub(crate) struct CapabilityScriptOptions {
 }
 
 pub(crate) struct PreparedCapabilityRun {
-    pub execution: super::ExtensionExecutionContext,
+    pub execution: ExtensionExecutionContext,
     pub settings_json: String,
 }
 
 pub(crate) fn resolve_capability_component(
-    execution_context: &super::ExtensionExecutionContext,
+    execution_context: &ExtensionExecutionContext,
     pre_loaded_component: Option<&Component>,
     path_override: Option<&str>,
 ) -> Result<Component> {
@@ -543,10 +544,10 @@ pub(crate) fn resolve_capability_component(
 }
 
 pub(crate) fn build_capability_execution_context(
-    execution_context: &super::ExtensionExecutionContext,
+    execution_context: &ExtensionExecutionContext,
     component: Component,
     path_override: Option<&str>,
-) -> super::ExtensionExecutionContext {
+) -> ExtensionExecutionContext {
     let mut execution = execution_context.clone();
     execution.component = component;
 
@@ -586,7 +587,7 @@ fn absolutize_path_override(path: &str) -> String {
 }
 
 pub(crate) fn prepare_capability_run(
-    execution_context: &super::ExtensionExecutionContext,
+    execution_context: &ExtensionExecutionContext,
     pre_loaded_component: Option<&Component>,
     path_override: Option<&str>,
     settings_overrides: &[(String, String)],
@@ -940,7 +941,7 @@ fn build_exec_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::extract_component_extension_settings;
+    use crate::extension_execution::extract_component_extension_settings;
     use homeboy_core::component::Component;
 
     fn make_executable(path: &Path) {

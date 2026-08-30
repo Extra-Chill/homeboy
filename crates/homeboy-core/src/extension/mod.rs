@@ -37,10 +37,6 @@ pub use compiler_warning_contract::{
     CompilerWarningContract,
 };
 pub(crate) use homeboy_core::extension_execution::{extension_guidance_hints, stderr_tail};
-pub use homeboy_core::extension_execution::{
-    extract_component_extension_settings, path_list_env_value, resolve_execution_context,
-    resolve_extension_for_capability, ExtensionExecutionContext,
-};
 pub use homeboy_extension_contract::core_compat::{
     core_incompatible_error, evaluate_core_compatibility, evaluate_core_compatibility_for_version,
     installed_homeboy_version, validate_core_compatibility, CoreCompatibilityReport,

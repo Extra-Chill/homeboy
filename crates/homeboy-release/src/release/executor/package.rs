@@ -813,9 +813,12 @@ fn package_provider_config(
     skip_build_validation: bool,
 ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
     let mut config: std::collections::HashMap<_, _> =
-        extension::extract_component_extension_settings(component, extension_id)
-            .into_iter()
-            .collect();
+        homeboy_core::extension_execution::extract_component_extension_settings(
+            component,
+            extension_id,
+        )
+        .into_iter()
+        .collect();
     if let Some(release_config) = package_build_config(skip_build_validation) {
         config.extend(release_config);
     }

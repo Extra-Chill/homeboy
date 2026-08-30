@@ -1,6 +1,7 @@
 //! Trace scenario discovery (list-only) workflow.
 
-use crate::extension::{resolve_execution_context, ExtensionCapability, RunnerOutput};
+use crate::extension::{ExtensionCapability, RunnerOutput};
+use crate::extension_execution::resolve_execution_context;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};

@@ -1499,8 +1499,10 @@ fn run_fuzz_extension_script(
         return Ok(output.into());
     }
 
-    let execution_context =
-        extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
+    let execution_context = homeboy_core::extension_execution::resolve_execution_context(
+        &ctx.component,
+        ExtensionCapability::Fuzz,
+    )?;
     if execution_context.script_path.trim().is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "fuzz.extension_script",

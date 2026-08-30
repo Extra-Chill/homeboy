@@ -4,9 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::extension::{
-    exec_context, ExtensionCapability, ExtensionExecutionContext, ExtensionPhaseTiming,
-};
+use crate::extension::{exec_context, ExtensionCapability, ExtensionPhaseTiming};
+use crate::extension_execution::{self, ExtensionExecutionContext};
 use homeboy_core::artifact_inputs::{self, ResolvedArtifactInput};
 use homeboy_core::component::{self, Component};
 use homeboy_core::config::{is_json_input, parse_bulk_ids};
@@ -73,7 +72,8 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
     }
 
     // 1. Check exactly one build-capable extension for bundled script or local script patterns
-    if let Ok(context) = extension::resolve_execution_context(component, ExtensionCapability::Build)
+    if let Ok(context) =
+        extension_execution::resolve_execution_context(component, ExtensionCapability::Build)
     {
         let extension_id = context.extension_id.clone();
         let extension = extension::load_extension(&extension_id)?;
@@ -591,8 +591,10 @@ fn execute_build_component(
         }
         runner.run()?
     } else {
-        let context =
-            extension::resolve_execution_context(comp, extension::ExtensionCapability::Build)?;
+        let context = extension_execution::resolve_execution_context(
+            comp,
+            extension::ExtensionCapability::Build,
+        )?;
         let mut runner = extension::ExtensionRunner::for_context(context)
             .component(comp.clone())
             .working_dir(&local_path_str)

@@ -12,10 +12,11 @@ pub mod workflow;
 
 use crate::extension::test::drift::DriftOptions;
 use crate::extension::{
-    ExtensionCapability, ExtensionExecutionContext, ExtensionRunner, TestChangedFileExclusiveEnv,
-    TestChangedFileRouting, TestChangedFileRoutingStrategy, TestPassthroughFilter,
-    TestPassthroughFilterStrategy, TestSecretEnvProjection,
+    ExtensionCapability, ExtensionRunner, TestChangedFileExclusiveEnv, TestChangedFileRouting,
+    TestChangedFileRoutingStrategy, TestPassthroughFilter, TestPassthroughFilterStrategy,
+    TestSecretEnvProjection,
 };
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::git;
 use std::collections::{BTreeMap, BTreeSet};

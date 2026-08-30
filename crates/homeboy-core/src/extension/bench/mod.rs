@@ -42,7 +42,8 @@ pub(crate) mod side_by_side;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use crate::extension::{ExtensionCapability, ExtensionExecutionContext};
+use crate::extension::ExtensionCapability;
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 
 pub use aggregation::aggregate_runs;

@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::extension::{path_list_env_value, RunnerOutput};
+use crate::extension::RunnerOutput;
+use crate::extension_execution::path_list_env_value;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};

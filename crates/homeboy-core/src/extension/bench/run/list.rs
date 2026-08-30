@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::extension::bench::parsing::{self, BenchRunExecution};
-use crate::extension::{resolve_execution_context, ExtensionCapability};
+use crate::extension::ExtensionCapability;
+use crate::extension_execution::resolve_execution_context;
 use homeboy_core::component::Component;
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_core::engine::run_dir::{self, RunDir};

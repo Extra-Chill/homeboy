@@ -3,6 +3,7 @@ use std::path::{Component as PathComponent, Path, PathBuf};
 use std::time::Duration;
 
 use crate::extension::{ExtensionCapability, ExtensionPhaseTiming, TestSecretEnvProjection};
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use homeboy_core::engine::resource::{self, ExtensionChildResourceSummary};
@@ -32,8 +33,6 @@ pub struct RunnerOutput {
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
     pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
 }
-
-use super::ExtensionExecutionContext;
 
 /// Orchestrates extension script execution for lint/test/build runners.
 ///
