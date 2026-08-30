@@ -730,6 +730,10 @@ pub(super) enum RunnerJobCommand {
         #[arg(long)]
         cursor: Option<u64>,
 
+        /// Emit one structured document without human event rendering
+        #[arg(long)]
+        json: bool,
+
         /// Return only lifecycle events, exit code, and a bounded stdout/stderr tail
         #[arg(long)]
         compact: bool,
@@ -887,6 +891,23 @@ mod tests {
             "homeboy", "runner", "job", "list", "lab", "--active", "--queued"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn runner_job_logs_accepts_explicit_machine_output() {
+        let cli = Cli::try_parse_from([
+            "homeboy", "runner", "job", "logs", "lab", "job-42", "--json",
+        ])
+        .expect("parse machine-readable runner logs");
+
+        assert!(matches!(
+            cli.command,
+            Commands::Runner(RunnerArgs {
+                command: RunnerCommand::Job {
+                    command: RunnerJobCommand::Logs { json: true, .. }
+                }
+            })
+        ));
     }
 
     #[test]
