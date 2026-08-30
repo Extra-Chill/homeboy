@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.39.9] - 2026-08-30
+
+### Changed
+- Handle canonical bench workload paths
+- Preserve WordPress bench workload paths
+
 ## [3.39.8] - 2026-08-30
 
 ### Fixed
