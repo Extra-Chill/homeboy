@@ -609,7 +609,10 @@ mod tests {
             remote_path: "source/path".to_string(),
             build_artifact: Some("source.zip".to_string()),
             extract_command: Some("source-extract".to_string()),
-            hooks: HashMap::from([("post:deploy".to_string(), vec!["source-hook".to_string()])]),
+            hooks: HashMap::from([(
+                homeboy_extension_contract::HookEvent::PostDeploy,
+                vec!["source-hook".to_string()],
+            )]),
             scopes: Some(crate::component::ScopeConfig::default()),
             artifact_inputs: vec![crate::component::ArtifactInput {
                 component: "source".to_string(),
@@ -628,7 +631,7 @@ mod tests {
                     build_artifact: Some("project.zip".to_string()),
                     extract_command: Some("project-extract".to_string()),
                     hooks: HashMap::from([(
-                        "post:deploy".to_string(),
+                        homeboy_extension_contract::HookEvent::PostDeploy,
                         vec!["project-hook".to_string()],
                     )]),
                     scopes: Some(crate::component::ScopeConfig {
@@ -662,7 +665,10 @@ mod tests {
         assert_eq!(bound.remote_path, "project/path");
         assert_eq!(bound.build_artifact.as_deref(), Some("project.zip"));
         assert_eq!(bound.extract_command.as_deref(), Some("project-extract"));
-        assert_eq!(bound.hooks["post:deploy"], ["project-hook"]);
+        assert_eq!(
+            bound.hooks[&homeboy_extension_contract::HookEvent::PostDeploy],
+            ["project-hook"]
+        );
         assert_eq!(
             bound
                 .scopes
