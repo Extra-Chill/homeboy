@@ -115,7 +115,7 @@
       },
       "commands": {
         "status": {
-          "command": "npm ci --dry-run",
+          "command": "npm ci --dry-run --ignore-scripts",
           "success_exit_codes": [0],
           "requires_lockfile": true
         },
