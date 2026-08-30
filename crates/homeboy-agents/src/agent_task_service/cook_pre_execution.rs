@@ -22,7 +22,7 @@ use homeboy_core::{Error, Result};
 
 use super::cook::{
     AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookPrimaryFailure,
-    AgentTaskCookRecoveryAction, AgentTaskCookReport, AgentTaskCookServiceOptions,
+    AgentTaskCookRecoveryAction, AgentTaskCookReport, CookRequest,
 };
 use super::cook_promotion::{cook_report, CookReportInput};
 use super::cook_recipe::CookRecipeStore;
@@ -218,9 +218,7 @@ impl<'a> CookExecutionPreparation<'a> {
 /// Persist the controller-owned initial attempt before transport preparation so
 /// runner eligibility failures remain addressable through the cook alias.
 #[cfg(test)]
-pub(crate) fn materialize_initial_cook_attempt(
-    options: &AgentTaskCookServiceOptions,
-) -> Result<()> {
+pub(crate) fn materialize_initial_cook_attempt(options: &CookRequest) -> Result<()> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, options)
@@ -233,7 +231,7 @@ pub(crate) fn materialize_initial_cook_attempt(
 pub(crate) fn materialize_initial_cook_attempt_with_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    options: &AgentTaskCookServiceOptions,
+    options: &CookRequest,
 ) -> Result<()> {
     materialize_initial_cook_attempt_with_store_and_lifecycle(
         recipe_store,
@@ -247,7 +245,7 @@ pub(crate) fn materialize_initial_cook_attempt_with_stores(
 pub(crate) fn materialize_initial_cook_attempt_with_stores_outcome(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    options: &AgentTaskCookServiceOptions,
+    options: &CookRequest,
     recipe_created_by_invocation: bool,
 ) -> Result<bool> {
     materialize_initial_cook_attempt_with_store_and_lifecycle(
@@ -261,13 +259,13 @@ pub(crate) fn materialize_initial_cook_attempt_with_stores_outcome(
 fn materialize_initial_cook_attempt_with_store_and_lifecycle(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
-    options: &AgentTaskCookServiceOptions,
+    options: &CookRequest,
     recipe_created_by_invocation: bool,
 ) -> Result<bool> {
     CookExecutionPreparation::new(recipe_store, lifecycle_store).materialize_with_runtime(
-        &options.cook_id,
-        &options.initial_run_id,
-        &options.initial_plan,
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        &options.identity.initial_plan,
         Some(&store_admission_status(lifecycle_store)),
         agent_task_lifecycle::execution_runner_id(),
         production_runtime_admission(lifecycle_store),
@@ -856,6 +854,10 @@ mod tests {
         AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::agent_task_lifecycle::AgentTaskLifecycleStore;
+    use crate::agent_task_service::cook::{
+        CookAiDisclosure, CookFinalization, CookIdentity, CookProviderTransport, CookRetryPolicy,
+        CookWorkspace,
+    };
     use crate::agent_task_service::cook_recipe::{
         AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, COOK_RECIPE_SCHEMA,
     };
@@ -1080,34 +1082,40 @@ mod tests {
         )
     }
 
-    fn options_for(
-        cook_id: &str,
-        run_id: &str,
-        initial_plan: AgentTaskPlan,
-    ) -> AgentTaskCookServiceOptions {
-        AgentTaskCookServiceOptions {
-            cook_id: cook_id.to_string(),
-            initial_run_id: run_id.to_string(),
-            initial_plan,
-            to_worktree: format!("fixture@{cook_id}"),
-            source_worktree_path: None,
-            provider_command: None,
-            provider_invocation: None,
+    fn options_for(cook_id: &str, run_id: &str, initial_plan: AgentTaskPlan) -> CookRequest {
+        CookRequest {
+            identity: CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan,
+            },
+            workspace: CookWorkspace {
+                to_worktree: format!("fixture@{cook_id}"),
+                source_worktree_path: None,
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            retry_policy: CookRetryPolicy { max_attempts: 1 },
+            finalization: CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                base: "main".to_string(),
+                head: None,
+                title: "Paired-store materialization".to_string(),
+                commit_message: "test".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: CookAiDisclosure {
+                ai_tool: "test".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+            },
             gates: crate::agent_task_gate::VerifyGateOptions::default(),
-            max_attempts: 1,
-            no_finalize: true,
-            draft_pr: false,
-            base: "main".to_string(),
-            task_base_sha: None,
-            head: None,
-            title: "Paired-store materialization".to_string(),
-            commit_message: "test".to_string(),
-            source_refs: Vec::new(),
-            protected_branches: Vec::new(),
-            ai_tool: "test".to_string(),
-            ai_model: None,
-            ai_used_for: "test".to_string(),
-            attempt_dispatcher: None,
             harvest_context: Default::default(),
         }
     }

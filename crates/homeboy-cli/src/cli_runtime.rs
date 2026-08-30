@@ -515,8 +515,8 @@ fn register_startup_providers_after_reconcile(
     // includes durable agent-task records and their health summary without
     // depending on the agent-task subsystem.
     crate::agents::agent_task_lifecycle::activity_provider::register();
-    // Register the orchestration service so daemon HTTP control-plane routes
-    // call the same typed run/capabilities implementation as in-process reads.
+    // Register the orchestration service behind daemon HTTP control-plane
+    // routes without making core depend on the agent-task subsystem.
     crate::agents::orchestration::register();
     // Register the bench agent-task matrix provider so core's cross-rig
     // bench comparison can project rig entries into an agent-task matrix
@@ -5617,28 +5617,40 @@ mod tests {
             let cook_id = "cook-runtime-a";
             let run_id = "cook-runtime-a-attempt-1";
             let options = crate::agents::agent_tasks::service::CookRequest {
-                cook_id: cook_id.to_string(),
-                initial_run_id: run_id.to_string(),
-                initial_plan: plan.clone(),
-                to_worktree: target.display().to_string(),
-                source_worktree_path: Some(target.clone()),
-                provider_command: None,
-                provider_invocation: None,
+                identity: crate::agents::agent_task_service::CookIdentity {
+                    cook_id: cook_id.to_string(),
+                    initial_run_id: run_id.to_string(),
+                    initial_plan: plan.clone(),
+                },
+                workspace: crate::agents::agent_task_service::CookWorkspace {
+                    to_worktree: target.display().to_string(),
+                    source_worktree_path: Some(target.clone()),
+                    task_base_sha: None,
+                    source_refs: Vec::new(),
+                },
+                provider_transport: crate::agents::agent_task_service::CookProviderTransport {
+                    provider_command: None,
+                    provider_invocation: None,
+                    attempt_dispatcher: None,
+                },
                 gates: Default::default(),
-                max_attempts: 1,
-                no_finalize: true,
-                draft_pr: false,
-                base: "main".to_string(),
-                task_base_sha: None,
-                head: None,
-                title: "runtime continuation fixture".to_string(),
-                commit_message: "runtime continuation fixture".to_string(),
-                source_refs: Vec::new(),
-                protected_branches: Vec::new(),
-                ai_tool: "test".to_string(),
-                ai_model: None,
-                ai_used_for: "test".to_string(),
-                attempt_dispatcher: None,
+                retry_policy: crate::agents::agent_task_service::CookRetryPolicy {
+                    max_attempts: 1,
+                },
+                finalization: crate::agents::agent_task_service::CookFinalization {
+                    no_finalize: true,
+                    draft_pr: false,
+                    base: "main".to_string(),
+                    head: None,
+                    title: "runtime continuation fixture".to_string(),
+                    commit_message: "runtime continuation fixture".to_string(),
+                    protected_branches: Vec::new(),
+                },
+                ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
+                    ai_tool: "test".to_string(),
+                    ai_model: None,
+                    ai_used_for: "test".to_string(),
+                },
                 harvest_context: Default::default(),
             };
             crate::agents::agent_tasks::service::persist_initial_recipe(&options)
@@ -5730,28 +5742,40 @@ mod tests {
             let cook_id = "cook-runtime-legacy-terminal";
             let run_id = "cook-runtime-legacy-terminal-attempt-1";
             let options = crate::agents::agent_tasks::service::CookRequest {
-                cook_id: cook_id.to_string(),
-                initial_run_id: run_id.to_string(),
-                initial_plan: plan.clone(),
-                to_worktree: target.display().to_string(),
-                source_worktree_path: Some(target),
-                provider_command: None,
-                provider_invocation: None,
+                identity: crate::agents::agent_task_service::CookIdentity {
+                    cook_id: cook_id.to_string(),
+                    initial_run_id: run_id.to_string(),
+                    initial_plan: plan.clone(),
+                },
+                workspace: crate::agents::agent_task_service::CookWorkspace {
+                    to_worktree: target.display().to_string(),
+                    source_worktree_path: Some(target),
+                    task_base_sha: None,
+                    source_refs: Vec::new(),
+                },
+                provider_transport: crate::agents::agent_task_service::CookProviderTransport {
+                    provider_command: None,
+                    provider_invocation: None,
+                    attempt_dispatcher: None,
+                },
                 gates: Default::default(),
-                max_attempts: 1,
-                no_finalize: true,
-                draft_pr: false,
-                base: "main".to_string(),
-                task_base_sha: None,
-                head: None,
-                title: "legacy terminal continuation fixture".to_string(),
-                commit_message: "legacy terminal continuation fixture".to_string(),
-                source_refs: Vec::new(),
-                protected_branches: Vec::new(),
-                ai_tool: "test".to_string(),
-                ai_model: None,
-                ai_used_for: "test".to_string(),
-                attempt_dispatcher: None,
+                retry_policy: crate::agents::agent_task_service::CookRetryPolicy {
+                    max_attempts: 1,
+                },
+                finalization: crate::agents::agent_task_service::CookFinalization {
+                    no_finalize: true,
+                    draft_pr: false,
+                    base: "main".to_string(),
+                    head: None,
+                    title: "legacy terminal continuation fixture".to_string(),
+                    commit_message: "legacy terminal continuation fixture".to_string(),
+                    protected_branches: Vec::new(),
+                },
+                ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
+                    ai_tool: "test".to_string(),
+                    ai_model: None,
+                    ai_used_for: "test".to_string(),
+                },
                 harvest_context: Default::default(),
             };
             crate::agents::agent_tasks::service::persist_initial_recipe(&options)

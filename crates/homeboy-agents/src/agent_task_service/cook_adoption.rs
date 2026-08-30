@@ -298,8 +298,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             )
         })?;
     let adopted_attempt = recipe_attempt.attempt;
-    options.initial_run_id = run_id.clone();
-    options.initial_plan = recipe_attempt.plan.clone();
+    options.identity.initial_run_id = run_id.clone();
+    options.identity.initial_plan = recipe_attempt.plan.clone();
     let source_request = plan.tasks.first().cloned().ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -321,18 +321,28 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     let (adoption_ai_model, ai_model_source) = match adoption.ai_model {
         Some(model) => (concrete_adoption_ai_model(&model)?, "candidate_input"),
         None => (
-            concrete_adoption_ai_model(options.ai_model.as_deref().unwrap_or_default())?,
+            concrete_adoption_ai_model(
+                options
+                    .ai_disclosure
+                    .ai_model
+                    .as_deref()
+                    .unwrap_or_default(),
+            )?,
             "recipe_finalization",
         ),
     };
-    let source_worktree = options.source_worktree_path.clone().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "candidate_ref",
-            "candidate adoption requires the recorded source worktree",
-            None,
-            None,
-        )
-    })?;
+    let source_worktree = options
+        .workspace
+        .source_worktree_path
+        .clone()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "candidate_ref",
+                "candidate adoption requires the recorded source worktree",
+                None,
+                None,
+            )
+        })?;
     let gate_workspace = super::cook_promotion::component_workspace_path(&options)?
         .unwrap_or_else(|| source_worktree.clone());
     // Resolve the caller input to the commit object before durable ownership is
@@ -461,7 +471,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             source_request,
             promotion_report: promotion.clone(),
             attempt: adopted_attempt,
-            max_attempts: options.max_attempts,
+            max_attempts: options.retry_policy.max_attempts,
             source_run_id: Some(record.run_id.clone()),
             current_diff: String::new(),
             require_review_form: true,
@@ -505,7 +515,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     }
     let attempt_dispatcher =
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
-    options.attempt_dispatcher = attempt_dispatcher;
+    options.provider_transport.attempt_dispatcher = attempt_dispatcher;
     lifecycle_store.start_candidate_adoption_with_policy(
         &record.run_id,
         &candidate_sha,
@@ -565,16 +575,19 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                             source_run_id: Some(record.run_id.clone()),
                             source_path,
                             source_worktree_path: Some(gate_workspace.clone()),
-                            base_ref: Some(options.base.clone()),
-                            task_base_sha: options.task_base_sha.clone(),
+                            base_ref: Some(options.finalization.base.clone()),
+                            task_base_sha: options.workspace.task_base_sha.clone(),
                             candidate_ref: Some(candidate_sha.clone()),
-                            to_worktree: options.to_worktree.clone(),
+                            to_worktree: options.workspace.to_worktree.clone(),
                             task_id: None,
                             artifact_id: None,
                             dry_run: false,
                             gates: options.gates.clone(),
-                            provider_command: options.provider_command.clone(),
-                            provider_invocation: options.provider_invocation.clone(),
+                            provider_command: options.provider_transport.provider_command.clone(),
+                            provider_invocation: options
+                                .provider_transport
+                                .provider_invocation
+                                .clone(),
                         },
                         &observation_store,
                         |checkpoint| {
@@ -649,12 +662,12 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     // The adopted candidate did not run through this cook's provider lifecycle.
     // Bind its declared model to the authenticated promotion instead of inferring
     // one from the immutable execution plan.
-    options.ai_model = Some(adoption_ai_model.clone());
+    options.ai_disclosure.ai_model = Some(adoption_ai_model.clone());
     promotion.provenance["adoption"] = serde_json::json!({
         "source_run_id": record.run_id,
         "candidate_ref": candidate_sha,
-        "source_worktree_path": options.source_worktree_path,
-        "recorded_task_base": options.task_base_sha,
+        "source_worktree_path": options.workspace.source_worktree_path,
+        "recorded_task_base": options.workspace.task_base_sha,
         "candidate_base": candidate_base_sha,
         "recovery": recovery,
         "ai_model": adoption_ai_model,
@@ -667,7 +680,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         source_request,
         promotion_report: promotion.clone(),
         attempt: adopted_attempt,
-        max_attempts: options.max_attempts,
+        max_attempts: options.retry_policy.max_attempts,
         source_run_id: Some(record.run_id.clone()),
         current_diff: gate_feedback_current_diff(&promotion),
         require_review_form: true,
@@ -763,7 +776,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         return match dispatch {
             CookFollowUpDispatch::Dispatched { run_id } => {
                 lifecycle_store.finish_candidate_adoption(&record.run_id, None)?;
-                options.initial_plan = recipe_store.load_recipe(cook_id)?
+                options.identity.initial_plan = recipe_store.load_recipe(cook_id)?
                     .attempts
                     .into_iter()
                     .find(|attempt| attempt.run_id == run_id)
@@ -776,7 +789,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                             None,
                         )
                     })?;
-                options.initial_run_id = run_id;
+                options.identity.initial_run_id = run_id;
                 let mut result = super::cook::CookService::run(
                     options,
                     super::cook::CookRuntime::new(
@@ -813,7 +826,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                     attempts: vec![attempt],
                     finalization: None,
                     stop_reason: Some(super::cook::exhausted_budget_guidance(
-                        options.max_attempts,
+                        options.retry_policy.max_attempts,
                         &budget,
                         &reason,
                         true,
@@ -886,7 +899,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             invocation_latest_run_id: Some(record.run_id.as_str()),
         }));
     }
-    if options.no_finalize {
+    if options.finalization.no_finalize {
         lifecycle_store.finish_candidate_adoption(&record.run_id, None)?;
         return Ok(cook_report(CookReportInput {
             cook_id: cook_id.to_string(),

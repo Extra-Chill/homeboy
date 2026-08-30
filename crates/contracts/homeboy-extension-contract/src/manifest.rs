@@ -179,10 +179,11 @@ pub struct ExtensionManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionConfig>,
 
-    // Lifecycle hooks: event name -> list of shell commands.
-    // Extension hooks run before component hooks at each event.
+    // Lifecycle hooks. Extension hooks run before component hooks at each event.
+    // The key is closed over events Homeboy actually emits; an unknown string
+    // is inert configuration and therefore a deserialization error.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub hooks: HashMap<String, Vec<String>>,
+    pub hooks: HashMap<crate::HookEvent, Vec<String>>,
 
     // Shared
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

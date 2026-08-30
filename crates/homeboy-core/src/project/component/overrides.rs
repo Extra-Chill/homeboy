@@ -148,12 +148,16 @@ mod tests {
     #[test]
     fn component_override_config_replaces_hooks() {
         let mut component = base_component("my-plugin");
-        component
-            .hooks
-            .insert("pre:deploy".to_string(), vec!["echo old".to_string()]);
+        component.hooks.insert(
+            homeboy_extension_contract::HookEvent::PreVersionBump,
+            vec!["echo old".to_string()],
+        );
 
         let mut hooks = HashMap::new();
-        hooks.insert("post:deploy".to_string(), vec!["echo new".to_string()]);
+        hooks.insert(
+            homeboy_extension_contract::HookEvent::PostDeploy,
+            vec!["echo new".to_string()],
+        );
         let overrides = ProjectComponentOverrides {
             hooks,
             ..Default::default()
@@ -161,8 +165,12 @@ mod tests {
 
         overrides.apply_to_component(&mut component);
         // Hooks should be replaced entirely
-        assert!(component.hooks.contains_key("post:deploy"));
-        assert!(!component.hooks.contains_key("pre:deploy"));
+        assert!(component
+            .hooks
+            .contains_key(&homeboy_extension_contract::HookEvent::PostDeploy));
+        assert!(!component
+            .hooks
+            .contains_key(&homeboy_extension_contract::HookEvent::PreVersionBump));
     }
 
     #[test]
@@ -244,7 +252,7 @@ mod tests {
             Some("deploy")
         );
         assert_eq!(
-            component.hooks["post:deploy"],
+            component.hooks[&homeboy_extension_contract::HookEvent::PostDeploy],
             vec!["wp cache flush".to_string()]
         );
         assert!(component

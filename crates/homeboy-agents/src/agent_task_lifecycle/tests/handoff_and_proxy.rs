@@ -2889,6 +2889,48 @@ fn status_keeps_fresh_planned_runner_submission_live() {
     });
 }
 
+#[test]
+fn planned_lab_proxy_stamps_heartbeat_without_a_runner_pid() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let run_id = "run-planned-lab-proxy-heartbeat";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        record_cook_progress_in_store(&test_lifecycle_store(), run_id, "provider_start", 1, None)
+            .expect("provider_start");
+        let remote_command = ["homeboy".to_string(), "agent-task".to_string()];
+        let recorded = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &remote_command,
+            durable_plan: Some(&plan),
+        })
+        .expect("planned Lab proxy");
+        rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata object")
+                .remove("runner_pid");
+        })
+        .expect("initiating client ended");
+
+        assert!(recorded.updated_at.is_some(), "{recorded:?}");
+        assert!(recorded.has_planned_runner_execution(), "{recorded:?}");
+        assert!(recorded.is_controller_pre_provider_phase(), "{recorded:?}");
+
+        let loaded = status(run_id).expect("status loaded");
+        assert!(loaded.has_fresh_update(), "{loaded:?}");
+        assert!(loaded.has_fresh_controller_pre_provider_heartbeat());
+        assert!(loaded.metadata.get("stale_running").is_none());
+        assert_eq!(
+            loaded.metadata["runner_execution_record"]["status"],
+            "planned"
+        );
+        assert_eq!(loaded.metadata["cook_progress"]["phase"], "provider_start");
+    });
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). Cancellation resolves the alias, mutates the record and then reads
 /// it back; all three name `lifecycle_store`, so the durable cancellation

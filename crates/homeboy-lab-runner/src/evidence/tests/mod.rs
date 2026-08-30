@@ -37,15 +37,39 @@ use super::mirror::{
     mirror_daemon_evidence, mirror_job_run, mirror_job_run_request,
     mirror_remote_observation_runs_by_id_with,
     mirror_remote_observation_runs_by_id_with_downloader, mirror_reverse_broker_evidence,
-    mirror_terminal_job_artifacts_with, mirrored_patch_result, primary_mirrored_run,
-    refresh_mirrored_daemon_evidence, refresh_mirrored_daemon_evidence_with, MirrorEvidenceRequest,
-    ReverseBrokerEvidenceContext, MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+    mirror_terminal_job_artifacts_with, mirrored_patch_result, mirrored_runner_job_identity,
+    primary_mirrored_run, refresh_mirrored_daemon_evidence, refresh_mirrored_daemon_evidence_with,
+    MirrorEvidenceRequest, ReverseBrokerEvidenceContext, MIRRORED_REMOTE_EVENT_LIMIT,
+    MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
 };
+
 use super::tokens::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact, runner_artifact_token,
     RemoteArtifactToken,
 };
 use super::util::{fuzz_run_id_from_command, runner_exec_run_label};
+
+#[test]
+fn runner_execution_record_resolves_its_authoritative_job_identity() {
+    let run = RunRecord {
+        metadata_json: json!({
+            "runner_execution_record": {
+                "runner_id": "homeboy-lab",
+                "job_id": "c2d54086-5e83-4268-88a7-51232fa05a0c",
+                "status": "running"
+            }
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        mirrored_runner_job_identity(&run),
+        Some((
+            "homeboy-lab".to_string(),
+            "c2d54086-5e83-4268-88a7-51232fa05a0c".to_string()
+        ))
+    );
+}
 
 fn ssh_runner() -> Runner {
     Runner {

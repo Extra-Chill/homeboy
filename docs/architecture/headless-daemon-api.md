@@ -102,11 +102,9 @@ A useful headless UI can be built from this read/query surface:
   operations wired in this build. Run retrieval is a **pure read**: it never
   reconciles, because the reconciling read (`homeboy agent-task status`) writes
   durable state and can perform a live runner round trip, which a serial
-  accept loop cannot afford. Cook ids resolve through the same alias index the
-  CLI uses and the result reports requested vs resolved identity. The legacy
-  `GET /agent-task/runs/:id` response shape is a one-minor compatibility
-  adapter around the same typed run resource. A run is not a job — the job
-  *supervises* the run, so
+  accept loop cannot afford. The run route accepts exact run ids; mission/Cook
+  ids belong to the mission resource rather than acting as run aliases. A run
+  is not a job — the job *supervises* the run, so
   watching and cancelling stay on the controller-job surface below.
 - `GET /jobs`, `GET /jobs/:id`, `GET /jobs/:id/events`, and
   `POST /jobs/:id/cancel` for long-running work. Cook and fanout are both

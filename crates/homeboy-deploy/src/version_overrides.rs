@@ -16,6 +16,7 @@ use homeboy_extension::{
     load_all_extensions, DeployArchiveInstallPolicy, DeployOverride, DeployVerification,
     ExtensionManifest,
 };
+use homeboy_extension_contract::HookEvent;
 use homeboy_version::version;
 
 use super::lifecycle::DeployObservation;
@@ -812,7 +813,7 @@ pub(super) fn run_post_deploy_hooks(
     match hooks::run_hooks_remote(
         ssh_client,
         component,
-        hooks::events::POST_DEPLOY,
+        HookEvent::PostDeploy,
         HookFailureMode::NonFatal,
         &vars,
     ) {

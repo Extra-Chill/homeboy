@@ -180,13 +180,13 @@ pub struct ProcessContainmentCleanup {
 
 /// Lifecycle evidence available when a containment boundary is finalized.
 ///
-/// Only a caller that has reaped a successful direct leader may treat an empty
-/// marker scan as a complete scope. Every interruption path remains
-/// fail-closed because it can still have owned work in flight.
+/// A caller that has reaped the direct leader may treat an empty marker scan as
+/// a complete scope. Every interruption path remains fail-closed because it can
+/// still have owned work in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessContainmentCleanupContext {
     LeaderMayBeRunning,
-    LeaderReapedAfterSuccess,
+    LeaderReaped,
 }
 
 impl ProcessContainment {
@@ -1324,11 +1324,10 @@ fn scope_cleanup_report(
     // real error is discarded and replaced by a containment complaint about an
     // escape that did not happen.
     let marker_scope_was_observed = !targets.pids.is_empty();
-    let leader_reaped_cleanly =
-        context == ProcessContainmentCleanupContext::LeaderReapedAfterSuccess;
+    let leader_was_reaped = context == ProcessContainmentCleanupContext::LeaderReaped;
     let discovery_was_complete = unreadable == 0;
     let complete = survivors.pids.is_empty()
-        && (marker_scope_was_observed || leader_reaped_cleanly || discovery_was_complete);
+        && (marker_scope_was_observed || leader_was_reaped || discovery_was_complete);
     let detail = (!complete).then(|| {
         if !survivors.pids.is_empty() {
             format!(
@@ -1929,7 +1928,7 @@ mod tests {
                 unreadable_environments: 0,
             },
             true,
-            ProcessContainmentCleanupContext::LeaderReapedAfterSuccess,
+            ProcessContainmentCleanupContext::LeaderReaped,
         );
         assert!(!known_survivor.complete);
         assert!(known_survivor
@@ -1968,7 +1967,7 @@ mod tests {
                 unreadable_environments: 1,
             },
             false,
-            ProcessContainmentCleanupContext::LeaderReapedAfterSuccess,
+            ProcessContainmentCleanupContext::LeaderReaped,
         );
         assert!(clean_reaped_leader.complete);
         assert!(clean_reaped_leader.detail.is_none());
@@ -2021,13 +2020,11 @@ mod tests {
     /// A command that exits before teardown looks must not be reported as an
     /// escape (#13570).
     ///
-    /// This is keyed on the FAILING exit path on purpose. A fast non-zero exit
-    /// gets `LeaderMayBeRunning` — the context is chosen from the exit code, not
-    /// from whether the leader was reaped — so it reaches this function with no
-    /// observed marker and no clean-leader claim. Before this was fixed, that
-    /// combination discarded the command's real error and replaced it with a
-    /// containment complaint, which is how an archive-policy refusal surfaced as
-    /// "an escaped descendant may have removed HOMEBOY_PROCESS_SCOPE".
+    /// This exercises the fallback used when a caller cannot prove the direct
+    /// leader was reaped. Before this was fixed, an empty marker scan discarded
+    /// the command's real error and replaced it with a containment complaint,
+    /// which is how an archive-policy refusal surfaced as "an escaped descendant
+    /// may have removed HOMEBOY_PROCESS_SCOPE".
     ///
     /// The distinction that makes it safe is `unreadable`: every same-owner
     /// `/proc` environment was read, so there is nowhere an escapee could be

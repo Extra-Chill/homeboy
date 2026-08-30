@@ -438,33 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn promotion_provider_help_documents_argv_contract_for_cook_review_and_promote() {
-        for command in ["cook", "review", "promote"] {
-            let Err(error) = Cli::try_parse_from(["homeboy", "agent-task", command, "--help"])
-            else {
-                panic!("help exits after rendering");
-            };
-            let help = error.to_string();
-
-            assert!(help.contains("promotion apply-provider"), "{help}");
-            assert!(
-                help.contains("Repeat once per exact argv element"),
-                "{help}"
-            );
-            assert!(help.contains("never shell-split"), "{help}");
-            assert!(
-                help.contains("homeboy/agent-task-promotion-apply-request/v1"),
-                "{help}"
-            );
-            assert!(
-                help.contains("homeboy/agent-task-promotion-apply-response/v1"),
-                "{help}"
-            );
-            assert!(help.contains("Migrate `--provider-command"), "{help}");
-        }
-    }
-
-    #[test]
     fn promote_and_finalize_pr_parse_full_output() {
         let cli = Cli::try_parse_from([
             "homeboy",

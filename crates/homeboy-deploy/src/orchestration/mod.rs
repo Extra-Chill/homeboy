@@ -2463,7 +2463,7 @@ mod tests {
                     build_artifact: Some("build/fixture.zip".to_string()),
                     extract_command: Some("project-extract {{artifact}}".to_string()),
                     hooks: HashMap::from([(
-                        "post:deploy".to_string(),
+                        homeboy_extension_contract::HookEvent::PostDeploy,
                         vec!["project-hook".to_string()],
                     )]),
                     scopes: Some(homeboy_core::component::ScopeConfig {
@@ -2500,7 +2500,10 @@ mod tests {
             Some("build/fixture.zip")
         );
         assert_eq!(
-            checkout.component.hooks.get("post:deploy"),
+            checkout
+                .component
+                .hooks
+                .get(&homeboy_extension_contract::HookEvent::PostDeploy),
             Some(&vec!["project-hook".to_string()])
         );
         assert_eq!(checkout.component.cli_path.as_deref(), Some("project-cli"));

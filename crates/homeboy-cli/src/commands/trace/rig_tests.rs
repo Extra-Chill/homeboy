@@ -94,8 +94,9 @@ fn rig_trace_run_fails_fast_on_active_default_namespace_resource_lease() {
         set_trace_rig_resources(home, "studio-rig", resources.clone());
         set_trace_rig_resources(home, "studio-alt", resources);
 
-        let active_spec = rig::load(home.path(), "studio-rig").expect("load active rig");
-        let _lease = rig::lease::acquire_active_run_lease(home.path(), &active_spec, "trace")
+        let config_root = home.path().join(".config/homeboy");
+        let active_spec = rig::load(&config_root, "studio-rig").expect("load active rig");
+        let _lease = rig::lease::acquire_active_run_lease(&config_root, &active_spec, "trace")
             .expect("acquire active trace lease")
             .expect("resourceful trace rig leases");
 

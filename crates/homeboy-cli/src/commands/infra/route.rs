@@ -2154,18 +2154,21 @@ fn run_split_placement_fanout(
         // its decision here, not at coordinator startup, so the decision
         // names the child candidate/base that will actually be dispatched.
         let source_path = options
+            .identity
             .initial_plan
             .tasks
             .first()
             .and_then(|task| task.workspace.root.as_ref())
             .map(PathBuf::from);
         let task = options
+            .identity
             .initial_plan
             .tasks
             .first()
             .map(|task| task.task_id.as_str())
             .unwrap_or("fanout-provider-attempt");
         let placement_decision = options
+            .identity
             .initial_plan
             .metadata
             .get("execution_placement_decision")

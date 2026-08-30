@@ -45,7 +45,7 @@ pub(crate) struct InstallInstructions {
     pub(crate) extract_command: Option<String>,
     pub(crate) remote_owner: Option<String>,
     pub(crate) cli_path: Option<String>,
-    pub(crate) hooks: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) hooks: std::collections::HashMap<homeboy_extension_contract::HookEvent, Vec<String>>,
 }
 
 #[allow(

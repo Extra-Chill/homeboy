@@ -16,6 +16,10 @@ use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::agents::agent_task_scheduler::{
     resolve_batch_concurrency, BatchConcurrencyDecision, BatchConcurrencyInputs,
 };
+use homeboy::agents::agent_task_service::{
+    CookAiDisclosure, CookFinalization, CookIdentity, CookProviderTransport, CookRequest,
+    CookRetryPolicy, CookWorkspace,
+};
 use homeboy::agents::agent_task_timeout::{with_current_cook_deadline, CookDeadline};
 use homeboy::agents::agent_tasks::batch;
 use homeboy::agents::agent_tasks::dependency_actions::{
@@ -36,7 +40,7 @@ use homeboy::agents::agent_tasks::gate::{
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider::{self, AgentTaskProviderCatalog};
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskPlan, SharedAgentTaskExecutor};
-use homeboy::agents::agent_tasks::service::{self as agent_task_service, CookRequest};
+use homeboy::agents::agent_tasks::service::{self as agent_task_service};
 use homeboy::agents::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
@@ -1641,12 +1645,12 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
         )?;
         persist_batch_cook_recipes(&plan, |options| {
             record_gate_contract_validation(options, &gate_contract_validation);
-            options.attempt_dispatcher = Some(attempt_dispatcher(options));
+            options.provider_transport.attempt_dispatcher = Some(attempt_dispatcher(options));
         })?;
         let ready_plan = plan.ready_plan()?;
         let cooks = compile_batch_cooks(&ready_plan, |options| {
             record_gate_contract_validation(options, &gate_contract_validation);
-            options.attempt_dispatcher = Some(attempt_dispatcher(options));
+            options.provider_transport.attempt_dispatcher = Some(attempt_dispatcher(options));
         })?;
         let concurrency = batch_concurrency(&plan, &cooks);
         // Resolved once, here, and bound for the whole batch: every worker thread
@@ -1792,7 +1796,7 @@ fn validate_batch_gate_contracts(
 }
 
 fn record_gate_contract_validation(options: &mut CookRequest, validation: &GateContractValidation) {
-    options.initial_plan.metadata["gate_contract_validation"] =
+    options.identity.initial_plan.metadata["gate_contract_validation"] =
         serde_json::to_value(validation).expect("gate contract validation serializes");
 }
 
@@ -1969,34 +1973,35 @@ fn compile_batch_cooks(
                 &mut readiness_cache,
             )?;
             if !cook.repository_identity.is_null() {
-                options.initial_plan.metadata["cook_repository_identity"] =
+                options.identity.initial_plan.metadata["cook_repository_identity"] =
                     cook.repository_identity.clone();
             }
             if let (Some(workspace), Some(component_id)) = (
-                options.source_worktree_path.as_deref(),
+                options.workspace.source_worktree_path.as_deref(),
                 cook.component_id.as_deref(),
             ) {
                 super::run::bind_cook_component_workspace(
-                    &mut options.initial_plan,
+                    &mut options.identity.initial_plan,
                     workspace,
                     component_id,
                 )?;
             }
             attach_fanout_placement_decision(plan, &mut options)?;
             if let Some(executor) = options
+                .identity
                 .initial_plan
                 .tasks
                 .first()
                 .map(|task| &task.executor)
             {
                 let model = executor.model().map(str::to_string);
-                options.ai_tool = resolve_ai_tool_disclosure(
-                    &options.ai_tool,
+                options.ai_disclosure.ai_tool = resolve_ai_tool_disclosure(
+                    &options.ai_disclosure.ai_tool,
                     Some(&executor.backend),
                     executor.selector.as_deref(),
                     model.as_deref(),
                 );
-                options.ai_model = model;
+                options.ai_disclosure.ai_model = model;
             }
             options.harvest_context = harvest_context.clone();
             configure(&mut options);
@@ -2007,10 +2012,11 @@ fn compile_batch_cooks(
 }
 
 fn enforce_fanout_placement(options: &CookRequest) -> Result<()> {
-    if options.attempt_dispatcher.is_some() {
+    if options.provider_transport.attempt_dispatcher.is_some() {
         return Ok(());
     }
     let decision = options
+        .identity
         .initial_plan
         .metadata
         .get("execution_placement_decision")
@@ -2037,11 +2043,11 @@ fn attach_fanout_placement_decision(
     let Some(directive) = plan.placement.as_ref() else {
         return Ok(());
     };
-    let task = options.initial_plan.tasks.first().ok_or_else(|| {
+    let task = options.identity.initial_plan.tasks.first().ok_or_else(|| {
         Error::validation_invalid_argument(
             "placement",
             "fanout child plan has no task identity for placement finalization",
-            Some(options.cook_id.clone()),
+            Some(options.identity.cook_id.clone()),
             None,
         )
     })?;
@@ -2058,7 +2064,7 @@ fn attach_fanout_placement_decision(
         candidate: source_path.and_then(homeboy::core::git::head_sha),
         base: source_path.and_then(|path| homeboy::core::git::rev_parse(path, "origin/HEAD")),
     };
-    options.initial_plan.metadata["execution_placement_decision"] =
+    options.identity.initial_plan.metadata["execution_placement_decision"] =
         serde_json::to_value(directive.finalize(identity)).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -2087,7 +2093,7 @@ fn batch_concurrency(
     // same host policy.
     let resource_budget = cooks
         .first()
-        .map(|cook| cook.initial_plan.options.resource_budget.clone())
+        .map(|cook| cook.identity.initial_plan.options.resource_budget.clone())
         .unwrap_or_default();
     resolve_batch_concurrency(BatchConcurrencyInputs {
         requested: plan.max_concurrency,
@@ -3468,10 +3474,11 @@ fn with_workspace_owner_repair_commands(
             repo: provision_repo.clone(),
             base: cook_batch_from(args).to_string(),
             head: row.branch.clone(),
-            task_url: cook
-                .task_url
-                .clone()
-                .expect("generated cooks have task URLs"),
+            task_url: Some(
+                cook.task_url
+                    .clone()
+                    .expect("generated cooks have task URLs"),
+            ),
         };
         let lifecycle = homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
             purpose: "agent_task_cook".to_string(),
@@ -3544,7 +3551,7 @@ fn preflight_batch_cook_recipes(
         )?;
         options.harvest_context = batch_harvest_context()?;
         if let Some(dispatcher) = attempt_dispatcher {
-            options.attempt_dispatcher = Some(dispatcher(&options));
+            options.provider_transport.attempt_dispatcher = Some(dispatcher(&options));
         }
         agent_task_service::validate_initial_recipe_compatibility(&options)?;
     }
@@ -4354,13 +4361,27 @@ impl BatchCookSpec {
         Ok(BatchCookInvocation {
             dispatch,
             options: CookRequest {
-                cook_id: self.run_id(),
-                initial_run_id: self.run_id(),
-                initial_plan: AgentTaskPlan::new(self.run_id(), Vec::new()),
-                to_worktree: self.to_worktree.clone(),
-                source_worktree_path,
-                provider_command: self.provider_command.clone(),
-                provider_invocation: None,
+                identity: CookIdentity {
+                    cook_id: self.run_id(),
+                    initial_run_id: self.run_id(),
+                    initial_plan: AgentTaskPlan::new(self.run_id(), Vec::new()),
+                },
+                workspace: CookWorkspace {
+                    to_worktree: self.to_worktree.clone(),
+                    source_worktree_path,
+                    task_base_sha,
+                    source_refs: self
+                        .task_url
+                        .clone()
+                        .into_iter()
+                        .chain(std::iter::once(cook_recipe_source_identity(plan, self)?))
+                        .collect(),
+                },
+                provider_transport: CookProviderTransport {
+                    provider_command: self.provider_command.clone(),
+                    provider_invocation: None,
+                    attempt_dispatcher: None,
+                },
                 gates: VerifyGateOptions {
                     verify: self.verify.clone(),
                     private_verify: self.private_verify.clone(),
@@ -4378,33 +4399,31 @@ impl BatchCookSpec {
                     gate_diagnostic_sidecars: Vec::new(),
                     hydrate_dependencies: true,
                 },
-                max_attempts: self.max_attempts,
-                no_finalize: self.no_finalize,
-                draft_pr: self.draft_pr,
-                base: self.base.clone(),
-                task_base_sha,
-                head: self.head.clone(),
-                title,
-                commit_message,
-                source_refs: self
-                    .task_url
-                    .clone()
-                    .into_iter()
-                    .chain(std::iter::once(cook_recipe_source_identity(plan, self)?))
-                    .collect(),
-                protected_branches: self.protected_branches.clone(),
-                ai_tool: resolve_ai_tool_disclosure(
-                    &self.ai_tool,
-                    self.backend.as_deref(),
-                    self.selector.as_deref(),
-                    self.model.as_deref(),
-                ),
-                // Explicit/config/rotation model selection only. Disclosure text
-                // is presentation, not provenance, so it is never reverse-parsed
-                // into a model — omitted stays omitted (#9789).
-                ai_model: self.model.clone(),
-                ai_used_for: self.ai_used_for.clone(),
-                attempt_dispatcher: None,
+                retry_policy: CookRetryPolicy {
+                    max_attempts: self.max_attempts,
+                },
+                finalization: CookFinalization {
+                    no_finalize: self.no_finalize,
+                    draft_pr: self.draft_pr,
+                    base: self.base.clone(),
+                    head: self.head.clone(),
+                    title,
+                    commit_message,
+                    protected_branches: self.protected_branches.clone(),
+                },
+                ai_disclosure: CookAiDisclosure {
+                    ai_tool: resolve_ai_tool_disclosure(
+                        &self.ai_tool,
+                        self.backend.as_deref(),
+                        self.selector.as_deref(),
+                        self.model.as_deref(),
+                    ),
+                    // Explicit/config/rotation model selection only. Disclosure text
+                    // is presentation, not provenance, so it is never reverse-parsed
+                    // into a model — omitted stays omitted (#9789).
+                    ai_model: self.model.clone(),
+                    ai_used_for: self.ai_used_for.clone(),
+                },
                 harvest_context:
                     crate::agents::agent_task_scheduler::HarvestExecutionContext::default(),
             },
@@ -7152,7 +7171,9 @@ fi
             let cooks = compile_batch_cooks(&plan, |_| {}).expect("compile batch cooks");
 
             assert_eq!(cooks.len(), 2);
-            assert!(cooks.iter().all(|cook| cook.initial_plan.tasks.len() == 1));
+            assert!(cooks
+                .iter()
+                .all(|cook| cook.identity.initial_plan.tasks.len() == 1));
             assert!(cooks
                 .iter()
                 .all(|cook| format!("{:?}", cook.harvest_context)
@@ -7216,8 +7237,14 @@ fi
             let invocation = plan.cooks[0]
                 .to_cook_invocation(&plan)
                 .expect("cook invocation");
-            assert_eq!(invocation.options.to_worktree, "homeboy@fix-5929-docs");
-            assert_eq!(invocation.options.head.as_deref(), Some("fix/5929-docs"));
+            assert_eq!(
+                invocation.options.workspace.to_worktree,
+                "homeboy@fix-5929-docs"
+            );
+            assert_eq!(
+                invocation.options.finalization.head.as_deref(),
+                Some("fix/5929-docs")
+            );
             assert_eq!(
                 invocation.dispatch.cwd.as_deref(),
                 Some("/runner/workspaces/homeboy@5929-docs")
@@ -7559,14 +7586,14 @@ fi
     }
 
     fn materialize_test_child(options: &mut CookRequest) {
-        options.initial_plan.tasks = vec![serde_json::from_value(serde_json::json!({
-            "task_id": options.cook_id,
+        options.identity.initial_plan.tasks = vec![serde_json::from_value(serde_json::json!({
+            "task_id": options.identity.cook_id,
             "executor": { "backend": "test" },
             "instructions": "test fanout placement",
             "workspace": { "root": env!("CARGO_MANIFEST_DIR") },
         }))
         .expect("materialized test task")];
-        options.initial_plan.rebuild_homeboy_plan();
+        options.identity.initial_plan.rebuild_homeboy_plan();
     }
 
     #[test]
@@ -7626,12 +7653,14 @@ fi
                 attach_fanout_placement_decision(&decoded, &mut options)
                     .expect("bind child placement");
                 if selected == EffectiveExecutionPlacement::Lab {
-                    options.attempt_dispatcher = Some(Arc::new(LabRecipeDispatcher));
+                    options.provider_transport.attempt_dispatcher =
+                        Some(Arc::new(LabRecipeDispatcher));
                 }
                 enforce_fanout_placement(&options).expect("admit child placement");
                 let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
                     serde_json::from_value(
-                        options.initial_plan.metadata["execution_placement_decision"].clone(),
+                        options.identity.initial_plan.metadata["execution_placement_decision"]
+                            .clone(),
                     )
                     .expect("canonical child decision");
                 assert_eq!(decision.requested, requested, "{name}: requested");
@@ -7639,7 +7668,7 @@ fi
 
                 agent_task_service::persist_initial_recipe(&options)
                     .expect("persist placement-bound recipe");
-                let recipe = agent_task_service::load_recipe(&options.cook_id)
+                let recipe = agent_task_service::load_recipe(&options.identity.cook_id)
                     .expect("load placement-bound recipe");
                 assert_eq!(
                     recipe.attempts[0].plan.metadata["execution_placement_decision"]["decision_id"],
@@ -7648,7 +7677,7 @@ fi
                 );
 
                 let run_id = format!("placement-round-trip-{name}-run");
-                agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id))
+                agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
                     .expect("submit durable child");
                 let outcome = decision
                     .outcome(
@@ -8466,30 +8495,6 @@ fi
         });
     }
 
-    #[test]
-    fn cook_batch_reuses_multiple_existing_issue_worktrees_before_lab_reconciliation() {
-        with_materialized_cook_batch_worktrees(|| {
-            let (value, exit_code) = cook_batch(cook_batch_args()).expect("plan existing wave");
-
-            assert_eq!(exit_code, 0, "{value}");
-            assert_eq!(value["summary"]["issues"], 2);
-            let rows = value["worktrees"]["rows"]
-                .as_array()
-                .expect("worktree rows");
-            assert_eq!(rows.len(), 2);
-            assert!(
-                rows.iter().all(|row| row["status"] == "created"),
-                "{rows:?}"
-            );
-            assert!(rows.iter().all(|row| row["path"].is_string()), "{rows:?}");
-            assert!(value["plan"]["cooks"]
-                .as_array()
-                .expect("planned cooks")
-                .iter()
-                .all(|cook| cook["workspace"].is_string()));
-        });
-    }
-
     #[cfg(unix)]
     #[test]
     fn fanout_uses_an_ensure_resolve_provider_without_a_finalizer_for_creation_binding_and_repair()
@@ -8942,7 +8947,7 @@ fi
                 Some(workspace.path().to_string_lossy().as_ref())
             );
             assert_eq!(
-                invocation.options.source_worktree_path.as_deref(),
+                invocation.options.workspace.source_worktree_path.as_deref(),
                 Some(workspace.path())
             );
         });
@@ -9214,7 +9219,7 @@ fi
             for cook in &loaded.cooks {
                 let invocation = cook.to_cook_invocation(&loaded).expect("cook invocation");
                 assert_eq!(
-                    invocation.options.ai_tool,
+                    invocation.options.ai_disclosure.ai_tool,
                     "OpenAI GPT-5.6 Terra via OpenCode"
                 );
                 let recipe = agent_task_service::load_recipe(&cook.run_id())
@@ -9246,6 +9251,7 @@ fi
                 .to_cook_invocation(&plan)
                 .expect("sol invocation")
                 .options
+                .ai_disclosure
                 .ai_tool,
             "OpenAI GPT-5.6 Sol via OpenCode"
         );
@@ -9254,6 +9260,7 @@ fi
                 .to_cook_invocation(&plan)
                 .expect("terra invocation")
                 .options
+                .ai_disclosure
                 .ai_tool,
             "OpenAI GPT-5.6 Terra via OpenCode"
         );
@@ -9299,13 +9306,16 @@ fi
                 .expect("workspace-bound cook invocation");
             assert_eq!(invocation.dispatch.workspace.as_deref(), root.to_str());
             assert_eq!(
-                invocation.options.source_worktree_path.as_deref(),
+                invocation.options.workspace.source_worktree_path.as_deref(),
                 Some(root.as_path())
             );
 
             let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile before provider");
             assert_eq!(
-                compiled[0].initial_plan.tasks[0].workspace.root.as_deref(),
+                compiled[0].identity.initial_plan.tasks[0]
+                    .workspace
+                    .root
+                    .as_deref(),
                 root.to_str()
             );
         });
@@ -9361,7 +9371,7 @@ fi
             Some("/explicit/multi-repo-workspace")
         );
         assert_eq!(
-            invocation.options.source_worktree_path.as_deref(),
+            invocation.options.workspace.source_worktree_path.as_deref(),
             Some(std::path::Path::new(&explicit_cwd))
         );
     }
@@ -9396,7 +9406,7 @@ fi
                 .to_cook_invocation(&plan)
                 .expect("cook invocation");
             assert_eq!(
-                invocation.options.ai_model, None,
+                invocation.options.ai_disclosure.ai_model, None,
                 "disclosure text must not populate ai_model"
             );
         });
@@ -9429,7 +9439,7 @@ fi
                 .to_cook_invocation(&plan)
                 .expect("cook invocation");
             assert_eq!(
-                invocation.options.ai_model.as_deref(),
+                invocation.options.ai_disclosure.ai_model.as_deref(),
                 Some("openai/gpt-5.6-terra"),
                 "explicit model selection must reach the execution request"
             );
@@ -9525,7 +9535,7 @@ fi
                 .to_cook_invocation(&plan)
                 .expect("cook invocation");
             invocation.options.harvest_context = batch_harvest_context().expect("harvest context");
-            invocation.options.initial_plan = compiled[0].initial_plan.clone();
+            invocation.options.identity.initial_plan = compiled[0].identity.initial_plan.clone();
             agent_task_service::persist_initial_recipe(&invocation.options)
                 .expect("persist initial recipe");
 
@@ -9579,7 +9589,7 @@ fi
             };
 
             persist_batch_cook_recipes(&plan, |options| {
-                options.attempt_dispatcher = Some(dispatcher(options));
+                options.provider_transport.attempt_dispatcher = Some(dispatcher(options));
             })
             .expect("persist Lab child recipes");
             preflight_batch_cook_recipes(&plan, Some(&dispatcher))

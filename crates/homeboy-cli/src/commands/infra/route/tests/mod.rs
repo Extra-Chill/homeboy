@@ -43,20 +43,6 @@ pub(super) fn git_add_remote(path: &Path, remote_url: &str) {
     );
 }
 
-/// Register the configured component a fixture checkout's remote maps to, so
-/// Cook can infer its repository instead of demanding an explicit `--repo`.
-pub(super) fn register_component(id: &str, path: &Path, remote_url: &str) {
-    homeboy::core::component::write_standalone_component_config(
-        &homeboy::core::component::Component {
-            id: id.to_string(),
-            local_path: path.display().to_string(),
-            remote_url: Some(remote_url.to_string()),
-            ..Default::default()
-        },
-    )
-    .expect("register fixture component");
-}
-
 pub(super) struct EnvGuard {
     previous: Vec<(&'static str, Option<String>)>,
     _guard: MutexGuard<'static, ()>,

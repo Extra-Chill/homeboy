@@ -14,8 +14,8 @@ pub mod resolve;
 pub mod resource;
 
 pub use capabilities::{
-    CompatibilityWindow, ControlPlaneCapabilities, ControlPlaneOperation, ControlPlaneResource,
-    CONTROL_PLANE_CAPABILITIES_SCHEMA, LEGACY_COMPATIBILITY_MINOR_VERSIONS,
+    ControlPlaneCapabilities, ControlPlaneOperation, ControlPlaneResource,
+    CONTROL_PLANE_CAPABILITIES_SCHEMA,
 };
 pub use control_plane_ref::{ControlPlaneRef, ControlPlaneRefError};
 pub use identity::{
@@ -24,6 +24,6 @@ pub use identity::{
 pub use resolve::{resolve, IdentityKind, ResolveError, ResolvedIdentities};
 pub use resource::{
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation,
-    ControlPlanePage, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunRequest,
-    ControlPlaneRunState, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, CONTROL_PLANE_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_SCHEMA,
 };

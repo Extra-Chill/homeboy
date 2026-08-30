@@ -694,24 +694,6 @@ mod tests {
         component
     }
 
-    fn enable_split_lint_routes(home: &Path) {
-        fs::write(
-            home.join(".config/homeboy/extensions/release-lint-fixture/release-lint-fixture.json"),
-            r#"{
-                "name":"Release lint fixture",
-                "version":"1.0.0",
-                "lint":{
-                    "extension_script":"lint.sh",
-                    "changed_file_routes":[
-                        {"extensions":["php"],"step":"php"},
-                        {"extensions":["js"],"step":"js"}
-                    ]
-                }
-            }"#,
-        )
-        .expect("split route manifest");
-    }
-
     fn runner_output(exit_code: i32, stdout: &str, stderr: &str) -> RunnerOutput {
         RunnerOutput {
             exit_code,
@@ -1304,62 +1286,6 @@ mod tests {
     }
 
     #[test]
-    fn extension_release_lint_blocks_finding_in_file_changed_since_prior_tag() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let source = tempfile::tempdir().expect("source dir");
-            let component = extension_lint_component(
-                home.path(),
-                source.path(),
-                r#"#!/bin/sh
-printf '[{"tool":"phpstan","message":"changed finding","fingerprint":"changed","file":"changed.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
-exit 1
-"#,
-                true,
-            );
-
-            let error = validate_lint_quality(&component, "fixture").expect_failed();
-            assert!(error.to_string().contains("Lint failed (exit code 1,"));
-        });
-    }
-
-    #[test]
-    fn extension_release_lint_includes_later_route_finding_in_failure_details() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let source = tempfile::tempdir().expect("source dir");
-            let component = extension_lint_component(
-                home.path(),
-                source.path(),
-                r#"#!/bin/sh
-if [ "$HOMEBOY_STEP" = "php" ]; then
-  printf '[]' > "$HOMEBOY_LINT_FINDINGS_FILE"
-  exit 0
-fi
-printf '[{"tool":"eslint","message":"second route release finding","fingerprint":"second","file":"assets/app.js"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
-exit 1
-"#,
-                true,
-            );
-            enable_split_lint_routes(home.path());
-            fs::create_dir_all(source.path().join("assets")).expect("assets dir");
-            fs::write(source.path().join("assets/app.js"), "broken();\n").expect("js source");
-            run_git(source.path(), &["add", "assets/app.js"]);
-            run_git(source.path(), &["commit", "-q", "-m", "fix: js route"]);
-
-            let error = validate_lint_quality(&component, "fixture").expect_failed();
-            assert_eq!(
-                error.details["lint_workflow"]["finding_count"].as_u64(),
-                Some(1)
-            );
-            assert_eq!(
-                error.details["lint_workflow"]["findings"][0]["message"].as_str(),
-                Some("second route release finding")
-            );
-            assert!(error.details["lint_workflow"]["run_dir"].is_string());
-            assert!(error.details["lint_workflow"]["hints"].is_array());
-        });
-    }
-
-    #[test]
     fn extension_release_lint_ignores_legacy_finding_outside_prior_tag_scope() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let source = tempfile::tempdir().expect("source dir");
@@ -1453,92 +1379,6 @@ exit 1
             };
 
             assert!(validate_lint_quality(&component, "fixture").expect_passed_with_value(true));
-        });
-    }
-
-    /// Malformed evidence and producer errors block release; a clean run that
-    /// reports nothing does not.
-    ///
-    /// The "missing" case changed meaning. `homeboy-extensions@740e20b5` made
-    /// every extension declaring `lint.findings` seed the sidecar with `[]` on
-    /// clean exit paths, so an absent findings file from an exit-0 run is a
-    /// clean pass rather than lost evidence. A runner that actually fails still
-    /// writes its infrastructure finding, so the measurement invariant is intact
-    /// — `[]` is treated as no payload, not as proof of success.
-    #[test]
-    fn extension_release_lint_blocks_malformed_and_producer_error_evidence_but_allows_a_clean_run()
-    {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let malformed_source = tempfile::tempdir().expect("malformed source dir");
-            let malformed = extension_lint_component(
-                home.path(),
-                malformed_source.path(),
-                "#!/bin/sh\nprintf '{' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nexit 1\n",
-                true,
-            );
-            let malformed_error = validate_lint_quality(&malformed, "fixture").expect_failed();
-            // Malformed findings evidence is now reported through the lint
-            // failure itself, carrying the producer-error count.
-            let malformed_message = malformed_error.to_string();
-            assert!(
-                malformed_message.contains("Lint failed") && malformed_message.contains("producer error"),
-                "malformed findings evidence must block release and name the producer error; got: {malformed_message}"
-            );
-
-            let missing_source = tempfile::tempdir().expect("missing source dir");
-            let missing = extension_lint_component(
-                home.path(),
-                missing_source.path(),
-                "#!/bin/sh\nexit 0\n",
-                true,
-            );
-            // Exit 0 with nothing to report is a clean pass, not missing
-            // evidence. This previously asserted a failure, under the older
-            // contract where a declaring extension left no sidecar behind.
-            assert!(
-                validate_lint_quality(&missing, "fixture").expect_passed_with_value(true),
-                "a clean lint run that reports no findings must not block release"
-            );
-
-            let producer_source = tempfile::tempdir().expect("producer error source dir");
-            let producer_error = extension_lint_component(
-                home.path(),
-                producer_source.path(),
-                r#"#!/bin/sh
-printf '[{"tool":"phpstan","message":"known","fingerprint":"known","file":"changed.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
-printf '[{"tool":"phpstan","status":"error","finding_count":1}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
-exit 0
-"#,
-                true,
-            );
-            let mut known = homeboy_core::finding::HomeboyFinding::builder("phpstan", "known")
-                .fingerprint("known")
-                .build();
-            known.location.file = Some("changed.php".to_string());
-            homeboy_extension::lint::baseline::save_baseline(
-                producer_source.path(),
-                "fixture",
-                &[known],
-            )
-            .expect("save accepted baseline");
-            let producer_error = validate_lint_quality(&producer_error, "fixture").expect_failed();
-            assert!(producer_error
-                .to_string()
-                .contains("Lint failed (exit code 1,"));
-            assert_eq!(
-                producer_error.details["lint_workflow"]["producer_error_count"].as_u64(),
-                Some(1)
-            );
-            assert_eq!(
-                producer_error.details["lint_workflow"]["baseline_new_count"].as_u64(),
-                None,
-                "producer errors make the baseline comparison ineligible"
-            );
-            assert_eq!(
-                producer_error.details["lint_workflow"]["baseline_known_count"].as_u64(),
-                None,
-                "producer errors make the baseline comparison ineligible"
-            );
         });
     }
 

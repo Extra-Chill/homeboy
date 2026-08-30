@@ -444,7 +444,7 @@ pub(crate) fn run_post_release(
     let hook_result = homeboy_core::engine::hooks::run_commands(
         commands,
         &component.local_path,
-        homeboy_core::engine::hooks::events::POST_RELEASE,
+        homeboy_extension_contract::HookEvent::PostRelease,
         homeboy_core::engine::hooks::HookFailureMode::NonFatal,
     )?;
 

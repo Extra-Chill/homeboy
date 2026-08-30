@@ -11,7 +11,7 @@ use crate::component::Component;
 use crate::engine::template;
 use crate::error::{Error, Result};
 use crate::server::{execute_local_command_in_dir, SshClient};
-use homeboy_extension_contract::ExtensionManifest;
+use homeboy_extension_contract::{ExtensionManifest, HookEvent};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -50,7 +50,7 @@ pub enum HookFailureMode {
 ///
 /// A configured extension is part of the component's declared behavior. Failing
 /// to load it must fail hook resolution rather than silently changing the plan.
-pub fn resolve_hooks(component: &Component, event: &str) -> Result<Vec<String>> {
+pub fn resolve_hooks(component: &Component, event: HookEvent) -> Result<Vec<String>> {
     let mut manifests = Vec::new();
     if let Some(ref extensions) = component.extensions {
         let mut extension_ids: Vec<_> = extensions.keys().collect();
@@ -66,7 +66,7 @@ pub fn resolve_hooks(component: &Component, event: &str) -> Result<Vec<String>> 
 pub fn resolve_hooks_with_extensions(
     component: &Component,
     extensions: &[ExtensionManifest],
-    event: &str,
+    event: HookEvent,
 ) -> Result<Vec<String>> {
     let mut commands = Vec::new();
 
@@ -86,14 +86,14 @@ pub fn resolve_hooks_with_extensions(
                             .collect(),
                     )
                 })?;
-            if let Some(extension_commands) = manifest.hooks.get(event) {
+            if let Some(extension_commands) = manifest.hooks.get(&event) {
                 commands.extend(extension_commands.clone());
             }
         }
     }
 
     // Component hooks second.
-    if let Some(component_commands) = component.hooks.get(event) {
+    if let Some(component_commands) = component.hooks.get(&event) {
         commands.extend(component_commands.clone());
     }
 
@@ -106,7 +106,7 @@ pub fn resolve_hooks_with_extensions(
 /// sequentially in the component's `local_path`.
 pub fn run_hooks(
     component: &Component,
-    event: &str,
+    event: HookEvent,
     failure_mode: HookFailureMode,
 ) -> Result<HookRunResult> {
     let commands = resolve_hooks(component, event)?;
@@ -119,7 +119,7 @@ pub fn run_hooks(
 pub fn run_commands(
     commands: &[String],
     working_dir: &str,
-    event: &str,
+    event: HookEvent,
     failure_mode: HookFailureMode,
 ) -> Result<HookRunResult> {
     let mut results = Vec::new();
@@ -157,7 +157,7 @@ pub fn run_commands(
     }
 
     Ok(HookRunResult {
-        event: event.to_string(),
+        event: event.label().to_string(),
         commands: results,
         all_succeeded,
     })
@@ -172,7 +172,7 @@ pub fn run_commands(
 pub fn run_hooks_remote(
     ssh_client: &SshClient,
     component: &Component,
-    event: &str,
+    event: HookEvent,
     failure_mode: HookFailureMode,
     vars: &HashMap<String, String>,
 ) -> Result<HookRunResult> {
@@ -191,7 +191,7 @@ pub fn run_hooks_remote(
 pub(crate) fn run_commands_remote(
     ssh_client: &SshClient,
     commands: &[String],
-    event: &str,
+    event: HookEvent,
     failure_mode: HookFailureMode,
 ) -> Result<HookRunResult> {
     let mut results = Vec::new();
@@ -229,22 +229,10 @@ pub(crate) fn run_commands_remote(
     }
 
     Ok(HookRunResult {
-        event: event.to_string(),
+        event: event.label().to_string(),
         commands: results,
         all_succeeded,
     })
-}
-
-/// Standard event names for the lifecycle hooks.
-pub mod events {
-    /// Runs after version targets are updated, before git commit.
-    pub const PRE_VERSION_BUMP: &str = "pre:version:bump";
-    /// Runs after pre-bump hooks, before git commit.
-    pub const POST_VERSION_BUMP: &str = "post:version:bump";
-    /// Runs after the release pipeline completes.
-    pub const POST_RELEASE: &str = "post:release";
-    /// Runs after deploy completes.
-    pub const POST_DEPLOY: &str = "post:deploy";
 }
 
 #[cfg(test)]
@@ -261,7 +249,7 @@ mod tests {
             extension_dir.join(format!("{id}.json")),
             format!(
                 r#"{{"name":"{id}","version":"1.0.0","hooks":{{"{}": ["{command}"]}}}}"#,
-                events::PRE_VERSION_BUMP
+                HookEvent::PreVersionBump
             ),
         )
         .unwrap();
@@ -275,7 +263,7 @@ mod tests {
             "".to_string(),
             None,
         );
-        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap();
+        let commands = resolve_hooks(&component, HookEvent::PreVersionBump).unwrap();
         assert!(commands.is_empty());
     }
 
@@ -287,11 +275,10 @@ mod tests {
             "".to_string(),
             None,
         );
-        component.hooks.insert(
-            events::PRE_VERSION_BUMP.to_string(),
-            vec!["echo hello".to_string()],
-        );
-        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap();
+        component
+            .hooks
+            .insert(HookEvent::PreVersionBump, vec!["echo hello".to_string()]);
+        let commands = resolve_hooks(&component, HookEvent::PreVersionBump).unwrap();
         assert_eq!(commands, vec!["echo hello".to_string()]);
     }
 
@@ -303,11 +290,10 @@ mod tests {
             "".to_string(),
             None,
         );
-        component.hooks.insert(
-            events::POST_DEPLOY.to_string(),
-            vec!["echo deploy".to_string()],
-        );
-        let commands = resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap();
+        component
+            .hooks
+            .insert(HookEvent::PostDeploy, vec!["echo deploy".to_string()]);
+        let commands = resolve_hooks(&component, HookEvent::PreVersionBump).unwrap();
         assert!(commands.is_empty());
     }
 
@@ -328,7 +314,7 @@ mod tests {
             ]));
 
             assert_eq!(
-                resolve_hooks(&component, events::PRE_VERSION_BUMP).unwrap(),
+                resolve_hooks(&component, HookEvent::PreVersionBump).unwrap(),
                 vec!["echo alpha", "echo zebra"]
             );
             let manifests = vec![
@@ -336,7 +322,7 @@ mod tests {
                 crate::extension_store::load_extension("alpha").unwrap(),
             ];
             assert_eq!(
-                resolve_hooks_with_extensions(&component, &manifests, events::PRE_VERSION_BUMP)
+                resolve_hooks_with_extensions(&component, &manifests, HookEvent::PreVersionBump)
                     .unwrap(),
                 vec!["echo alpha", "echo zebra"]
             );
@@ -346,11 +332,11 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .insert("missing".to_string(), ScopedExtensionConfig::default());
-            assert!(resolve_hooks(&component, events::PRE_VERSION_BUMP).is_err());
+            assert!(resolve_hooks(&component, HookEvent::PreVersionBump).is_err());
             assert!(resolve_hooks_with_extensions(
                 &component,
                 &manifests,
-                events::PRE_VERSION_BUMP
+                HookEvent::PreVersionBump
             )
             .is_err());
         });
@@ -358,16 +344,23 @@ mod tests {
 
     #[test]
     fn run_commands_succeeds_with_empty_list() {
-        let result = run_commands(&[], "/tmp", "test:event", HookFailureMode::Fatal).unwrap();
+        let result =
+            run_commands(&[], "/tmp", HookEvent::PostRelease, HookFailureMode::Fatal).unwrap();
         assert!(result.all_succeeded);
         assert!(result.commands.is_empty());
-        assert_eq!(result.event, "test:event");
+        assert_eq!(result.event, "post:release");
     }
 
     #[test]
     fn run_commands_executes_successfully() {
         let commands = vec!["echo hello".to_string()];
-        let result = run_commands(&commands, "/tmp", "test:event", HookFailureMode::Fatal).unwrap();
+        let result = run_commands(
+            &commands,
+            "/tmp",
+            HookEvent::PostRelease,
+            HookFailureMode::Fatal,
+        )
+        .unwrap();
         assert!(result.all_succeeded);
         assert_eq!(result.commands.len(), 1);
         assert!(result.commands[0].success);
@@ -377,15 +370,25 @@ mod tests {
     #[test]
     fn run_commands_fatal_stops_on_failure() {
         let commands = vec!["exit 1".to_string(), "echo should-not-run".to_string()];
-        let result = run_commands(&commands, "/tmp", "test:event", HookFailureMode::Fatal);
+        let result = run_commands(
+            &commands,
+            "/tmp",
+            HookEvent::PostRelease,
+            HookFailureMode::Fatal,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn run_commands_non_fatal_continues_on_failure() {
         let commands = vec!["exit 1".to_string(), "echo still-runs".to_string()];
-        let result =
-            run_commands(&commands, "/tmp", "test:event", HookFailureMode::NonFatal).unwrap();
+        let result = run_commands(
+            &commands,
+            "/tmp",
+            HookEvent::PostRelease,
+            HookFailureMode::NonFatal,
+        )
+        .unwrap();
         assert!(!result.all_succeeded);
         assert_eq!(result.commands.len(), 2);
         assert!(!result.commands[0].success);

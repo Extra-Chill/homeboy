@@ -67,7 +67,7 @@ impl ReleaseWorkspace {
             repo: component.id.clone(),
             base: source_sha.clone(),
             head: branch,
-            task_url: owner_run_ref,
+            task_url: None,
         };
         let planned =
             worktree_provider::plan_worktree_provision_from_config(&intent, &lifecycle, &config)?;
@@ -424,7 +424,7 @@ struct PersistedProvisionIntent {
     repo: String,
     base: String,
     head: String,
-    task_url: String,
+    task_url: Option<String>,
     #[allow(dead_code)]
     idempotency_key: String,
 }
@@ -696,6 +696,26 @@ mod tests {
 
             let workspace = ReleaseWorkspace::select(&test_roots(), &component, false)
                 .expect("built-in provider staging");
+
+            let owner = workspace
+                .output
+                .owner_run_ref
+                .as_deref()
+                .expect("release owner");
+            assert!(owner.starts_with("release/"));
+            assert_eq!(
+                test_store()
+                    .load(owner)
+                    .expect("load")
+                    .expect("record")
+                    .attributes["provision_intent"]["task_url"],
+                serde_json::Value::Null
+            );
+            let handle = workspace.output.handle.as_deref().expect("handle");
+            let record = homeboy_core::worktree::resolve_if_present(handle)
+                .expect("native lookup")
+                .expect("native record");
+            assert!(record.task_url.is_none());
 
             assert_eq!(workspace.output.kind, "provider_owned");
             assert_eq!(workspace.output.provider_id.as_deref(), Some("native"));
@@ -1021,7 +1041,7 @@ mod tests {
             let owner = "release/pre-ensure";
             test_store().create(&OperationRecord {
                 owner_run_ref: owner.to_string(), operation: "provider_workspace".to_string(), subject: "component".to_string(), provider: "fixture".to_string(), handle: "release-fixture".to_string(), path: None, source_sha: "abc".to_string(), cleanup_policy: "remove_on_success".to_string(), lifecycle_state: "provisioning".to_string(), terminal_disposition: None, finalization_status: "pending".to_string(), finalization_lease: None, finalization_lease_started_ms: None, attempt_count: 0, continuation_evidence: Vec::new(),
-                attributes: serde_json::Map::from_iter([("provision_intent".to_string(), serde_json::json!({ "repo": "repo", "base": "main", "head": "abc", "task_url": "release/pre-ensure", "idempotency_key": "release-fixture:repo:main:abc" }))]),
+                attributes: serde_json::Map::from_iter([("provision_intent".to_string(), serde_json::json!({ "repo": "repo", "base": "main", "head": "abc", "task_url": null, "idempotency_key": "release-fixture:repo:main:abc" }))]),
             }).expect("persist pre-ensure record");
 
             let completed = reconcile_pending(&test_roots(), "component", Some(owner))

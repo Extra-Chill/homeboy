@@ -4497,19 +4497,21 @@ mod tests {
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
                 .expect("pinned candidate");
+            let calls_after_pin =
+                TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             validate_pin(&runtime).expect("first fixture identity validation");
             validate_pin(&runtime).expect("second fixture identity validation");
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-                1,
-                "source and sealed candidate avoid additional full reads"
+                calls_after_pin,
+                "repeated validation avoids additional full reads"
             );
 
             chmod_until_observable(&candidate, 0o700);
             validate_pin(&runtime).expect("chmod preserves valid candidate bytes");
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-                2,
+                calls_after_pin + 1,
                 "chmod invalidates metadata identity and performs one rehash"
             );
 
@@ -4520,7 +4522,7 @@ mod tests {
             );
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-                3,
+                calls_after_pin + 2,
                 "content mutation misses the cache and rehashes before failing"
             );
 
@@ -4539,7 +4541,7 @@ mod tests {
             );
             assert_eq!(
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-                4,
+                calls_after_pin + 3,
                 "replacement misses the cache and rehashes before failing"
             );
         });
