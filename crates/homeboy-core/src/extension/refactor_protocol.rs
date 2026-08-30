@@ -165,14 +165,13 @@ impl RefactorScriptFailure {
 /// Output from a `parse_items` refactor command: the protocol name for a parsed
 /// top-level item.
 ///
-/// This was a second declaration of [`crate::extension::grammar_items::GrammarItem`] --
+/// This was a second declaration of [`homeboy_engine_primitives::grammar::items::GrammarItem`] --
 /// same six fields, same order, same serde, and the same doc comment on every
 /// field -- plus a `From` impl that moved them across one at a time.
 /// `GrammarItem`'s own doc already described it as "the core equivalent of
-/// `extension::ParsedItem`", and this crate re-exports the core module as
-/// `grammar_items`, so the two names always resolved through the same crate with
-/// no dependency boundary between them to justify a copy.
-pub type ParsedItem = crate::extension::grammar_items::GrammarItem;
+/// `extension::ParsedItem`", and core already depends directly on the grammar
+/// primitives, so there is no dependency boundary to justify a copy.
+pub type ParsedItem = homeboy_engine_primitives::grammar::items::GrammarItem;
 
 /// Output from a `resolve_imports` refactor command.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -234,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_parsed_item_from_grammar_item() {
-        let item = crate::extension::grammar_items::GrammarItem {
+        let item = homeboy_engine_primitives::grammar::items::GrammarItem {
             name: "run".to_string(),
             kind: "function".to_string(),
             start_line: 3,

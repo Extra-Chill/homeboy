@@ -14,10 +14,6 @@ mod env_provider;
 mod execution;
 mod fingerprint;
 // invocation_context relocated to homeboy_core::extension_invocation_context
-// The grammar parsing engine is a language-agnostic primitive; expose it through
-// the extension API while its implementation remains in homeboy-engine-primitives.
-pub use homeboy_engine_primitives::grammar;
-pub use homeboy_engine_primitives::grammar::items as grammar_items;
 pub mod lifecycle;
 pub mod lint;
 mod maintenance;

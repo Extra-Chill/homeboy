@@ -124,7 +124,7 @@ pub(crate) fn parse_items_for_dedup(
     file_path: &str,
 ) -> Option<Vec<homeboy_core::extension::ParsedItem>> {
     if let Some(grammar) = homeboy_code_audit::core_fingerprint::load_grammar_for_ext(file_ext) {
-        let items = homeboy_core::extension::grammar_items::parse_items(content, &grammar);
+        let items = homeboy_engine_primitives::grammar::items::parse_items(content, &grammar);
         if !items.is_empty() {
             return Some(
                 items
