@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.366.0] - 2026-08-30
+
+### Added
+- hand off synced workspace refs
+
+### Changed
+- Consolidate extension provider registry
+- Consolidate extension readiness ownership
+- Consolidate extension invocation ownership
+- Correct runner contract lock ownership
+- Narrow Runner API work to contracts
+- Preserve runner request environment plans
+- Establish core-owned Runner API
+- Consolidate extension resolution ownership
+- Consolidate extension catalog ownership
+- remove child recovery migration alias
+
+### Fixed
+- Fix nested Lab command placement
+- Fix prepared source cache publication race
+- validate dependency hydration outputs
+- promote provider failure diagnostics
+
 ## [0.365.2] - 2026-08-30
 
 ### Changed
