@@ -910,6 +910,31 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
     ))
 }
 
+/// Admit one connected runner for a bounded readiness repair without treating
+/// its missing capability as workload readiness. Transport freshness, idle
+/// ownership, and active-job evidence remain mandatory.
+pub fn runner_readiness_repair_admitted(runner_id: &str) -> Result<bool> {
+    let runner = load(runner_id)?;
+    let status = status(runner_id)?;
+    let mode = status
+        .session
+        .as_ref()
+        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+    let candidate = lab_runner_admission_candidate(
+        runner_id,
+        mode,
+        runner.settings.concurrency_limit,
+        &status,
+        false,
+        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    );
+    Ok(candidate.connected
+        && !candidate.stale_daemon
+        && candidate.admission_fresh
+        && candidate.active_jobs_available
+        && candidate.active_jobs == 0)
+}
+
 /// Refresh a bounded set of connected-runner admission observations before a
 /// hot controller rejects a portable workload. This is read-only: it neither
 /// reconnects sessions nor settles jobs, so it is a targeted alternative to a

@@ -8,14 +8,7 @@
 use super::Cli;
 use clap::CommandFactory;
 
-/// The globally-propagated flag set is a wire protocol, not just documentation:
-/// `homeboy-lab-runner` negotiates the lease-less recovery contract by parsing
-/// a remote binary's rendered `Options:` block
-/// (`negotiate_leaseless_recovery_contract`), and every `global = true`
-/// argument is rendered into that block for every subcommand. Pin the set so
-/// any addition or removal is a deliberate, reviewed protocol change.
-///
-/// This also anchors the invariant that motivated deleting the fieldless
+/// This anchors the invariant that motivated deleting the fieldless
 /// `GlobalArgs` handler parameter: process-wide CLI state is carried by these
 /// clap arguments on `Cli`, never by a separate struct threaded through
 /// command handlers.

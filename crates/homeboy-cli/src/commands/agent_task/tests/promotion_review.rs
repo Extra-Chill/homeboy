@@ -336,7 +336,8 @@ fn full_review_excludes_unrelated_worktree_cleanup_inventory() {
             format!("homeboy agent-task status {run_id} --full --output <path>")
         );
         assert!(!review_value.to_string().contains("unrelated-worktree-58"));
-        let persisted = agent_task_lifecycle::status(run_id).expect("cleanup evidence persists");
+        let persisted =
+            agent_task_lifecycle::reconcile_status(run_id).expect("cleanup evidence persists");
         assert_eq!(
             persisted.metadata["automatic_artifact_retention"]["worktrees"]
                 .as_array()

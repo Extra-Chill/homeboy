@@ -61,12 +61,12 @@ pub struct AgentTaskReconcileRun {
 /// Genuinely-active runs (live owner/runner with a fresh heartbeat, or queued
 /// work) are never touched. With `dry_run`, candidates are reported but no
 /// record is mutated so an operator can preview the blast radius first.
-/// [`agent_task_lifecycle::status`] against an explicitly injected root.
+/// [`agent_task_lifecycle::reconcile_status`] against an explicitly injected root.
 fn rooted_status(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    Ok(agent_task_lifecycle::status_in_store(
+    Ok(agent_task_lifecycle::reconcile_status_in_store(
         lifecycle_store,
         run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -80,7 +80,7 @@ fn rooted_exact_status(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    Ok(agent_task_lifecycle::status_in_store(
+    Ok(agent_task_lifecycle::reconcile_status_in_store(
         lifecycle_store,
         run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -1167,7 +1167,7 @@ mod tests {
 
             assert_eq!(report["reconciled"], 1, "{report}");
             let refreshed =
-                agent_task_lifecycle::status("reconcile-tick-orphan").expect("refreshed");
+                agent_task_lifecycle::reconcile_status("reconcile-tick-orphan").expect("refreshed");
             assert!(
                 refreshed.state.is_terminal(),
                 "orphan must not stay running: {:?}",
@@ -1201,7 +1201,7 @@ mod tests {
                 .expect("tick pass");
 
             assert_eq!(report["reconciled"], 0, "{report}");
-            let refreshed = agent_task_lifecycle::status(run_id).expect("refreshed");
+            let refreshed = agent_task_lifecycle::reconcile_status(run_id).expect("refreshed");
             assert_eq!(
                 refreshed.state,
                 agent_task_lifecycle::AgentTaskRunState::Queued
@@ -1231,14 +1231,15 @@ mod tests {
                     .remove("runner_pid");
             })
             .expect("owner identity removed");
-            let stale = agent_task_lifecycle::status(orphan_run_id)
+            let stale = agent_task_lifecycle::reconcile_status(orphan_run_id)
                 .expect("PID-less owner is projected stale before daemon reconciliation");
             assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("ownerless tick pass");
             assert_eq!(report["reconciled"], 1, "{report}");
-            let terminal = agent_task_lifecycle::status(orphan_run_id).expect("ownerless run");
+            let terminal =
+                agent_task_lifecycle::reconcile_status(orphan_run_id).expect("ownerless run");
             assert_eq!(
                 terminal.state,
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -1288,7 +1289,7 @@ mod tests {
             })
             .expect("initiating client ended");
 
-            let live = agent_task_lifecycle::status(run_id).expect("planned proxy");
+            let live = agent_task_lifecycle::reconcile_status(run_id).expect("planned proxy");
             assert!(
                 live.has_fresh_controller_pre_provider_heartbeat()
                     || (live.has_planned_runner_execution() && live.has_fresh_update()),
@@ -1307,7 +1308,7 @@ mod tests {
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("tick after initiating client exit");
             assert_eq!(report["reconciled"], 0, "{report}");
-            let retained = agent_task_lifecycle::status(run_id).expect("retained run");
+            let retained = agent_task_lifecycle::reconcile_status(run_id).expect("retained run");
             assert!(
                 !retained.state.is_terminal(),
                 "Lab proxy must survive initiating-client exit: {:?}",
@@ -1353,7 +1354,8 @@ mod tests {
             })
             .expect("record slow provider evidence");
 
-            let status = agent_task_lifecycle::status(run_id).expect("status while ensure runs");
+            let status =
+                agent_task_lifecycle::reconcile_status(run_id).expect("status while ensure runs");
             assert!(
                 status.has_fresh_controller_pre_provider_heartbeat(),
                 "{status:?}"
@@ -1371,7 +1373,7 @@ mod tests {
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("watchdog pass");
             assert_eq!(report["reconciled"], 0, "{report}");
-            let retained = agent_task_lifecycle::status(run_id).expect("retained run");
+            let retained = agent_task_lifecycle::reconcile_status(run_id).expect("retained run");
             assert_eq!(
                 retained.state,
                 agent_task_lifecycle::AgentTaskRunState::Queued
@@ -1452,7 +1454,7 @@ mod tests {
                 .expect("tick after parallel local submission");
             assert_eq!(report["reconciled"], 0, "{report}");
             for run_id in run_ids {
-                let record = agent_task_lifecycle::status(run_id).expect("retained");
+                let record = agent_task_lifecycle::reconcile_status(run_id).expect("retained");
                 assert!(!record.state.is_terminal(), "{run_id} was terminalized");
                 assert_eq!(record.metadata["runner_pid"], std::process::id());
                 assert!(record.owner_process_is_running());
@@ -1516,7 +1518,7 @@ mod tests {
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("tick after supervisor projection");
             assert_eq!(report["reconciled"], 0, "{report}");
-            let retained = agent_task_lifecycle::status(run_id).expect("retained");
+            let retained = agent_task_lifecycle::reconcile_status(run_id).expect("retained");
             assert!(!retained.state.is_terminal());
             assert!(retained.metadata.get("cancel_reason").is_none());
             assert!(retained.has_live_pending_local_cook_supervisor(now));
@@ -1614,13 +1616,14 @@ mod tests {
             })
             .expect("runner submission without PID");
 
-            let stale = agent_task_lifecycle::status(run_id).expect("status after submission");
+            let stale =
+                agent_task_lifecycle::reconcile_status(run_id).expect("status after submission");
             assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("watchdog pass");
             assert_eq!(report["reconciled"], 1, "{report}");
-            let cancelled = agent_task_lifecycle::status(run_id).expect("cancelled run");
+            let cancelled = agent_task_lifecycle::reconcile_status(run_id).expect("cancelled run");
             assert_eq!(
                 cancelled.state,
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -1681,7 +1684,8 @@ mod tests {
                 .expect("cleanup during delayed identity publication");
             assert_eq!(report["reconciled"], 0, "{report}");
             for run_id in run_ids {
-                let record = agent_task_lifecycle::status(run_id).expect("planned record");
+                let record =
+                    agent_task_lifecycle::reconcile_status(run_id).expect("planned record");
                 assert!(!record.state.is_terminal(), "{run_id} was terminalized");
                 assert_eq!(
                     record.metadata["runner_execution_record"]["status"],
@@ -1754,7 +1758,8 @@ mod tests {
                 report.runs.is_empty(),
                 "a pre-supervisor admission is not an abandoned executor: {report:#?}"
             );
-            let parent = agent_task_lifecycle::status(cook_id).expect("read durable admission");
+            let parent =
+                agent_task_lifecycle::reconcile_status(cook_id).expect("read durable admission");
             assert_eq!(
                 parent.state,
                 agent_task_lifecycle::AgentTaskRunState::Queued
@@ -1801,7 +1806,8 @@ mod tests {
 
             assert_eq!(report.reconciled, 2, "{report:#?}");
             for cook_id in ["expired-pre-supervisor", "expired-legacy-pending"] {
-                let parent = agent_task_lifecycle::status(cook_id).expect("read terminal parent");
+                let parent =
+                    agent_task_lifecycle::reconcile_status(cook_id).expect("read terminal parent");
                 assert_eq!(
                     parent.state,
                     agent_task_lifecycle::AgentTaskRunState::Failed
@@ -1849,7 +1855,7 @@ mod tests {
 
             assert!(report.runs.is_empty(), "{report:#?}");
             assert_eq!(
-                agent_task_lifecycle::status(cook_id)
+                agent_task_lifecycle::reconcile_status(cook_id)
                     .expect("read protected parent")
                     .metadata["detached_cook_handoff"]["admission_state"],
                 "supervising"
@@ -1875,10 +1881,12 @@ mod tests {
                 agent_task_lifecycle::AgentTaskRunState::Running,
                 "preview mutates nothing, so the observed state is the state",
             );
-            assert!(!agent_task_lifecycle::status("reconcile-preview-orphan")
-                .expect("unchanged")
-                .state
-                .is_terminal());
+            assert!(
+                !agent_task_lifecycle::reconcile_status("reconcile-preview-orphan")
+                    .expect("unchanged")
+                    .state
+                    .is_terminal()
+            );
         });
     }
 

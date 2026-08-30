@@ -334,7 +334,7 @@ pub(crate) fn refresh_stale_running_child_actions(
         let Some(run_id) = action_referenced_run_id(action, record) else {
             continue;
         };
-        let run = agent_task_lifecycle::status(&run_id)?;
+        let run = agent_task_lifecycle::reconcile_status(&run_id)?;
         if run.state != AgentTaskRunState::Running || !run.is_stale_running() {
             continue;
         }

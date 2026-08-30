@@ -909,7 +909,7 @@ pub fn record_pre_dispatch_failure_in_store(
     failure: AgentTaskPreDispatchFailure<'_>,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(failure.identity.run_id);
-    if let Ok(record) = status_in_store(
+    if let Ok(record) = reconcile_status_in_store(
         lifecycle_store,
         &run_id,
         AgentTaskStatusOptions::default(),
@@ -1585,7 +1585,7 @@ pub(crate) fn terminal_provider_model_reconciliation_needed(
 /// The persist at the end is the whole point of taking a store: it is the only
 /// durable effect, so a reconciliation driven from injected roots must land its
 /// repaired model in the same installation the record and aggregate were read
-/// from. There is no ambient wrapper — `status_in_store` is the only caller,
+/// from. There is no ambient wrapper — `reconcile_status_in_store` is the only caller,
 /// and the store it hands down is the one its own caller injected.
 pub(crate) fn reconcile_terminal_provider_model_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,

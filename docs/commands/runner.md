@@ -433,14 +433,8 @@ homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid 
 homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
 
-`--confirm-pid-dead`, `--confirm-no-daemon-owner`, and
-`--confirm-control-plane-lost` are deprecated no-ops on both surfaces; the runner
-proves each fact itself before mutating anything. See the deprecation table in
-[daemon.md](daemon.md). They remain accepted for one release, so released
-runbooks and composed repair commands keep working, but supplying one *without*
-its recovery mode is refused — a confirmation selects no recovery on its own.
-`--recorded-pid` and `--recorded-endpoint` are **not** confirmations: once a
-runner's state record is gone it cannot recompute them, so they stay required.
+`--recorded-pid` and `--recorded-endpoint` stay required because once a runner's
+state record is gone it cannot recompute them.
 `--confirm-untracked-child-dead <job-id>` also stays required where it applies —
 it names an exact job with no recorded child PID, which is evidence homeboy does
 not have.

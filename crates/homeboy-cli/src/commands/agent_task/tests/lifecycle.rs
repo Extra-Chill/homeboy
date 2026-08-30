@@ -77,7 +77,7 @@ fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
         )
         .expect("persist controller admission hash failure");
 
-        let record = agent_task_lifecycle::status(run_id).expect("load failed run");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("load failed run");
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             "controller_admission"
@@ -151,7 +151,7 @@ fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() 
         )
         .expect("persist Lab transport failure");
 
-        let record = agent_task_lifecycle::status(run_id).expect("durable failed record");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("durable failed record");
         let aggregate = test_lifecycle_store()
             .read_aggregate(run_id)
             .expect("durable aggregate");
@@ -583,7 +583,7 @@ fn full_status_bounds_unrelated_high_cardinality_cleanup_inventory() {
         assert!(!value.to_string().contains("/workspace/unrelated-9999"));
         assert!(value.to_string().len() < 16 * 1024);
 
-        let persisted = agent_task_lifecycle::status(run_id).expect("persisted record");
+        let persisted = agent_task_lifecycle::reconcile_status(run_id).expect("persisted record");
         assert_eq!(
             persisted.metadata["automatic_artifact_retention"]["worktrees"]
                 .as_array()
@@ -2076,8 +2076,9 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
         .unwrap();
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
         assert_eq!(
-            agent_task_lifecycle::status(run_id).unwrap().metadata["cook_continue_route"]
-                ["artifact_id"],
+            agent_task_lifecycle::reconcile_status(run_id)
+                .unwrap()
+                .metadata["cook_continue_route"]["artifact_id"],
             "selected"
         );
     });
@@ -2489,8 +2490,8 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
             .expect("executor lock")
             .is_none());
 
-        let record =
-            agent_task_lifecycle::status("run-cli-transport-proxy").expect("proxy state preserved");
+        let record = agent_task_lifecycle::reconcile_status("run-cli-transport-proxy")
+            .expect("proxy state preserved");
         assert_eq!(record.state, AgentTaskRunState::Queued);
         assert_eq!(record.metadata["retryable"], true);
         assert_eq!(record.metadata["transport_recovery"], "required");
@@ -2566,7 +2567,7 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
             .expect("executor lock")
             .is_none());
         assert_eq!(
-            agent_task_lifecycle::status("run-cli-resume-transport-proxy")
+            agent_task_lifecycle::reconcile_status("run-cli-resume-transport-proxy")
                 .expect("proxy state preserved")
                 .state,
             AgentTaskRunState::Queued
@@ -2647,7 +2648,7 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
             .expect("executor lock")
             .is_none());
         assert_eq!(
-            agent_task_lifecycle::status("run-cli-queued-proxy")
+            agent_task_lifecycle::reconcile_status("run-cli-queued-proxy")
                 .expect("proxy status")
                 .state,
             AgentTaskRunState::Queued
@@ -2734,6 +2735,7 @@ fn submit_run_status_reports_terminal_state() {
             bridge_status_json["schema"],
             "homeboy/agent-task-run-status/v3"
         );
+        assert_eq!(bridge_status_json["reconciled"], false);
         assert!(bridge_status_json["events"]["events"].is_array());
         assert_eq!(
             bridge_status_json["control_plane_run"]["action_eligibility"]["schema"],
@@ -4834,7 +4836,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
         }
 
         assert_eq!(RETRY_RUN_DISPATCHES.load(Ordering::SeqCst), 1);
-        let record = agent_task_lifecycle::status(&replacement.record.run_id)
+        let record = agent_task_lifecycle::reconcile_status(&replacement.record.run_id)
             .expect("read replacement record");
         assert_eq!(record.metadata["retry_of"], source_run_id);
         assert_eq!(record.metadata["cook_id"], cook_id);

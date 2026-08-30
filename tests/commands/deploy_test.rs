@@ -329,6 +329,20 @@ fn deploy_rejects_old_apply_spelling() {
 }
 
 #[test]
+fn deploy_rejects_zero_max_concurrency() {
+    let result = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "project-a",
+        "component-a",
+        "--max-concurrency",
+        "0",
+    ]);
+
+    assert!(result.is_err(), "zero concurrency must be rejected");
+}
+
+#[test]
 fn deploy_parser_accepts_explicit_source_safety_overrides() {
     let cli = Cli::try_parse_from([
         "homeboy",
@@ -495,6 +509,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         tagged: false,
         target: None,
         resume: None,
+        max_concurrency: 4,
         exact_refs: BTreeMap::new(),
         resolved_refs: BTreeMap::new(),
         preflighted_source_paths: BTreeMap::new(),

@@ -27,10 +27,8 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
     /// Resolve one durable record by its primary key (`exact_record`, a single
     /// indexed `get_run`) instead of listing and refreshing every record.
     ///
-    /// This read is deliberately not `status()`: `activity` is documented as a
-    /// read model that does not mutate persisted state, and `status()` is a
-    /// reconciling read that writes. Resolving one id must not enter that path
-    /// (#10308).
+    /// This read uses the indexed store directly so resolving one id stays a
+    /// bounded read from the same installation (#10308).
     ///
     /// An id that is not a durable agent-task record — an observation run id, a
     /// daemon job UUID, a malformed record — is `None`, not an error, so id
@@ -127,7 +125,7 @@ fn compact_health_samples(
 /// behaviour and only an id that missed pays for the alias lookup.
 ///
 /// Both steps are pure reads. `resolve_run_id` is an indexed
-/// `read_cook_index`, not the reconciling `status()` — resolving one id must
+/// `read_cook_index`, not `reconcile_status()` — resolving one id must
 /// still never mutate persisted state (#10308).
 fn record_for_id(id: &str) -> Option<AgentTaskRunRecord> {
     if let Ok(record) = agent_task_lifecycle::exact_record(id) {

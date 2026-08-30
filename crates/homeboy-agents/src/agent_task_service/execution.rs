@@ -1059,7 +1059,7 @@ pub fn terminal_transport_recovery_required(run_id: &str) -> bool {
 /// Return durable terminal evidence instead of attempting to transition a
 /// completed child run back into execution during controller reconciliation.
 pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -1258,7 +1258,7 @@ where
             )?;
         }
         Ok(Some(
-            agent_task_lifecycle::status_in_store(
+            agent_task_lifecycle::reconcile_status_in_store(
                 &lifecycle_store,
                 retry_run_id,
                 agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -1375,7 +1375,7 @@ where
             registration.project_terminal_after_unlock()?;
             // `status` is this call with `Default::default()` and `exact = false`,
             // resolved against an ambient store. Same read, explicit root.
-            let record = agent_task_lifecycle::status_in_store(
+            let record = agent_task_lifecycle::reconcile_status_in_store(
                 &lifecycle_store,
                 &retry_run_id,
                 agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -2276,17 +2276,17 @@ pub struct AgentTaskRetryServiceResult {
 }
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    agent_task_lifecycle::status(run_id)
+    agent_task_lifecycle::reconcile_status(run_id)
 }
 
 /// [`status`] with explicit control over whether the read may reach the runner.
 ///
 /// Read-only inspection must stay answerable while the Lab is wedged (#10418).
-pub fn status_with_options(
+pub fn reconcile_status_with_options(
     run_id: &str,
     options: agent_task_lifecycle::AgentTaskStatusOptions,
 ) -> Result<agent_task_lifecycle::AgentTaskStatusOutcome> {
-    agent_task_lifecycle::status_with_options(run_id, options)
+    agent_task_lifecycle::reconcile_status_with_options(run_id, options)
 }
 
 /// Return the controller's durable record without runner liveness enrichment.

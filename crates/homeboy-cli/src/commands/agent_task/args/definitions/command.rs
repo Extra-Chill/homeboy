@@ -110,7 +110,7 @@ pub enum AgentTaskCommand {
     /// This is an alias for `homeboy activity watch` — the same command the
     /// cook completion notification already points at — so a cook id, durable
     /// run id, observation run id, or runner job id all resolve here, including
-    /// records still resident on a Lab runner. Unlike `agent-task status`, the
+    /// records still resident on a Lab runner. Like `agent-task status`, the
     /// underlying read does not reconcile.
     Watch(crate::commands::activity::ActivityWatchArgs),
     /// List durable runs, newest first.

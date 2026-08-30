@@ -3002,7 +3002,7 @@ where
     )? {
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
         | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
-            let record = agent_task_lifecycle::status_in_store(
+            let record = agent_task_lifecycle::reconcile_status_in_store(
                 &lifecycle_store,
                 run_id,
                 agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -4500,6 +4500,7 @@ fn preview_provider_plan_timeout(config: &defaults::HomeboyConfig, provider_id: 
 pub(super) struct CookRepositoryIdentity {
     repository_name: String,
     slug: String,
+    component_registered: bool,
     aliases: Vec<String>,
     remote_identity: String,
     workspace_path: PathBuf,
@@ -4585,14 +4586,19 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
         validate_cook_repository_component_selection(repo, component)?;
     }
     args.dispatch.repo = Some(selected.repository_name.clone());
-    args.component = Some(selected.slug.clone());
-    let component_cwd = homeboy::core::component::registered_by_id(&selected.slug)?
-        .map(|component| durable_component_cwd(&component, &selected.repository_name))
-        .transpose()?;
+    let component_id = selected.component_registered.then(|| selected.slug.clone());
+    args.component = component_id.clone();
+    let component_cwd = match component_id.as_deref() {
+        Some(component_id) => homeboy::core::component::registered_by_id(component_id)?
+            .map(|component| durable_component_cwd(&component, &selected.repository_name))
+            .transpose()?,
+        None => None,
+    };
     args.repository_identity = Some(serde_json::json!({
         "slug": selected.slug,
         "repository_name": selected.repository_name,
-        "component_id": selected.slug,
+        "component_id": component_id,
+        "component_registered": selected.component_registered,
         "component_cwd": component_cwd,
         "remote_identity": selected.remote_identity,
         "workspace_path": selected.workspace_path,
@@ -4926,7 +4932,7 @@ fn require_explicit_cook_repo(args: &AgentTaskCookArgs, reason: &str) -> homeboy
     }
     Err(homeboy::core::Error::validation_missing_argument(vec![
         format!(
-            "--repo <repo> is required because {reason}; provide --repo <configured-component>"
+            "--repo <repo> is required because {reason}; provide --repo <repository-or-configured-component>"
         ),
     ]))
 }
@@ -4972,7 +4978,7 @@ pub(super) fn cook_repository_identities_for_workspace(
                 matches
             }
         }
-        None => homeboy::core::component::registered()?,
+        None => homeboy::core::component::inventory::registered_base()?,
     };
     let mut identities = Vec::new();
     for (remote_name, remote_url) in remotes {
@@ -4991,6 +4997,7 @@ pub(super) fn cook_repository_identities_for_workspace(
                 identities.push(CookRepositoryIdentity {
                     repository_name: normalize_repository_name(&remote_url),
                     slug: component.id.clone(),
+                    component_registered: true,
                     aliases: component.aliases.clone(),
                     remote_identity: remote_identity.clone(),
                     workspace_path: git_root.clone(),
@@ -5007,6 +5014,7 @@ pub(super) fn cook_repository_identities_for_workspace(
             identities.push(CookRepositoryIdentity {
                 repository_name: repository_name.clone(),
                 slug: repository_name,
+                component_registered: false,
                 aliases: Vec::new(),
                 remote_identity,
                 workspace_path: git_root.clone(),

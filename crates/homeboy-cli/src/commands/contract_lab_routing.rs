@@ -293,6 +293,9 @@ impl Commands {
             Commands::Extension(args) if args.is_update_command() => {
                 LabCommandContract::explicit_runner_simple(args.update_command_label())
             }
+            Commands::Extension(args) if args.is_readiness_repair_command() => {
+                LabCommandContract::runner_resident("extension setup")
+            }
             Commands::Extension(args) if args.is_runner_resident_read_command() => {
                 LabCommandContract::runner_resident(args.runner_resident_read_command_label())
             }
@@ -388,7 +391,7 @@ fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
     // Keep its resolution, integrity verification, and target application on
     // the controller rather than splitting those phases across placements.
     source.starts_with("homeboy://agent-task/run/")
-        || agent_task_lifecycle::status(source).is_ok()
+        || agent_task_lifecycle::reconcile_status(source).is_ok()
         || std::path::Path::new(source).is_file()
 }
 

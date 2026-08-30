@@ -7,6 +7,7 @@ mod lifecycle;
 mod orchestration;
 mod orchestration_ref_checkout;
 mod orchestration_tag_checkout;
+mod parallel;
 mod path_roots;
 pub(crate) mod permissions;
 mod planning;
@@ -124,20 +125,36 @@ use uuid::Uuid;
 /// This is the preferred entry point for callers - it handles project loading
 /// and SSH context resolution, keeping those details encapsulated.
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
-    let mut release_artifacts =
-        homeboy_core::git::release_download::ReleaseArtifactStore::default();
+    let mut artifacts = preparation::DeploymentArtifactStore::default();
     // Single-project deploy is its own unit of work: resolve once here so the
     // receipt read, write, and invalidation below all address one home (#7505).
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
-    run_with_release_artifacts(roots.data(), project_id, config, &mut release_artifacts)
+    let prepared = prepare_project_deployment(roots.data(), project_id, config, &mut artifacts)?;
+    apply_project_deployment(roots.data(), prepared)
 }
 
-fn run_with_release_artifacts(
+enum PreparedProjectKind {
+    Provider(provider::PreparedProviderDeployment),
+    Server {
+        ctx: Box<homeboy_core::context::RemoteProjectContext>,
+        base_path: String,
+        deployment: orchestration::PreparedDeployment,
+    },
+}
+
+struct PreparedProjectDeployment {
+    project: project::Project,
+    config: DeployConfig,
+    observation: Option<lifecycle::DeployObservation>,
+    kind: PreparedProjectKind,
+}
+
+fn prepare_project_deployment(
     data_root: &std::path::Path,
     project_id: &str,
     config: &DeployConfig,
-    release_artifacts: &mut homeboy_core::git::release_download::ReleaseArtifactStore,
-) -> Result<DeployOrchestrationResult> {
+    artifacts: &mut preparation::DeploymentArtifactStore,
+) -> Result<PreparedProjectDeployment> {
     let project = project::load(project_id)?;
     let source =
         lifecycle_identity(&[project_id.to_string()], &config.component_ids, config).source;
@@ -145,23 +162,15 @@ fn run_with_release_artifacts(
         .then(|| lifecycle::DeployObservation::start(project_id, &source))
         .transpose()?;
     let admitted_run_id = observation.as_ref().map(|run| run.run_id().to_string());
-    if let Some(mut result) =
-        provider::run_if_configured(project_id, &project, config, observation.as_mut())
-            .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?
+    if let Some(provider) = provider::prepare_if_configured(project_id, &project, config)
+        .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?
     {
-        if let Some(observation) = observation.as_mut() {
-            observation.finish(
-                if result.summary.failed == 0 {
-                    homeboy_core::observation::RunStatus::Pass
-                } else {
-                    homeboy_core::observation::RunStatus::Fail
-                },
-                (result.summary.failed > 0)
-                    .then_some("deployment provider reported failure".to_string()),
-            );
-            result.deploy_run_id = Some(observation.run_id().to_string());
-        }
-        return Ok(result);
+        return Ok(PreparedProjectDeployment {
+            project,
+            config: config.clone(),
+            observation,
+            kind: PreparedProjectKind::Provider(provider),
+        });
     }
     // A version-pinned release asset is resolved remotely before orchestration;
     // requiring its configured checkout to exist would reintroduce a mutable
@@ -183,17 +192,69 @@ fn run_with_release_artifacts(
         .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)
         .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
-    let mut result = orchestration::deploy_components(
+    let deployment = orchestration::prepare_components(
         data_root,
         config,
         &project,
         &ctx,
         &base_path,
-        release_artifacts,
+        artifacts,
         observation.as_mut(),
     )
     .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?;
-    disclose_server_routes(&project, config, &mut result);
+    Ok(PreparedProjectDeployment {
+        project,
+        config: config.clone(),
+        observation,
+        kind: PreparedProjectKind::Server {
+            ctx: Box::new(ctx),
+            base_path,
+            deployment,
+        },
+    })
+}
+
+fn apply_project_deployment(
+    data_root: &std::path::Path,
+    prepared: PreparedProjectDeployment,
+) -> Result<DeployOrchestrationResult> {
+    let PreparedProjectDeployment {
+        project,
+        config,
+        mut observation,
+        kind,
+    } = prepared;
+    let admitted_run_id = observation.as_ref().map(|run| run.run_id().to_string());
+    let (mut result, server_route) = match kind {
+        PreparedProjectKind::Provider(prepared) => (
+            provider::apply_prepared(prepared, observation.as_mut())
+                .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?,
+            false,
+        ),
+        PreparedProjectKind::Server {
+            ctx,
+            base_path,
+            deployment,
+        } => {
+            let result = match deployment {
+                orchestration::PreparedDeployment::Complete(result) => result,
+                orchestration::PreparedDeployment::Apply(plan) => {
+                    orchestration::apply_prepared_components(
+                        data_root,
+                        *plan,
+                        &ctx,
+                        &base_path,
+                        observation.as_mut(),
+                    )
+                    .map_err(|error| attach_admitted_run_id(error, admitted_run_id.as_deref()))?
+                }
+            };
+            (result, true)
+        }
+    };
+    if server_route {
+        disclose_server_routes(&project, &config, &mut result);
+    }
     if let Some(observation) = observation.as_mut() {
         observation.finish(
             if result.summary.failed == 0 {
@@ -207,6 +268,120 @@ fn run_with_release_artifacts(
         result.deploy_run_id = Some(observation.run_id().to_string());
     }
     Ok(result)
+}
+
+fn project_preflight_failed(prepared: &PreparedProjectDeployment) -> bool {
+    match &prepared.kind {
+        PreparedProjectKind::Provider(_) => false,
+        PreparedProjectKind::Server {
+            deployment: orchestration::PreparedDeployment::Complete(result),
+            ..
+        } => result.summary.failed > 0,
+        PreparedProjectKind::Server {
+            deployment: orchestration::PreparedDeployment::Apply(_),
+            ..
+        } => false,
+    }
+}
+
+fn project_requires_apply(prepared: &PreparedProjectDeployment) -> bool {
+    match &prepared.kind {
+        PreparedProjectKind::Provider(_) => !prepared.config.dry_run && !prepared.config.check,
+        PreparedProjectKind::Server {
+            deployment: orchestration::PreparedDeployment::Apply(_),
+            ..
+        } => true,
+        PreparedProjectKind::Server {
+            deployment: orchestration::PreparedDeployment::Complete(_),
+            ..
+        } => false,
+    }
+}
+
+fn abort_project_before_apply(
+    mut prepared: PreparedProjectDeployment,
+    reason: &str,
+) -> Result<DeployOrchestrationResult> {
+    let run_id = prepared
+        .observation
+        .as_ref()
+        .map(|observation| observation.run_id().to_string());
+    if let Some(observation) = prepared.observation.as_mut() {
+        observation.finish(
+            homeboy_core::observation::RunStatus::Fail,
+            Some(reason.to_string()),
+        );
+    }
+    Err(attach_admitted_run_id(
+        Error::validation_invalid_argument(
+            "projects",
+            reason,
+            Some(prepared.project.id),
+            Some(vec![
+                "Resolve every reported target preflight failure, then rerun the complete deployment"
+                    .to_string(),
+            ]),
+        ),
+        run_id.as_deref(),
+    ))
+}
+
+struct PreparedTargetJob {
+    project_id: String,
+    timer: PhaseTimer,
+    preparation: Result<PreparedProjectDeployment>,
+}
+
+struct TargetOutcome {
+    project_id: String,
+    result: Result<DeployOrchestrationResult>,
+    timings: homeboy_core::phase_timing::PhaseTimingReport,
+}
+
+fn persist_target_outcome(
+    data_root: &std::path::Path,
+    lifecycle_run: &std::sync::Mutex<Option<lifecycle::DeployLifecycleRun>>,
+    project_id: &str,
+    result: &Result<DeployOrchestrationResult>,
+    timings: &homeboy_core::phase_timing::PhaseTimingReport,
+) -> Result<()> {
+    let mut lifecycle_run = lifecycle_run
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(run) = lifecycle_run.as_mut() else {
+        return Ok(());
+    };
+    let (status, error) = match result {
+        Ok(result) if result.summary.failed == 0 => {
+            (lifecycle::DeployTargetStatus::Succeeded, None)
+        }
+        Ok(result) => {
+            let applied_unverified_only = result
+                .results
+                .iter()
+                .any(|row| row.status == "applied_unverified")
+                && result.results.iter().all(|row| row.status != "failed");
+            let error = result
+                .results
+                .iter()
+                .find_map(|row| row.error.clone())
+                .unwrap_or_else(|| "Deployment failed".to_string());
+            (
+                if applied_unverified_only {
+                    lifecycle::DeployTargetStatus::AppliedUnverified
+                } else {
+                    lifecycle::DeployTargetStatus::Failed
+                },
+                Some(error),
+            )
+        }
+        Err(error) => (
+            lifecycle::DeployTargetStatus::Failed,
+            Some(error.to_string()),
+        ),
+    };
+    run.update_target(project_id, status, error, Some(timings.clone()));
+    lifecycle::save_in_roots(data_root, run)
 }
 
 /// Record which deliverable each dual-deliverable component actually deployed.
@@ -355,7 +530,6 @@ pub fn run_multi(
             None,
         ));
     }
-
     // Validate project IDs, skip unknown ones
     let known_projects = project::list_ids().unwrap_or_default();
     let mut unknown_projects = Vec::new();
@@ -400,6 +574,7 @@ pub fn run_multi(
 
     // Every supplied payload must bind safely before this multi-target run
     // creates lifecycle state or resolves an SSH context for any project.
+    let mut target_jobs = Vec::with_capacity(valid_project_ids.len());
     for project_id in &valid_project_ids {
         let project = project::load(project_id)?;
         preflight_prepared_payload_binding(&project, project_id, config)?;
@@ -462,8 +637,10 @@ pub fn run_multi(
     let mut failed: u32 = 0;
     let mut skipped: u32 = unknown_projects.len() as u32;
     let mut planned: u32 = 0;
-    let mut release_artifacts =
-        homeboy_core::git::release_download::ReleaseArtifactStore::default();
+    // Payload ownership spans the complete fanout. Equal target-independent
+    // preparation requests therefore build or download once, while requests
+    // with genuinely different source inputs retain separate payloads.
+    let mut artifacts = preparation::DeploymentArtifactStore::default();
     // Record skipped results for unknown projects
     for pid in &unknown_projects {
         project_results.push(ProjectDeployResult {
@@ -544,16 +721,62 @@ pub fn run_multi(
             lifecycle::save_in_roots(roots.data(), run)?;
         }
         let mut timer = PhaseTimer::new();
-        let result = timer.time("resolve_source", || {
-            run_with_release_artifacts(
-                roots.data(),
-                project_id,
-                &project_config,
-                &mut release_artifacts,
-            )
+        let preparation = timer.time("prepare", || {
+            prepare_project_deployment(roots.data(), project_id, &project_config, &mut artifacts)
         });
-        let timings = timer.into_report();
+        target_jobs.push(PreparedTargetJob {
+            project_id: project_id.to_string(),
+            timer,
+            preparation,
+        });
+    }
 
+    let preflight_failed = !config.dry_run
+        && !config.check
+        && target_jobs.iter().any(|job| match &job.preparation {
+            Ok(prepared) => project_preflight_failed(prepared),
+            Err(_) => true,
+        });
+    let lifecycle_run = std::sync::Mutex::new(lifecycle_run);
+    let target_outcomes = parallel::map_bounded(target_jobs, config.max_concurrency, |job| {
+        let PreparedTargetJob {
+            project_id,
+            mut timer,
+            preparation,
+        } = job;
+        let mut result = match preparation {
+            Ok(prepared) if preflight_failed && project_requires_apply(&prepared) => {
+                timer.time("apply", || {
+                    abort_project_before_apply(
+                        prepared,
+                        "Multi-target preflight failed; no target application was started",
+                    )
+                })
+            }
+            Ok(prepared) => {
+                timer.time("apply", || apply_project_deployment(roots.data(), prepared))
+            }
+            Err(error) => Err(error),
+        };
+        let timings = timer.into_report();
+        if let Err(error) =
+            persist_target_outcome(roots.data(), &lifecycle_run, &project_id, &result, &timings)
+        {
+            result = Err(error);
+        }
+        TargetOutcome {
+            project_id,
+            result,
+            timings,
+        }
+    });
+
+    for outcome in target_outcomes {
+        let TargetOutcome {
+            project_id,
+            result,
+            timings,
+        } = outcome;
         match result {
             Ok(result) => {
                 let observation_run_id = result.deploy_run_id.clone();
@@ -561,7 +784,7 @@ pub fn run_multi(
                     aggregate_observation.as_mut(),
                     observation_run_id.as_deref(),
                 ) {
-                    aggregate.link_target(project_id, target_run_id)?;
+                    aggregate.link_target(&project_id, target_run_id)?;
                 }
                 let deploy_failed = result.summary.failed > 0;
                 let is_planned = config.dry_run || config.check;
@@ -579,7 +802,7 @@ pub fn run_multi(
                         && result.results.iter().all(|row| row.status != "failed");
 
                     project_results.push(ProjectDeployResult {
-                        project_id: project_id.to_string(),
+                        project_id: project_id.clone(),
                         status: if applied_unverified_only {
                             "applied_unverified".to_string()
                         } else {
@@ -591,23 +814,10 @@ pub fn run_multi(
                         phase_timings: Some(timings.clone()),
                         observation_run_id,
                     });
-                    if let Some(run) = lifecycle_run.as_mut() {
-                        run.update_target(
-                            project_id,
-                            if applied_unverified_only {
-                                lifecycle::DeployTargetStatus::AppliedUnverified
-                            } else {
-                                lifecycle::DeployTargetStatus::Failed
-                            },
-                            project_results.last().and_then(|entry| entry.error.clone()),
-                            Some(timings.clone()),
-                        );
-                        lifecycle::save_in_roots(roots.data(), run)?;
-                    }
                     failed += 1;
                 } else if is_planned {
                     project_results.push(ProjectDeployResult {
-                        project_id: project_id.to_string(),
+                        project_id: project_id.clone(),
                         status: "planned".to_string(),
                         error: None,
                         results: result.results,
@@ -618,7 +828,7 @@ pub fn run_multi(
                     planned += 1;
                 } else {
                     project_results.push(ProjectDeployResult {
-                        project_id: project_id.to_string(),
+                        project_id: project_id.clone(),
                         status: "deployed".to_string(),
                         error: None,
                         results: result.results,
@@ -626,15 +836,6 @@ pub fn run_multi(
                         phase_timings: Some(timings.clone()),
                         observation_run_id,
                     });
-                    if let Some(run) = lifecycle_run.as_mut() {
-                        run.update_target(
-                            project_id,
-                            lifecycle::DeployTargetStatus::Succeeded,
-                            None,
-                            Some(timings.clone()),
-                        );
-                        lifecycle::save_in_roots(roots.data(), run)?;
-                    }
                     succeeded += 1;
                 }
             }
@@ -648,10 +849,10 @@ pub fn run_multi(
                     aggregate_observation.as_mut(),
                     observation_run_id.as_deref(),
                 ) {
-                    aggregate.link_target(project_id, target_run_id)?;
+                    aggregate.link_target(&project_id, target_run_id)?;
                 }
                 project_results.push(ProjectDeployResult {
-                    project_id: project_id.to_string(),
+                    project_id: project_id.clone(),
                     status: "failed".to_string(),
                     error: Some(e.to_string()),
                     results: vec![],
@@ -664,15 +865,6 @@ pub fn run_multi(
                     phase_timings: Some(timings.clone()),
                     observation_run_id,
                 });
-                if let Some(run) = lifecycle_run.as_mut() {
-                    run.update_target(
-                        project_id,
-                        lifecycle::DeployTargetStatus::Failed,
-                        Some(e.to_string()),
-                        Some(timings),
-                    );
-                    lifecycle::save_in_roots(roots.data(), run)?;
-                }
                 failed += 1;
             }
         }
@@ -798,7 +990,7 @@ pub fn resolve_shared_targets(component_ids: &[String]) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::component::{Component, ScopedExtensionConfig};
+    use homeboy_core::component::{Component, ScopedExtensionConfig, VersionTarget};
     use homeboy_core::project::{Project, ProjectComponentAttachment};
     use homeboy_core::server::{self, Server};
     use homeboy_core::test_support::with_isolated_home;
@@ -1047,6 +1239,119 @@ mod tests {
 
             preflight_prepared_payload_binding(&project, "site", &config)
                 .expect("detector-backed managed path binds before lifecycle creation");
+        });
+    }
+
+    #[test]
+    fn later_target_preflight_failure_prevents_every_target_write() {
+        with_isolated_home(|home| {
+            server::save(&Server {
+                id: "local".to_string(),
+                host: "localhost".to_string(),
+                user: "test".to_string(),
+                port: 22,
+                identity_file: None,
+                aliases: vec![],
+                kind: None,
+                auth: None,
+                env: Default::default(),
+                runner: None,
+            })
+            .expect("save local server");
+
+            let first_base = home.path().join("first");
+            let second_base = home.path().join("second");
+            std::fs::create_dir_all(&first_base).expect("first base");
+            std::fs::create_dir_all(&second_base).expect("second base");
+            for (id, base_path) in [("first", &first_base), ("second", &second_base)] {
+                project::save(&Project {
+                    id: id.to_string(),
+                    server_id: Some("local".to_string()),
+                    base_path: Some(base_path.display().to_string()),
+                    components: vec![ProjectComponentAttachment {
+                        id: "plugin".to_string(),
+                        remote_path: Some("plugin".to_string()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .expect("save project");
+            }
+
+            let first_source = home.path().join("first-source");
+            let second_source = home.path().join("second-source");
+            std::fs::create_dir_all(&first_source).expect("first source");
+            std::fs::create_dir_all(&second_source).expect("second source");
+            std::fs::write(first_source.join("plugin.php"), "Version: 1.2.3\n")
+                .expect("first version");
+            std::fs::write(second_source.join("plugin.php"), "Version: 9.9.9\n")
+                .expect("second version");
+
+            let archive = home.path().join("plugin.zip");
+            let file = std::fs::File::create(&archive).expect("archive");
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("plugin.php", zip::write::FileOptions::default())
+                .expect("archive entry");
+            std::io::Write::write_all(&mut zip, b"Version: 1.2.3\n").expect("archive contents");
+            zip.finish().expect("finish archive");
+
+            let component = |local_path: &Path| Component {
+                id: "plugin".to_string(),
+                local_path: local_path.display().to_string(),
+                remote_path: "plugin".to_string(),
+                build_artifact: Some("plugin.zip".to_string()),
+                extract_command: Some("unzip -q {{artifact}} -d {{targetDir}}".to_string()),
+                version_targets: Some(vec![VersionTarget {
+                    file: "plugin.php".to_string(),
+                    pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                    artifact_path: Some("plugin.php".to_string()),
+                }]),
+                ..Default::default()
+            };
+            let config = DeployConfig {
+                component_ids: vec!["plugin".to_string()],
+                expected_version: Some("1.2.3".to_string()),
+                force: true,
+                skip_build: true,
+                no_pull: true,
+                prepared_projection: Some(PreparedDeployProjection {
+                    components: BTreeMap::from([
+                        ("first:plugin".to_string(), component(&first_source)),
+                        ("second:plugin".to_string(), component(&second_source)),
+                    ]),
+                }),
+                prepared_artifact: Some(PreparedDeployArtifact {
+                    component_id: "plugin".to_string(),
+                    path: archive.display().to_string(),
+                    durable_path: archive.display().to_string(),
+                    size_bytes: std::fs::metadata(&archive).expect("archive metadata").len(),
+                    sha256: sha256_file(&archive).expect("archive sha"),
+                    version: "1.2.3".to_string(),
+                    tag: "v1.2.3".to_string(),
+                    source_commit: "0123456789abcdef".to_string(),
+                }),
+                max_concurrency: 2,
+                ..Default::default()
+            };
+
+            let result = run_multi(
+                &["first".to_string(), "second".to_string()],
+                &["plugin".to_string()],
+                &config,
+            )
+            .expect("preflight failures are reported per target");
+
+            assert_eq!(result.summary.failed, 2);
+            assert!(
+                result.projects[0]
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("no target application was started")),
+                "unexpected target outcomes: {:?}",
+                result.projects
+            );
+            assert!(!first_base.join("plugin").exists());
+            assert!(!second_base.join("plugin").exists());
         });
     }
 }

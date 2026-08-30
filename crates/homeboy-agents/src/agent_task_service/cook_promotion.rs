@@ -11,6 +11,7 @@
 
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::PathBuf;
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
@@ -143,8 +144,30 @@ pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
         }
     }
 
-    if let Ok((raw, path)) = agent_task_lifecycle::aggregate_source(spec) {
-        return Ok((raw, Some(path)));
+    match agent_task_lifecycle::aggregate_source(spec) {
+        Ok((raw, path)) => return Ok((raw, Some(path))),
+        Err(aggregate_error) => {
+            let lifecycle_store =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            let record =
+                agent_task_lifecycle::status(spec).or_else(|_| lifecycle_store.read_record(spec));
+            if let Ok(record) = record {
+                let (raw, path) =
+                    recover_executor_outcome_source(&lifecycle_store, &record, &aggregate_error)
+                        .map_err(|error| {
+                            Error::new(
+                                error.code,
+                                "failed to reconstruct the promotion aggregate",
+                                json!({
+                                    "run_id": record.run_id,
+                                    "cause": error.message,
+                                    "cause_details": error.details,
+                                }),
+                            )
+                        })?;
+                return Ok((raw, Some(path)));
+            }
+        }
     }
 
     Ok((
@@ -157,9 +180,172 @@ pub(crate) fn promotion_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<(String, Option<PathBuf>)> {
-    lifecycle_store
-        .aggregate_source_exact(run_id)
-        .map(|(raw, path)| (raw, Some(path)))
+    match lifecycle_store.aggregate_source_exact(run_id) {
+        Ok((raw, path)) => Ok((raw, Some(path))),
+        Err(aggregate_error) => {
+            let record = lifecycle_store.read_record(run_id)?;
+            recover_executor_outcome_source(lifecycle_store, &record, &aggregate_error)
+                .map(|(raw, path)| (raw, Some(path)))
+        }
+    }
+}
+
+/// Repair immutable promotion state before dispatching to a historical pinned
+/// controller that cannot recover its own missing aggregate.
+pub fn recover_missing_promotion_aggregate(run_id: &str) -> Result<bool> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record(run_id)?;
+    let aggregate_error = match lifecycle_store.aggregate_source_exact(&record.run_id) {
+        Ok(_) => return Ok(false),
+        Err(error) => error,
+    };
+    recover_executor_outcome_source(&lifecycle_store, &record, &aggregate_error).map_err(
+        |error| {
+            Error::new(
+                error.code,
+                "failed to reconstruct the promotion aggregate",
+                json!({
+                    "run_id": record.run_id,
+                    "cause": error.message,
+                    "cause_details": error.details,
+                }),
+            )
+        },
+    )?;
+    Ok(true)
+}
+
+fn recover_executor_outcome_source(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    aggregate_error: &Error,
+) -> Result<(String, PathBuf)> {
+    let (task_id, path) = match record.latest_executor_evidence.as_ref() {
+        Some(evidence) => {
+            let raw_path = evidence
+                .outcome_ref
+                .uri
+                .strip_prefix("file://")
+                .ok_or_else(|| {
+                    missing_promotion_source_error(
+                        &record.run_id,
+                        aggregate_error,
+                        "the executor outcome evidence is not a local file reference",
+                    )
+                })?;
+            (evidence.task_id.as_str(), PathBuf::from(raw_path))
+        }
+        None => {
+            let candidates = record
+                .tasks
+                .iter()
+                .map(|task| {
+                    (
+                        task.task_id.as_str(),
+                        crate::agent_task_executor_evidence::executor_result_evidence_path(
+                            &lifecycle_store.artifact_root(),
+                            &record.run_id,
+                            &task.task_id,
+                        ),
+                    )
+                })
+                .filter(|(_, path)| path.is_file())
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [(task_id, path)] => (*task_id, path.clone()),
+                [] => {
+                    return Err(missing_promotion_source_error(
+                        &record.run_id,
+                        aggregate_error,
+                        "the lifecycle record has no persisted executor outcome evidence",
+                    ));
+                }
+                _ => {
+                    return Err(missing_promotion_source_error(
+                        &record.run_id,
+                        aggregate_error,
+                        "multiple persisted executor outcomes exist; select a task-specific promotion source",
+                    ));
+                }
+            }
+        }
+    };
+    let canonical_path = path.canonicalize().map_err(|error| {
+        missing_promotion_source_error(
+            &record.run_id,
+            aggregate_error,
+            &format!("the executor outcome evidence cannot be read: {error}"),
+        )
+    })?;
+    let canonical_artifact_root =
+        lifecycle_store
+            .artifact_root()
+            .canonicalize()
+            .map_err(|error| {
+                missing_promotion_source_error(
+                    &record.run_id,
+                    aggregate_error,
+                    &format!("the artifact root cannot be resolved: {error}"),
+                )
+            })?;
+    if !canonical_path.starts_with(&canonical_artifact_root) {
+        return Err(missing_promotion_source_error(
+            &record.run_id,
+            aggregate_error,
+            "the executor outcome evidence is outside the configured artifact root",
+        ));
+    }
+
+    let source = fs::read_to_string(&canonical_path).map_err(|error| {
+        missing_promotion_source_error(
+            &record.run_id,
+            aggregate_error,
+            &format!("the executor outcome evidence cannot be read: {error}"),
+        )
+    })?;
+    let outcome: crate::agent_task::AgentTaskOutcome =
+        serde_json::from_str(&source).map_err(|error| {
+            missing_promotion_source_error(
+                &record.run_id,
+                aggregate_error,
+                &format!("the executor outcome evidence is invalid JSON: {error}"),
+            )
+        })?;
+    if outcome.schema != crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA
+        || outcome.task_id != task_id
+        || !record.tasks.iter().any(|task| task.task_id == task_id)
+    {
+        return Err(missing_promotion_source_error(
+            &record.run_id,
+            aggregate_error,
+            "the executor outcome evidence does not match the lifecycle record",
+        ));
+    }
+
+    agent_task_lifecycle::recover_single_task_aggregate_from_executor_outcome_in_store(
+        lifecycle_store,
+        record,
+        outcome,
+    )?;
+    lifecycle_store.aggregate_source_exact(&record.run_id)
+}
+
+fn missing_promotion_source_error(
+    run_id: &str,
+    aggregate_error: &Error,
+    recovery_error: &str,
+) -> Error {
+    Error::new(
+        homeboy_core::ErrorCode::ValidationInvalidArgument,
+        "promotion source is unavailable",
+        json!({
+            "run_id": run_id,
+            "aggregate_error": aggregate_error.to_string(),
+            "executor_evidence_error": recovery_error,
+            "remediation": "retain or restore aggregate.json or the referenced executor-result evidence before promotion",
+        }),
+    )
 }
 
 pub(crate) fn promote_attempt_in_store(
@@ -716,7 +902,7 @@ fn continuation_artifact_id_in_store(
 pub(crate) fn persisted_promotion_for_attempt(
     run_id: &str,
 ) -> Result<Option<AgentTaskPromotionReport>> {
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     persisted_promotion_from_record(run_id, record)
 }
 
@@ -864,7 +1050,7 @@ pub fn record_replacement_gate_proof(
         });
         return Err(error);
     }
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     let original_history_index = record
         .metadata
         .get("promotions")
@@ -1578,7 +1764,7 @@ fn promotion_checkpoint_matches(promotion: &AgentTaskPromotionReport, checkpoint
 }
 
 pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
-    agent_task_lifecycle::status(run_id)
+    agent_task_lifecycle::reconcile_status(run_id)
         .map(|record| run_record_needs_execution(&record))
         .unwrap_or(true)
 }
@@ -1612,7 +1798,7 @@ fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord)
 }
 
 pub(crate) fn retryable_provider_discovery_failure(run_id: &str) -> bool {
-    agent_task_lifecycle::status(run_id)
+    agent_task_lifecycle::reconcile_status(run_id)
         .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
         && agent_task_lifecycle::read_aggregate(run_id).is_ok_and(|aggregate| {
             !aggregate.outcomes.is_empty()
@@ -2926,7 +3112,7 @@ pub fn persist_manual_finalization_receipt(
     run_id: &str,
     report: &AgentTaskPrFinalizationReport,
 ) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     let intent = manual_finalization_intent_for_run(&record, run_id)?;
     if !valid_manual_finalization_receipt(report, &intent, &record, run_id, false) {
         return Err(Error::validation_invalid_argument(
@@ -2989,12 +3175,12 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
-        let retryable = agent_task_lifecycle::status(&report.run_id)?.metadata
+        let retryable = agent_task_lifecycle::reconcile_status(&report.run_id)?.metadata
             ["manual_finalization_retry"]
             == true;
         if retryable {
             require_manual_retry_candidate(
-                &agent_task_lifecycle::status(&report.run_id)?,
+                &agent_task_lifecycle::reconcile_status(&report.run_id)?,
                 &report.path,
             )?;
         }
@@ -3365,7 +3551,7 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
     preflight: bool,
     backend: &mut B,
 ) -> Result<Value> {
-    let record = agent_task_lifecycle::status(run_id).map_err(|_| {
+    let record = agent_task_lifecycle::reconcile_status(run_id).map_err(|_| {
         Error::validation_invalid_argument(
             "run_or_cook_id",
             "no durable Cook recipe or manual finalization record contains this run or cook id",
@@ -3449,7 +3635,7 @@ fn completed_finalization_receipt_for_recovery(
         manual_finalization_run_ids(recipe)
     };
     for run_id in run_ids {
-        let record = agent_task_lifecycle::status(run_id)?;
+        let record = agent_task_lifecycle::reconcile_status(run_id)?;
         let Some(value) = record.metadata.get("cook_finalization") else {
             continue;
         };
@@ -3522,7 +3708,7 @@ fn manual_finalization_intent_for_recovery(
         manual_finalization_run_ids(recipe)
     };
     for run_id in run_ids {
-        let record = agent_task_lifecycle::status(run_id)?;
+        let record = agent_task_lifecycle::reconcile_status(run_id)?;
         let Some(_) = record.metadata.get("manual_finalization_intent") else {
             continue;
         };

@@ -11,12 +11,9 @@
 //! ## This is a read model, not a reconciler
 //!
 //! Every source here is read without writing. That is a deliberate contract,
-//! and it is *observable*: `agent-task status <id>` is a reconciling read that
-//! writes, and `runs watch` reconciles on purpose. So `activity show <id>` and
-//! `agent-task status <id>` can legitimately report different states for the
-//! same run at the same instant, and calling one changes what the other
-//! returns. [`ActivityReport::reconciled`] is emitted as `false` so a consumer
-//! can tell which kind of answer it is holding (#W3-15).
+//! shared with `agent-task status`; lifecycle repair belongs to the explicit
+//! reconciliation operations. [`ActivityReport::reconciled`] remains `false`
+//! so mutation results and read models stay distinguishable (#W3-15).
 
 use std::collections::BTreeSet;
 

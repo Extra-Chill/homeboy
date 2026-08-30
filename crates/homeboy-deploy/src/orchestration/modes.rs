@@ -641,6 +641,7 @@ mod tests {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            max_concurrency: 1,
             target: None,
         };
 

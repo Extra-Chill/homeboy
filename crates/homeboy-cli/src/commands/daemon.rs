@@ -63,10 +63,6 @@ enum DaemonCommand {
         /// Exact lease ID reported by `homeboy daemon status`
         #[arg(long)]
         lease_id: String,
-        /// Deprecated no-op retained for one release; adoption already proves the
-        /// recorded PID dead under the daemon lifecycle lock.
-        #[arg(long)]
-        confirm_pid_dead: bool,
         /// Accepted migration alias for legacy child recovery. It never mutates jobs.
         #[arg(long)]
         recover_missing_child_identity: bool,
@@ -85,10 +81,6 @@ enum DaemonCommand {
         /// compare-and-swap over the destructive scope, not a fact assertion.
         #[arg(long = "job-id", required = true)]
         job_ids: Vec<Uuid>,
-        /// Deprecated no-op retained for one release; recovery already requires
-        /// persisted unexpected-termination evidence and re-proves the PID dead.
-        #[arg(long)]
-        confirm_pid_dead: bool,
         /// Required. Attests that the workload processes for --job-id were
         /// inspected and are absent. Unverifiable by design: this command exists
         /// because the daemon died before persisting any child identity, so the
@@ -115,24 +107,6 @@ enum DaemonCommand {
     },
     /// Explicitly reconcile active jobs after proving a missing-lease store has no daemon owner
     ReconcileLeaselessOrphans {
-        // Deprecated no-op retained for one release: recovery already fails
-        // closed on the daemon owner lock, daemon process candidates, and a
-        // reachable listener at --addr.
-        //
-        // This deliberately carries NO doc comment. Current controllers
-        // negotiate the lease-less recovery contract from the typed capability
-        // list advertised in `self identity`
-        // (`homeboy_lab_runner_contract::daemon_recovery_capabilities`); older
-        // controllers still fall back to running this subcommand's `--help` on
-        // the remote and matching bare long options
-        // (`homeboy_lab_runner_contract::declared_long_options` only accepts an
-        // option whose trailing tokens are value placeholders). Rendering help
-        // text after `--confirm-no-daemon-owner` removes it from the advertised
-        // contract and makes every help-scraping controller refuse remote
-        // lease-less recovery. The deprecation is documented in
-        // `docs/commands/daemon.md` instead.
-        #[arg(long)]
-        confirm_no_daemon_owner: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
         /// Controller-generated idempotency key for a replacement operation.
@@ -166,15 +140,6 @@ enum DaemonCommand {
         /// Recorded concrete loopback endpoint captured with the lease ID
         #[arg(long)]
         recorded_endpoint: String,
-        /// Deprecated no-op retained for one release; recovery already refuses a
-        /// running recorded PID.
-        #[arg(long)]
-        confirm_pid_dead: bool,
-        /// Deprecated no-op retained for one release; recovery already requires an
-        /// absent state record, a `lease_missing` freshness code, an unreachable
-        /// daemon, and a failed probe of the recorded endpoint.
-        #[arg(long)]
-        confirm_control_plane_lost: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
         /// Controller-generated idempotency key for a replacement operation.
@@ -335,8 +300,6 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         ),
         DaemonCommand::AdoptOrphan {
             lease_id,
-            // Deprecated no-op: adoption proves PID death itself, under the lock.
-            confirm_pid_dead: _deprecated_confirm_pid_dead,
             recover_missing_child_identity,
             confirm_untracked_child_dead,
             addr,
@@ -358,7 +321,6 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::ReconcileDeadLeaseOrphans {
             lease_id,
             job_ids,
-            confirm_pid_dead: _deprecated_confirm_pid_dead,
             confirm_workload_processes_absent,
             addr,
         } => Ok((
@@ -389,7 +351,6 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             0,
         )),
         DaemonCommand::ReconcileLeaselessOrphans {
-            confirm_no_daemon_owner: _deprecated_confirm_no_daemon_owner,
             addr,
             replacement_operation_id,
         } => Ok((
@@ -417,8 +378,6 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             lease_id,
             recorded_pid,
             recorded_endpoint,
-            confirm_pid_dead: _deprecated_confirm_pid_dead,
-            confirm_control_plane_lost: _deprecated_confirm_control_plane_lost,
             addr,
             replacement_operation_id,
         } => Ok((
@@ -871,7 +830,7 @@ impl AnalysisJobRunner for CommandAnalysisJobRunner {
 
 #[cfg(test)]
 mod tests {
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -941,183 +900,22 @@ mod tests {
     /// as durable job provenance, so it must stay required.
     #[test]
     fn exact_dead_lease_recovery_still_requires_the_workload_absence_attestation() {
-        for args in [
-            vec![
-                "homeboy",
-                "daemon",
-                "reconcile-dead-lease-orphans",
-                "--lease-id",
-                "lease-dead",
-                "--job-id",
-                "00000000-0000-0000-0000-000000000001",
-            ],
-            vec![
-                "homeboy",
-                "daemon",
-                "reconcile-dead-lease-orphans",
-                "--lease-id",
-                "lease-dead",
-                "--job-id",
-                "00000000-0000-0000-0000-000000000001",
-                "--confirm-pid-dead",
-            ],
-        ] {
-            let cli = Cli::try_parse_from(args).expect("recovery command parses");
-            let Commands::Daemon(args) = cli.command else {
-                panic!("expected daemon command");
-            };
-            let error = run(args)
-                .expect_err("missing operator attestation is rejected before state access");
-            assert!(
-                error.message.contains("confirm-workload-processes-absent"),
-                "expected the workload attestation refusal, got {}",
-                error.message
-            );
-            assert!(
-                !error.message.contains("--confirm-pid-dead"),
-                "PID death is proven by the lifecycle controller, not asserted: {}",
-                error.message
-            );
-        }
-    }
-
-    /// PID death, control-plane loss, and daemon-owner absence are all proven by
-    /// the lifecycle controller before it mutates anything, so none of them may
-    /// be demanded as an operator assertion at the argument layer. Each command
-    /// below must get past argument validation without its former confirmation
-    /// and fail on real state instead.
-    #[test]
-    fn deprecated_confirmations_are_no_longer_demanded() {
-        with_isolated_home(|_| {
-            for (args, refused_flag) in [
-                (
-                    vec![
-                        "homeboy",
-                        "daemon",
-                        "adopt-orphan",
-                        "--lease-id",
-                        "lease-dead",
-                    ],
-                    "--confirm-pid-dead",
-                ),
-                (
-                    vec!["homeboy", "daemon", "reconcile-leaseless-orphans"],
-                    "--confirm-no-daemon-owner",
-                ),
-                (
-                    vec![
-                        "homeboy",
-                        "daemon",
-                        "recover-missing-lease-state",
-                        "--lease-id",
-                        "lease-dead",
-                        "--recorded-pid",
-                        "4242",
-                        "--recorded-endpoint",
-                        "127.0.0.1:4242",
-                    ],
-                    "--confirm-control-plane-lost",
-                ),
-            ] {
-                let cli = Cli::try_parse_from(args).expect("recovery command parses");
-                let Commands::Daemon(args) = cli.command else {
-                    panic!("expected daemon command");
-                };
-                let error =
-                    run(args).expect_err("an isolated home has no recoverable daemon state");
-                assert!(
-                    !error.message.contains(refused_flag),
-                    "{refused_flag} must no longer gate recovery, got {}",
-                    error.message
-                );
-            }
-        });
-    }
-
-    /// The released spellings still appear in composed remote commands and in
-    /// operator runbooks. They must keep parsing for one release, and — because
-    /// controllers still negotiate the lease-less recovery contract by reading
-    /// `--confirm-no-daemon-owner` out of the remote's `--help` output when the
-    /// remote does not advertise the typed capability list — they must also
-    /// stay visible in help rather than being hidden.
-    #[test]
-    fn deprecated_confirmations_remain_accepted_and_advertised() {
-        for args in [
-            vec![
-                "homeboy",
-                "daemon",
-                "adopt-orphan",
-                "--lease-id",
-                "lease-dead",
-                "--confirm-pid-dead",
-            ],
-            vec![
-                "homeboy",
-                "daemon",
-                "reconcile-leaseless-orphans",
-                "--confirm-no-daemon-owner",
-            ],
-            vec![
-                "homeboy",
-                "daemon",
-                "recover-missing-lease-state",
-                "--lease-id",
-                "lease-dead",
-                "--recorded-pid",
-                "4242",
-                "--recorded-endpoint",
-                "127.0.0.1:4242",
-                "--confirm-pid-dead",
-                "--confirm-control-plane-lost",
-            ],
-        ] {
-            assert!(
-                Cli::try_parse_from(args.clone()).is_ok(),
-                "released spelling must stay accepted: {args:?}"
-            );
-        }
-
-        let mut command = Cli::command();
-        let daemon = command
-            .find_subcommand_mut("daemon")
-            .expect("daemon subcommand");
-        let leaseless = daemon
-            .find_subcommand_mut("reconcile-leaseless-orphans")
-            .expect("reconcile-leaseless-orphans subcommand");
-        let help = leaseless.render_help().to_string();
-        assert!(
-            help.contains("--confirm-no-daemon-owner"),
-            "controllers negotiate this contract from remote help output: {help}"
-        );
-    }
-
-    /// Controllers negotiate the lease-less recovery contract by running this
-    /// subcommand's `--help` on the remote and matching *bare* long options —
-    /// now only as the fallback for older binaries that do not advertise the
-    /// typed capability list (`self identity`). The predicate lives in
-    /// `homeboy_lab_runner_contract::declared_long_options`, which only accepts
-    /// an option whose trailing tokens are value placeholders. Adding a doc
-    /// comment to `--confirm-no-daemon-owner` makes clap render help text after
-    /// the flag name, silently removing it from the advertised contract and
-    /// making every controller refuse remote lease-less recovery. This
-    /// reproduces that predicate against the real rendered help so the coupling
-    /// cannot rot.
-    #[test]
-    fn leaseless_recovery_help_advertises_a_bare_confirmation_option() {
-        let mut command = Cli::command();
-        let daemon = command
-            .find_subcommand_mut("daemon")
-            .expect("daemon subcommand");
-        let leaseless = daemon
-            .find_subcommand_mut("reconcile-leaseless-orphans")
-            .expect("reconcile-leaseless-orphans subcommand");
-        let help = leaseless.render_help().to_string();
-
-        let declared = homeboy_lab_runner_contract::declared_long_options(&help);
-        assert!(
-            declared.contains("--confirm-no-daemon-owner"),
-            "--confirm-no-daemon-owner must render as a bare long option or controllers refuse remote lease-less recovery; declared={declared:?} help={help}"
-        );
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "daemon",
+            "reconcile-dead-lease-orphans",
+            "--lease-id",
+            "lease-dead",
+            "--job-id",
+            "00000000-0000-0000-0000-000000000001",
+        ])
+        .expect("recovery command parses");
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        let error =
+            run(args).expect_err("missing operator attestation is rejected before state access");
+        assert!(error.message.contains("confirm-workload-processes-absent"));
     }
 
     /// #11105: five recovery subcommands existed and nothing chose between
@@ -1766,7 +1564,6 @@ mod tests {
                 "adopt-orphan",
                 "--lease-id",
                 "lease-dead",
-                "--confirm-pid-dead",
                 "--recover-missing-child-identity",
             ])
             .expect("legacy alias still parses");
@@ -1816,11 +1613,10 @@ mod tests {
             "homeboy",
             "daemon",
             "reconcile-leaseless-orphans",
-            "--confirm-no-daemon-owner",
             "--addr",
             "not-an-address",
         ])
-        .expect("the recovery subcommand and its required confirmation should parse");
+        .expect("the recovery subcommand should parse");
         let Commands::Daemon(args) = cli.command else {
             panic!("expected daemon command");
         };

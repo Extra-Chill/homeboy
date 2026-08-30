@@ -138,31 +138,6 @@ operator's inspection the sole source of truth. The attestation is written into
 every affected job's durable event data as
 `operator_confirmed_workload_processes_absent`.
 
-## Deprecated confirmation flags
-
-`--confirm-pid-dead`, `--confirm-no-daemon-owner`, and
-`--confirm-control-plane-lost` are deprecated no-ops, retained for one release
-and then removed. Every fact they asserted is established by the lifecycle
-controller *before* it mutates anything, and the old gates ran ahead of that
-verification, so they could only reject correct operators:
-
-| Deprecated flag | Commands | What proves it instead |
-| --- | --- | --- |
-| `--confirm-pid-dead` | `adopt-orphan`, `reconcile-dead-lease-orphans`, `recover-missing-lease-state` | A `pid_dead` freshness code, a non-running recorded PID, and — for adoption and dead-lease recovery — a second liveness proof taken under the daemon owner lock, so a reused PID cannot slip through. Dead-lease recovery additionally requires persisted unexpected-termination evidence bound to the exact lease and PID. |
-| `--confirm-no-daemon-owner` | `reconcile-leaseless-orphans` | The daemon owner lock (refused while any daemon is live or starting), a fail-closed daemon-process candidate probe, and a fail-closed listener probe at `--addr`. |
-| `--confirm-control-plane-lost` | `recover-missing-lease-state` | An absent daemon state record, a `lease_missing` freshness code, an unreachable daemon, active jobs, and a failed connect to the recorded endpoint. |
-
-Passing them still works and changes nothing. Drop them from scripts and
-runbooks. The same three flags are deprecated on `homeboy runner connect`, where
-supplying one *without* its recovery mode is still refused — a confirmation
-selects no recovery on its own.
-
-`--confirm-no-daemon-owner` intentionally remains visible, and with no help text,
-in `homeboy daemon reconcile-leaseless-orphans --help`: controllers negotiate the
-remote lease-less recovery contract by parsing bare long options out of that help
-output. Do not hide it or give it a doc comment before the flag is removed
-outright.
-
 ## VPS Reverse Runner Broker
 
 `homeboy daemon broker-config` renders the code-backed deployment shape for a

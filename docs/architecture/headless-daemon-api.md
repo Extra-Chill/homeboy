@@ -99,10 +99,9 @@ A useful headless UI can be built from this read/query surface:
 - `GET /audit/runs` and `GET /bench/runs` for analysis-specific run history
 - `GET /v1/control-plane/capabilities` and `GET /v1/control-plane/runs/:id`
   for the typed orchestration service. Capabilities advertise only the
-  operations wired in this build. Run retrieval is a **pure read**: it never
-  reconciles, because the reconciling read (`homeboy agent-task status`) writes
-  durable state and can perform a live runner round trip, which a serial
-  accept loop cannot afford. The run route accepts exact run ids; mission/Cook
+  operations wired in this build. Run retrieval and `homeboy agent-task status`
+  are pure reads; live runner refresh and durable repair belong to the explicit
+  reconciliation operation. The run route accepts exact run ids; mission/Cook
   ids belong to the mission resource rather than acting as run aliases. A run
   is not a job — the job *supervises* the run, so
   watching and cancelling stay on the controller-job surface below.

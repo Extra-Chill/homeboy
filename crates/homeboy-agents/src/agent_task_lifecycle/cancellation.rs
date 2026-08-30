@@ -774,7 +774,7 @@ fn cancel_resolved_run_in_store(
 /// uses exactly these two rooted forms.
 ///
 /// The caller mutates `record` in place and persists it itself, so no record
-/// write happens here. There is no ambient wrapper: `status_in_store` is the
+/// write happens here. There is no ambient wrapper: `reconcile_status_in_store` is the
 /// only caller, and the store it hands down is the one its own caller
 /// injected.
 pub(super) fn reconcile_controller_job_cancellation_in_store(

@@ -106,7 +106,8 @@ fn build(result: &homeboy::core::parsed_command_preflight::ParsedCommandPrefligh
         })
         .map(|runner| runner.runner_id.clone());
     let explicit_runner_id = match &result.input.runner {
-        homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(runner_id) => {
+        homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(runner_id)
+        | homeboy::core::parsed_command_preflight::RunnerIntent::ReadinessRepair(runner_id) => {
             Some(runner_id.clone())
         }
         _ => None,

@@ -74,11 +74,7 @@ pub(crate) fn evaluate_requirements(rig: &RigSpec) -> PipelineOutcome {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by the rig test suite"
-)]
-pub(crate) fn runner_capability_preflight(
+pub fn runner_capability_preflight(
     rig: &RigSpec,
     command: &str,
 ) -> Option<RunnerCapabilityPreflight> {

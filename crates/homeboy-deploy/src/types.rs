@@ -113,6 +113,8 @@ pub struct DeployConfig {
     pub prepared_artifact: Option<PreparedDeployArtifact>,
     /// Resume a durable multi-target deploy run after exact identity validation.
     pub resume_run_id: Option<String>,
+    /// Maximum number of project targets applied concurrently.
+    pub max_concurrency: usize,
     /// Explicitly select which deliverable a dual-deliverable component deploys.
     ///
     /// `None` infers the route from project target configuration. An explicit
@@ -149,6 +151,7 @@ impl DeployConfig {
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
+            max_concurrency: 1,
             target: None,
         }
     }

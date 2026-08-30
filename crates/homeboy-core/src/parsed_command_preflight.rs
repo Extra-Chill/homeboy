@@ -109,6 +109,7 @@ pub enum PlacementIntent {
 pub enum RunnerIntent {
     Default,
     Explicit(String),
+    ReadinessRepair(String),
     CommandLocal,
 }
 
@@ -161,6 +162,10 @@ pub struct LabReadinessSnapshot {
     pub available_runner_ids: Vec<String>,
     pub reasons: Vec<String>,
     pub remediation_commands: Vec<String>,
+    /// Connected runners admitted only for a bounded readiness-repair action.
+    /// Ordinary workload admission never consumes this evidence.
+    #[serde(default)]
+    pub repair_admitted_runner_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,7 +224,9 @@ pub fn resolve_generic_route_runner(
     }
     match (&input.runner, &input.placement) {
         (_, PlacementIntent::Local) => None,
-        (RunnerIntent::Explicit(_), _) => policy.selected_runner_id.clone(),
+        (RunnerIntent::Explicit(_) | RunnerIntent::ReadinessRepair(_), _) => {
+            policy.selected_runner_id.clone()
+        }
         _ if policy.automatic_authorized => policy.selected_runner_id.clone(),
         _ => None,
     }
@@ -251,7 +258,20 @@ pub fn resolve_parsed_command_preflight(
             None,
         ));
     }
+    let readiness_repair_admitted = match &input.runner {
+        RunnerIntent::ReadinessRepair(runner_id) => {
+            policy.selected_runner_id.as_deref() == Some(runner_id.as_str())
+                && policy.lab_readiness.as_ref().is_some_and(|readiness| {
+                    readiness
+                        .repair_admitted_runner_ids
+                        .iter()
+                        .any(|admitted| admitted == runner_id)
+                })
+        }
+        _ => false,
+    };
     if policy.selected_runner_id.is_some()
+        && !readiness_repair_admitted
         && (!policy.runner_admitted
             || !policy.lab_readiness.as_ref().is_some_and(|readiness| {
                 readiness.state == "connected_ready"
@@ -318,8 +338,10 @@ pub fn resolve_parsed_command_preflight(
         DeferredWorkloadPolicy::Eligible => DeferredWorkloadDecision::NotApplicable,
     };
     let required = if matches!(input.placement, PlacementIntent::Lab)
-        || matches!(input.runner, RunnerIntent::Explicit(_))
-    {
+        || matches!(
+            input.runner,
+            RunnerIntent::Explicit(_) | RunnerIntent::ReadinessRepair(_)
+        ) {
         ExecutionPlacementRequirement::Lab
     } else {
         ExecutionPlacementRequirement::Either
@@ -337,7 +359,10 @@ pub fn resolve_parsed_command_preflight(
             .as_ref()
             .map(|runner_id| ExecutionPlacementRunnerSelection {
                 runner_id: runner_id.clone(),
-                source: if matches!(input.runner, RunnerIntent::Explicit(_)) {
+                source: if matches!(
+                    input.runner,
+                    RunnerIntent::Explicit(_) | RunnerIntent::ReadinessRepair(_)
+                ) {
                     homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
                 } else {
                     homeboy_lab_runner_contract::RunnerSelectionSource::Policy
@@ -651,5 +676,65 @@ mod tests {
             auto_local_capacity_fallback: false,
         };
         assert!(resolve_parsed_command_preflight(vec!["fixture".into()], input, policy).is_err());
+    }
+
+    #[test]
+    fn readiness_repair_admission_is_action_and_runner_scoped() {
+        let input = ParsedCommandPreflightInput {
+            identity: ParsedCommandIdentity {
+                family: "extension".into(),
+                operation: vec!["setup".into(), "fixture".into()],
+            },
+            resource_admission: ResourceAdmissionRequirement::Exempt,
+            controller_execution: ControllerExecution::Ordinary,
+            deferred_workload: DeferredWorkloadPolicy::Forbidden,
+            placement: PlacementIntent::Auto,
+            runner: RunnerIntent::ReadinessRepair("lab-a".into()),
+            runner_normalization: RunnerNormalization::None,
+            lab_route: LabRouteIntent::Supported { automatic: false },
+            provenance: ProvenanceRequirement::CaptureExecution,
+        };
+        let policy = ParsedCommandPolicySnapshot {
+            resource_admission_evidence: ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness: Some(LabReadinessSnapshot {
+                state: "capability_blocked".into(),
+                selected_runner_id: Some("lab-a".into()),
+                available_runner_ids: Vec::new(),
+                reasons: vec!["fixture toolchain is unavailable".into()],
+                remediation_commands: vec!["homeboy extension setup fixture".into()],
+                repair_admitted_runner_ids: vec!["lab-a".into()],
+            }),
+            selected_runner_id: Some("lab-a".into()),
+            generic_route: GenericRoutePolicySnapshot {
+                command_supports_lab: true,
+                automatic_authorized: false,
+                selected_runner_id: Some("lab-a".into()),
+            },
+            deferred_pressure_refusal: false,
+            runner_admitted: false,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        };
+
+        let repair = resolve_parsed_command_preflight(
+            vec!["extension".into(), "setup".into(), "fixture".into()],
+            input.clone(),
+            policy.clone(),
+        )
+        .expect("the bounded setup action is admitted");
+        assert_eq!(
+            repair.placement.selected,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+        );
+
+        let mut unrelated = input;
+        unrelated.runner = RunnerIntent::Explicit("lab-a".into());
+        assert!(resolve_parsed_command_preflight(
+            vec!["bench".into(), "run".into()],
+            unrelated,
+            policy
+        )
+        .is_err());
     }
 }

@@ -140,7 +140,7 @@ fn cook_alias_status_projects_active_adoption_from_earlier_attempt() {
     )
     .expect("start unrelated adoption");
 
-    let projected = status_in_store(
+    let projected = reconcile_status_in_store(
         &lifecycle_store,
         cook_id,
         AgentTaskStatusOptions::default(),
@@ -182,7 +182,7 @@ fn cook_alias_status_has_no_adoption_projection_without_indexed_adoption() {
     record_cook_attempt_in_store(&lifecycle_store, cook_id, 2, &latest.run_id)
         .expect("index latest run");
 
-    let projected = status_in_store(
+    let projected = reconcile_status_in_store(
         &lifecycle_store,
         cook_id,
         AgentTaskStatusOptions::default(),
@@ -255,7 +255,7 @@ fn cook_alias_status_selects_latest_terminal_adoption_then_index_order() {
         .expect("set deterministic adoption timestamp");
     }
 
-    let projected = status_in_store(
+    let projected = reconcile_status_in_store(
         &lifecycle_store,
         cook_id,
         AgentTaskStatusOptions::default(),
@@ -274,7 +274,7 @@ fn cook_alias_status_selects_latest_terminal_adoption_then_index_order() {
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Both reads still go through the alias-resolving `status_in_store`
+/// (#7505). Both reads still go through the alias-resolving `reconcile_status_in_store`
 /// (`exact: false`), exactly as the ambient `status` did — what this test
 /// asserts is that naming a run id directly declines the alias projection, not
 /// that a different entry point was used.
@@ -305,7 +305,7 @@ fn exact_run_id_status_keeps_its_own_adoption_without_alias_projection() {
     record_cook_attempt_in_store(&lifecycle_store, cook_id, 2, &latest.run_id)
         .expect("index latest run");
 
-    let exact_earlier = status_in_store(
+    let exact_earlier = reconcile_status_in_store(
         &lifecycle_store,
         &earlier.run_id,
         AgentTaskStatusOptions::default(),
@@ -323,7 +323,7 @@ fn exact_run_id_status_keeps_its_own_adoption_without_alias_projection() {
         "2222222222222222222222222222222222222222"
     );
 
-    let exact_latest = status_in_store(
+    let exact_latest = reconcile_status_in_store(
         &lifecycle_store,
         &latest.run_id,
         AgentTaskStatusOptions::default(),
@@ -369,7 +369,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
         false,
     )
     .expect("claim before verifier starts");
-    let running = status_in_store(
+    let running = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -404,7 +404,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
             .owner_pid = u32::MAX;
     })
     .expect("make owner stale without sleeping");
-    let interrupted = status_in_store(
+    let interrupted = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -454,7 +454,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
         "finalize pull request",
     )
     .expect("finalization checkpoint");
-    let finalizing = status_in_store(
+    let finalizing = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -467,7 +467,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     assert_eq!(adoption.active_gate, "finalize pull request");
     finish_candidate_adoption_in_store(&lifecycle_store, &record.run_id, None)
         .expect("terminal completion");
-    let completed = status_in_store(
+    let completed = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -507,7 +507,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
 /// (#7505). The audit history asserted at the end is the *original* adoption
 /// preserved alongside its replacement, so the record that gets replaced and
 /// the record the history is read from have to be the same one. The
-/// intervening `status_in_store` is what reconciles the falsified owner pid
+/// intervening `reconcile_status_in_store` is what reconciles the falsified owner pid
 /// into `interrupted`, and it must see the rewrite that preceded it.
 #[test]
 fn interrupted_candidate_adoption_can_be_explicitly_replaced_with_audit_history() {
@@ -548,7 +548,7 @@ fn interrupted_candidate_adoption_can_be_explicitly_replaced_with_audit_history(
             .owner_pid = u32::MAX;
     })
     .unwrap();
-    status_in_store(
+    reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -630,7 +630,7 @@ fn public_candidate_adoption_gate_progress_is_durable() {
         },
     )
     .expect("persist periodic gate heartbeat");
-    let running = status_in_store(
+    let running = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -709,7 +709,7 @@ fn private_candidate_adoption_gate_progress_is_redacted_before_persistence() {
     )
     .expect("persist policy-filtered heartbeat");
 
-    let adoption = status_in_store(
+    let adoption = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -771,7 +771,7 @@ fn cook_alias_status_projects_active_adoption_remediation() {
     )
     .expect("remediation checkpoint");
 
-    let projected = status_in_store(
+    let projected = reconcile_status_in_store(
         &lifecycle_store,
         cook_id,
         AgentTaskStatusOptions::default(),
@@ -844,7 +844,7 @@ fn candidate_adoption_reconciles_and_cancels_an_orphaned_gate_group() {
     })
     .expect("simulate controller interruption");
 
-    let interrupted = status_in_store(
+    let interrupted = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -956,7 +956,7 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
             });
         })
         .expect("project wrong hash pin");
-        let before_hash = status(&record.run_id).expect("record before wrong hash");
+        let before_hash = reconcile_status(&record.run_id).expect("record before wrong hash");
         let hash_error = recover_controller_runtime_in_store(
             &test_lifecycle_store(),
             &record.run_id,
@@ -966,7 +966,7 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
         .expect_err("wrong hash rejected");
         assert!(hash_error.message.contains("hash mismatch"));
         assert_eq!(
-            status(&record.run_id).expect("record after wrong hash"),
+            reconcile_status(&record.run_id).expect("record after wrong hash"),
             before_hash
         );
 
@@ -980,7 +980,8 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
             });
         })
         .expect("project wrong identity pin");
-        let before_identity = status(&record.run_id).expect("record before wrong identity");
+        let before_identity =
+            reconcile_status(&record.run_id).expect("record before wrong identity");
         let identity_error = recover_controller_runtime_in_store(
             &test_lifecycle_store(),
             &record.run_id,
@@ -990,7 +991,7 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
         .expect_err("wrong identity rejected");
         assert!(identity_error.message.contains("build identity mismatch"));
         assert_eq!(
-            status(&record.run_id).expect("record after wrong identity"),
+            reconcile_status(&record.run_id).expect("record after wrong identity"),
             before_identity
         );
     });
@@ -1056,7 +1057,7 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
             })
             .expect("detached handoff recorded");
 
-            let loaded = status(run_id).expect("status resolves");
+            let loaded = reconcile_status(run_id).expect("status resolves");
             let log = logs(run_id).expect("logs resolve");
             let artifacts = artifacts(run_id).expect("artifacts resolve");
 
@@ -1144,7 +1145,7 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
                 run_id
             )
             .expect("duplicate wake"));
-            let record = status(run_id).expect("accepted lifecycle");
+            let record = reconcile_status(run_id).expect("accepted lifecycle");
             assert_eq!(
                 record.metadata["runner_submission_intent"]["state"],
                 "accepted"
@@ -1277,7 +1278,7 @@ fn expired_running_submission_retains_typed_handoff_rejection() {
         })
         .expect("simulate rejected runner submission");
 
-        let expired = status(run_id).expect("expired handoff is terminalized");
+        let expired = reconcile_status(run_id).expect("expired handoff is terminalized");
         assert_eq!(expired.state, AgentTaskRunState::Cancelled);
         assert_eq!(
             expired.metadata["cancel_reason"],
@@ -1395,7 +1396,7 @@ fn preparing_crash_never_submits_or_queries_the_runner() {
         )
         .expect("no replay"));
         assert_eq!(
-            status("preparing-crash").expect("status").state,
+            reconcile_status("preparing-crash").expect("status").state,
             AgentTaskRunState::Queued
         );
         assert!(submitted.lock().expect("submitted").is_empty());
@@ -1454,7 +1455,7 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
                         .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
                 })
                 .expect("expire deadline");
-                let record = status(run_id).expect("late acceptance reconciliation");
+                let record = reconcile_status(run_id).expect("late acceptance reconciliation");
                 let job_id = job.id.to_string();
                 assert_eq!(record.runner_job_id(), Some(job_id.as_str()));
                 assert_eq!(record.state, AgentTaskRunState::Running);
@@ -1520,7 +1521,7 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
                 .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
         })
         .expect("expire absent handoff");
-        let absent = status("absent-after-deadline").expect("absent reconciliation");
+        let absent = reconcile_status("absent-after-deadline").expect("absent reconciliation");
         assert_eq!(absent.state, AgentTaskRunState::Cancelled);
         assert!(absent.runner_job_id().is_none());
         assert!(submitted.lock().expect("submitted").is_empty());
@@ -1767,7 +1768,7 @@ fn logs_expose_mirrored_live_runner_events_before_terminal_aggregate() {
 /// different home there would either reject for the wrong reason or find no
 /// record to conflict with at all.
 ///
-/// The runner-continuation registry `status_in_store` consults stays
+/// The runner-continuation registry `reconcile_status_in_store` consults stays
 /// process-global by design: it is configured trust material and a subprocess
 /// contract, not a lifecycle root (#12618).
 #[test]
@@ -1787,7 +1788,7 @@ fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
         },
     )
     .expect("running proxy");
-    let mut record = status_in_store(
+    let mut record = reconcile_status_in_store(
         &lifecycle_store,
         "agent-task-late-artifact-mismatch",
         AgentTaskStatusOptions::default(),
@@ -1888,7 +1889,7 @@ fn terminal_projection_keeps_prior_commit_when_interrupted_before_commit() {
             .expect_err("controller persistence failure is surfaced");
 
         assert_eq!(record, before);
-        let persisted = status(&record.run_id).expect("persisted controller record");
+        let persisted = reconcile_status(&record.run_id).expect("persisted controller record");
         assert_eq!(persisted.state, AgentTaskRunState::Running);
         assert!(persisted.artifact_refs.is_empty());
         assert!(store::read_aggregate(&record.run_id).is_err());
@@ -1965,7 +1966,7 @@ fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently()
 
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("hydrate persisted result");
-    let status = status_in_store(
+    let status = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -2136,7 +2137,7 @@ fn terminal_executor_artifacts_are_projected_under_logical_ids() {
         .expect("record aggregate");
     reconcile_terminal_artifact_projection_in_store(&lifecycle_store, "projection-parity")
         .expect("idempotent projection");
-    let record = status_in_store(
+    let record = reconcile_status_in_store(
         &lifecycle_store,
         "projection-parity",
         AgentTaskStatusOptions::default(),
@@ -2234,7 +2235,7 @@ fn terminal_executor_artifact_projection_rejects_mismatched_bytes() {
     record_run_aggregate_in_store(&lifecycle_store, "projection-tampered", &plan, &aggregate)
         .expect("record aggregate");
 
-    let record = status_in_store(
+    let record = reconcile_status_in_store(
         &lifecycle_store,
         "projection-tampered",
         AgentTaskStatusOptions::default(),
@@ -2302,7 +2303,7 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
             .expect("runner identity");
         record_run_aggregate(&submitted.run_id, &plan, &aggregate).expect("controller projection");
 
-        let record = status(&submitted.run_id).expect("status");
+        let record = reconcile_status(&submitted.run_id).expect("status");
         assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
         assert!(record.metadata["artifact_projection"]["error"]
             .as_str()
@@ -2370,7 +2371,7 @@ fn duplicate_runner_artifact_ids_fail_closed_before_projection() {
             .expect("runner identity");
         record_run_aggregate(&submitted.run_id, &plan, &aggregate).expect("record aggregate");
 
-        let record = status(&submitted.run_id).expect("terminal record");
+        let record = reconcile_status(&submitted.run_id).expect("terminal record");
         assert_eq!(record.metadata["artifact_projection"]["status"], "failed");
         assert!(record.metadata["artifact_projection"]["error"]
             .as_str()
@@ -2523,7 +2524,7 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
         .expect("sparse dispatch failure recorded")
         .expect("dispatch envelope recognized");
 
-        let loaded = status("local-sparse-run").expect("status loaded");
+        let loaded = reconcile_status("local-sparse-run").expect("status loaded");
         let artifacts = artifacts("local-sparse-run").expect("artifacts loaded");
         let (raw_aggregate, _) = aggregate_source("local-sparse-run").expect("aggregate source");
 
@@ -2576,7 +2577,7 @@ fn status_preserves_existing_terminal_runtime_evidence() {
         .read_record(&record.run_id)
         .expect("record before status");
 
-    let loaded = status_in_store(
+    let loaded = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -2638,7 +2639,7 @@ fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
         Some("run/store-contract"),
     )
     .expect("completed run recorded");
-    let loaded = status_in_store(
+    let loaded = reconcile_status_in_store(
         &lifecycle_store,
         "run/store-contract",
         AgentTaskStatusOptions::default(),
@@ -2878,7 +2879,7 @@ fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
         let legacy = reconcile_record_health_in_store(&test_lifecycle_store(), false)
             .expect("legacy migrated");
         assert_eq!(legacy.migrated, 1);
-        let legacy_record = status("legacy-record").expect("legacy loaded");
+        let legacy_record = reconcile_status("legacy-record").expect("legacy loaded");
         assert_eq!(legacy_record.schema, schemas::RUN);
         assert!(legacy_record
             .metadata
@@ -3157,8 +3158,9 @@ fn controller_local_status_answers_without_any_runner_interaction() {
         let record = submit_plan(&test_plan(), Some("controller-local-status")).expect("submit");
         mark_running(&record.run_id).expect("mark running");
 
-        let outcome = status_with_options(&record.run_id, AgentTaskStatusOptions::default())
-            .expect("controller-local status resolves");
+        let outcome =
+            reconcile_status_with_options(&record.run_id, AgentTaskStatusOptions::default())
+                .expect("controller-local status resolves");
 
         // The whole point of #10418: a known controller-local run must be
         // answerable while the Lab is wedged, so the read must not reach the
@@ -3197,9 +3199,11 @@ fn a_runner_backed_status_still_reconciles_against_the_runner() {
         })
         .expect("detached handoff recorded");
 
-        let outcome =
-            status_with_options("runner-backed-status", AgentTaskStatusOptions::default())
-                .expect("runner-backed status resolves");
+        let outcome = reconcile_status_with_options(
+            "runner-backed-status",
+            AgentTaskStatusOptions::default(),
+        )
+        .expect("runner-backed status resolves");
 
         assert!(
             interactions.load(std::sync::atomic::Ordering::SeqCst) > 0,
@@ -3230,7 +3234,7 @@ fn a_caller_can_opt_a_runner_backed_status_out_of_every_runner_probe() {
         })
         .expect("detached handoff recorded");
 
-        let outcome = status_with_options(
+        let outcome = reconcile_status_with_options(
             "runner-backed-local-only",
             AgentTaskStatusOptions {
                 runner_probe: AgentTaskRunnerProbe::Never,

@@ -7,7 +7,7 @@ use crate::agent_task::{
     AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_lifecycle;
-use crate::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
+use crate::agent_task_lifecycle::{reconcile_status as lifecycle_status, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -1221,7 +1221,7 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
         .expect("adversarial readiness skip does not block eligible work");
         let record =
             lifecycle_status("run-next-a-adversarial-readiness").expect("quarantined record");
-        let status = agent_task_lifecycle::status("run-next-a-adversarial-readiness")
+        let status = agent_task_lifecycle::reconcile_status("run-next-a-adversarial-readiness")
             .expect("status projection");
         let logs = agent_task_lifecycle::logs("run-next-a-adversarial-readiness")
             .expect("logs projection");
@@ -3134,7 +3134,7 @@ fn discovery_keeps_controller_handoff_commands_resolvable_after_runner_reconnect
             run.commands.logs,
             "homeboy --placement local agent-task logs controller-handoff-reconnect"
         );
-        assert!(agent_task_lifecycle::status(&run.run_id).is_ok());
+        assert!(agent_task_lifecycle::reconcile_status(&run.run_id).is_ok());
         assert!(agent_task_lifecycle::logs(&run.run_id).is_ok());
     });
 }

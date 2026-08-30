@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.365.1] - 2026-08-30
+
+### Changed
+- Remove daemon recovery help negotiation
+- make status reads non-reconciling
+- stop compiling unused fixtures
+- reuse socket helper binary
+- observe cancelled child exit
+- remove real-time check waits
+- Validate imported lifecycle provenance
+- Test worktree import and finalization lifecycle
+
+### Fixed
+- admit unregistered cwd repositories
+
 ## [0.365.0] - 2026-08-30
 
 ### Added

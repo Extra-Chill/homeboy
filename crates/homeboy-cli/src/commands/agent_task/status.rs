@@ -302,15 +302,12 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     }
     let target = resolve_cook_reader_target(&args.run_id, args.exact)?;
     if args.bridge {
-        // `--bridge` routes through `agent_task_lifecycle::status()`, which is a
-        // reconciling read that WRITES: it refreshes accepted runner handoffs,
-        // expires unbound controller handoffs, and persists the result. So this
-        // answer is not merely a different view from `activity show <id>` — it
-        // can also change what a later `activity show` returns. Say so (#W3-15).
+        // Bridge status combines the same durable run projection with canonical
+        // events. Runner refresh and repair belong to `agent-task reconcile`.
         let cursor = parse_event_cursor(args.since_cursor.as_deref(), "since_cursor")?;
         let bridge_status = agent_task_service::run_status(&target.run_id, cursor)?;
         let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
-        attach_reconciled(&mut value, true);
+        attach_reconciled(&mut value, false);
         if let Some(selection) = target.selection {
             value["candidate_selection"] = selection;
         }
@@ -934,15 +931,7 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
     })))
 }
 
-/// Record whether this read reconciled — i.e. whether producing this answer
-/// also *wrote*, and therefore changed what a later read of the same run
-/// returns.
-///
-/// `activity show <id>` and `agent-task status <id>` can legitimately disagree
-/// about the same run at the same instant because one is a read model and the
-/// other (on `--bridge`) is a reconciling read. That is by design and is not
-/// changed here; it is only made visible, so a consumer can tell which kind of
-/// answer it received without inferring it from the command name (#W3-15).
+/// Attach the canonical run resource assembled from the durable snapshot.
 fn attach_control_plane_run(
     value: &mut Value,
     record: &AgentTaskRunRecord,
@@ -4737,7 +4726,7 @@ impl WatchPoller for CancelTerminalPoller {
     type Item = AgentTaskRunRecord;
 
     fn poll(&self, run_id: &str) -> homeboy::core::Result<Self::Item> {
-        Ok(agent_task_lifecycle::status_with_options(
+        Ok(agent_task_lifecycle::reconcile_status_with_options(
             run_id,
             agent_task_lifecycle::AgentTaskStatusOptions {
                 runner_probe: agent_task_lifecycle::AgentTaskRunnerProbe::Never,
@@ -8257,7 +8246,7 @@ mod tests {
             )
             .expect("record retryable failure");
 
-            let record = agent_task_lifecycle::status("stale-generic-lab-replay")
+            let record = agent_task_lifecycle::reconcile_status("stale-generic-lab-replay")
                 .expect("load replay record");
             let retry = retry_replay_action(&record);
 
@@ -8296,7 +8285,7 @@ mod tests {
             )
             .expect("record retryable failure");
 
-            let record = agent_task_lifecycle::status("cook-owned-generic-lab-replay")
+            let record = agent_task_lifecycle::reconcile_status("cook-owned-generic-lab-replay")
                 .expect("load replay record");
             let retry = retry_replay_action(&record);
 
