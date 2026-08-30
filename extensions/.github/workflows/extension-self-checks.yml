@@ -69,7 +69,7 @@ jobs:
           repository: Extra-Chill/homeboy
           ref: main
           path: .ci/homeboy
-          sparse-checkout: crates/homeboy-extension/src/runtime
+          sparse-checkout: crates/homeboy-core/src/extension/runtime
           sparse-checkout-cone-mode: false
 
       - name: Set up Node.js

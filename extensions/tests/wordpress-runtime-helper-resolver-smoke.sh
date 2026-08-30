@@ -10,7 +10,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 EXTENSIONS_ROOT="${TMP_DIR}/homeboy-extensions"
 CORE_ROOT="${TMP_DIR}/homeboy"
-HELPER="${CORE_ROOT}/crates/homeboy-extension/src/runtime/sidecar-writer.sh"
+HELPER="${CORE_ROOT}/crates/homeboy-core/src/extension/runtime/sidecar-writer.sh"
 mkdir -p "$(dirname "$HELPER")" "$EXTENSIONS_ROOT"
 touch "$HELPER"
 HELPER="$(cd "$(dirname "$HELPER")" && pwd)/sidecar-writer.sh"
@@ -32,7 +32,7 @@ status=$?
 set -e
 [ "$status" -ne 0 ] || { echo "Expected missing helper resolution to fail" >&2; exit 1; }
 case "$diagnostic" in
-    *"Probed: ${TMP_DIR}/missing/crates/homeboy-extension/src/runtime/sidecar-writer.sh"*"Set HOMEBOY_RUNTIME_SIDECAR_WRITER=/path/to/sidecar-writer.sh"*) ;;
+    *"Probed: ${TMP_DIR}/missing/crates/homeboy-core/src/extension/runtime/sidecar-writer.sh"*"Set HOMEBOY_RUNTIME_SIDECAR_WRITER=/path/to/sidecar-writer.sh"*) ;;
     *) echo "Expected actionable missing-helper diagnostic, got: $diagnostic" >&2; exit 1 ;;
 esac
 
