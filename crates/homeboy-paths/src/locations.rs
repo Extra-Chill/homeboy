@@ -96,17 +96,6 @@ pub fn agent_runtimes() -> Result<PathBuf> {
     Ok(agent_runtimes_in_root(&homeboy()?))
 }
 
-/// Legacy runtime package directory below an already-resolved config root.
-pub fn legacy_agent_runtimes_in_root(config_root: &Path) -> PathBuf {
-    config_root.join("agent-runtimes")
-}
-
-/// Legacy runtime package directory, used only while migrating it into a
-/// generation. Runtime consumers must use [`agent_runtimes`].
-pub fn legacy_agent_runtimes() -> Result<PathBuf> {
-    Ok(legacy_agent_runtimes_in_root(&homeboy()?))
-}
-
 /// Keys directory below an already-resolved config root.
 pub fn keys_in_root(config_root: &Path) -> PathBuf {
     config_root.join("keys")

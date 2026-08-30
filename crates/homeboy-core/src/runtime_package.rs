@@ -277,7 +277,7 @@ fn seed_legacy_generation(config_root: &Path, stage: &Path) -> Result<()> {
     // The shared-asset loop below already joins `config_root`; resolving the
     // legacy runtime directory ambiently would seed a generation from one
     // installation's runtimes and another's shared assets.
-    let legacy = paths::legacy_agent_runtimes_in_root(config_root);
+    let legacy = config_root.join("agent-runtimes");
     if legacy.is_dir() {
         reject_symlink_tree_except_root(&legacy)?;
         copy_regular_tree(
@@ -674,9 +674,9 @@ fn switch_current(store: &Path, generation: &str) -> Result<()> {
 fn ensure_stable_runtime_boundary(config_root: &Path) -> Result<()> {
     // Derived from the injected root, never re-resolved: the backup and
     // temporary siblings below are already `config_root`-relative, so an
-    // ambient `legacy_agent_runtimes()` here would rename a boundary in one
+    // ambient `agent_runtimes()` here would rename a boundary in one
     // installation into a backup name recorded in another.
-    let boundary = paths::legacy_agent_runtimes_in_root(config_root);
+    let boundary = paths::agent_runtimes_in_root(config_root);
     let expected = Path::new(GENERATIONS).join(CURRENT).join("agent-runtimes");
     if fs::read_link(&boundary).ok().as_deref() == Some(expected.as_path()) {
         return Ok(());
@@ -808,7 +808,7 @@ fn recover_boundary_migration(config_root: &Path) -> Result<()> {
     // this recovery already runs against one specific installation. Resolving
     // the boundary ambiently could restore a backup recorded here over an
     // unrelated installation's live boundary.
-    let boundary = paths::legacy_agent_runtimes_in_root(config_root);
+    let boundary = paths::agent_runtimes_in_root(config_root);
     let expected = Path::new(GENERATIONS).join(CURRENT).join("agent-runtimes");
 
     if fs::read_link(&boundary).ok().as_deref() != Some(expected.as_path()) {
@@ -1062,7 +1062,7 @@ mod tests {
             let result =
                 refresh("opencode", &staged_source.path().to_string_lossy(), None).unwrap();
             fs::remove_dir_all(staged_source.path()).unwrap();
-            let documented = paths::legacy_agent_runtimes().unwrap();
+            let documented = paths::agent_runtimes().unwrap();
             assert_eq!(result.path, documented.join("opencode"));
             assert_eq!(
                 fs::read_link(&documented).unwrap(),
@@ -1093,7 +1093,7 @@ mod tests {
             CRASH_AFTER_BOUNDARY_BOOTSTRAP.store(true, Ordering::SeqCst);
             assert!(refresh("neutral", &source.path().to_string_lossy(), None).is_err());
 
-            let boundary = paths::legacy_agent_runtimes().unwrap();
+            let boundary = paths::agent_runtimes().unwrap();
             let current = active_current_generation(&root.join(GENERATIONS))
                 .unwrap()
                 .unwrap();
@@ -1125,7 +1125,7 @@ mod tests {
             CRASH_AFTER_BOUNDARY_BACKUP_RENAME.store(true, Ordering::SeqCst);
             assert!(refresh("neutral", &source.path().to_string_lossy(), None).is_err());
 
-            let boundary = paths::legacy_agent_runtimes().unwrap();
+            let boundary = paths::agent_runtimes().unwrap();
             assert!(fs::symlink_metadata(&boundary).is_err());
             let current = active_current_generation(&store).unwrap().unwrap();
             assert_eq!(
@@ -1256,7 +1256,7 @@ mod tests {
             package(linked.path(), "legacy", "linked");
             let source = tempfile::tempdir().unwrap();
             package(source.path(), "neutral", "new");
-            let legacy = paths::legacy_agent_runtimes().unwrap();
+            let legacy = paths::agent_runtimes().unwrap();
             fs::create_dir_all(legacy.parent().unwrap()).unwrap();
             symlink(linked.path().join("agent-runtimes"), &legacy).unwrap();
 
