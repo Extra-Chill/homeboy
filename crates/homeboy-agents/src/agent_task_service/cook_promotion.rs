@@ -5741,7 +5741,7 @@ fn cook_recovery_actions(
     let mut actions = vec![
         super::AgentTaskCookRecoveryAction {
             action: "status".to_string(),
-            command: super::cook_recovery_command(run_id, &["status", run_id, "--full"]),
+            command: super::cook_recovery_command(run_id, &["status", run_id]),
         },
         super::AgentTaskCookRecoveryAction {
             action: "diagnose".to_string(),
@@ -5873,6 +5873,11 @@ mod recovery_action_tests {
                 .map(|action| action.action.as_str())
                 .collect::<Vec<_>>();
             assert_eq!(actions, expected, "{status}");
+            assert_eq!(
+                recovery.legal_actions[0].command,
+                "homeboy agent-task status cook-state-matrix-attempt-1",
+                "status recovery must contain only supported CLI arguments"
+            );
             assert_eq!(
                 recovery.reason,
                 format!(
