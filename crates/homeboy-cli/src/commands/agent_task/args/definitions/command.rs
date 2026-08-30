@@ -21,9 +21,9 @@ use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
     LifecycleReadArgs, LogsArgs, PromoteArgs, QuarantineArgs, RearmArgs,
-    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunArgs,
-    RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
-    ValidatePlanArgs, VerifyReplacementArgs,
+    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs,
+    RunArgs, RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
+    SubmitArgs, ValidatePlanArgs, VerifyReplacementArgs,
 };
 
 pub use super::super::auth::{
@@ -166,7 +166,7 @@ pub enum AgentTaskCommand {
     /// Return one exact quarantined queued record to normal queue eligibility.
     Rearm(RearmArgs),
     /// Resume a queued or stale-running durable run.
-    Resume(LifecycleReadArgs),
+    Resume(ResumeArgs),
     /// Submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
     /// Cook, submit, and inspect batches of independent tasks.

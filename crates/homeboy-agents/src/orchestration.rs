@@ -15,8 +15,8 @@ use homeboy_control_plane_contract::{
     ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId,
     ProviderSessionId, RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
     CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+    CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 
@@ -161,27 +161,45 @@ impl OrchestrationService<LifecycleStoreLookup> {
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
-        self.execute_action_with_retry(requested_id, request, |parameters| {
-            crate::agent_task_service::retry(
-                requested_id.as_str(),
-                parameters.new_run_id.as_deref(),
-                true,
-                parameters.force,
-            )
-        })
+        self.execute_action_with_delegates(
+            requested_id,
+            request,
+            |parameters| {
+                crate::agent_task_service::retry(
+                    requested_id.as_str(),
+                    parameters.new_run_id.as_deref(),
+                    true,
+                    parameters.force,
+                )
+            },
+            || {
+                crate::agent_task_service::resume(
+                    requested_id.as_str().to_string(),
+                    std::sync::Arc::new(
+                        crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+                    ),
+                )
+            },
+        )
     }
 
-    fn execute_action_with_retry<F>(
+    fn execute_action_with_delegates<F, R>(
         &self,
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
         retry: F,
+        resume: R,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError>
     where
         F: FnOnce(
             &ControlPlaneRetryParameters,
         )
             -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
+        R: FnOnce() -> homeboy_core::Result<
+            crate::agent_task_service::AgentTaskRunResult<
+                crate::agent_task_schedule::AgentTaskAggregate,
+            >,
+        >,
     {
         validate_action_request(request)?;
         let resolved = resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
@@ -352,6 +370,122 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 ),
                             }
                         }
+                        ControlPlaneAction::Resume
+                            if record
+                                .metadata
+                                .get("unmaterialized_cook_admission")
+                                .is_some_and(serde_json::Value::is_object) =>
+                        {
+                            if record.state.is_terminal() {
+                                let terminal_error = record
+                                    .metadata
+                                    .get("cancel_reason")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string)
+                                    .or_else(|| {
+                                        record.metadata["unmaterialized_cook_admission"]["reason"]
+                                            .as_str()
+                                            .map(str::to_string)
+                                    });
+                                (
+                                    ControlPlaneActionOutcome::AlreadySatisfied,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload {
+                                        schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
+                                        data: serde_json::json!({
+                                            "schema": "homeboy/unmaterialized-cook-resume/v1",
+                                            "status": record.metadata["unmaterialized_cook_admission"]["state"],
+                                            "run_id": record.run_id,
+                                            "idempotent": true,
+                                            "terminal": true,
+                                            "terminal_state": record.state,
+                                            "error": terminal_error,
+                                        }),
+                                    },
+                                    None,
+                                )
+                            } else {
+                                let resumed = (|| -> homeboy_core::Result<_> {
+                                    crate::agent_task_lifecycle::rearm_unmaterialized_cook_admission(
+                                        requested_id.as_str(),
+                                    )?;
+                                    let reconciliation = crate::agent_task_service::reconcile_unmaterialized_cook_admission(
+                                        requested_id.as_str(),
+                                    )?;
+                                    let current = self.lookup.store.read_record(&resolved)?;
+                                    Ok((current, reconciliation))
+                                })();
+                                match resumed {
+                                    Ok((current, reconciliation)) => (
+                                        ControlPlaneActionOutcome::Succeeded,
+                                        project_record(&current, None)?,
+                                        ControlPlaneActionPayload {
+                                            schema: "homeboy/unmaterialized-cook-resume/v1"
+                                                .to_string(),
+                                            data: serde_json::json!({
+                                                "schema": "homeboy/unmaterialized-cook-resume/v1",
+                                                "status": current.metadata["unmaterialized_cook_admission"]["state"],
+                                                "run_id": requested_id,
+                                                "idempotent": true,
+                                                "reconciliation": reconciliation,
+                                            }),
+                                        },
+                                        None,
+                                    ),
+                                    Err(error) => (
+                                        ControlPlaneActionOutcome::Failed,
+                                        project_record(&record, None)?,
+                                        ControlPlaneActionPayload::empty(),
+                                        Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                    ),
+                                }
+                            }
+                        }
+                        ControlPlaneAction::Resume => {
+                            let needs_transport_recovery =
+                                crate::agent_task_service::terminal_transport_recovery_required(
+                                    requested_id.as_str(),
+                                );
+                            let resumed = (|| -> homeboy_core::Result<_> {
+                                if needs_transport_recovery {
+                                    crate::agent_task_service::recover_terminal_transport_proxy_evidence(
+                                        requested_id.as_str(),
+                                    )?;
+                                }
+                                let result = resume()?;
+                                if needs_transport_recovery {
+                                    crate::agent_task_service::reconcile_terminal_artifact_projection(
+                                        requested_id.as_str(),
+                                    )?;
+                                }
+                                let current = self.lookup.store.read_record(&resolved)?;
+                                Ok((result, current))
+                            })();
+                            match resumed {
+                                Ok((result, current)) => (
+                                    if record.state.is_terminal() {
+                                        ControlPlaneActionOutcome::AlreadySatisfied
+                                    } else {
+                                        ControlPlaneActionOutcome::Succeeded
+                                    },
+                                    project_record(&current, None)?,
+                                    ControlPlaneActionPayload {
+                                        schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                                        data: serde_json::json!({
+                                            "aggregate": result.value,
+                                            "exit_code": result.exit_code,
+                                        }),
+                                    },
+                                    None,
+                                ),
+                                Err(error) => (
+                                    ControlPlaneActionOutcome::Failed,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                ),
+                            }
+                        }
                         _ => {
                             return Err(ControlPlaneError::invalid_argument(format!(
                                 "{} is not wired through the canonical action executor",
@@ -409,6 +543,7 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
     let expected_parameters_schema = match request.action {
         ControlPlaneAction::Cancel => CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
         ControlPlaneAction::Reconcile => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
+        ControlPlaneAction::Resume => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
         ControlPlaneAction::Retry => CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
         _ => {
             return Err(ControlPlaneError::invalid_argument(format!(
@@ -562,15 +697,70 @@ where
     })?;
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
-        .execute_action_with_retry(&requested_id, request, |parameters| {
-            crate::agent_task_service::retry_with_preflight(
-                run_id,
-                parameters.new_run_id.as_deref(),
-                true,
-                parameters.force,
-                &preflight,
-            )
+        .execute_action_with_delegates(
+            &requested_id,
+            request,
+            |parameters| {
+                crate::agent_task_service::retry_with_preflight(
+                    run_id,
+                    parameters.new_run_id.as_deref(),
+                    true,
+                    parameters.force,
+                    &preflight,
+                )
+            },
+            || {
+                crate::agent_task_service::resume(
+                    run_id.to_string(),
+                    std::sync::Arc::new(
+                        crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+                    ),
+                )
+            },
+        )
+        .map_err(|error| match error.class {
+            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
+                homeboy_core::Error::validation_invalid_argument(
+                    "action",
+                    error.message,
+                    None,
+                    None,
+                )
+            }
+            ControlPlaneErrorClass::Unavailable => {
+                homeboy_core::Error::internal_unexpected(error.message)
+            }
         })
+}
+
+pub fn execute_resume_action_from_current_environment(
+    run_id: &str,
+    request: &ControlPlaneActionRequest,
+    executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
+) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    let requested_id = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    OrchestrationService::new(LifecycleStoreLookup::new(store))
+        .execute_action_with_delegates(
+            &requested_id,
+            request,
+            |parameters| {
+                crate::agent_task_service::retry(
+                    run_id,
+                    parameters.new_run_id.as_deref(),
+                    true,
+                    parameters.force,
+                )
+            },
+            || crate::agent_task_service::resume(run_id.to_string(), executor),
+        )
         .map_err(|error| match error.class {
             ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
                 homeboy_core::Error::validation_invalid_argument(
@@ -1055,7 +1245,9 @@ mod tests {
         event_page, project_record, LifecycleStoreLookup, OrchestrationService, RunLookup,
         RunSnapshot,
     };
-    use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunRecord};
+    use crate::agent_task_lifecycle::{
+        AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+    };
     use crate::agent_task_schedule::AgentTaskPlan;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
@@ -1063,7 +1255,7 @@ mod tests {
         ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState,
         EventCursor, EventId, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
         CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
@@ -1314,6 +1506,70 @@ mod tests {
                 service.execute_action(&run, &reconcile).expect("replay"),
                 first
             );
+        });
+    }
+
+    #[test]
+    fn resume_action_replays_the_stored_result_without_reexecuting() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let mut terminal = record(AGENT_TASK_RUN);
+            terminal.state = AgentTaskRunState::Running;
+            terminal.metadata = json!({});
+            terminal.artifact_refs.clear();
+            terminal.provider_handles.clear();
+            store.write_record(&terminal).expect("record");
+            let aggregate = serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-aggregate/v1",
+                "plan_id": "plan",
+                "status": "succeeded",
+                "totals": { "skipped": 0, "succeeded": 0, "failed": 0 },
+                "outcomes": [],
+            }))
+            .expect("aggregate");
+            store
+                .write_aggregate(AGENT_TASK_RUN, &aggregate)
+                .expect("aggregate evidence");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "resume-request-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let executions = std::rc::Rc::new(std::cell::Cell::new(0));
+            let execute = || {
+                let executions = std::rc::Rc::clone(&executions);
+                let aggregate = aggregate.clone();
+                service.execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_| panic!("retry delegate must not run"),
+                    move || {
+                        executions.set(executions.get() + 1);
+                        Ok(crate::agent_task_service::AgentTaskRunResult {
+                            value: aggregate,
+                            exit_code: 0,
+                        })
+                    },
+                )
+            };
+
+            let first = execute().expect("resume");
+            let replay = execute().expect("replay");
+
+            assert_eq!(
+                first.outcome,
+                ControlPlaneActionOutcome::Succeeded,
+                "{first:?}"
+            );
+            assert_eq!(first.result.schema, CONTROL_PLANE_RESUME_RESULT_SCHEMA);
+            assert_eq!(replay, first);
+            assert_eq!(executions.get(), 1);
         });
     }
 

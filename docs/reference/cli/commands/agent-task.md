@@ -689,11 +689,12 @@ Resume a queued or stale-running durable run
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | Durable run or Cook ID to inspect |
+| `<RUN_ID>` | yes | Durable run or Cook ID to resume |
 
 | Option | Value | Description |
 | --- | --- | --- |
 | `--full` | flag | Return complete lifecycle details instead of the bounded summary |
+| `--idempotency-key` | `<KEY>` | Stable key used to replay this resume without executing it twice |
 
 ## `homeboy agent-task retry`
 

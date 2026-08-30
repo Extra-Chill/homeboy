@@ -55,6 +55,18 @@ pub struct LifecycleReadArgs {
     pub full: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct ResumeArgs {
+    /// Durable run or Cook ID to resume.
+    pub run_id: String,
+    /// Return complete lifecycle details instead of the bounded summary.
+    #[arg(long)]
+    pub full: bool,
+    /// Stable key used to replay this resume without executing it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
+}
+
 #[cfg_attr(test, derive(Default))]
 #[derive(Args, Debug, Clone)]
 pub struct StatusArgs {

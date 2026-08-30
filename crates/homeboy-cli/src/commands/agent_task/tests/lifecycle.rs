@@ -2421,6 +2421,32 @@ fn unmaterialized_cook_run_requires_resume_without_execution_or_mutation() {
 }
 
 #[test]
+fn unmaterialized_cook_resume_replays_the_canonical_action_result() {
+    with_temp_home(|| {
+        let run_id = "run-cli-unmaterialized-resume";
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            run_id,
+            serde_json::json!({ "request_ref": "sha256:fixture" }),
+            "blocked_runner_unavailable",
+            "runner disconnected",
+        )
+        .expect("record unmaterialized admission");
+        let args = || ResumeArgs {
+            run_id: run_id.to_string(),
+            full: false,
+            idempotency_key: Some("resume-unmaterialized-1".to_string()),
+        };
+
+        let first = resume(args()).expect("resume admission");
+        let replay = resume(args()).expect("replay admission resume");
+
+        assert_eq!(replay, first);
+        assert_eq!(first.0["schema"], "homeboy/unmaterialized-cook-resume/v1");
+        assert_eq!(first.0["run_id"], run_id);
+    });
+}
+
+#[test]
 fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
@@ -2439,6 +2465,7 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
         let error = run_resume_with_executor(
             "run-cli-resume-transport-proxy".to_string(),
             false,
+            None,
             executor.clone(),
         )
         .expect_err("transport proxy needs runner recovery");
@@ -4836,6 +4863,7 @@ fn resume_command_executes_existing_run() {
         let (_value, exit_code) = run_resume_with_executor(
             "run-resume-cli".to_string(),
             false,
+            None,
             Arc::new(InspectingExecutor {
                 run_id: "run-resume-cli".to_string(),
                 observed_status: Arc::clone(&observed_status),
@@ -4919,9 +4947,10 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             .expect("artifacts before bridge")
             .is_empty());
 
-        let (value, exit_code) = resume(LifecycleReadArgs {
+        let (value, exit_code) = resume(ResumeArgs {
             run_id: run_id.to_string(),
             full: true,
+            idempotency_key: Some("terminal-recovery".to_string()),
         })
         .expect("resume reconciles terminal projection");
 
@@ -4941,9 +4970,10 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             Some(std::path::PathBuf::from(&artifacts[0].path))
         );
 
-        resume(LifecycleReadArgs {
+        resume(ResumeArgs {
             run_id: run_id.to_string(),
             full: true,
+            idempotency_key: Some("terminal-recovery".to_string()),
         })
         .expect("automatic reconciliation is idempotent");
         assert_eq!(
@@ -4977,9 +5007,10 @@ fn ordinary_resume_keeps_aggregate_output_shape() {
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
             .expect("persist terminal aggregate");
 
-        let (value, exit_code) = resume(LifecycleReadArgs {
+        let (value, exit_code) = resume(ResumeArgs {
             run_id: run_id.to_string(),
             full: true,
+            idempotency_key: Some("ordinary-terminal".to_string()),
         })
         .expect("ordinary resume returns terminal aggregate");
 

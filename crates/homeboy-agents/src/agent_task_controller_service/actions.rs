@@ -809,16 +809,60 @@ where
         "resume" => {
             let run_id = required_string(request, "run_id")?;
             record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, request)?;
-            let run_result = agent_task_service::resume(run_id.clone(), executor)?;
-            record_controller_aggregate_evidence(record, entity_id, &run_id, &run_result.value)?;
-            let aggregate_value = serde_json::to_value(&run_result.value)
-                .map_err(|error| Error::internal_json(error.to_string(), None))?;
+            let idempotency_key = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                format!("{}:{}:{dedupe_key}", record.loop_id, action.action_id).as_bytes(),
+            )
+            .to_string();
+            let acknowledgement =
+                crate::orchestration::execute_resume_action_from_current_environment(
+                    &run_id,
+                    &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                            .to_string(),
+                        action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+                        idempotency_key,
+                        actor: "homeboy-controller".to_string(),
+                        expected_updated_at: None,
+                        parameters:
+                            homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+                        confirmed: true,
+                    },
+                    executor,
+                )?;
+            if acknowledgement.outcome
+                == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+            {
+                return Err(Error::validation_invalid_argument(
+                    "resume",
+                    acknowledgement
+                        .message
+                        .unwrap_or_else(|| "resume action failed".to_string()),
+                    Some(run_id),
+                    None,
+                ));
+            }
+            let aggregate_value = acknowledgement
+                .result
+                .data
+                .get("aggregate")
+                .cloned()
+                .unwrap_or_else(|| acknowledgement.result.data.clone());
+            if acknowledgement.result.data.get("aggregate").is_some() {
+                let aggregate = serde_json::from_value(aggregate_value.clone())
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+                record_controller_aggregate_evidence(record, entity_id, &run_id, &aggregate)?;
+            }
+            let exit_code = acknowledgement.result.data["exit_code"]
+                .as_i64()
+                .and_then(|code| i32::try_from(code).ok())
+                .unwrap_or_else(|| i32::from(acknowledgement.result.data["terminal"] == true) * 2);
             Ok((
                 execution_with_request_workflow_artifacts(
                     serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate_value }),
                     request,
                 ),
-                run_result.exit_code,
+                exit_code,
             ))
         }
         "run_next" => {
