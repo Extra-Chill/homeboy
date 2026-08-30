@@ -349,7 +349,7 @@ fn apply_component(
         PreparedProviderInput::Layered(payload) => (payload.path(), true),
         PreparedProviderInput::Repository(contract) => (contract.as_path(), false),
     };
-    let run = homeboy_core::extension::run_deployment_provider(
+    let run = homeboy_core::extension::invoke::run_deployment_provider(
         &extension,
         &provider,
         &project_id,

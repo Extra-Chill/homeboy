@@ -643,6 +643,18 @@
           ]
         },
         "name": "extensions-use-canonical-resolve-api"
+      },
+      {
+        "forbid": {
+          "glob": "crates/**",
+          "patterns": [
+            "\\bextension_invocation_context\\b",
+            "\\bextension_scope\\b",
+            "\\bextension::execution\\b",
+            "\\bextension::(execute_action|run_action|run_deployment_provider|run_extension|run_setup|ExtensionExecutionMode|ExtensionRunResult|ExtensionSetupResult|ExtensionStepFilter)\\b"
+          ]
+        },
+        "name": "extensions-use-canonical-invoke-api"
       }
     ]
   },

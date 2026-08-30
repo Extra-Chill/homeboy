@@ -411,7 +411,7 @@ pub(crate) fn run_setup_if_configured(extension_id: &str) -> Result<()> {
         .runtime()
         .is_some_and(|r| r.setup_command.is_some())
     {
-        super::super::execution::run_setup(extension_id)?;
+        super::super::invoke::run_setup(extension_id)?;
     }
     Ok(())
 }

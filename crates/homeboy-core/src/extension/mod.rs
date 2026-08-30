@@ -9,8 +9,8 @@ pub mod catalog;
 mod compiler_warning_contract;
 pub mod component_script;
 mod env_provider;
-mod execution;
 mod fingerprint;
+pub mod invoke;
 pub mod lifecycle;
 pub mod lint;
 mod maintenance;
@@ -42,13 +42,8 @@ pub use env_provider::{
     resolve_installed_all as resolve_installed_env_providers, EnvProviderCommandPayload,
     EnvProviderContribution, ENV_PROVIDER_COMMAND_PAYLOAD_ENV,
 };
-pub(crate) use execution::build_settings_json_from_manifest;
-pub use execution::execute_action;
-pub use execution::{
-    run_action, run_deployment_provider, run_extension, run_setup, ExtensionExecutionMode,
-    ExtensionRunResult, ExtensionSetupResult, ExtensionStepFilter,
-};
 pub use fingerprint::run_fingerprint_script;
+pub(crate) use invoke::build_settings_json_from_manifest;
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{
     deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,

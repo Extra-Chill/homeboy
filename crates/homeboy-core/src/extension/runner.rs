@@ -285,7 +285,7 @@ impl ExtensionRunner {
     /// 7. Prepare environment variables
     /// 8. Execute via shell
     pub fn run(&self) -> Result<RunnerOutput> {
-        let prepared = super::execution::prepare_capability_run(
+        let prepared = super::invoke::prepare_capability_run(
             &self.execution_context,
             self.pre_loaded_component
                 .as_ref()
@@ -486,7 +486,7 @@ impl ExtensionRunner {
         extra_env_vars: &[(String, String)],
     ) -> Result<Vec<(String, String)>> {
         let additional_env_provider_paths = self.additional_env_provider_paths()?;
-        super::execution::build_capability_env_with_additional_providers(
+        super::invoke::build_capability_env_with_additional_providers(
             extension_name,
             &self.execution_context.component.id,
             extension_path,
@@ -523,7 +523,7 @@ impl ExtensionRunner {
                 self.command_string(extension_path)
             )
         });
-        super::execution::execute_capability_script(
+        super::invoke::execute_capability_script(
             extension_path,
             &self.execution_context.script_path,
             &self.script_args,
@@ -532,7 +532,7 @@ impl ExtensionRunner {
             command_override
                 .as_deref()
                 .or(self.command_override.as_deref()),
-            super::execution::CapabilityScriptOptions {
+            super::invoke::CapabilityScriptOptions {
                 // Streaming an arbitrary child stream cannot guarantee exact
                 // value redaction. Secret-bearing children are captured first,
                 // then redacted before any Homeboy evidence is produced.

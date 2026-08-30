@@ -33,7 +33,7 @@ pub(crate) fn run_prepare(
     let mut responses = Vec::new();
 
     for extension in providers {
-        let response = extension::execute_action(
+        let response = extension::invoke::execute_action(
             &extension.id,
             "release.prepare",
             None,

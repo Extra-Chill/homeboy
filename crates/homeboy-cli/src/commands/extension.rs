@@ -11,7 +11,7 @@ use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
 use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
-use homeboy_core::extension::{run_setup, ExtensionSummary};
+use homeboy_core::extension::{invoke::run_setup, ExtensionSummary};
 use homeboy_core::extension_readiness::{
     extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
@@ -1073,7 +1073,7 @@ fn run_extension(
     step: Option<String>,
     skip: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    use homeboy_core::extension::{ExtensionExecutionMode, ExtensionStepFilter};
+    use homeboy_core::extension::invoke::{ExtensionExecutionMode, ExtensionStepFilter};
 
     let mode = if no_stream {
         ExtensionExecutionMode::Captured
@@ -1085,7 +1085,7 @@ fn run_extension(
 
     let filter = ExtensionStepFilter { step, skip };
 
-    let result = homeboy_core::extension::run_extension(
+    let result = homeboy_core::extension::invoke::run_extension(
         extension_id,
         project.as_deref(),
         component.as_deref(),
@@ -1565,7 +1565,7 @@ fn run_action(
     project_id: Option<String>,
     data: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let response = homeboy_core::extension::run_action(
+    let response = homeboy_core::extension::invoke::run_action(
         extension_id,
         action_id,
         project_id.as_deref(),

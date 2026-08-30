@@ -11,7 +11,7 @@ use super::{
     derive_id_from_url, install_linked_shared_assets, rename_dir, resolve_cloned_extension,
     slugify_id, write_requested_source_ref, write_source_metadata,
 };
-use crate::extension::execution::run_setup;
+use crate::extension::invoke::run_setup;
 use homeboy_extension_contract::ExtensionManifest;
 
 const REPLACE_CLONE_TEMP_PREFIX: &str = ".replace-clone-tmp";

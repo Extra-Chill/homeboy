@@ -160,7 +160,7 @@ pub fn declared_secret_env_names(component: &Component) -> homeboy_core::Result<
         return Ok(Vec::new());
     }
 
-    let prepared = crate::extension::execution::prepare_capability_run(
+    let prepared = crate::extension::invoke::prepare_capability_run(
         &context,
         Some(component),
         None,

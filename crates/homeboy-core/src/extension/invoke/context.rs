@@ -5,7 +5,7 @@ use crate::engine::template;
 use crate::error::{Error, Result};
 use crate::project::{self, Project};
 
-use crate::extension_scope::ExtensionScope;
+use super::scope::ExtensionScope;
 use homeboy_extension_contract::ExtensionManifest;
 
 /// The resolved project/component/settings identity for one extension invocation.
