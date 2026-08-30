@@ -103,6 +103,14 @@ set -e
 [ "${active_closed_status}" -eq 1 ] || { printf 'FAIL: active PR accepted pr_closed candidate evidence\n'; exit 1; }
 printf 'PASS: active PR fails closed for pr_closed candidate evidence\n'
 
+mkdir -p "${tmp}/bin"
+printf '#!/usr/bin/env bash\nprintf "CLOSED"\n' > "${tmp}/bin/gh"
+chmod +x "${tmp}/bin/gh"
+rm -f "${tmp}/output"
+PATH="${tmp}/bin:${PATH}" PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo GITHUB_REPOSITORY=example/repo PR_NUMBER=42 CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ARTIFACT_KEY=fixture-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=true GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null
+grep -F 'lifecycle-state=pr_closed' "${tmp}/output" >/dev/null || { printf 'FAIL: standalone reconciler did not resolve closed PR state\n'; exit 1; }
+printf 'PASS: standalone reconciler loads its PR state helper\n'
+
 rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; write_phase baseline base component cli '{"review test":"fail"}' "${payload_one}"; mark_pr_closed baseline
 run_case 0 'closed PR before baseline execution produces a neutral lifecycle verdict'
 grep -F 'lifecycle-state=pr_closed' "${tmp}/output" >/dev/null || { printf 'FAIL: baseline closure omitted typed lifecycle output\n'; exit 1; }
