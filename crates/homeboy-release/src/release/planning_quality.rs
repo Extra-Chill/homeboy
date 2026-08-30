@@ -107,7 +107,7 @@ pub(super) fn validate_lint_quality(
     }
 
     let lint_context =
-        match homeboy_core::extension_execution::resolve_execution_context_if_available(
+        match homeboy_core::extension::resolve::resolve_execution_context_if_available(
             component,
             ExtensionCapability::Lint,
         ) {

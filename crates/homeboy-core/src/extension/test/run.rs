@@ -2346,7 +2346,7 @@ fn failed_test_workflow(
 
 fn run_declared_result_parser(
     component: &Component,
-    context: &crate::extension_execution::ExtensionExecutionContext,
+    context: &crate::extension::resolve::ExtensionExecutionContext,
     spec: &ParseSpec,
     stdout: &str,
     run_dir: &RunDir,
@@ -5572,7 +5572,7 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
                 "fixture-extension".to_string(),
                 None,
             );
-            let context = crate::extension_execution::ExtensionExecutionContext {
+            let context = crate::extension::resolve::ExtensionExecutionContext {
                 component: component.clone(),
                 capability: ExtensionCapability::Test,
                 extension_id: "fixture-extension".to_string(),
@@ -5633,7 +5633,7 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
             "fixture-extension".to_string(),
             None,
         );
-        let context = crate::extension_execution::ExtensionExecutionContext {
+        let context = crate::extension::resolve::ExtensionExecutionContext {
             component: component.clone(),
             capability: ExtensionCapability::Test,
             extension_id: "fixture-extension".to_string(),
@@ -5708,7 +5708,7 @@ exit 23
                 "fixture-extension".to_string(),
                 None,
             );
-            let context = crate::extension_execution::ExtensionExecutionContext {
+            let context = crate::extension::resolve::ExtensionExecutionContext {
                 component: component.clone(),
                 capability: ExtensionCapability::Test,
                 extension_id: "fixture-extension".to_string(),
@@ -5780,7 +5780,7 @@ printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
                 "fixture-extension".to_string(),
                 None,
             );
-            let context = crate::extension_execution::ExtensionExecutionContext {
+            let context = crate::extension::resolve::ExtensionExecutionContext {
                 component: component.clone(),
                 capability: ExtensionCapability::Test,
                 extension_id: "fixture-extension".to_string(),
@@ -5847,7 +5847,7 @@ printf 'not json\n'
             "fixture-extension".to_string(),
             None,
         );
-        let context = crate::extension_execution::ExtensionExecutionContext {
+        let context = crate::extension::resolve::ExtensionExecutionContext {
             component: component.clone(),
             capability: ExtensionCapability::Test,
             extension_id: "fixture-extension".to_string(),

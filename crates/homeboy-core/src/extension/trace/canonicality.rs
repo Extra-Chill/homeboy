@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::extension_execution::ExtensionExecutionContext;
+use crate::extension::resolve::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::error::Result;
 use homeboy_core::lab_workspace_provenance::{

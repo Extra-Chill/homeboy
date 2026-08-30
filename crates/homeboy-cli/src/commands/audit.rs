@@ -561,7 +561,7 @@ pub(crate) fn resolve_audit_reference_paths(
         }
 
         let execution_context =
-            homeboy::core::extension_execution::resolve_execution_context_for_extension(
+            homeboy::core::extension::resolve::resolve_execution_context_for_extension(
                 &source_ctx.component,
                 ExtensionCapability::Audit,
                 ext_id,
@@ -599,7 +599,7 @@ pub(crate) fn resolve_audit_reference_paths(
                 ),
                 Some(ext_id.clone()),
                 Some(vec![
-                    homeboy::core::extension_execution::stderr_tail(&output.stderr),
+                    homeboy::core::extension::resolve::stderr_tail(&output.stderr),
                     "Reference paths feed cross-reference analysis; running audit without them would change findings.".to_string(),
                 ]),
             ));

@@ -2,8 +2,8 @@ pub mod baseline;
 pub mod report;
 pub mod run;
 
+use crate::extension::resolve::ExtensionExecutionContext;
 use crate::extension::ExtensionRunner;
-use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_extension_contract::ExtensionCapability;
 
@@ -39,7 +39,7 @@ pub struct LintRunnerRequest<'a> {
 pub fn resolve_lint_command(
     component: &Component,
 ) -> homeboy_core::error::Result<ExtensionExecutionContext> {
-    crate::extension_execution::resolve_execution_context(component, ExtensionCapability::Lint)
+    crate::extension::resolve::resolve_execution_context(component, ExtensionCapability::Lint)
 }
 
 /// The manifest key for the lint findings structured sidecar.

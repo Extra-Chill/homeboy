@@ -299,15 +299,15 @@ pub fn resolve_with_component(
                 (None, None, settings, Vec::new())
             } else {
                 let ext_context =
-                    crate::extension_execution::resolve_execution_context(&component, capability)
+                    crate::extension::resolve::resolve_execution_context(&component, capability)
                         .map_err(|err| {
-                        add_extension_override_hints(
-                            err,
-                            &options.extension_overrides,
-                            &declared_extension_ids,
-                            capability,
-                        )
-                    })?;
+                            add_extension_override_hints(
+                                err,
+                                &options.extension_overrides,
+                                &declared_extension_ids,
+                                capability,
+                            )
+                        })?;
                 let accepted_setting_keys = ext_context.accepted_setting_keys.clone();
                 let mut settings = ext_context.settings.clone();
                 // Merge settings profile files below explicit CLI overrides.

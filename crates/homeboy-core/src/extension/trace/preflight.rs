@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::extension_execution::ExtensionExecutionContext;
+use crate::extension::resolve::ExtensionExecutionContext;
 use homeboy_core::error::{Error, Result};
 use homeboy_extension_contract::TraceDependencySpec;
 

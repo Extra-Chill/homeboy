@@ -1499,7 +1499,7 @@ fn run_fuzz_extension_script(
         return Ok(output.into());
     }
 
-    let execution_context = homeboy_core::extension_execution::resolve_execution_context(
+    let execution_context = homeboy_core::extension::resolve::resolve_execution_context(
         &ctx.component,
         ExtensionCapability::Fuzz,
     )?;

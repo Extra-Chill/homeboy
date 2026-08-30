@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::extension_execution::{self, ExtensionExecutionContext};
+use crate::extension::resolve::{self, ExtensionExecutionContext};
 use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_core::artifact_inputs::{self, ResolvedArtifactInput};
 use homeboy_core::component::{self, Component};
@@ -74,9 +74,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
     }
 
     // 1. Check exactly one build-capable extension for bundled script or local script patterns
-    if let Ok(context) =
-        extension_execution::resolve_execution_context(component, ExtensionCapability::Build)
-    {
+    if let Ok(context) = resolve::resolve_execution_context(component, ExtensionCapability::Build) {
         let extension_id = context.extension_id.clone();
         let extension = crate::extension::catalog::load_extension(&extension_id)?;
         if let Some(build) = &extension.build {
@@ -593,8 +591,7 @@ fn execute_build_component(
         }
         runner.run()?
     } else {
-        let context =
-            extension_execution::resolve_execution_context(comp, ExtensionCapability::Build)?;
+        let context = resolve::resolve_execution_context(comp, ExtensionCapability::Build)?;
         let mut runner = extension::ExtensionRunner::for_context(context)
             .component(comp.clone())
             .working_dir(&local_path_str)

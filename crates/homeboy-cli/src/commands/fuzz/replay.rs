@@ -307,7 +307,7 @@ impl ReplayLikeMode {
 
 #[derive(Clone)]
 struct ResolvedReplayContext {
-    execution_context: homeboy_core::extension_execution::ExtensionExecutionContext,
+    execution_context: homeboy_core::extension::resolve::ExtensionExecutionContext,
     component: homeboy::core::component::Component,
     command: Option<String>,
 }
@@ -332,7 +332,7 @@ fn resolve_replay_context(
         ExtensionCapability::Fuzz,
         rig_context.as_ref(),
     )?;
-    let execution_context = homeboy_core::extension_execution::resolve_execution_context(
+    let execution_context = homeboy_core::extension::resolve::resolve_execution_context(
         &ctx.component,
         ExtensionCapability::Fuzz,
     )?;

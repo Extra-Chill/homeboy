@@ -813,7 +813,7 @@ fn package_provider_config(
     skip_build_validation: bool,
 ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
     let mut config: std::collections::HashMap<_, _> =
-        homeboy_core::extension_execution::extract_component_extension_settings(
+        homeboy_core::extension::resolve::extract_component_extension_settings(
             component,
             extension_id,
         )

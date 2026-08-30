@@ -633,6 +633,16 @@
           ]
         },
         "name": "extensions-use-canonical-catalog-api"
+      },
+      {
+        "forbid": {
+          "glob": "crates/**",
+          "patterns": [
+            "\\bextension_execution\\b",
+            "\\bfind_extension_for_file_ext\\b"
+          ]
+        },
+        "name": "extensions-use-canonical-resolve-api"
       }
     ]
   },

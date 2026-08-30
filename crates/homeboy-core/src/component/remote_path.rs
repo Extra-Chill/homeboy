@@ -14,7 +14,7 @@ use homeboy_component_contract::Component;
 
 use crate::error::Result;
 use crate::extension::catalog::load_extension_in_optional_root;
-use crate::extension_execution::{resolve_owner, resolve_owner_in_root, REMOTE_PATH_SURFACE};
+use crate::extension::resolve::{resolve_owner, resolve_owner_in_root, REMOTE_PATH_SURFACE};
 
 /// Auto-resolve `remote_path` from linked extension deploy rules when not
 /// explicitly set.

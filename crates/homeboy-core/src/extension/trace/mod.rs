@@ -27,7 +27,7 @@ pub mod run;
 mod span_summary;
 pub mod spans;
 
-use crate::extension_execution::ExtensionExecutionContext;
+use crate::extension::resolve::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_extension_contract::ExtensionCapability;
 
@@ -81,5 +81,5 @@ pub use span_summary::{
 pub fn resolve_trace_command(
     component: &Component,
 ) -> homeboy_core::error::Result<ExtensionExecutionContext> {
-    crate::extension_execution::resolve_execution_context(component, ExtensionCapability::Trace)
+    crate::extension::resolve::resolve_execution_context(component, ExtensionCapability::Trace)
 }

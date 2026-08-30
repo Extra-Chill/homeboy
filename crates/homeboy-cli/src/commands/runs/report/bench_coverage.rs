@@ -7,7 +7,7 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy_core::extension::bench::{
     run_bench_list_workflow, BenchListWorkflowArgs, BenchListWorkflowResult, BenchScenario,
 };
-use homeboy_core::extension_execution::resolve_extension_for_capability;
+use homeboy_core::extension::resolve::resolve_extension_for_capability;
 use homeboy_extension_contract::ExtensionCapability;
 
 use crate::commands::escape_markdown_table_cell;

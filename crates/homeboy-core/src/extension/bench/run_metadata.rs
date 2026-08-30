@@ -7,7 +7,7 @@ use crate::extension::bench::parsing::{
     BenchResults, BenchRunMetadata, BenchRunnerMetadata, BenchScenario, BenchWorkloadMetadata,
 };
 use crate::extension::bench::run::BenchRunWorkflowArgs;
-use crate::extension_execution::ExtensionExecutionContext;
+use crate::extension::resolve::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 
 pub(crate) fn stamp_run_metadata(

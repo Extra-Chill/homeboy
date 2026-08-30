@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Component as PathComponent, Path, PathBuf};
 use std::time::Duration;
 
-use crate::extension_execution::ExtensionExecutionContext;
+use crate::extension::resolve::ExtensionExecutionContext;
 use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_core::component::Component;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};
