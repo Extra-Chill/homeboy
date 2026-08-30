@@ -3231,7 +3231,9 @@ fn unmaterialized_cook_admission_keeps_stale_unavailable_and_capacity_distinct()
 
 #[test]
 fn admission_capability_contract_accepts_runtime_or_capability_and_rejects_missing() {
-    let inventory = runners::RunnerCapabilityInventory {
+    let inventory = runners::RunnerCapabilities {
+        schema: runners::RUNNER_CAPABILITIES_SCHEMA.to_string(),
+        runner_id: "runner-a".to_string(),
         runtime_ids: ["runtime-a".to_string()].into_iter().collect(),
         capabilities: ["capability-a".to_string()].into_iter().collect(),
     };

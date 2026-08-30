@@ -140,14 +140,14 @@ pub(crate) fn runner_satisfies_admission_capabilities(
     if required.is_empty() {
         return Ok(true);
     }
-    let inventory = crate::runner::runners::runner_capability_inventory(runner_id)?;
+    let inventory = crate::runner::runners::RunnerDiscoveryService::capabilities(runner_id)?;
     Ok(runner_inventory_satisfies_admission_capabilities(
         &inventory, required,
     ))
 }
 
 pub(crate) fn runner_inventory_satisfies_admission_capabilities(
-    inventory: &crate::runner::runners::RunnerCapabilityInventory,
+    inventory: &crate::runner::runners::RunnerCapabilities,
     required: &BTreeSet<&str>,
 ) -> bool {
     required.iter().all(|required| {

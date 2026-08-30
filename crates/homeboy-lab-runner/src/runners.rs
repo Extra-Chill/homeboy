@@ -11,6 +11,11 @@
 //! connection, execution, workspace, evidence, capability, and lab offload
 //! contracts.
 
+pub use homeboy_runner_contract::{
+    RunnerCapabilities, RunnerDescriptor, RunnerInspection, RunnerReadiness,
+    RUNNER_CAPABILITIES_SCHEMA, RUNNER_DESCRIPTOR_SCHEMA,
+};
+
 // ----------------------------------------------------------------------------
 // Stable top-level contracts
 // ----------------------------------------------------------------------------
@@ -68,9 +73,9 @@ pub use crate::{
     RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput, RunnerBinarySource,
     RunnerCapabilityInventory, RunnerCapabilityPreflight, RunnerChangedRuntimePath,
     RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDevSyncOptions, RunnerDevSyncOutput,
-    RunnerDisconnectReport, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
-    RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary, RunnerFailureKind,
-    RunnerGenerationJobOwners, RunnerJob, RunnerKind, RunnerLifecycleOwner,
+    RunnerDisconnectReport, RunnerDiscoveryService, RunnerExecDiagnostics, RunnerExecMode,
+    RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
+    RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob, RunnerKind, RunnerLifecycleOwner,
     RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerRequiredTool,
     RunnerResourceMetrics, RunnerResult, RunnerSecretEnvMigrationPlan, RunnerSession,
     RunnerSessionRole, RunnerSessionState, RunnerSpec, RunnerStaleDaemonWarning,

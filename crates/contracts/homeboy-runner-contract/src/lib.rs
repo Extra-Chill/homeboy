@@ -6,12 +6,18 @@
 
 mod artifact;
 mod capability;
+mod discovery;
 mod lifecycle;
 
 pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
 pub use capability::{
     RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
     RunnerToolchainReadinessProbe,
+};
+pub use discovery::{
+    RunnerCapabilities, RunnerDescriptor, RunnerInspection, RunnerKind, RunnerReadiness,
+    RUNNER_CAPABILITIES_SCHEMA, RUNNER_DESCRIPTOR_SCHEMA, RUNNER_INSPECTION_SCHEMA,
+    RUNNER_READINESS_SCHEMA,
 };
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 
@@ -676,7 +682,7 @@ mod tests {
 
         assert_eq!(decoded.schema, RUNNER_EXECUTION_ENVELOPE_SCHEMA);
         assert_eq!(decoded.lab_runner_workload, Some(workload));
-        assert_eq!(decoded.mutation_policy.capture_patch, true);
+        assert!(decoded.mutation_policy.capture_patch);
         assert_eq!(decoded.result_refs.plan_id.as_deref(), Some("plan-1"));
         assert_eq!(decoded.result_refs.job_id.as_deref(), Some("job-1"));
         assert_eq!(decoded.result_refs.artifacts.len(), 1);

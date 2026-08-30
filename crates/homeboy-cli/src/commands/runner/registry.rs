@@ -90,15 +90,15 @@ const RUNNER_LIST_TEXT_LIMIT: usize = 256;
 const RUNNER_LIST_PROJECTION_BYTES: usize = 12 * 1024;
 
 pub(super) fn list(full: bool) -> CmdResult<RunnerListOutput> {
-    let entities = runner::list()?;
     let sessions = runner::statuses()?;
 
     if full {
-        return Ok((full_list_output(entities, sessions), 0));
+        return Ok((full_list_output(runner::list()?, sessions), 0));
     }
 
+    let descriptors = runner::RunnerDiscoveryService::list()?;
     Ok((
-        bounded_list_output(compact_list_output(&entities, &sessions)),
+        bounded_list_output(compact_list_output(&descriptors, &sessions)),
         0,
     ))
 }
@@ -121,16 +121,18 @@ fn full_list_output(
 }
 
 fn compact_list_output(
-    entities: &[Runner],
+    descriptors: &[runner::RunnerDescriptor],
     sessions: &[runner::RunnerStatusReport],
 ) -> RunnerListOutput {
-    let runner_summaries = entities
+    let runner_summaries = descriptors
         .iter()
         .take(RUNNER_LIST_LIMIT)
-        .map(|runner| {
+        .map(|descriptor| {
             runner_inventory_summary(
-                runner,
-                sessions.iter().find(|status| status.runner_id == runner.id),
+                descriptor,
+                sessions
+                    .iter()
+                    .find(|status| status.runner_id == descriptor.runner_id),
             )
         })
         .collect::<Vec<_>>();
@@ -139,7 +141,7 @@ fn compact_list_output(
         variant: "list",
         truncation: Some(RunnerListTruncation {
             shown: runner_summaries.len(),
-            omitted: entities.len().saturating_sub(runner_summaries.len()),
+            omitted: descriptors.len().saturating_sub(runner_summaries.len()),
             evidence_ref: "runner:configured-inventory",
             full_command: "homeboy runner list --full",
         }),
@@ -150,10 +152,10 @@ fn compact_list_output(
 }
 
 fn runner_inventory_summary(
-    configured: &Runner,
+    configured: &runner::RunnerDescriptor,
     status: Option<&runner::RunnerStatusReport>,
 ) -> RunnerInventorySummary {
-    let identity = bounded_list_text(&configured.id);
+    let identity = bounded_list_text(&configured.runner_id);
     let is_local = configured.kind == RunnerKind::Local;
     let operator = status.map(super::status::operator_summary);
     let admission = status.map(|status| {
@@ -186,7 +188,7 @@ fn runner_inventory_summary(
                 (status.active_job_state == runner::RunnerActiveJobState::Available)
                     .then_some(status.active_job_count)
             }),
-            limit: configured.settings.concurrency_limit,
+            limit: configured.concurrency_limit,
         },
         drift: if is_local {
             "not_applicable"
@@ -213,15 +215,15 @@ fn runner_inventory_summary(
             .map(|summary| summary.next_action.clone())
             .unwrap_or_else(|| {
                 if is_local {
-                    format!("homeboy runner show {}", shell_arg(&configured.id))
+                    format!("homeboy runner show {}", shell_arg(&configured.runner_id))
                 } else {
                     "homeboy runner status --full".to_string()
                 }
             }),
         evidence: RunnerInventoryEvidence {
-            environment_ref: format!("runner:{}:environment", configured.id),
-            environment_command: format!("homeboy runner env {}", shell_arg(&configured.id)),
-            full_ref: format!("runner:{}:configuration", configured.id),
+            environment_ref: format!("runner:{}:environment", configured.runner_id),
+            environment_command: format!("homeboy runner env {}", shell_arg(&configured.runner_id)),
+            full_ref: format!("runner:{}:configuration", configured.runner_id),
             full_command: "homeboy runner list --full",
         },
     }
@@ -854,6 +856,17 @@ mod tests {
             }
         }
 
+        fn descriptor(configured: &Runner) -> runner::RunnerDescriptor {
+            runner::RunnerDescriptor {
+                schema: runner::RUNNER_DESCRIPTOR_SCHEMA.to_string(),
+                runner_id: configured.id.clone(),
+                kind: configured.kind.clone(),
+                server_id: configured.server_id.clone(),
+                workspace_root: configured.workspace_root.clone(),
+                concurrency_limit: configured.settings.concurrency_limit,
+            }
+        }
+
         fn parse(args: &[&str]) -> bool {
             let cli = Cli::try_parse_from(args).expect("parse runner list");
             let crate::cli_surface::Commands::Runner(runner) = cli.command else {
@@ -882,7 +895,7 @@ mod tests {
         #[test]
         fn default_projection_omits_environment_and_bounds_the_real_wire_envelope() {
             let runners = (0..25)
-                .map(|index| configured_runner(&format!("lab-{index}")))
+                .map(|index| descriptor(&configured_runner(&format!("lab-{index}"))))
                 .collect::<Vec<_>>();
             let output = bounded_list_output(compact_list_output(&runners, &[]));
             let data = serde_json::to_value(super::super::super::types::RunnerCommandOutput::List(
@@ -923,7 +936,7 @@ mod tests {
         #[test]
         fn projection_keeps_exact_quoted_environment_followup_or_falls_back() {
             let id = "lab 'quoted' \\ target";
-            let runners = vec![configured_runner(id)];
+            let runners = vec![descriptor(&configured_runner(id))];
             let output = bounded_list_output(compact_list_output(&runners, &[]));
             let summary = &output.runner_summaries[0];
 
@@ -944,7 +957,7 @@ mod tests {
 
         #[test]
         fn oversized_exact_followups_trigger_the_bounded_fallback() {
-            let runners = vec![configured_runner(&"\"\\\n".repeat(10_000))];
+            let runners = vec![descriptor(&configured_runner(&"\"\\\n".repeat(10_000)))];
             let output = bounded_list_output(compact_list_output(&runners, &[]));
 
             assert!(output.runner_summaries.is_empty());
@@ -958,7 +971,7 @@ mod tests {
             let mut configured = configured_runner("lab");
             configured.kind = RunnerKind::Ssh;
             let status = ssh_status("lab", runner::RunnerActiveJobState::Unavailable);
-            let output = compact_list_output(&[configured], &[status]);
+            let output = compact_list_output(&[descriptor(&configured)], &[status]);
             let value =
                 serde_json::to_value(&output.runner_summaries[0]).expect("summary serializes");
 
