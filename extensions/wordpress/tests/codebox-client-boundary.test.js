@@ -89,7 +89,7 @@ try {
 	fs.chmodSync(missingDescriptor, 0o755);
 	assert.throws(
 		() => createCodeboxClient({ wp_codebox_bin: missingDescriptor, env: {} }).runPublicCliCommand(['run-fuzz-suite']),
-		/wp_codebox_browser_preview_capability_missing/
+		/wp_codebox_runtime_descriptor_invalid/
 	);
 
 	const managedInstall = path.join(root, 'managed');

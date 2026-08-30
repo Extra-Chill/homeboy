@@ -10,6 +10,7 @@ const { minimum_version: REQUIRED_WP_CODEBOX_VERSION } = require('../wordpress.j
 
 const BROWSER_PREVIEW_SCHEMA = 'wp-codebox/browser-contained-site-open/v1';
 const MANAGED_IDENTITY_SCHEMA = 'homeboy/wp-codebox-managed-runtime-identity/v1';
+const DEFAULT_DESCRIPTOR_PROBE_TIMEOUT_MS = 30_000;
 
 function selectWpCodeboxRuntime(options = {}) {
   const env = options.env || process.env;
@@ -78,8 +79,11 @@ function preflightWpCodeboxRuntime(options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure(selection, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
-	const descriptor = probeWpCodeboxRuntimeDescriptor(selection.selected.path, options);
-  if (!browserPreviewContractAvailable(descriptor)) {
+	const descriptorProbe = probeWpCodeboxRuntimeDescriptorResult(selection.selected.path, options);
+	if (descriptorProbe.reason) {
+		return failure(selection, requiredVersion, version, descriptorProbe.reason, 'homeboy extension setup wordpress');
+	}
+	if (!browserPreviewContractAvailable(descriptorProbe.descriptor)) {
     return failure(selection, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
   }
   if (selection.selected.source === 'managed' && !managedIdentityMatches(selection.selected.path, options)) {
@@ -111,7 +115,11 @@ function preflightWpCodeboxCommand(command, options = {}) {
   if (compareVersions(version, requiredVersion) < 0) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_version_too_old', 'homeboy extension setup wordpress');
   }
-	if (!browserPreviewContractAvailable(probeWpCodeboxRuntimeDescriptor(binary, options, args))) {
+	const descriptorProbe = probeWpCodeboxRuntimeDescriptorResult(binary, options, args);
+	if (descriptorProbe.reason) {
+		return failure({ selected, candidates: {} }, requiredVersion, version, descriptorProbe.reason, 'homeboy extension setup wordpress');
+	}
+	if (!browserPreviewContractAvailable(descriptorProbe.descriptor)) {
     return failure({ selected, candidates: {} }, requiredVersion, version, 'wp_codebox_browser_preview_capability_missing', 'homeboy extension setup wordpress');
   }
   if (managed && !managedIdentityMatches(managed, options)) {
@@ -172,15 +180,20 @@ function packagedWpCodeboxBin(env, options = {}) {
 // This is deliberately a low-level probe. Higher-level descriptor consumers
 // must preflight their selected runtime and exact argv before calling it.
 function probeWpCodeboxRuntimeDescriptor(bin, options = {}, prefixArgs = []) {
+	return probeWpCodeboxRuntimeDescriptorResult(bin, options, prefixArgs).descriptor;
+}
+
+function probeWpCodeboxRuntimeDescriptorResult(bin, options = {}, prefixArgs = []) {
   const invocation = wpCodeboxCommand(bin);
   const result = (options.spawnSync || spawnSync)(invocation.command, [...invocation.args, ...prefixArgs, 'runtime', 'descriptor', '--json'], {
-    encoding: 'utf8', env: options.env || process.env, timeout: options.timeoutMs || 5_000,
+		encoding: 'utf8', env: options.env || process.env, timeout: options.descriptorTimeoutMs || options.timeoutMs || DEFAULT_DESCRIPTOR_PROBE_TIMEOUT_MS,
   });
-  if (result.error || result.status !== 0) return null;
+	if (result.error?.code === 'ETIMEDOUT') return { descriptor: null, reason: 'wp_codebox_runtime_descriptor_probe_timed_out' };
+	if (result.error || result.status !== 0) return { descriptor: null, reason: 'wp_codebox_runtime_descriptor_probe_failed' };
   try {
-    return JSON.parse(result.stdout);
+		return { descriptor: JSON.parse(result.stdout), reason: '' };
   } catch {
-    return null;
+		return { descriptor: null, reason: 'wp_codebox_runtime_descriptor_invalid' };
   }
 }
 
@@ -333,6 +346,7 @@ function settingsFromEnv(env) {
 module.exports = {
   REQUIRED_WP_CODEBOX_VERSION,
   BROWSER_PREVIEW_SCHEMA,
+	DEFAULT_DESCRIPTOR_PROBE_TIMEOUT_MS,
   MANAGED_IDENTITY_SCHEMA,
   compareVersions,
   parseVersion,

@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const require = createRequire(import.meta.url);
-const { preflightWpCodeboxCommand } = require(path.join(root, 'wordpress/lib/wp-codebox-runtime-selection.js'));
+const { DEFAULT_DESCRIPTOR_PROBE_TIMEOUT_MS, preflightWpCodeboxCommand } = require(path.join(root, 'wordpress/lib/wp-codebox-runtime-selection.js'));
 const readiness = path.join(root, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-wp-codebox-runner-readiness.cjs');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'agent-runtimes/wp-codebox/wp-codebox.json'), 'utf8'));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hbe-wp-codebox-runner-readiness-'));
@@ -141,6 +141,23 @@ try {
   const missingCapability = path.join(temp, 'missing-capability');
   managedRuntime(missingCapability, '0.21.0', false);
   assert.equal(run({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: missingCapability, PATH: `${stalePath}:${process.env.PATH}` }).classification, 'wp_codebox_browser_preview_capability_missing');
+
+	const probeTimeouts = [];
+	const slowDescriptorSpawn = (_command, args, options) => {
+		probeTimeouts.push(options.timeout);
+		if (args.includes('--version')) return { status: 0, stdout: '0.25.0', stderr: '' };
+		if (options.timeout < 6_000) return { status: null, stdout: '', stderr: '', error: { code: 'ETIMEDOUT' } };
+		return { status: 0, stdout: JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } }), stderr: '' };
+	};
+	const slowDescriptor = preflightWpCodeboxCommand(['/tmp/wp-codebox'], { spawnSync: slowDescriptorSpawn });
+	assert.equal(slowDescriptor.ready, true);
+	assert.deepEqual(probeTimeouts, [5_000, DEFAULT_DESCRIPTOR_PROBE_TIMEOUT_MS]);
+
+	const timedOutDescriptor = preflightWpCodeboxCommand(['/tmp/wp-codebox'], {
+		spawnSync: slowDescriptorSpawn,
+		descriptorTimeoutMs: 5_000,
+	});
+	assert.equal(timedOutDescriptor.reason, 'wp_codebox_runtime_descriptor_probe_timed_out');
 
   const browserUnavailable = path.join(temp, 'browser-unavailable');
   managedRuntime(browserUnavailable, '0.21.0', true, false);
