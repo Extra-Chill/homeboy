@@ -5,10 +5,11 @@
 //! here so core stays agent-task-agnostic.
 
 use homeboy_control_plane_contract::{
-    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneOperation, ControlPlaneRun, RunId,
+    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneEventPage, ControlPlaneOperation,
+    ControlPlaneRun, EventCursor, RunId,
 };
 
-/// Supplies control-plane capabilities and run reads to the HTTP adapter.
+/// Supplies control-plane capabilities and resource reads to the HTTP adapter.
 pub trait ControlPlaneProvider: Send + Sync {
     fn capabilities(&self) -> ControlPlaneCapabilities {
         ControlPlaneCapabilities::new(Vec::new(), vec![ControlPlaneOperation::GetCapabilities])
@@ -16,7 +17,17 @@ pub trait ControlPlaneProvider: Send + Sync {
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
         Err(ControlPlaneError::not_found(format!(
-            "agent-task run not found: {requested_id}"
+            "control-plane run not found: {requested_id}"
+        )))
+    }
+
+    fn events(
+        &self,
+        requested_id: &RunId,
+        _cursor: Option<&EventCursor>,
+    ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane run not found: {requested_id}"
         )))
     }
 }
@@ -42,6 +53,13 @@ pub fn capabilities() -> ControlPlaneCapabilities {
 
 pub fn run(requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
     with_provider(|provider| provider.run(requested_id))
+}
+
+pub fn events(
+    requested_id: &RunId,
+    cursor: Option<&EventCursor>,
+) -> Result<ControlPlaneEventPage, ControlPlaneError> {
+    with_provider(|provider| provider.events(requested_id, cursor))
 }
 
 #[cfg(test)]

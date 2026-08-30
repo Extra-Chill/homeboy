@@ -2420,6 +2420,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
         .expect("controller status resolves");
         let (logs_value, logs_exit) = logs(LogsArgs {
             run_id: "run-cli-controller-proxy".to_string(),
+            cursor: None,
             raw: false,
         })
         .expect("controller logs resolve");
@@ -2427,7 +2428,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
         assert_eq!(status_exit, 0);
         assert_eq!(logs_exit, 0);
         assert_eq!(status_value["outcome"]["state"], "queued");
-        assert_eq!(logs_value["run_id"], "run-cli-controller-proxy");
+        assert_eq!(logs_value["events"]["run"], "run-cli-controller-proxy");
     });
 }
 
@@ -2695,7 +2696,7 @@ fn submit_run_status_reports_terminal_state() {
         let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
             bridge: true,
-            since_cursor: Some(0),
+            since_cursor: Some("0".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
@@ -2710,9 +2711,9 @@ fn submit_run_status_reports_terminal_state() {
         assert_eq!(bridge_status_exit_code, 0);
         assert_eq!(
             bridge_status_json["schema"],
-            "homeboy/agent-task-run-status/v2"
+            "homeboy/agent-task-run-status/v3"
         );
-        assert!(bridge_status_json["normalized_events"].is_array());
+        assert!(bridge_status_json["events"]["events"].is_array());
         assert_eq!(
             bridge_status_json["control_plane_run"]["action_eligibility"]["schema"],
             "homeboy/control-plane-action-eligibility/v1"
@@ -2741,6 +2742,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         .expect("status loaded");
         let (logs_value, _) = logs(LogsArgs {
             run_id: run_id.to_string(),
+            cursor: None,
             raw: false,
         })
         .expect("logs loaded");
@@ -5030,7 +5032,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         let (value, exit_code) = resume(StatusArgs {
             run_id: run_id.to_string(),
             bridge: true,
-            since_cursor: Some(1),
+            since_cursor: Some("1".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
@@ -5038,16 +5040,13 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         .expect("bridge resume reconciles terminal projection");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(value["schema"], "homeboy/agent-task-run-status/v2");
+        assert_eq!(value["schema"], "homeboy/agent-task-run-status/v3");
         assert_eq!(value["control_plane_run"]["run"], run_id);
         assert_eq!(value["control_plane_run"]["state"], "succeeded");
-        assert_eq!(value["latest_event_cursor"], 2);
-        assert_eq!(value["normalized_events"].as_array().map(Vec::len), Some(1));
-        assert_eq!(
-            value["normalized_events"][0]["type"],
-            "agent_task.state_changed"
-        );
-        assert_eq!(value["normalized_events"][0]["status"], "succeeded");
+        assert_eq!(value["events"]["next_cursor"], "2");
+        assert_eq!(value["events"]["events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["events"]["events"][0]["kind"], "task.state_changed");
+        assert_eq!(value["events"]["events"][0]["data"]["state"], "succeeded");
         let artifacts = store.list_artifacts(run_id).expect("projected artifacts");
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_type, "file");
@@ -5064,7 +5063,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         resume(StatusArgs {
             run_id: run_id.to_string(),
             bridge: true,
-            since_cursor: Some(1),
+            since_cursor: Some("1".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()

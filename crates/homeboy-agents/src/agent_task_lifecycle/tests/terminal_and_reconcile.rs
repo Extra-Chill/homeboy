@@ -2770,7 +2770,7 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         assert_eq!(loaded.metadata["remote_run_id"], "remote-run");
         assert_eq!(loaded.metadata["remote_plan_path"], "remote-plan");
         assert_eq!(
-            log.events[0].message.as_deref(),
+            log.events.events[0].data["message"].as_str(),
             Some("Remote provider agent task failed.")
         );
         assert_eq!(artifacts.evidence_refs[0].kind, "provider-run");
@@ -3930,23 +3930,31 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
     )
     .expect("recorded");
 
-    let status =
-        run_status_in_store(&lifecycle_store, "run-status-bridge", Some(1)).expect("bridge status");
+    let cursor = homeboy_control_plane_contract::EventCursor::new("1").expect("cursor");
+    let status = run_status_in_store(&lifecycle_store, "run-status-bridge", Some(cursor))
+        .expect("bridge status");
 
     assert_eq!(status.schema, schemas::RUN_STATUS);
     assert_eq!(
         status.control_plane_run.state,
         homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
     );
-    assert_eq!(status.latest_event_cursor, 2);
-    assert_eq!(status.normalized_events.len(), 1);
-    assert_eq!(status.normalized_events[0].sequence, 2);
-    assert_eq!(status.normalized_events[0].schema, schemas::EVENT);
     assert_eq!(
-        status.normalized_events[0].event_type,
-        "agent_task.state_changed"
+        status
+            .events
+            .next_cursor
+            .as_ref()
+            .map(|cursor| cursor.as_str()),
+        Some("2")
     );
-    assert_eq!(status.normalized_events[0].artifact_refs.len(), 1);
+    assert_eq!(status.events.events.len(), 1);
+    assert_eq!(status.events.events[0].sequence, 2);
+    assert_eq!(
+        status.events.events[0].schema,
+        homeboy_control_plane_contract::CONTROL_PLANE_EVENT_SCHEMA
+    );
+    assert_eq!(status.events.events[0].kind, "task.state_changed");
+    assert_eq!(status.events.events[0].artifacts.len(), 1);
     assert_eq!(
         status.control_plane_run.artifacts[0].kind,
         "artifact-bundle"

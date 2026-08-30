@@ -2209,7 +2209,7 @@ mod tests {
 
             assert_eq!(status.run_id, "cook-pending");
             assert_eq!(status.metadata["detached_cook_handoff"]["state"], "pending");
-            assert_eq!(logs.run_id, "cook-pending");
+            assert_eq!(logs.events.run.as_str(), "cook-pending");
             assert_eq!(
                 agent_task_lifecycle::cancel_run("cook-pending", None)
                     .expect("pending handoff cancel command resolves")
@@ -2560,7 +2560,9 @@ mod tests {
             assert_eq!(
                 agent_task_lifecycle::logs(cook_id)
                     .expect("pending logs command resolves")
-                    .run_id,
+                    .events
+                    .run
+                    .as_str(),
                 cook_id
             );
             assert_eq!(

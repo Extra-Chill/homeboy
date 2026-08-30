@@ -532,13 +532,13 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         let (bridge_value, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
             bridge: true,
-            since_cursor: Some(0),
+            since_cursor: Some("0".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
         .expect("Cook bridge status selects the candidate");
-        assert_eq!(bridge_value["schema"], "homeboy/agent-task-run-status/v2");
+        assert_eq!(bridge_value["schema"], "homeboy/agent-task-run-status/v3");
         assert_eq!(bridge_value["control_plane_run"]["run"], candidate_run_id);
         assert_eq!(
             bridge_value["candidate_selection"]["run_id"],
