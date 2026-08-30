@@ -448,6 +448,7 @@ Reconcile one durable agent-task run or explicit Cook group. This is a preview b
 | --- | --- | --- |
 | `--dry-run` | flag | Preview the selected durable run/group without persisted mutation. This is the default when `--apply` is omitted |
 | `--apply` | flag | Apply the reviewed reconciliation to the selected durable run/group |
+| `--idempotency-key` | `<KEY>` | Stable caller key for safely replaying an applied reconciliation |
 
 ## `homeboy agent-task reconcile-records`
 

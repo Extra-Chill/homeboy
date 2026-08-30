@@ -9,6 +9,7 @@ pub(in crate::commands::agent_task) use super::super::super::agent_task_dispatch
     DispatchArgs, DispatchCoreArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::CookContinueArgs;
+pub(in crate::commands::agent_task) use super::super::args::ReconcileArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerDispatchArgs,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
@@ -31,7 +32,7 @@ pub(in crate::commands::agent_task) use super::super::run::{
     validate_cook_request, validate_plan,
 };
 pub(in crate::commands::agent_task) use super::super::status::{
-    cancel, diagnose, evidence, logs, replay_provider_boundary, status,
+    cancel, diagnose, evidence, logs, reconcile_run, replay_provider_boundary, status,
 };
 pub(in crate::commands::agent_task) use super::super::{
     review, CancelArgs, ProvidersArgs, RetryArgs,

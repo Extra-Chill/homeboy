@@ -9,11 +9,12 @@ use crate::observation::{
 };
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
-    ControlPlaneActionRequest, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
-    ControlPlaneEvent, ControlPlaneEventPage, ControlPlaneEventSource, ControlPlaneOperation,
-    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, EventCursor,
-    EventId, MissionId, RunId, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneCapabilities,
+    ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventPage,
+    ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneResource, ControlPlaneResult,
+    ControlPlaneRun, ControlPlaneRunState, EventCursor, EventId, MissionId, RunId, TaskId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
     CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 
@@ -367,6 +368,7 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
             completed_at: "2026-01-01T00:00:01Z".to_string(),
             outcome: ControlPlaneActionOutcome::AlreadySatisfied,
             resource: fixture_control_plane_run(),
+            result: ControlPlaneActionPayload::empty(),
             message: None,
         })
     }
@@ -449,7 +451,10 @@ fn control_plane_action_http_uses_the_typed_provider_contract() {
         idempotency_key: "http-request-1".to_string(),
         actor: "test-client".to_string(),
         expected_updated_at: None,
-        reason: Some("stop".to_string()),
+        parameters: ControlPlaneActionPayload {
+            schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+            data: serde_json::json!({ "reason": "stop" }),
+        },
         confirmed: true,
     };
     let response = http_api::handle(HttpApiRequest {

@@ -16,8 +16,10 @@ pub mod resolve;
 pub mod resource;
 
 pub use action::{
-    ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome, ControlPlaneActionRequest,
+    ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+    ControlPlaneActionRequest, ControlPlaneCancelParameters,
     CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
 };
 pub use capabilities::{
     ControlPlaneCapabilities, ControlPlaneOperation, ControlPlaneResource,

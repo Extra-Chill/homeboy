@@ -355,6 +355,9 @@ pub struct ReconcileArgs {
     /// Apply the reviewed reconciliation to the selected durable run/group.
     #[arg(long = "apply", conflicts_with = "dry_run")]
     pub apply: bool,
+    /// Stable caller key for safely replaying an applied reconciliation.
+    #[arg(long, value_name = "KEY", requires = "apply")]
+    pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct ReconcileRecordsArgs {

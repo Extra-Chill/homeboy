@@ -7,12 +7,14 @@
 
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
-    ControlPlaneActionRequest, ControlPlaneBlocker, ControlPlaneCapabilities, ControlPlaneError,
+    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneBlocker,
+    ControlPlaneCancelParameters, ControlPlaneCapabilities, ControlPlaneError,
     ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation, ControlPlaneOperation,
     ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
     ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId,
     ProviderSessionId, RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 
@@ -165,7 +167,11 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .store
             .read_record(&resolved)
             .map_err(map_lifecycle_error)?;
-        let operation_key = format!("control-plane-action:cancel:{}", request.idempotency_key);
+        let operation_key = format!(
+            "control-plane-action:{}:{}",
+            action_name(request.action),
+            request.idempotency_key
+        );
         let intent = serde_json::to_value(request)
             .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
         match claim_operation_with_intent_in_store(
@@ -188,10 +194,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
             ClaimOutcome::Acquired => {
                 let accepted_at = now_timestamp();
                 let acknowledgement = format!(
-                    "{}:action:cancel:{}",
-                    record.run_id, request.idempotency_key
+                    "{}:action:{}:{}",
+                    record.run_id,
+                    action_name(request.action),
+                    request.idempotency_key
                 );
-                let (outcome, resource, message) = if request
+                let (outcome, resource, result, message) = if request
                     .expected_updated_at
                     .as_ref()
                     .is_some_and(|expected| record.updated_at.as_ref() != Some(expected))
@@ -199,30 +207,87 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     (
                         ControlPlaneActionOutcome::Failed,
                         project_record(&record, None)?,
+                        ControlPlaneActionPayload::empty(),
                         Some("run changed since the supplied precondition".to_string()),
                     )
-                } else if record.state.is_terminal() {
-                    (
-                        ControlPlaneActionOutcome::AlreadySatisfied,
-                        project_record(&record, None)?,
-                        Some("run is already terminal".to_string()),
-                    )
                 } else {
-                    match crate::agent_task_lifecycle::cancel_run_in_store(
-                        &self.lookup.store,
-                        requested_id.as_str(),
-                        request.reason.as_deref(),
-                    ) {
-                        Ok(cancelled) => (
-                            ControlPlaneActionOutcome::Succeeded,
-                            project_record(&cancelled, None)?,
-                            None,
-                        ),
-                        Err(error) => (
-                            ControlPlaneActionOutcome::Failed,
+                    match request.action {
+                        ControlPlaneAction::Cancel if record.state.is_terminal() => (
+                            ControlPlaneActionOutcome::AlreadySatisfied,
                             project_record(&record, None)?,
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            ControlPlaneActionPayload::empty(),
+                            Some("run is already terminal".to_string()),
                         ),
+                        ControlPlaneAction::Cancel => {
+                            let parameters: ControlPlaneCancelParameters = serde_json::from_value(
+                                request.parameters.data.clone(),
+                            )
+                            .map_err(|error| {
+                                ControlPlaneError::invalid_argument(format!(
+                                    "cancel parameters: {error}"
+                                ))
+                            })?;
+                            match crate::agent_task_lifecycle::cancel_run_in_store(
+                                &self.lookup.store,
+                                requested_id.as_str(),
+                                parameters.reason.as_deref(),
+                            ) {
+                                Ok(cancelled) => (
+                                    ControlPlaneActionOutcome::Succeeded,
+                                    project_record(&cancelled, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    None,
+                                ),
+                                Err(error) => (
+                                    ControlPlaneActionOutcome::Failed,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                ),
+                            }
+                        }
+                        ControlPlaneAction::Reconcile => {
+                            match crate::agent_task_service::reconcile_run(
+                                requested_id.as_str(),
+                                false,
+                            ) {
+                                Ok(report) => {
+                                    let current = self
+                                        .lookup
+                                        .store
+                                        .read_record(&resolved)
+                                        .map_err(map_lifecycle_error)?;
+                                    let outcome = if report.failed > 0 {
+                                        ControlPlaneActionOutcome::Failed
+                                    } else if report.reconciled == 0 {
+                                        ControlPlaneActionOutcome::AlreadySatisfied
+                                    } else {
+                                        ControlPlaneActionOutcome::Succeeded
+                                    };
+                                    (
+                                        outcome,
+                                        project_record(&current, None)?,
+                                        ControlPlaneActionPayload {
+                                            schema: report.schema.to_string(),
+                                            data: serde_json::to_value(report).unwrap_or_default(),
+                                        },
+                                        None,
+                                    )
+                                }
+                                Err(error) => (
+                                    ControlPlaneActionOutcome::Failed,
+                                    project_record(&record, None)?,
+                                    ControlPlaneActionPayload::empty(),
+                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                ),
+                            }
+                        }
+                        _ => {
+                            return Err(ControlPlaneError::invalid_argument(format!(
+                                "{} is not wired through the canonical action executor",
+                                action_name(request.action)
+                            )))
+                        }
                     }
                 };
                 let result = ControlPlaneActionAcknowledgement {
@@ -237,6 +302,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     completed_at: now_timestamp(),
                     outcome,
                     resource,
+                    result,
                     message,
                 };
                 complete_cook_operation_in_store(
@@ -260,11 +326,6 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
             "unsupported control-plane action request schema",
         ));
     }
-    if request.action != ControlPlaneAction::Cancel {
-        return Err(ControlPlaneError::invalid_argument(
-            "only the cancel run action is currently wired",
-        ));
-    }
     for (name, value) in [
         ("idempotency_key", request.idempotency_key.as_str()),
         ("actor", request.actor.as_str()),
@@ -275,21 +336,54 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
             )));
         }
     }
-    if request
-        .reason
-        .as_ref()
-        .is_some_and(|reason| reason.len() > ACTION_REASON_BOUND)
-    {
+    let expected_parameters_schema = match request.action {
+        ControlPlaneAction::Cancel => CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        ControlPlaneAction::Reconcile => CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA,
+        _ => {
+            return Err(ControlPlaneError::invalid_argument(format!(
+                "{} is not wired through the canonical action executor",
+                action_name(request.action)
+            )))
+        }
+    };
+    if request.parameters.schema != expected_parameters_schema {
         return Err(ControlPlaneError::invalid_argument(format!(
-            "reason exceeds {ACTION_REASON_BOUND} bytes"
+            "{} requires parameters schema {expected_parameters_schema}",
+            action_name(request.action)
         )));
     }
-    if !request.confirmed {
+    if request.action == ControlPlaneAction::Cancel {
+        let parameters: ControlPlaneCancelParameters =
+            serde_json::from_value(request.parameters.data.clone()).map_err(|error| {
+                ControlPlaneError::invalid_argument(format!("cancel parameters: {error}"))
+            })?;
+        if parameters
+            .reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > ACTION_REASON_BOUND)
+        {
+            return Err(ControlPlaneError::invalid_argument(format!(
+                "reason exceeds {ACTION_REASON_BOUND} bytes"
+            )));
+        }
+    }
+    if matches!(request.action, ControlPlaneAction::Cancel) && !request.confirmed {
         return Err(ControlPlaneError::invalid_argument(
             "cancel requires explicit confirmation",
         ));
     }
     Ok(())
+}
+
+const fn action_name(action: ControlPlaneAction) -> &'static str {
+    match action {
+        ControlPlaneAction::Cancel => "cancel",
+        ControlPlaneAction::Resume => "resume",
+        ControlPlaneAction::Retry => "retry",
+        ControlPlaneAction::Review => "review",
+        ControlPlaneAction::Promote => "promote",
+        ControlPlaneAction::Reconcile => "reconcile",
+    }
 }
 
 fn map_lifecycle_error(error: homeboy_core::Error) -> ControlPlaneError {
@@ -848,9 +942,10 @@ mod tests {
     use crate::agent_task_schedule::AgentTaskPlan;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
-        ControlPlaneActionRequest, ControlPlaneErrorClass, ControlPlaneEvent,
-        ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState, EventCursor, EventId,
-        RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneErrorClass,
+        ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState,
+        EventCursor, EventId, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
         CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -1037,7 +1132,10 @@ mod tests {
                 idempotency_key: "cancel-request-1".to_string(),
                 actor: "test".to_string(),
                 expected_updated_at: Some("2026-01-01T00:01:00Z".to_string()),
-                reason: Some("no longer needed".to_string()),
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "no longer needed" }),
+                },
                 confirmed: true,
             };
             let first = service
@@ -1061,7 +1159,7 @@ mod tests {
             );
 
             let mut conflicting = request;
-            conflicting.reason = Some("different reason".to_string());
+            conflicting.parameters.data = json!({ "reason": "different reason" });
             let error = service
                 .execute_action(&run, &conflicting)
                 .expect_err("conflicting key");
@@ -1080,6 +1178,25 @@ mod tests {
                 .message
                 .as_deref()
                 .is_some_and(|message| message.contains("precondition")));
+
+            let reconcile = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Reconcile,
+                idempotency_key: "reconcile-request-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let first = service
+                .execute_action(&run, &reconcile)
+                .expect("reconcile action");
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::AlreadySatisfied);
+            assert_eq!(first.result.schema, "homeboy/agent-task-reconcile/v1");
+            assert_eq!(
+                service.execute_action(&run, &reconcile).expect("replay"),
+                first
+            );
         });
     }
 

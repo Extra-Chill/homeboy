@@ -350,7 +350,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 status::list_active(active_args.into())
             }
         }
-        AgentTaskCommand::Reconcile(args) => status::reconcile_run(&args.run_id, !args.apply),
+        AgentTaskCommand::Reconcile(args) => status::reconcile_run(args),
         AgentTaskCommand::ReconcileRecords(args) => status::reconcile_records(args.dry_run),
         AgentTaskCommand::Latest(latest_args) => status::list_runs(
             agent_task_service::AgentTaskDiscoveryFilter::Latest,
