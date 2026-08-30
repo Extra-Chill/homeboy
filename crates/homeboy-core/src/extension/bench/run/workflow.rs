@@ -9,11 +9,11 @@ use crate::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
 use crate::extension::bench::parsing::{BenchRunMetadata, BenchRunnerMetadata};
 use crate::extension::bench::responsiveness::{memory_sample, read_responsiveness_summary};
 use crate::extension::bench::run_metadata::stamp_run_metadata;
-use crate::extension::ExtensionCapability;
 use crate::extension_execution::resolve_execution_context;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::failure::classify_bench_failure;
 use super::memory_timeline::{

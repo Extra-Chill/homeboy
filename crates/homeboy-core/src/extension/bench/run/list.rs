@@ -3,13 +3,13 @@
 use std::path::{Path, PathBuf};
 
 use crate::extension::bench::parsing::{self, BenchRunExecution};
-use crate::extension::ExtensionCapability;
 use crate::extension_execution::resolve_execution_context;
 use homeboy_core::component::Component;
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
 use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::runner::build_runner;
 use super::scenario::{apply_scenario_filter, normalize_workload_json_scenario_ids};

@@ -23,7 +23,8 @@ impl FingerprintScriptProvider for ExtensionFingerprintScriptProvider {
         relative_path: &str,
         content: &str,
     ) -> Option<FingerprintOutput> {
-        let matched = super::find_extension_for_file_ext(file_extension, "fingerprint")?;
+        let matched =
+            crate::extension_store::find_extension_for_file_ext(file_extension, "fingerprint")?;
         super::run_fingerprint_script(&matched, relative_path, content)
     }
 }

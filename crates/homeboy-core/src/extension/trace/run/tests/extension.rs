@@ -12,7 +12,7 @@ use crate::extension::trace::generic_runner::{
 };
 use crate::extension::trace::overlay::{apply_trace_overlays, TraceOverlayRequest};
 use crate::extension::trace::probes::TraceProbeConfig;
-use crate::extension::{ExtensionCapability, RunnerOutput};
+use crate::extension::RunnerOutput;
 use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::{Component, ScopedExtensionConfig};
 use homeboy_core::engine::invocation::InvocationRequirements;
@@ -20,6 +20,7 @@ use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, ErrorCode};
 use homeboy_core::test_support::{exec_capable_tempdir, with_isolated_home};
 use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::super::runner::{build_trace_runner, failure_from_output, trace_is_unclaimed};
 use super::super::types::{TraceRunWorkflowArgs, TraceRunnerInputs};

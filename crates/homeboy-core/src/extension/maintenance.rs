@@ -1,12 +1,12 @@
 use homeboy_core::error::{Error, Result};
 use std::collections::HashMap;
 
-use super::exec_context;
 use super::lifecycle::{update, update_linked_group};
-use super::update_output::{
+use homeboy_core::extension_store::{available_extension_ids, load_extension};
+use homeboy_extension_contract::exec_context;
+use homeboy_extension_contract::update_output::{
     SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry, UpdateSkippedEntry,
 };
-use homeboy_core::extension_store::{available_extension_ids, load_extension};
 
 /// Update all installed extensions through the same path used by single-extension updates.
 pub fn update_all(force: bool) -> UpdateAllResult {

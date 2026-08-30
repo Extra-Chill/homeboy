@@ -15,7 +15,7 @@ use crate::command_contract::{
 };
 use crate::commands::{adapter, agent_task};
 use crate::core::engine::execution_context::{self, ResolveOptions};
-use homeboy_core::extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 use crate::command_contract::{
     CommandPortabilityContract, LabCommandContract, LabWorkspaceModePolicy,

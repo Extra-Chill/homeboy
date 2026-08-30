@@ -1,6 +1,7 @@
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
+use homeboy_core::extension_store::{discover_extensions, DiscoveredExtension};
 use homeboy_core::extension_update_check::is_git_url;
 use homeboy_core::{build_identity, git};
 use semver::Version;
@@ -861,10 +862,10 @@ fn extension_preflight_failure_result(
 /// Network refresh, setup, and runner convergence remain in their established
 /// phases; this gate only rejects failures that cannot be repaired by a retry.
 fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPreflightBlocker> {
-    extension::discover_extensions()
+    discover_extensions()
         .into_iter()
         .filter_map(|discovered| match discovered {
-            extension::DiscoveredExtension::Invalid(failure) => {
+            DiscoveredExtension::Invalid(failure) => {
                 let extension_id = failure.id;
                 Some(ExtensionPreflightBlocker {
                     extension_id: extension_id.clone(),
@@ -873,10 +874,10 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
                     recovery_command: format!("homeboy extension show {extension_id}"),
                 })
             }
-            extension::DiscoveredExtension::Valid(manifest) => {
+            DiscoveredExtension::Valid(manifest) => {
                 let extension_id = manifest.id.clone();
                 let source_path = manifest.extension_path.as_deref().map(Path::new)?;
-                if extension::is_extension_linked(&extension_id) {
+                if homeboy_core::extension_store::is_extension_linked(&extension_id) {
                     if let Some(blocker) =
                         linked_extension_source_blocker(&extension_id, source_path)
                     {
@@ -887,7 +888,7 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
                     .requires
                     .as_ref()
                     .and_then(|requirements| requirements.homeboy.as_deref());
-                match homeboy_core::extension::evaluate_core_compatibility_for_version(
+                match homeboy_extension_contract::evaluate_core_compatibility_for_version(
                     requires,
                     homeboy_core::extension_update_check::read_source_revision(&extension_id),
                     candidate_version,
@@ -1479,7 +1480,7 @@ fn targeted_runner_message(
 /// lacking a reproducible URL or revision are forwarded as unrefreshable so the
 /// runner can report that condition explicitly.
 fn installed_extension_catalog() -> Vec<ExtensionUpgradeEntry> {
-    installed_extension_catalog_for(&extension::available_extension_ids())
+    installed_extension_catalog_for(&homeboy_core::extension_store::available_extension_ids())
 }
 
 fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpgradeEntry> {
@@ -1487,7 +1488,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
         .iter()
         .cloned()
         .map(
-            |extension_id| match extension::load_extension(&extension_id) {
+            |extension_id| match homeboy_core::extension_store::load_extension(&extension_id) {
                 Ok(manifest) => {
                     let (source_url, update_note) =
                         match extension::resolve_source_url_read_only(&extension_id) {
@@ -1512,12 +1513,12 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                         extension_id: extension_id.clone(),
                         old_version: manifest.version.clone(),
                         new_version: manifest.version,
-                        linked: extension::is_extension_linked(&extension_id),
+                        linked: homeboy_core::extension_store::is_extension_linked(&extension_id),
                         source_path: manifest.extension_path,
                         git_root: None,
                         source_url,
                         source_revision: homeboy_core::extension_update_check::read_source_revision(&extension_id),
-                        source_update: homeboy_core::extension::ExtensionSourceUpdate {
+                        source_update: homeboy_extension_contract::update_output::ExtensionSourceUpdate {
                             update_note,
                             ..Default::default()
                         },
@@ -1532,7 +1533,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                     git_root: None,
                     source_url: None,
                     source_revision: None,
-                    source_update: homeboy_core::extension::ExtensionSourceUpdate {
+                    source_update: homeboy_extension_contract::update_output::ExtensionSourceUpdate {
                         update_note: Some(format!(
                             "unrefreshable extension manifest: {}",
                             err.message
@@ -1713,7 +1714,7 @@ fn complete_upgrade_operation(
 fn update_all_extensions(
     operation_id: Option<&str>,
 ) -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeSkip>) {
-    let extension_ids = extension::available_extension_ids();
+    let extension_ids = homeboy_core::extension_store::available_extension_ids();
     if extension_ids.is_empty() {
         return (vec![], vec![]);
     }
@@ -1728,7 +1729,7 @@ fn update_all_extensions(
     let mut skipped = Vec::new();
 
     for (index, id) in extension_ids.iter().enumerate() {
-        let old_version = extension::load_extension(id)
+        let old_version = homeboy_core::extension_store::load_extension(id)
             .ok()
             .map(|m| m.version.clone())
             .unwrap_or_default();
@@ -1744,7 +1745,7 @@ fn update_all_extensions(
 
         match update_result {
             Ok(result) => {
-                let new_version = extension::load_extension(id)
+                let new_version = homeboy_core::extension_store::load_extension(id)
                     .ok()
                     .map(|m| m.version.clone())
                     .unwrap_or_default();
@@ -2323,13 +2324,14 @@ mod runner_source_upgrade_tests {
             Vec::new(),
             || {
                 events.borrow_mut().push("runner manifest revalidation");
-                let compatible = homeboy_core::extension::evaluate_core_compatibility_for_version(
-                    Some(changed_manifest_requires_homeboy),
-                    None,
-                    "2.1.0",
-                )?
-                .status
-                    != "incompatible";
+                let compatible =
+                    homeboy_extension_contract::evaluate_core_compatibility_for_version(
+                        Some(changed_manifest_requires_homeboy),
+                        None,
+                        "2.1.0",
+                    )?
+                    .status
+                        != "incompatible";
                 Ok((!compatible)
                     .then(|| RunnerUpgradeEntry {
                         runner_id: "lab-a".to_string(),

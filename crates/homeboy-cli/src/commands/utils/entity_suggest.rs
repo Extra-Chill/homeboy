@@ -2,7 +2,6 @@
 
 use homeboy::core::engine::text::levenshtein;
 use homeboy::core::{component, project, server};
-use homeboy_core::extension;
 use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +70,7 @@ fn load_entity_suggestion_snapshot() -> Vec<EntityIdList> {
         },
         EntityIdList {
             entity_type: EntityType::Extension,
-            ids: extension::available_extension_ids(),
+            ids: homeboy_core::extension_store::available_extension_ids(),
         },
     ]
 }

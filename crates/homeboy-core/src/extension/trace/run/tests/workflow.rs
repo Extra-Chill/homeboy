@@ -8,12 +8,13 @@ use crate::extension::trace::attach::TraceAttachment;
 use crate::extension::trace::canonicality::TraceCanonicalPolicy;
 use crate::extension::trace::parsing::{TraceGitProvenance, TraceResults, TraceStatus};
 use crate::extension::trace::probes::TraceProbeConfig;
-use crate::extension::{ExtensionCapability, RunnerOutput};
+use crate::extension::RunnerOutput;
 use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, ErrorCode};
 use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::super::list::run_trace_list_workflow;
 use super::super::provenance::{

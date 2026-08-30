@@ -1,4 +1,3 @@
-use homeboy_core::extension;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -10,7 +9,8 @@ use homeboy::fuzz::{
     FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA,
 };
 use homeboy::rig::{self, RigSpec};
-use homeboy_core::{self, extension::ExtensionCapability};
+use homeboy_core;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use super::report::fuzz_provenance;
@@ -397,7 +397,7 @@ pub(super) fn fuzz_workloads(
 
     if let Some(extensions) = component.extensions.as_ref() {
         for extension_id in extensions.keys() {
-            if let Ok(manifest) = extension::load_extension(extension_id) {
+            if let Ok(manifest) = homeboy_core::extension_store::load_extension(extension_id) {
                 workloads.extend(manifest.fuzz_workloads().iter().map(|workload| {
                     FuzzWorkloadOutput {
                         id: workload.id.clone(),

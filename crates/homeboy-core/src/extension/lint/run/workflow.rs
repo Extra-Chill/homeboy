@@ -15,11 +15,11 @@ use super::types::{LintRunWorkflowArgs, LintRunWorkflowResult, ScopedLintPlan, S
 use crate::extension;
 use crate::extension::lint::baseline as lint_baseline;
 use crate::extension::lint::build_lint_runner;
-use crate::extension::ExtensionCapability;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::finding::HomeboyFinding;
 use homeboy_core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
+use homeboy_extension_contract::ExtensionCapability;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

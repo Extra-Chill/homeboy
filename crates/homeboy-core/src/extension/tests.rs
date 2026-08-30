@@ -1,6 +1,16 @@
 use super::*;
 use homeboy_core::component::{Component, ScopedExtensionConfig};
 use homeboy_core::config::ConfigEntity;
+use homeboy_extension_contract::extension_contract_producer::{
+    ExtensionContractProducerOutputKind, ExtensionContractProducerPhase,
+    ExtensionMaterializationSourceKind, EXTENSION_CONTRACT_PRODUCER_SCHEMA,
+    EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
+};
+use homeboy_extension_contract::manifest_toolchain_config::TestChangedFileRoutingStrategy;
+use homeboy_extension_contract::runner_contract::RunnerStepFilter;
+use homeboy_extension_contract::{
+    ExtensionCapability, ExtensionManifest, TestPassthroughFilterStrategy,
+};
 use std::collections::HashMap;
 
 #[test]

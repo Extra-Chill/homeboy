@@ -11,7 +11,7 @@ use crate::extension::test::{
     normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
     parse_test_results_file_with_spec, parse_test_results_text, parse_test_results_text_with_spec,
 };
-use crate::extension::{ExtensionCapability, ExtensionPhaseTiming};
+use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, ErrorCode};
@@ -27,6 +27,7 @@ pub use homeboy_extension_contract::test_results::{
     TestRuntimeIdentity,
 };
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
+use homeboy_extension_contract::ExtensionCapability;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -469,7 +470,7 @@ impl InventoryProfile {
     /// A declared config that selects no fingerprint files, or names no usable
     /// runner, is refused rather than silently degraded: an inventory bound to
     /// a constant fingerprint would compare equal across unrelated workspaces.
-    fn resolve(config: Option<&crate::extension::TestInventoryConfig>) -> Option<Self> {
+    fn resolve(config: Option<&homeboy_extension_contract::TestInventoryConfig>) -> Option<Self> {
         let Some(config) = config else {
             return Some(Self::cargo());
         };
@@ -5910,7 +5911,7 @@ printf 'not json\n'
 #[cfg(all(test, unix))]
 mod inventory_profile_tests {
     use super::*;
-    use crate::extension::{TestInventoryConfig, TestInventoryRunner};
+    use homeboy_extension_contract::{TestInventoryConfig, TestInventoryRunner};
 
     fn wordpress_config() -> TestInventoryConfig {
         TestInventoryConfig {

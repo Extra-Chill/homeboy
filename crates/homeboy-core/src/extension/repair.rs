@@ -12,7 +12,7 @@ use super::lifecycle::{
     derive_id_from_url, install_linked_shared_assets, rename_dir, resolve_cloned_extension,
     slugify_id, write_requested_source_ref, write_source_metadata,
 };
-use super::manifest::ExtensionManifest;
+use homeboy_extension_contract::ExtensionManifest;
 
 const REPLACE_CLONE_TEMP_PREFIX: &str = ".replace-clone-tmp";
 
@@ -440,7 +440,8 @@ mod tests {
         clean_stale_replace_clone_temps, relink, replace, replace_with_revision,
         unique_replace_clone_temp,
     };
-    use crate::extension::{install, load_extension};
+    use crate::extension::install;
+    use crate::extension_store::load_extension;
     use homeboy_core::test_support::with_isolated_home;
     use std::fs;
     use std::path::Path;

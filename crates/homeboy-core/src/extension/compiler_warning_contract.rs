@@ -2,7 +2,7 @@ use std::path::Path;
 
 use homeboy_engine_primitives::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 
-use super::ExtensionManifest;
+use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CompilerWarningContract {
@@ -168,7 +168,7 @@ mod tests {
         .unwrap();
         extension.id = "example".to_string();
         extension.extension_path = Some(dir.path().to_string_lossy().to_string());
-        extension.scripts = Some(crate::extension::ScriptsConfig {
+        extension.scripts = Some(homeboy_extension_contract::ScriptsConfig {
             compiler_warnings: Some("warnings.sh".to_string()),
             ..Default::default()
         });

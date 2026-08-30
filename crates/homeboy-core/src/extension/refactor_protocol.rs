@@ -1,5 +1,5 @@
-use super::manifest::ExtensionManifest;
 use homeboy_engine_primitives::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
+use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone)]
 pub struct RefactorScriptFailure {

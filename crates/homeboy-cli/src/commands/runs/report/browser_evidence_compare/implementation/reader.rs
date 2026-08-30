@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use homeboy_core::extension::trace::trace_browser_summary_has_signal;
-use homeboy_core::extension::TraceBrowserEvidenceAdapterConfig;
+use homeboy_extension_contract::trace_config::TraceBrowserEvidenceAdapterConfig;
 
 use super::super::types::BrowserEvidenceArtifactLink;
 use super::parse::{

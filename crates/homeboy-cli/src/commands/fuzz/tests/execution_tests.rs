@@ -114,7 +114,7 @@ fn auto_run_ids_scope_identical_payloads_while_explicit_ids_remain_stable() {
 #[test]
 fn fuzz_contract_exposes_only_declared_core_helper_environment() {
     let config = FuzzConfig {
-        runtime_helpers: vec![homeboy_core::extension::RuntimeHelperRequirement {
+        runtime_helpers: vec![homeboy_extension_contract::RuntimeHelperRequirement {
             id: homeboy_core::extension::RUNTIME_SETTINGS_HELPER_ID.to_string(),
             revision: None,
         }],

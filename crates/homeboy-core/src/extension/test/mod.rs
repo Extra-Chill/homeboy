@@ -11,14 +11,17 @@ pub mod run;
 pub mod workflow;
 
 use crate::extension::test::drift::DriftOptions;
-use crate::extension::{
-    ExtensionCapability, ExtensionRunner, TestChangedFileExclusiveEnv, TestChangedFileRouting,
-    TestChangedFileRoutingStrategy, TestPassthroughFilter, TestPassthroughFilterStrategy,
-    TestSecretEnvProjection,
-};
+use crate::extension::ExtensionRunner;
 use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::git;
+use homeboy_extension_contract::manifest_toolchain_config::{
+    TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
+};
+use homeboy_extension_contract::{
+    ExtensionCapability, TestPassthroughFilter, TestPassthroughFilterStrategy,
+    TestSecretEnvProjection,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -1236,7 +1239,7 @@ fn is_direct_changed_test_path(file: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::{TestDriftConfig, TestSettingStringPredicate};
+    use homeboy_extension_contract::{TestDriftConfig, TestSettingStringPredicate};
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;

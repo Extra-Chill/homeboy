@@ -1,7 +1,7 @@
 use super::*;
 use homeboy::core::agent_runtime_manifest::{self, AgentRuntimeManifest};
-use homeboy_core::extension;
-use homeboy_core::{self, extension::ExtensionManifest};
+use homeboy_core;
+use homeboy_extension_contract::ExtensionManifest;
 use types::{DiskProbe, HomeboyProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
 pub(crate) fn tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {
@@ -26,7 +26,7 @@ pub(crate) fn capabilities_from(
 
 pub(crate) fn declared_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
     let mut by_source = declared_extension_tool_specs_by_source(
-        &extension::load_all_extensions().unwrap_or_default(),
+        &homeboy_core::extension_store::load_all_extensions().unwrap_or_default(),
     );
     by_source.extend(declared_tool_specs_by_source_from_manifests(
         &agent_runtime_manifest::discover_agent_runtime_tool_diagnostic_manifests(),

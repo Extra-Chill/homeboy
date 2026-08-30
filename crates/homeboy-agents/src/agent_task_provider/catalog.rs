@@ -300,7 +300,7 @@ impl ExtensionProviderAgentTaskExecutor {
     #[cfg(test)]
     pub(super) fn default_backend_with_policy(
         &self,
-        extensions: Vec<extension::ExtensionManifest>,
+        extensions: Vec<homeboy_extension_contract::ExtensionManifest>,
         config: &defaults::HomeboyConfig,
     ) -> homeboy_core::Result<Option<String>> {
         default_backend_from_policy_sources(None, extensions, || {
@@ -689,14 +689,14 @@ fn default_backend_from_policy(component_id: Option<&str>) -> homeboy_core::Resu
     let component = component_id.and_then(|id| component::load(id).ok());
     default_backend_from_policy_sources(
         component.as_ref(),
-        extension::load_all_extensions().unwrap_or_default(),
+        homeboy_core::extension_store::load_all_extensions().unwrap_or_default(),
         || defaults::load_config().agent_task.default_backend,
     )
 }
 
 pub(super) fn default_backend_from_policy_sources<F>(
     component: Option<&component::Component>,
-    extensions: Vec<extension::ExtensionManifest>,
+    extensions: Vec<homeboy_extension_contract::ExtensionManifest>,
     config_default: F,
 ) -> homeboy_core::Result<Option<String>>
 where

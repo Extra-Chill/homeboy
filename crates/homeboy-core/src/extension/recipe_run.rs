@@ -2,12 +2,12 @@
 
 use homeboy_core::error::{Error, Result};
 
-use crate::extension::manifest::ExtensionManifest;
 use crate::extension_store::DiscoveredExtension;
+use homeboy_extension_contract::{
+    ExtensionManifest, RecipeRunProviderDeclaration, RecipeRunProviderDescriptor,
+};
 
 const AVAILABLE_ID_LIMIT: usize = 20;
-
-pub use homeboy_extension_contract::{RecipeRunProviderDeclaration, RecipeRunProviderDescriptor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeRunRequest {

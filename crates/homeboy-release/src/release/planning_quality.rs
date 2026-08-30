@@ -2,7 +2,8 @@ use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{ActionSafety, CommandEvidence, Error, ExecutableAction, Result};
 use homeboy_core::extension;
-use homeboy_core::{self, extension::ExtensionCapability};
+use homeboy_extension_contract::runner_contract::GENERIC_INFRASTRUCTURE_FAILURE_MARKERS;
+use homeboy_extension_contract::ExtensionCapability;
 use std::path::Path;
 
 use super::scope::ReleaseScope;
@@ -488,7 +489,7 @@ fn is_runner_infrastructure_failure(output: &extension::RunnerOutput) -> bool {
     // Core only matches ecosystem-agnostic infra markers. Ecosystem-specific
     // failure signatures must be detected by the extension that owns that
     // ecosystem, not hardcoded here.
-    extension::GENERIC_INFRASTRUCTURE_FAILURE_MARKERS
+    GENERIC_INFRASTRUCTURE_FAILURE_MARKERS
         .iter()
         .any(|needle| combined.contains(needle))
 }

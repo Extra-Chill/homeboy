@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use homeboy_core::extension;
 use homeboy_core::Error;
+use homeboy_extension_contract::ExtensionManifest;
 
 /// A located definition: the file it lives in and its extracted source block.
 pub(crate) struct LocatedDefinition {
@@ -34,8 +35,8 @@ pub(crate) struct LocatedDefinition {
 /// Enumerate installed extensions that advertise a refactor script and handle at
 /// least one file extension. Shared by definition-finding and the
 /// propagate/collapse scans so they agree on which languages participate.
-pub(crate) fn refactor_capable_extensions() -> Result<Vec<extension::ExtensionManifest>, Error> {
-    let exts: Vec<extension::ExtensionManifest> = extension::load_all_extensions()
+pub(crate) fn refactor_capable_extensions() -> Result<Vec<ExtensionManifest>, Error> {
+    let exts: Vec<ExtensionManifest> = homeboy_core::extension_store::load_all_extensions()
         .unwrap_or_default()
         .into_iter()
         .filter(|m| m.refactor_script().is_some() && !m.provided_file_extensions().is_empty())
@@ -62,7 +63,7 @@ pub(crate) fn extract_definition_source(
     struct_name: &str,
     file_content: &str,
     file_relative: &str,
-    exts: &[extension::ExtensionManifest],
+    exts: &[ExtensionManifest],
 ) -> Option<String> {
     if !file_content.contains(struct_name) {
         return None;
@@ -100,7 +101,7 @@ pub(crate) fn extract_definition_source(
 pub(crate) fn find_definition(
     struct_name: &str,
     root: &Path,
-    exts: &[extension::ExtensionManifest],
+    exts: &[ExtensionManifest],
 ) -> Result<LocatedDefinition, Error> {
     for ext_manifest in exts {
         let handled_exts: Vec<String> = ext_manifest.provided_file_extensions().to_vec();

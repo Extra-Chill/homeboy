@@ -864,9 +864,10 @@ mod tests {
         DeploymentProvenanceEvidence, PreparedDeployArtifact, ReleaseState, ReleaseStateStatus,
     };
     use homeboy_core::component::{Component, ScopedExtensionConfig};
-    use homeboy_core::extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
     use homeboy_core::project::Project;
     use homeboy_core::test_support::with_isolated_home;
+    use homeboy_extension_contract::manifest_capabilities::DeployCapability;
+    use homeboy_extension_contract::{ExtensionManifest, RemotePathRootRule};
     use std::collections::HashMap;
 
     fn component() -> Component {
@@ -888,7 +889,7 @@ mod tests {
     }
 
     fn install_wordpress_extension() {
-        homeboy_core::extension::save_manifest(&ExtensionManifest {
+        homeboy_core::extension_store::save_manifest(&ExtensionManifest {
             id: "wordpress".to_string(),
             name: "WordPress".to_string(),
             version: "1.0.0".to_string(),

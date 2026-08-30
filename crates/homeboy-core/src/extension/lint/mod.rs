@@ -2,9 +2,10 @@ pub mod baseline;
 pub mod report;
 pub mod run;
 
-use crate::extension::{ExtensionCapability, ExtensionRunner};
+use crate::extension::ExtensionRunner;
 use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
+use homeboy_extension_contract::ExtensionCapability;
 
 pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata};
 pub use report::LintCommandOutput;

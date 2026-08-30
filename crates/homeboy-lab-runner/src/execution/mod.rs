@@ -571,7 +571,7 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
     let mut extensions = required_extensions
         .iter()
         .filter_map(|extension_id| {
-            let manifest = homeboy_core::extension::load_extension(extension_id).ok()?;
+            let manifest = homeboy_core::extension_store::load_extension(extension_id).ok()?;
             let path = manifest.extension_path.clone().unwrap_or_else(|| {
                 homeboy_core::paths::extension(extension_id)
                     .map(|path| path.display().to_string())
@@ -584,7 +584,7 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
             Some(ExtensionProvenance {
                 extension_id: extension_id.clone(),
                 path,
-                install_mode: if homeboy_core::extension::is_extension_linked(extension_id) {
+                install_mode: if homeboy_core::extension_store::is_extension_linked(extension_id) {
                     "linked".to_string()
                 } else {
                     "copied".to_string()

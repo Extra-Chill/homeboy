@@ -19,7 +19,7 @@ use super::compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
-use super::ExtensionManifest;
+use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct CompilerWarning {

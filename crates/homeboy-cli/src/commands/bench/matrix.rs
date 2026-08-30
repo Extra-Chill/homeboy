@@ -14,7 +14,7 @@ use homeboy_core::extension::bench::{
     BenchCommandOutput, BenchGate, BenchGateOp, BenchResults, BenchRunExecution,
     BenchRunWorkflowArgs, BenchRunWorkflowResult,
 };
-use homeboy_core::extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::observation::{self, BenchObservationStart};
 use super::{BenchRunArgs, CmdResult};

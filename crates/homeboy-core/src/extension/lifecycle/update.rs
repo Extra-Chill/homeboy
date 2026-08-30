@@ -12,9 +12,10 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::paths;
 
-use super::super::{is_extension_linked, load_extension, ExtensionSourceUpdate};
 use super::install_sources::{install_linked_shared_assets, rename_dir, resolve_cloned_extension};
 use super::{source_metadata, UpdateResult};
+use crate::extension_store::{is_extension_linked, load_extension};
+use homeboy_extension_contract::update_output::ExtensionSourceUpdate;
 
 /// Update an installed extension by pulling latest changes.
 pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
@@ -69,7 +70,7 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
         write_source_metadata(&extension_dir, &source_url, new_revision.clone());
         let refreshed = (|| {
             let manifest = load_extension(extension_id)?;
-            super::super::validate_core_compatibility(
+            homeboy_extension_contract::validate_core_compatibility(
                 "extension",
                 extension_id,
                 manifest
@@ -260,7 +261,7 @@ fn update_extracted_extension(
 
     let refreshed = (|| {
         let manifest = load_extension(extension_id)?;
-        super::super::validate_core_compatibility(
+        homeboy_extension_contract::validate_core_compatibility(
             "extension",
             extension_id,
             manifest
@@ -515,7 +516,7 @@ fn refresh_linked_extension_install(
 ) -> Result<()> {
     install_linked_shared_assets(source_dir, extension_dir, None)?;
     let manifest = load_extension(extension_id)?;
-    super::super::validate_core_compatibility(
+    homeboy_extension_contract::validate_core_compatibility(
         "extension",
         extension_id,
         manifest

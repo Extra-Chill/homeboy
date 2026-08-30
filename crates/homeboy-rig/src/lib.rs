@@ -151,8 +151,8 @@ pub use workloads::{
 
 use discovery::discover_rigs_for_install;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::bench::parsing::{RigPackageEvidence, RigPackageFreshness};
 use homeboy_core::{git, paths};
+use homeboy_extension_contract::{RigPackageEvidence, RigPackageFreshness};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

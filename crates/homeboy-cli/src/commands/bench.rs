@@ -13,7 +13,7 @@ use homeboy_core::extension::bench::{
     BenchComparisonSummaryOutput, BenchListProfile, BenchListWorkflowArgs, BenchListWorkflowResult,
     RigBenchEntry, DEFAULT_REGRESSION_THRESHOLD_PERCENT,
 };
-use homeboy_core::extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
