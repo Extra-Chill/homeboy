@@ -1,6 +1,7 @@
 mod admission;
 mod constants;
 mod execution;
+pub mod extension_update_check;
 mod helpers;
 mod operation;
 mod planning;

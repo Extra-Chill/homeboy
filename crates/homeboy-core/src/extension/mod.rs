@@ -28,7 +28,6 @@ mod setup_env;
 mod summary;
 pub mod test;
 pub mod trace;
-pub mod update_check;
 mod validation;
 
 pub use capability::{build_scenario_runner, ScenarioRunnerOptions};

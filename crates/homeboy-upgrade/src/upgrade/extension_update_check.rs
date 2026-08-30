@@ -13,7 +13,7 @@
 //! [`homeboy_core::update_check_cache`]. The on-disk filename and JSON
 //! schema live here and are unchanged.
 
-use crate::extension::catalog;
+use homeboy_core::extension::catalog;
 use homeboy_core::update_check_cache;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -100,7 +100,7 @@ pub fn run_startup_check() {
     let extensions_behind = collect_updates_with_budget(
         &extension_ids,
         STARTUP_UPDATE_CHECK_BUDGET,
-        homeboy_core::extension_update_check::check_update_available_until,
+        homeboy_core::extension::lifecycle::check_update_available_until,
     );
 
     write_cache(&ExtensionUpdateCache {
@@ -119,7 +119,7 @@ fn collect_updates_with_budget<F>(
     mut check: F,
 ) -> HashMap<String, usize>
 where
-    F: FnMut(&str, Instant) -> Option<homeboy_core::extension_update_check::UpdateAvailable>,
+    F: FnMut(&str, Instant) -> Option<homeboy_core::extension::lifecycle::UpdateAvailable>,
 {
     let deadline = Instant::now() + budget;
     let mut extensions_behind = HashMap::new();

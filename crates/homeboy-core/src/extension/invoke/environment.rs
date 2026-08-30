@@ -30,7 +30,7 @@ pub(crate) fn prepare_capability_run(
             .get("requires")
             .and_then(|requires| requires.get("homeboy"))
             .and_then(serde_json::Value::as_str),
-        homeboy_core::extension_update_check::read_source_revision(&execution.extension_id),
+        homeboy_core::extension::lifecycle::read_source_revision(&execution.extension_id),
     )?;
     let settings_json = build_settings_json_from_manifest(
         &manifest,
@@ -207,7 +207,7 @@ pub(super) fn execute_extension_runtime(
             .requires
             .as_ref()
             .and_then(|requires| requires.homeboy.as_deref()),
-        homeboy_core::extension_update_check::read_source_revision(extension_id),
+        homeboy_core::extension::lifecycle::read_source_revision(extension_id),
     )?;
     let runtime = extension_runtime(&extension)?;
     let run_command = runtime.run_command.as_ref().ok_or_else(|| {

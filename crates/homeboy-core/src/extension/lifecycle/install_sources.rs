@@ -106,7 +106,7 @@ pub(super) fn install_configured_extension(
     source: &str,
     extension_id: &str,
 ) -> Result<InstallResult> {
-    if homeboy_core::extension_update_check::is_git_url(source) {
+    if super::is_git_url(source) {
         return super::install(source, Some(extension_id));
     }
 

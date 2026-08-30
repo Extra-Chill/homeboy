@@ -592,7 +592,7 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
                 },
                 manifest_path,
                 version: Some(manifest.version),
-                source_revision: homeboy_core::extension_update_check::read_source_revision(
+                source_revision: homeboy_core::extension::lifecycle::read_source_revision(
                     extension_id,
                 ),
             })

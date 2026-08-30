@@ -121,7 +121,7 @@ fn refresh_locked_in_root(
 
     let source_stage = store.join(format!("source-{}-{}", runtime_id, nonce()));
     remove_if_exists(&source_stage, "clean runtime refresh source")?;
-    let (source_root, source_revision) = if crate::extension_update_check::is_git_url(source) {
+    let (source_root, source_revision) = if crate::extension::lifecycle::is_git_url(source) {
         git::clone_repo_at_ref(source, &source_stage, revision)?;
         (
             source_stage.as_path(),

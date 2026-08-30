@@ -844,7 +844,7 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 Some(&extension.id),
                 extension.extension_path.as_deref(),
                 runtime_core_constraint(runtime, extension),
-                crate::extension_update_check::read_source_revision(&extension.id),
+                crate::extension::lifecycle::read_source_revision(&extension.id),
             ) {
                 diagnostics.push(diagnostic);
                 continue;
@@ -884,7 +884,7 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 requires: runtime_requires(runtime, extension),
                 extension_path: extension.extension_path.clone(),
                 runtime_path: extension.extension_path.clone(),
-                source_revision: crate::extension_update_check::read_source_revision(&extension.id)
+                source_revision: crate::extension::lifecycle::read_source_revision(&extension.id)
                     .filter(|revision| is_immutable_revision(revision)),
                 extra: runtime
                     .extra

@@ -41,7 +41,7 @@ pub fn update_all(force: bool) -> UpdateAllResult {
 
     for id in &extension_ids {
         let old_version = load_extension(id).ok().map(|m| m.version.clone());
-        let old_source_revision = homeboy_core::extension_update_check::read_source_revision(id);
+        let old_source_revision = homeboy_core::extension::lifecycle::read_source_revision(id);
 
         let update_result = linked_group_result(id, force, &linked_groups, &mut grouped_results);
         match update_result.unwrap_or_else(|| update(id, force)) {
@@ -59,7 +59,7 @@ pub fn update_all(force: bool) -> UpdateAllResult {
                 }
                 if result.source_update.new_source_revision.is_none() {
                     result.source_update.new_source_revision =
-                        homeboy_core::extension_update_check::read_source_revision(id);
+                        homeboy_core::extension::lifecycle::read_source_revision(id);
                 }
 
                 if let Some(repair) = repaired.clone() {

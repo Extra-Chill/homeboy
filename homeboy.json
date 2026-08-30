@@ -673,6 +673,16 @@
           ]
         },
         "name": "extensions-use-canonical-registry-api"
+      },
+      {
+        "forbid": {
+          "glob": "crates/**",
+          "patterns": [
+            "\\b(?:homeboy_core|crate)::extension_update_check::",
+            "\\bextension::update_check\\b"
+          ]
+        },
+        "name": "extensions-use-canonical-lifecycle-source-api"
       }
     ]
   },

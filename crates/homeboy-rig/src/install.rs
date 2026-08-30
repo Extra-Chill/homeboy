@@ -7,7 +7,7 @@
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension::lifecycle;
-use homeboy_core::extension_update_check::is_git_url;
+use homeboy_core::extension::lifecycle::is_git_url;
 use homeboy_core::{git, paths};
 use homeboy_stack::stack;
 use serde::{Deserialize, Serialize};
