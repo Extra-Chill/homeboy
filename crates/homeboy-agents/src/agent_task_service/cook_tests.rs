@@ -7406,6 +7406,17 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             .status()
             .expect("git commit")
             .success());
+        let base_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&source)
+                .output()
+                .expect("git rev-parse runs")
+                .stdout,
+        )
+        .expect("base SHA is UTF-8")
+        .trim()
+        .to_string();
         let components = home.path().join(".config/homeboy/components");
         std::fs::create_dir_all(&components).expect("component registry");
         std::fs::write(
@@ -7423,7 +7434,7 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.to_worktree = "fixture@native-provision".to_string();
-        options.workspace.task_base_sha = Some("fixture-base".to_string());
+        options.workspace.task_base_sha = Some(base_sha);
         options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
@@ -7460,6 +7471,8 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             .expect("bound native destination");
         materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
             .expect("re-admit native Cook destination");
+        validate_cook_workspace(&options)
+            .expect("invocation-created native destination remains valid for provider dispatch");
 
         let record = homeboy_core::worktree::resolve_if_present(&options.workspace.to_worktree)
             .expect("native lookup")
