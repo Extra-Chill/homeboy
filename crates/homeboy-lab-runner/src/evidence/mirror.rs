@@ -916,16 +916,30 @@ pub fn runner_job_log_snapshot_for_session_until(
 }
 
 pub fn mirrored_runner_job_identity(run: &RunRecord) -> Option<(String, String)> {
-    let lab = run.metadata_json.get("lab")?;
-    let runner_id = lab
-        .pointer("/runner/id")
-        .or_else(|| lab.get("runner_id"))
-        .and_then(Value::as_str)?;
-    let job_id = lab
-        .pointer("/remote_job/id")
-        .or_else(|| lab.get("remote_job_id"))
-        .and_then(Value::as_str)?;
-    Some((runner_id.to_string(), job_id.to_string()))
+    let lab_identity = || {
+        let lab = run.metadata_json.get("lab")?;
+        Some((
+            lab.pointer("/runner/id")
+                .or_else(|| lab.get("runner_id"))
+                .and_then(Value::as_str)?,
+            lab.pointer("/remote_job/id")
+                .or_else(|| lab.get("remote_job_id"))
+                .and_then(Value::as_str)?,
+        ))
+    };
+    let execution_identity = || {
+        let record = run.metadata_json.get("runner_execution_record")?;
+        Some((
+            record.get("runner_id").and_then(Value::as_str)?,
+            record
+                .get("job_id")
+                .or_else(|| record.get("execution_id"))
+                .and_then(Value::as_str)?,
+        ))
+    };
+    lab_identity()
+        .or_else(execution_identity)
+        .map(|(runner_id, job_id)| (runner_id.to_string(), job_id.to_string()))
 }
 
 fn fetch_daemon_job(runner_id: &str, job_id: &str) -> Result<Job> {
