@@ -128,7 +128,7 @@ fn project_remote_path_root_rules(project: &Project) -> Vec<RemotePathRootRule> 
         if seen_extensions.insert(id.clone(), ()).is_some() {
             continue;
         }
-        let Ok(manifest) = crate::extension_store::load_extension(&id) else {
+        let Ok(manifest) = crate::extension::catalog::load_extension(&id) else {
             continue;
         };
         let Some(deploy) = manifest.deploy else {

@@ -36,7 +36,7 @@ pub(crate) struct LocatedDefinition {
 /// least one file extension. Shared by definition-finding and the
 /// propagate/collapse scans so they agree on which languages participate.
 pub(crate) fn refactor_capable_extensions() -> Result<Vec<ExtensionManifest>, Error> {
-    let exts: Vec<ExtensionManifest> = homeboy_core::extension_store::load_all_extensions()
+    let exts: Vec<ExtensionManifest> = homeboy_core::extension::catalog::load_all_extensions()
         .unwrap_or_default()
         .into_iter()
         .filter(|m| m.refactor_script().is_some() && !m.provided_file_extensions().is_empty())

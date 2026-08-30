@@ -1543,7 +1543,7 @@ fn run_main_test_workflow_inner(
     let test_context = crate::extension::test::resolve_test_command(component).ok();
     let test_config = test_context
         .as_ref()
-        .and_then(|context| crate::extension_store::load_extension(&context.extension_id).ok())
+        .and_then(|context| crate::extension::catalog::load_extension(&context.extension_id).ok())
         .and_then(|extension| extension.test);
     let result_parse = test_config
         .as_ref()

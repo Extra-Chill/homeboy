@@ -18,7 +18,7 @@ pub(crate) fn toolchain_readiness_preflight_for_extensions(
     let operation = command.split_whitespace().last().unwrap_or_default();
     let mut probes = Vec::new();
     for extension_id in extensions {
-        let manifest = homeboy_core::extension_store::load_extension(extension_id)?;
+        let manifest = homeboy_core::extension::catalog::load_extension(extension_id)?;
         for probe in &manifest.toolchain_readiness {
             if probe.is_legacy_non_executable() {
                 return Err(homeboy_core::Error::validation_invalid_argument(

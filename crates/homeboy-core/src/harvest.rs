@@ -432,7 +432,7 @@ mod tests {
     }
 
     fn install_managed_root_extension(root: &Path) {
-        crate::extension_store::save_manifest(&ExtensionManifest {
+        crate::extension::catalog::save_manifest(&ExtensionManifest {
             id: "managed-host".to_string(),
             name: "Managed Host".to_string(),
             version: "1.0.0".to_string(),

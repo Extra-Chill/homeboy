@@ -2,7 +2,7 @@ use homeboy_core::error::{Error, Result};
 use std::collections::HashMap;
 
 use super::lifecycle::{update, update_linked_group};
-use homeboy_core::extension_store::{available_extension_ids, load_extension};
+use homeboy_core::extension::catalog::{available_extension_ids, load_extension};
 use homeboy_extension_contract::exec_context;
 use homeboy_extension_contract::update_output::{
     SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry, UpdateSkippedEntry,
@@ -27,7 +27,7 @@ pub fn update_all(force: bool) -> UpdateAllResult {
         let Some(config_root) = config_root.as_deref() else {
             break;
         };
-        if homeboy_core::extension_store::is_extension_linked_in_root(config_root, id) {
+        if homeboy_core::extension::catalog::is_extension_linked_in_root(config_root, id) {
             let path = homeboy_core::paths::extension_in_root(config_root, id);
             if let Ok(source) = std::fs::canonicalize(path) {
                 if let Ok(root) = homeboy_core::git::get_git_root(&source.to_string_lossy()) {

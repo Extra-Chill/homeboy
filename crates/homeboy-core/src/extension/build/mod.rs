@@ -78,7 +78,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
         extension_execution::resolve_execution_context(component, ExtensionCapability::Build)
     {
         let extension_id = context.extension_id.clone();
-        let extension = crate::extension_store::load_extension(&extension_id)?;
+        let extension = crate::extension::catalog::load_extension(&extension_id)?;
         if let Some(build) = &extension.build {
             // Priority 1: Extension's bundled build script
             let bundled = build
@@ -679,7 +679,7 @@ fn resolve_changed_scope(
         )));
     };
 
-    let extension = crate::extension_store::load_extension(&context.extension_id)?;
+    let extension = crate::extension::catalog::load_extension(&context.extension_id)?;
     let changed_scope_script = extension
         .build
         .as_ref()
@@ -852,7 +852,7 @@ fn run_pre_build_scripts(
         return Ok(None);
     };
 
-    let extension = crate::extension_store::load_extension(&build_context.extension_id)?;
+    let extension = crate::extension::catalog::load_extension(&build_context.extension_id)?;
     let build_config = match &extension.build {
         Some(b) => b,
         None => return Ok(None),

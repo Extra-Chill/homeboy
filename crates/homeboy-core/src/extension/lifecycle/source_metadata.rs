@@ -1,6 +1,6 @@
 use super::write_source_metadata;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension_store::{is_extension_linked, load_extension};
+use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
 use homeboy_core::extension_update_check::read_source_url;
 use homeboy_core::git;
 use homeboy_core::paths;

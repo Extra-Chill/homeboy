@@ -496,7 +496,8 @@ mod tests {
                 "registry",
                 "printf '{\"component_id\":\"%s\",\"component_path\":\"%s\"}' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"",
             );
-            homeboy_core::extension_store::save_manifest(&publish).expect("save publish extension");
+            homeboy_core::extension::catalog::save_manifest(&publish)
+                .expect("save publish extension");
 
             let result = run_publish(
                 &[publish],
@@ -530,7 +531,8 @@ mod tests {
             let component = tempfile::tempdir_in(std::env::temp_dir()).expect("component tempdir");
             let publish =
                 release_publish_extension("registry", "printf '%s' \"$HOMEBOY_SETTINGS_JSON\"");
-            homeboy_core::extension_store::save_manifest(&publish).expect("save publish extension");
+            homeboy_core::extension::catalog::save_manifest(&publish)
+                .expect("save publish extension");
             let github = GithubConfig {
                 hosts: HashMap::from([(
                     "github.enterprise.test".to_string(),

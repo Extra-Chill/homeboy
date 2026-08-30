@@ -10,7 +10,7 @@ use homeboy::core::context::require_project_base_path;
 use homeboy::core::engine::executor::execute_for_project;
 use homeboy::core::engine::template::{render_map, TemplateVars};
 use homeboy::core::engine::text;
-use homeboy::core::extension_store::load_all_extensions;
+use homeboy::core::extension::catalog::load_all_extensions;
 use homeboy::core::project::{self, Project};
 use homeboy::core::{Error, Result};
 use homeboy_extension_contract::DatabaseCliConfig;

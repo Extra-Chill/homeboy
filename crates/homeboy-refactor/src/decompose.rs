@@ -396,7 +396,7 @@ fn parse_items(file: &str, content: &str) -> Option<Vec<ParsedItem>> {
     // grammar parser remains the fallback for languages without a dedicated
     // refactor parser.
     if let Some(manifest) =
-        homeboy_core::extension_store::find_extension_for_file_ext(ext, "refactor")
+        homeboy_core::extension::catalog::find_extension_for_file_ext(ext, "refactor")
     {
         // Try extension script first
         let command = serde_json::json!({
@@ -442,7 +442,8 @@ fn validate_plan_sources(plan: &DecomposePlan, root: &Path) -> Result<()> {
 
     let ext = Path::new(&plan.file).extension().and_then(|e| e.to_str());
     let grammar = ext.and_then(|ext| {
-        let manifest = homeboy_core::extension_store::find_extension_for_file_ext(ext, "refactor")?;
+        let manifest =
+            homeboy_core::extension::catalog::find_extension_for_file_ext(ext, "refactor")?;
         let ext_path = manifest.extension_path.as_deref()?;
         grammar::load_for_extension_path(Path::new(ext_path), ext)
     });
@@ -553,7 +554,7 @@ fn public_items_for_group(plan: &DecomposePlan, group: &DecomposeGroup) -> Vec<S
 }
 
 fn parse_items_for_group_export(ext: &str, content: &str, file: &str) -> Option<Vec<ParsedItem>> {
-    let manifest = homeboy_core::extension_store::find_extension_for_file_ext(ext, "refactor")?;
+    let manifest = homeboy_core::extension::catalog::find_extension_for_file_ext(ext, "refactor")?;
     crate::move_items::ext_parse_items(&manifest, content, file)
         .or_else(|| crate::move_items::core_parse_items(&manifest, content))
 }

@@ -553,7 +553,7 @@ pub(crate) fn resolve_audit_reference_paths(
         // An unreadable sibling manifest does not get to fail audit for the
         // extensions that are readable (#11122). Only a declared-and-broken
         // setup script is an error.
-        let Ok(manifest) = homeboy_core::extension_store::load_extension(ext_id) else {
+        let Ok(manifest) = homeboy_core::extension::catalog::load_extension(ext_id) else {
             continue;
         };
         if !manifest.has_audit() {

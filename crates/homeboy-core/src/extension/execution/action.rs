@@ -6,8 +6,8 @@ use homeboy_core::server::http::ApiClient;
 use homeboy_engine_primitives::validation;
 
 use super::{build_action_env, execute_extension_command, ExtensionExecutionMode};
+use crate::extension::catalog::load_extension;
 use crate::extension_scope::ExtensionScope;
-use crate::extension_store::load_extension;
 use homeboy_extension_contract::action_types::{ActionType, HttpMethod};
 use homeboy_extension_contract::manifest_action_config::ActionConfig;
 

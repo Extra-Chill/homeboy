@@ -182,7 +182,7 @@ fn trace_runner_capabilities(
         capabilities.extend(parsed);
     }
     if let Some(context) = execution_context {
-        let manifest = crate::extension_store::load_extension(&context.extension_id)?;
+        let manifest = crate::extension::catalog::load_extension(&context.extension_id)?;
         capabilities.extend(manifest.trace_runner_capabilities().iter().cloned());
     }
     Ok(capabilities)

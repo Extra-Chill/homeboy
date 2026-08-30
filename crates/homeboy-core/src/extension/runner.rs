@@ -458,7 +458,7 @@ impl ExtensionRunner {
     fn declared_structured_sidecars(
         &self,
     ) -> Vec<homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration> {
-        crate::extension_store::load_extension(&self.execution_context.extension_id)
+        crate::extension::catalog::load_extension(&self.execution_context.extension_id)
             .map(|manifest| crate::extension::structured_sidecars(&manifest))
             .unwrap_or_default()
     }
@@ -504,7 +504,7 @@ impl ExtensionRunner {
             .map(|extension_id| {
                 Ok((
                     extension_id.clone(),
-                    homeboy_core::extension_store::extension_path(extension_id),
+                    homeboy_core::extension::catalog::extension_path(extension_id),
                 ))
             })
             .collect()

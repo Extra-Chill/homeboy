@@ -43,7 +43,9 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
     let fuzz_config = ctx
         .extension_id
         .as_deref()
-        .and_then(|extension_id| homeboy_core::extension_store::load_extension(extension_id).ok())
+        .and_then(|extension_id| {
+            homeboy_core::extension::catalog::load_extension(extension_id).ok()
+        })
         .and_then(|manifest| manifest.fuzz);
     let workloads = fuzz_workloads(
         &ctx.component,

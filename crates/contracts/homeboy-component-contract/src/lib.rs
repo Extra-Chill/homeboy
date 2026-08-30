@@ -10,7 +10,7 @@
 //! The extension-driven, filesystem-touching behavior on `Component`
 //! (auto-resolving `remote_path` from extension deploy rules) lives in
 //! `homeboy-core` as free functions, because it reaches into core's
-//! `extension_store` and the filesystem.
+//! the extension catalog and the filesystem.
 
 pub mod config;
 pub mod model;

@@ -21,7 +21,7 @@ mod settings;
 
 use super::env_provider;
 use super::runtime_helper;
-use crate::extension_store::load_extension;
+use crate::extension::catalog::load_extension;
 use homeboy_core::extension_execution::ExtensionExecutionContext;
 use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
 use homeboy_extension_contract::exec_context;

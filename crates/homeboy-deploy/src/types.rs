@@ -889,7 +889,7 @@ mod tests {
     }
 
     fn install_wordpress_extension() {
-        homeboy_core::extension_store::save_manifest(&ExtensionManifest {
+        homeboy_core::extension::catalog::save_manifest(&ExtensionManifest {
             id: "wordpress".to_string(),
             name: "WordPress".to_string(),
             version: "1.0.0".to_string(),

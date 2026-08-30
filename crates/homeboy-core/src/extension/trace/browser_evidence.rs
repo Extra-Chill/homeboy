@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-use crate::extension_store::load_all_extensions;
+use crate::extension::catalog::load_all_extensions;
 use homeboy_extension_contract::trace_config::{
     TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
     TraceBrowserSummaryAliasConfig,

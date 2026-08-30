@@ -236,7 +236,7 @@ fn install_transport(id: &str, command: Vec<&str>) {
         }))
         .expect("manifest");
     manifest.id = "cook-notify-test".to_string();
-    homeboy_core::extension_store::save_manifest(&manifest).expect("install transport");
+    homeboy_core::extension::catalog::save_manifest(&manifest).expect("install transport");
 }
 
 fn set_default_transport(id: &str) {

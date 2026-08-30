@@ -9,7 +9,7 @@ use homeboy_extension_contract::ExtensionManifest;
 /// Find a refactor-capable extension for a file based on its extension.
 pub(crate) fn find_refactor_extension(file_path: &str) -> Option<ExtensionManifest> {
     let ext = Path::new(file_path).extension().and_then(|e| e.to_str())?;
-    homeboy_core::extension_store::find_extension_for_file_ext(ext, "refactor")
+    homeboy_core::extension::catalog::find_extension_for_file_ext(ext, "refactor")
 }
 
 /// Try parsing items using the core grammar engine (no extension script needed).

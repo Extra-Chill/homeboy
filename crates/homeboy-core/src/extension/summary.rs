@@ -1,13 +1,13 @@
 use serde::Serialize;
 
 use homeboy_core::error::ExecutableAction;
+use homeboy_core::extension::catalog::{
+    broken_extension_link_repair_actions, discover_extensions, is_extension_linked,
+    DiscoveredExtension, ExtensionManifestFailure,
+};
 use homeboy_core::extension_readiness::{
     extension_ready_status_with, is_extension_compatible, ExtensionReadinessMode,
     ExtensionReadinessState,
-};
-use homeboy_core::extension_store::{
-    broken_extension_link_repair_actions, discover_extensions, is_extension_linked,
-    DiscoveredExtension, ExtensionManifestFailure,
 };
 use homeboy_extension_contract::action_types::ActionType;
 use homeboy_extension_contract::NotificationTransportDescriptor;

@@ -7,7 +7,7 @@ use crate::project::Project;
 use crate::server::execute_local_command_in_dir_with_timeout;
 use homeboy_engine_primitives::template;
 
-use crate::extension_store::load_extension;
+use crate::extension::catalog::load_extension;
 use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]

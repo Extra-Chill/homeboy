@@ -5364,7 +5364,7 @@ mod tests {
         let gate_home = worktree.path().join("tmp/gate-home");
         let _gate_home = EnvVarGuard::set(&[("HOME", gate_home.as_path())]);
         assert_eq!(
-            homeboy_core::extension_store::available_extension_ids(),
+            homeboy_core::extension::catalog::available_extension_ids(),
             vec!["selected-fixture"]
         );
         assert_eq!(

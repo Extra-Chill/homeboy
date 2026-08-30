@@ -440,8 +440,8 @@ mod tests {
         clean_stale_replace_clone_temps, relink, replace, replace_with_revision,
         unique_replace_clone_temp,
     };
+    use crate::extension::catalog::load_extension;
     use crate::extension::lifecycle::install;
-    use crate::extension_store::load_extension;
     use homeboy_core::test_support::with_isolated_home;
     use std::fs;
     use std::path::Path;

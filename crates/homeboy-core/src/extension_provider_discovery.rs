@@ -74,7 +74,7 @@ pub fn validate_installed_extension_provider_discovery(extension_id: &str) -> Re
 /// A manifest that cannot be loaded at all is left to the caller's own manifest
 /// handling rather than reported here as a provider-declaration fault.
 fn validate_declared_agent_task_executors(extension_id: &str) -> Result<()> {
-    let Ok(extension) = crate::extension_store::load_extension(extension_id) else {
+    let Ok(extension) = crate::extension::catalog::load_extension(extension_id) else {
         return Ok(());
     };
 

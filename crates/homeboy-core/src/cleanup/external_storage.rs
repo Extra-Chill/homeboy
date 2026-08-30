@@ -75,7 +75,7 @@ pub struct ExternalStorageEvidence {
 pub fn cleanup_external_storage_from_extensions(
     options: ExternalStorageCleanupOptions,
 ) -> Result<ExternalStorageCleanupOutput> {
-    let providers = crate::extension_store::load_all_extensions()?
+    let providers = crate::extension::catalog::load_all_extensions()?
         .into_iter()
         .flat_map(|extension| extension.external_storage_retention.providers)
         .collect::<Vec<_>>();

@@ -341,7 +341,7 @@ pub(crate) fn generate_duplicate_function_fixes(
         };
 
         let manifest = if use_extract_shared {
-            homeboy_core::extension_store::find_extension_for_file_ext(ext, "refactor")
+            homeboy_core::extension::catalog::find_extension_for_file_ext(ext, "refactor")
         } else {
             None
         };

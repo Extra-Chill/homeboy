@@ -170,7 +170,7 @@ fn scoped_format_arg(root: &Path, path: &Path) -> String {
 fn find_extension_with_format(
     file_ext: &str,
 ) -> Option<homeboy_extension_contract::ExtensionManifest> {
-    crate::extension_store::load_all_extensions()
+    crate::extension::catalog::load_all_extensions()
         .ok()
         .and_then(|manifests| {
             manifests

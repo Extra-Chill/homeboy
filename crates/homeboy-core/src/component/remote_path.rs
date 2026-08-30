@@ -1,7 +1,7 @@
 //! Extension-driven `remote_path` auto-resolution for components.
 //!
 //! These functions used to be `Component` methods, but they reach into core's
-//! `extension_store` (to load extension deploy rules) and the filesystem (to
+//! extension catalog (to load extension deploy rules) and the filesystem (to
 //! test rule file-content conditions), so they cannot live in the leaf
 //! `homeboy-component-contract` crate. They stay in core as free functions over
 //! `&Component` / `&mut Component`.
@@ -13,8 +13,8 @@ use homeboy_component_contract::model::render_remote_path_template;
 use homeboy_component_contract::Component;
 
 use crate::error::Result;
+use crate::extension::catalog::load_extension_in_optional_root;
 use crate::extension_execution::{resolve_owner, resolve_owner_in_root, REMOTE_PATH_SURFACE};
-use crate::extension_store::load_extension_in_optional_root;
 
 /// Auto-resolve `remote_path` from linked extension deploy rules when not
 /// explicitly set.

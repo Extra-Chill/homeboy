@@ -141,7 +141,7 @@ fn resolve_verify_config(
     let comp = component::load(component_id).ok()?;
     let extensions = comp.extensions.as_ref()?;
     for ext_id in extensions.keys() {
-        if let Ok(manifest) = homeboy_core::extension_store::load_extension(ext_id) {
+        if let Ok(manifest) = homeboy_core::extension::catalog::load_extension(ext_id) {
             if let Some(cfg) = manifest.autofix_verify() {
                 return Some(cfg.clone());
             }

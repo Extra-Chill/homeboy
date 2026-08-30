@@ -5,7 +5,7 @@ use homeboy_engine_primitives::identifier;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::extension_store::load_extension;
+use crate::extension::catalog::load_extension;
 
 pub(crate) const EXTENSION_SOURCE_PREPARE_TIMEOUT: Duration = Duration::from_secs(120);
 

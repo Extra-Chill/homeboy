@@ -208,7 +208,7 @@ fn parse_direct_template(
     template = template.replace("{{cliPath}}", &cli_path);
 
     // Expand {{extension_path}}
-    let extension_dir = crate::extension_store::extension_path(extension_id);
+    let extension_dir = crate::extension::catalog::extension_path(extension_id);
     if extension_dir.exists() {
         template = template.replace("{{extension_path}}", &extension_dir.to_string_lossy());
     }

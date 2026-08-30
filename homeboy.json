@@ -624,6 +624,15 @@
           ]
         },
         "name": "rig-owns-no-service-implementation"
+      },
+      {
+        "forbid": {
+          "glob": "crates/**",
+          "patterns": [
+            "\\bextension_store\\b"
+          ]
+        },
+        "name": "extensions-use-canonical-catalog-api"
       }
     ]
   },

@@ -33,7 +33,7 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
     let Some(extension_id) = setting_value(settings, &setting_key) else {
         return Ok(None);
     };
-    let manifest = homeboy_core::extension_store::load_extension(extension_id)?;
+    let manifest = homeboy_core::extension::catalog::load_extension(extension_id)?;
     let command = serde_json::json!({
         "command": "refactor_source",
         "source": source,

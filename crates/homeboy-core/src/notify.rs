@@ -330,7 +330,7 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
         };
     };
 
-    let extensions = match crate::extension_store::load_all_extensions() {
+    let extensions = match crate::extension::catalog::load_all_extensions() {
         Ok(extensions) => extensions,
         Err(err) => return missing_transport(event.kind, &transport_id, err.message),
     };
@@ -489,7 +489,7 @@ mod tests {
             }))
             .unwrap();
         manifest.id = "test-transport".to_string();
-        crate::extension_store::save_manifest(&manifest).unwrap();
+        crate::extension::catalog::save_manifest(&manifest).unwrap();
     }
 
     #[test]
