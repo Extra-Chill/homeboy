@@ -1861,14 +1861,10 @@ pub(crate) fn run_lab_offload_inner(
 
     let mut capability_preflight: Option<RunnerCapabilityPreflight> =
         capability_plan.map(Into::into);
-    if let Some(toolchain_preflight) = execution_toolchain {
-        match &mut capability_preflight {
-            Some(preflight) => preflight
-                .required_toolchain_probes
-                .extend(toolchain_preflight.required_toolchain_probes),
-            None => capability_preflight = Some(toolchain_preflight),
-        }
-    }
+    crate::lab_selection::merge_runner_capability_preflight(
+        &mut capability_preflight,
+        execution_toolchain,
+    );
     if let Some(preflight) = capability_preflight.as_ref() {
         preflight_runner_toolchain_readiness(&runner, preflight)?;
     }

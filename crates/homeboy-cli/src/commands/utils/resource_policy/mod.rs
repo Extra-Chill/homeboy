@@ -82,7 +82,11 @@ pub(crate) fn parsed_command_preflight_input(
         Placement::LabOrLocal => PlacementIntent::LabOrLocal,
     };
     let runner = if let Some(runner) = &cli.runner {
-        RunnerIntent::Explicit(runner.clone())
+        if matches!(&cli.command, Commands::Extension(args) if args.is_readiness_repair_command()) {
+            RunnerIntent::ReadinessRepair(runner.clone())
+        } else {
+            RunnerIntent::Explicit(runner.clone())
+        }
     } else if matches!(&cli.command, Commands::Runs(_))
         && normalized_args
             .iter()
@@ -335,6 +339,7 @@ pub(crate) fn lab_readiness_snapshot(
         available_runner_ids: readiness.available_runner_ids.clone(),
         reasons: readiness.reasons.clone(),
         remediation_commands: readiness.remediation_commands.clone(),
+        repair_admitted_runner_ids: Vec::new(),
     }
 }
 
@@ -1037,6 +1042,7 @@ mod tests {
                             .collect(),
                         reasons: Vec::new(),
                         remediation_commands: Vec::new(),
+                        repair_admitted_runner_ids: Vec::new(),
                     }),
                     selected_runner_id: selected_runner_id.map(str::to_string),
                     generic_route: GenericRoutePolicySnapshot {

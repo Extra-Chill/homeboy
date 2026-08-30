@@ -324,6 +324,10 @@ impl ExtensionArgs {
         )
     }
 
+    pub(crate) fn is_readiness_repair_command(&self) -> bool {
+        matches!(self.command, ExtensionCommand::Setup { .. })
+    }
+
     pub(crate) fn update_command_label(&self) -> &'static str {
         match self.command {
             ExtensionCommand::Refresh { .. } => "extension refresh",
@@ -364,6 +368,7 @@ pub enum ExtensionOutput {
     #[serde(rename = "extension.setup")]
     Setup {
         extension_id: String,
+        before_runtime_diagnostics: ExtensionRuntimeDiagnostics,
         runtime_diagnostics: ExtensionRuntimeDiagnostics,
     },
     #[serde(rename = "extension.install")]
@@ -1424,11 +1429,13 @@ fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
 }
 
 fn setup_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
+    let before_runtime_diagnostics = extension_runtime_diagnostics(extension_id, None);
     let result = run_setup(extension_id)?;
 
     Ok((
         ExtensionOutput::Setup {
             extension_id: extension_id.to_string(),
+            before_runtime_diagnostics,
             runtime_diagnostics: extension_runtime_diagnostics(extension_id, None),
         },
         result.exit_code,

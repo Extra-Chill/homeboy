@@ -49,6 +49,7 @@ mod rig_test_support;
 
 pub use app::AppLauncherAction;
 pub use app::{AppLauncherOptions, AppLauncherReport};
+pub use capabilities::runner_capability_preflight;
 // Reachable through `RigRunArtifactIndex`'s public fields.
 pub use artifact_index::{
     for_run_with_artifacts as artifact_index_for_run_with_artifacts, RigRunArtifactIndex,
