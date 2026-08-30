@@ -1319,8 +1319,12 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         ));
     }
     let store = lifecycle_store.open_observation_initialized()?;
-    let existing_metadata = store
-        .get_run(&record.run_id)?
+    let existing = store.get_run(&record.run_id)?;
+    let homeboy_version = existing
+        .as_ref()
+        .map(|run| run.homeboy_version.clone())
+        .unwrap_or_else(|| Some(build_identity::current().version));
+    let existing_metadata = existing
         .map(|run| run.metadata_json)
         .unwrap_or_else(|| json!({}));
     let mut record = record.clone();
@@ -1346,7 +1350,7 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         status: run_status(record.state).to_string(),
         command: Some("homeboy agent-task".to_string()),
         cwd: None,
-        homeboy_version: Some(build_identity::current().version),
+        homeboy_version,
         git_sha: None,
         rig_id: None,
         metadata_json,

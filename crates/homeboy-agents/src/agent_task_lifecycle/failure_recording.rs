@@ -1531,8 +1531,12 @@ fn project_terminal_artifacts_in_store(
         AgentTaskRunState::Cancelled => "fail",
         _ => return Ok(()),
     };
-    let mut existing_metadata = store
-        .get_run(&record.run_id)?
+    let existing = store.get_run(&record.run_id)?;
+    let homeboy_version = existing
+        .as_ref()
+        .map(|run| run.homeboy_version.clone())
+        .unwrap_or_else(|| Some(homeboy_core::build_identity::current().version));
+    let mut existing_metadata = existing
         .map(|run| run.metadata_json)
         .unwrap_or_else(|| json!({ "agent_task_run": record.run_id }));
     if !existing_metadata.is_object() {
@@ -1551,7 +1555,7 @@ fn project_terminal_artifacts_in_store(
         status: status.to_string(),
         command: Some("homeboy agent-task".to_string()),
         cwd: None,
-        homeboy_version: Some(homeboy_core::build_identity::current().display),
+        homeboy_version,
         git_sha: None,
         rig_id: None,
         metadata_json: existing_metadata,
