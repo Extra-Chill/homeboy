@@ -513,6 +513,7 @@ mod tests {
             source_projections: Vec::new(),
             state_conflicts: Vec::new(),
             next_actions: vec![action("show", format!("homeboy runs show {id}"))],
+            failure: None,
         }
     }
 
@@ -537,6 +538,7 @@ mod tests {
             source_projections: Vec::new(),
             state_conflicts: Vec::new(),
             next_actions: Vec::new(),
+            failure: None,
         }
     }
 

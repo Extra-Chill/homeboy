@@ -156,6 +156,7 @@ fn item_from_active_runner_job(job: ActiveRunnerJobSummary) -> ActivityItem {
         source_projections: Vec::new(),
         state_conflicts: Vec::new(),
         next_actions: actions_for_runner_job(&job.runner_id, &job.job_id, state),
+        failure: None,
     }
 }
 

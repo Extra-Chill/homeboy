@@ -175,7 +175,7 @@ pub struct RunnerLeaselessRecoveryEvidence {
 // Re-exported so internal/CLI call sites resolve unchanged. The
 // From<&JobArtifactMetadata> impl stays below (orphan rule: JobArtifactMetadata
 // is core-owned).
-pub use homeboy_lab_runner_contract::RunnerArtifactRef;
+pub use homeboy_runner_contract::RunnerArtifactRef;
 
 /// Build a `RunnerArtifactRef` from a core job artifact. A free function rather
 /// than a `From` impl because both types are foreign to this crate (orphan rule).
@@ -372,7 +372,7 @@ pub struct RunnerWorkspaceLeaseSet {
     pub leases: Vec<RunnerNamedWorkspaceLease>,
 }
 
-pub use homeboy_lab_runner_contract::RunnerMutationArtifacts;
+pub use homeboy_runner_contract::RunnerMutationArtifacts;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerResult {

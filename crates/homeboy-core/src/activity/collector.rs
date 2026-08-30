@@ -82,6 +82,9 @@ fn merge_item(existing: &mut ActivityItem, incoming: &ActivityItem) {
             &mut replacement.source_projections,
             &existing.source_projections,
         );
+        if replacement.failure.is_none() {
+            replacement.failure = existing.failure.clone();
+        }
         *existing = replacement;
         return;
     }
@@ -94,6 +97,9 @@ fn merge_item(existing: &mut ActivityItem, incoming: &ActivityItem) {
         &mut existing.source_projections,
         &incoming.source_projections,
     );
+    if existing.failure.is_none() {
+        existing.failure = incoming.failure.clone();
+    }
 }
 
 fn source_precedence(item: &ActivityItem) -> u8 {

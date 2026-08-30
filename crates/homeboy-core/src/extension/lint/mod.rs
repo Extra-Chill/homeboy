@@ -70,7 +70,7 @@ pub fn declares_lint_findings_sidecar(component: &Component) -> bool {
     let Ok(manifest) = crate::extension::catalog::load_extension(&context.extension_id) else {
         return false;
     };
-    crate::extension::structured_sidecars(&manifest)
+    crate::extension::catalog::structured_sidecars(&manifest)
         .iter()
         .any(|declaration| declaration.name == LINT_FINDINGS_SIDECAR)
 }

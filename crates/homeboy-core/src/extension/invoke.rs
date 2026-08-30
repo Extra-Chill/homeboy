@@ -249,7 +249,7 @@ pub fn run_deployment_provider(
     dry_run: bool,
 ) -> Result<ExtensionRunResult> {
     let extension = load_extension(extension_id)?;
-    let provider = super::deployment_providers(&extension)
+    let provider = crate::extension::catalog::deployment_providers(&extension)
         .into_iter()
         .find(|provider| provider.id == provider_id)
         .ok_or_else(|| Error::validation_invalid_argument(

@@ -206,7 +206,7 @@ fn prepare_component(
             }),
         )
     })?;
-    let layered = homeboy_core::extension::deployment_provider_layered_input(
+    let layered = homeboy_core::extension::catalog::deployment_provider_layered_input(
         &attachment.extension,
         &attachment.provider,
     )?;

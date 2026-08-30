@@ -28,6 +28,9 @@ pub use execution_placement::{
     CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
 };
 /// Compatibility exports for established Lab runner consumers. Generic runner
+/// artifact results are canonical in `homeboy-runner-contract`.
+pub use homeboy_runner_contract::{RunnerArtifactRef, RunnerMutationArtifacts};
+/// Compatibility exports for established Lab runner consumers. Generic runner
 /// identity, lifecycle, capability, and readiness requests are canonical in
 /// `homeboy-runner-contract`.
 pub use homeboy_runner_contract::{
@@ -88,28 +91,6 @@ pub struct RunnerWorkspaceCurrentSummary {
     pub synthetic_checkout_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub synthetic_checkout_tree: Option<String>,
-}
-
-/// A reference to an artifact produced by a runner job. Plain data describing
-/// where/how to fetch the artifact; behavior-free so core can name it without a
-/// core -> runner edge.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerArtifactRef {
-    pub artifact_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transport: Option<String>,
 }
 
 /// How a runner workspace is synced before a job runs.
@@ -296,26 +277,6 @@ pub struct RunnerResourceGuardViolation {
     pub rss_limit_bytes: u64,
     pub process_count: u64,
     pub process_count_limit: u64,
-}
-
-/// Artifact references produced by a runner mutation (patch, file bundle,
-/// operation log). Pure serde data embedded in core job records.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerMutationArtifacts {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub patch_ref: Option<RunnerArtifactRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_bundle_ref: Option<RunnerArtifactRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_log_ref: Option<RunnerArtifactRef>,
-}
-
-impl RunnerMutationArtifacts {
-    pub fn is_empty(&self) -> bool {
-        self.patch_ref.is_none()
-            && self.file_bundle_ref.is_none()
-            && self.operation_log_ref.is_none()
-    }
 }
 
 /// How a runner session is tunneled. Pure serde data (with small label helpers)

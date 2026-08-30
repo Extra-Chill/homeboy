@@ -151,6 +151,15 @@ pub struct ActivityEvidenceRef {
     pub uri: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityFailure {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
 /// A store-specific view retained with the canonical activity item so state
 /// reconciliation remains inspectable without returning duplicate work items.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +213,8 @@ pub struct ActivityItem {
     pub state_conflicts: Vec<ActivityStateConflict>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<ActivityNextAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ActivityFailure>,
 }
 
 /// The `source_store` of the worktree provider projection. Items from this

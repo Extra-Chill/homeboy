@@ -216,6 +216,7 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
                     .as_ref()
                     .is_ok_and(plan_has_retry_materialization_identity),
         ),
+        failure: None,
     }
 }
 
