@@ -377,7 +377,7 @@ fn run_extension_hook(
         "env": env_map,
     });
 
-    let value = homeboy_extension::execute_action(
+    let value = homeboy_core::extension::execute_action(
         extension_id.trim(),
         action_id.trim(),
         None,

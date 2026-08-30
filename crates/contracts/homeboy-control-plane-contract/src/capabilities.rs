@@ -22,6 +22,7 @@ pub struct ControlPlaneCapabilities {
 pub enum ControlPlaneOperation {
     GetCapabilities,
     GetRun,
+    GetRunEvents,
 }
 
 /// A resource identity this build serves.
@@ -34,6 +35,7 @@ pub enum ControlPlaneResource {
     Attempt,
     Execution,
     ProviderSession,
+    Event,
 }
 
 impl ControlPlaneCapabilities {
@@ -77,7 +79,9 @@ mod tests {
         assert!(
             !document.operations.iter().any(|operation| !matches!(
                 operation,
-                ControlPlaneOperation::GetCapabilities | ControlPlaneOperation::GetRun
+                ControlPlaneOperation::GetCapabilities
+                    | ControlPlaneOperation::GetRun
+                    | ControlPlaneOperation::GetRunEvents
             )),
             "capabilities must not advertise unwired mutations"
         );

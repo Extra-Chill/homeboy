@@ -113,8 +113,8 @@ fn contract_output_exports_core_agent_task_metadata() {
         "homeboy/agent-task-plan-validation/v1"
     );
     assert_eq!(
-        value["schemas"]["lifecycle_action_eligibility"],
-        "homeboy/agent-task-lifecycle-action-eligibility/v1"
+        value["schemas"]["control_plane_action_eligibility"],
+        "homeboy/control-plane-action-eligibility/v1"
     );
     assert_eq!(
         value["schemas"]["artifact_declaration"],

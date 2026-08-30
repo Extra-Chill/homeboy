@@ -13,13 +13,13 @@
 //! this rule, and they disagreed with one another about what to do when the
 //! instrument came back empty:
 //!
-//! * `homeboy-extension/src/test/run.rs::test_run_status` had the best of them
+//! * `homeboy-core/src/extension/test/run.rs::test_run_status` had the best of them
 //!   — "a zero count or an all-skipped result proves only that the runner
 //!   started" — and failed closed to `"failed"`.
 //! * `homeboy-code-audit/src/engine.rs` (#10557 / #10574) hard-errors on an
 //!   empty corpus, because an audit that scanned zero of 1,817 files had been
 //!   reporting `passed: true` in seven seconds for weeks.
-//! * `homeboy-extension/src/lint/run/workflow.rs` had none, and still renders
+//! * `homeboy-core/src/extension/lint/run/workflow.rs` had none, and still renders
 //!   an unconditional `passed` when changed-file scoping resolves to zero
 //!   runnable scopes — including when the changed set was *not* empty.
 //!

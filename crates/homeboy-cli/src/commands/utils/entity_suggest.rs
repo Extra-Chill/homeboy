@@ -2,7 +2,7 @@
 
 use homeboy::core::engine::text::levenshtein;
 use homeboy::core::{component, project, server};
-use homeboy_extension as extension;
+use homeboy_core::extension;
 use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

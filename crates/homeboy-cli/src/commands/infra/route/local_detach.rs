@@ -25,7 +25,7 @@
 //! Detachment alone left the cook PID-owned: durable enough to read, but with
 //! no job record, no checkpoint, and no authority that outlived the launcher.
 //! The launcher now also submits the cook to the daemon as a typed controller
-//! job (`agent_task_service::CookJobDriver`), so the daemon owns the lifecycle
+//! job (`agent_task_service::WorkJobDriver`), so the daemon owns the lifecycle
 //! — durable record, checkpointing, cancellation, and HTTP inspection — while
 //! this launcher still spawns the child.
 //!
@@ -2209,7 +2209,7 @@ mod tests {
 
             assert_eq!(status.run_id, "cook-pending");
             assert_eq!(status.metadata["detached_cook_handoff"]["state"], "pending");
-            assert_eq!(logs.run_id, "cook-pending");
+            assert_eq!(logs.run.as_str(), "cook-pending");
             assert_eq!(
                 agent_task_lifecycle::cancel_run("cook-pending", None)
                     .expect("pending handoff cancel command resolves")
@@ -2560,7 +2560,8 @@ mod tests {
             assert_eq!(
                 agent_task_lifecycle::logs(cook_id)
                     .expect("pending logs command resolves")
-                    .run_id,
+                    .run
+                    .as_str(),
                 cook_id
             );
             assert_eq!(

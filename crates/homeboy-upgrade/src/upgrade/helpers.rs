@@ -1,15 +1,21 @@
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::extension;
+use homeboy_core::extension_update_check::is_git_url;
 use homeboy_core::{build_identity, git};
-use homeboy_extension as extension;
 use semver::Version;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use super::constants::{GITHUB_RELEASES_API, VERSION};
 use super::execution::{
     execute_upgrade, installed_target_build_identity, prepare_source_workspace_for_upgrade,
     resolve_source_workspace,
+};
+use super::operation::{
+    persist_extension_progress, run_with_upgrade_heartbeats, UpgradeOperation,
+    UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
 };
 use super::release_catalog::{self, InstallableSelection, ReleaseEntry, SelectedRelease};
 use super::services;
@@ -221,7 +227,12 @@ pub fn run_upgrade_with_method(
         return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
-    let install_method = method_override.unwrap_or_else(detect_install_method);
+    let (install_method, inferred_from_pin) =
+        resolve_install_method(method_override, pinned_version, detect_install_method);
+
+    if inferred_from_pin {
+        upgrade_phase("install method: binary (inferred from --version)");
+    }
 
     if install_method == InstallMethod::Unknown {
         return Err(Error::validation_invalid_argument(
@@ -381,10 +392,13 @@ pub fn run_upgrade_with_method(
             check.update_available,
         ) {
             // Even when no binary update is needed, still run extension updates.
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
             let (extensions_updated, extension_skips) = if skip_extensions {
+                operation.mark_extensions("skipped", "extension refresh skipped");
                 (vec![], vec![])
             } else {
-                update_all_extensions()
+                operation.set_phase("refreshing installed extensions");
+                update_all_extensions(operation.id())
             };
             let promotion_lease = homeboy_core::runtime_promotion::acquire(
                 "controller upgrade completion",
@@ -423,7 +437,7 @@ pub fn run_upgrade_with_method(
                 &extensions_updated,
                 &extension_skips,
             );
-            return Ok(UpgradeResult {
+            let result = UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
                 previous_version: previous_version.clone(),
@@ -477,7 +491,9 @@ pub fn run_upgrade_with_method(
                 // current binary and need no restart.
                 services_restarted: Vec::new(),
                 services_pending_restart: Vec::new(),
-            });
+                operation_id: None,
+            };
+            return Ok(complete_upgrade_operation(operation, result));
         }
     }
 
@@ -499,6 +515,8 @@ pub fn run_upgrade_with_method(
             extension_revalidation,
         ));
     }
+    let mut operation = UpgradeOperation::start("homeboy upgrade");
+    operation.set_phase("mutating controller");
     let controller_upgrade = run_controller_mutation_after_runner_preflight(
         runner_preflight,
         || {
@@ -547,15 +565,29 @@ pub fn run_upgrade_with_method(
         // before it retain their immutable runtime pin and remain executable.
         let installed_executable = super::execution::active_binary_path()?;
         homeboy_core::controller_runtime::activate_installed_generation(&installed_executable)?;
+        if success {
+            operation.mark_controller_promoted("controller installation completed");
+        }
+    } else if superseded {
+        operation.mark_controller(
+            "superseded",
+            "controller promotion was superseded by the active build",
+        );
+    } else {
+        operation.mark_controller("failed", "controller installation did not complete");
     }
 
     // Auto-update all installed extensions after the upgrade command completes.
     // This prevents CI/local extension version drift that causes baseline
     // mismatches and inconsistent audit findings.
     let (extensions_updated, extension_skips) = if upgrade_completed && !skip_extensions {
-        upgrade_phase("refreshing installed extensions");
-        update_all_extensions()
+        operation.set_phase("refreshing installed extensions");
+        update_all_extensions(operation.id())
+    } else if skip_extensions {
+        operation.mark_extensions("skipped", "extension refresh skipped");
+        (vec![], vec![])
     } else {
+        operation.mark_extensions("not_run", "extension refresh was not attempted");
         (vec![], vec![])
     };
 
@@ -565,7 +597,7 @@ pub fn run_upgrade_with_method(
     )?;
     promotion_lease.assert_generation()?;
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
-        upgrade_phase("refreshing configured runners");
+        operation.set_phase("refreshing configured runners");
         super::with_runner_upgrade(|p| {
             p.upgrade_configured_runners_with_explicit_source_path(
                 force,
@@ -603,7 +635,7 @@ pub fn run_upgrade_with_method(
         &extension_skips,
     );
 
-    Ok(UpgradeResult {
+    let result = UpgradeResult {
         command: "upgrade".to_string(),
         install_method,
         previous_version,
@@ -671,7 +703,9 @@ pub fn run_upgrade_with_method(
         runners_skipped,
         services_restarted,
         services_pending_restart,
-    })
+        operation_id: None,
+    };
+    Ok(complete_upgrade_operation(operation, result))
 }
 
 fn source_upgrade_noop_result(
@@ -710,6 +744,7 @@ fn source_upgrade_noop_result(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+        operation_id: None,
     }
 }
 
@@ -769,6 +804,7 @@ fn runner_preflight_failure_result(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+        operation_id: None,
     }
 }
 
@@ -817,6 +853,7 @@ fn extension_preflight_failure_result(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+        operation_id: None,
     }
 }
 
@@ -850,7 +887,7 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
                     .requires
                     .as_ref()
                     .and_then(|requirements| requirements.homeboy.as_deref());
-                match homeboy_extension::evaluate_core_compatibility_for_version(
+                match homeboy_core::extension::evaluate_core_compatibility_for_version(
                     requires,
                     homeboy_core::extension_update_check::read_source_revision(&extension_id),
                     candidate_version,
@@ -967,6 +1004,24 @@ fn controller_replacement_proceeds(
 /// nothing (#11750).
 fn controller_replacement_is_deliberate(force: bool, pinned_version: Option<&str>) -> bool {
     force || pinned_version.is_some()
+}
+
+/// A published release pin identifies the binary transport when the operator
+/// leaves method selection implicit. Explicit methods remain authoritative so
+/// incompatible combinations reach validation and fail closed.
+fn resolve_install_method<F>(
+    method_override: Option<InstallMethod>,
+    pinned_version: Option<&str>,
+    detect: F,
+) -> (InstallMethod, bool)
+where
+    F: FnOnce() -> InstallMethod,
+{
+    match method_override {
+        Some(method) => (method, false),
+        None if pinned_version.is_some() => (InstallMethod::Binary, true),
+        None => (detect(), false),
+    }
 }
 
 /// `--version` pins a published *release asset*, so it is only meaningful for
@@ -1228,6 +1283,7 @@ fn run_targeted_runner_upgrade(
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
+        operation_id: None,
     })
 }
 
@@ -1435,7 +1491,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                 Ok(manifest) => {
                     let (source_url, update_note) =
                         match extension::resolve_source_url_read_only(&extension_id) {
-                            Ok(source_url) if extension::is_git_url(&source_url) => {
+                            Ok(source_url) if is_git_url(&source_url) => {
                                 (Some(source_url), None)
                             }
                             Ok(source_url) => (
@@ -1461,7 +1517,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                         git_root: None,
                         source_url,
                         source_revision: homeboy_core::extension_update_check::read_source_revision(&extension_id),
-                        source_update: homeboy_extension::ExtensionSourceUpdate {
+                        source_update: homeboy_core::extension::ExtensionSourceUpdate {
                             update_note,
                             ..Default::default()
                         },
@@ -1476,7 +1532,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                     git_root: None,
                     source_url: None,
                     source_revision: None,
-                    source_update: homeboy_extension::ExtensionSourceUpdate {
+                    source_update: homeboy_core::extension::ExtensionSourceUpdate {
                         update_note: Some(format!(
                             "unrefreshable extension manifest: {}",
                             err.message
@@ -1642,10 +1698,21 @@ pub(crate) fn should_sync_after_upgrade(new_version: Option<&str>) -> bool {
     new_version.is_some()
 }
 
+fn complete_upgrade_operation(
+    mut operation: UpgradeOperation,
+    mut result: UpgradeResult,
+) -> UpgradeResult {
+    operation.finish_completed(&result);
+    result.operation_id = operation.id().map(str::to_string);
+    result
+}
+
 /// Update all installed extensions. Best-effort — failures are logged, and the
 /// extension is added to the skipped list carrying its error reason so the
 /// structured result can say *why* it was skipped (#12181).
-fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeSkip>) {
+fn update_all_extensions(
+    operation_id: Option<&str>,
+) -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeSkip>) {
     let extension_ids = extension::available_extension_ids();
     if extension_ids.is_empty() {
         return (vec![], vec![]);
@@ -1660,13 +1727,22 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeS
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
 
-    for id in &extension_ids {
+    for (index, id) in extension_ids.iter().enumerate() {
         let old_version = extension::load_extension(id)
             .ok()
             .map(|m| m.version.clone())
             .unwrap_or_default();
 
-        match extension::update(id, false) {
+        let current = index + 1;
+        let total = extension_ids.len();
+        report_extension_progress(operation_id, id, current, total, Duration::ZERO);
+        let update_result = run_with_upgrade_heartbeats(
+            UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
+            |elapsed| report_extension_progress(operation_id, id, current, total, elapsed),
+            || extension::update(id, false),
+        );
+
+        match update_result {
             Ok(result) => {
                 let new_version = extension::load_extension(id)
                     .ok()
@@ -1735,6 +1811,25 @@ fn update_all_extensions() -> (Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeS
     }
 
     (updated, skipped)
+}
+
+fn report_extension_progress(
+    operation_id: Option<&str>,
+    extension_id: &str,
+    current: usize,
+    total: usize,
+    elapsed: Duration,
+) {
+    if let Some(run_id) = operation_id {
+        persist_extension_progress(run_id, extension_id, current, total, elapsed);
+        return;
+    }
+    upgrade_phase(&super::operation::upgrade_extension_progress_message(
+        extension_id,
+        current,
+        total,
+        elapsed,
+    ));
 }
 
 /// Detect unrefreshed symlinked extension clones and log a loud, actionable
@@ -1963,12 +2058,12 @@ fn git_commits_behind_upstream(git_root: &Path) -> Option<u32> {
     count.trim().parse::<u32>().ok()
 }
 
-fn portable_extension_source_url(result: &homeboy_extension::UpdateResult) -> Option<String> {
+fn portable_extension_source_url(result: &homeboy_core::extension::UpdateResult) -> Option<String> {
     if let Some(git_root) = result.git_root.as_ref() {
         return git::remote_origin_url(git_root);
     }
 
-    if extension::is_git_url(&result.url) {
+    if is_git_url(&result.url) {
         Some(result.url.clone())
     } else {
         None
@@ -2228,7 +2323,7 @@ mod runner_source_upgrade_tests {
             Vec::new(),
             || {
                 events.borrow_mut().push("runner manifest revalidation");
-                let compatible = homeboy_extension::evaluate_core_compatibility_for_version(
+                let compatible = homeboy_core::extension::evaluate_core_compatibility_for_version(
                     Some(changed_manifest_requires_homeboy),
                     None,
                     "2.1.0",
@@ -3570,6 +3665,44 @@ mod pinned_release_tests {
                 "refusal must offer the method that honors a pin: {:?}",
                 error.hints
             );
+        }
+    }
+
+    #[test]
+    fn a_pin_infers_binary_for_a_cargo_installed_controller() {
+        let (method, inferred) = resolve_install_method(None, Some("v0.332.0"), || {
+            panic!("a release pin must not use the detected cargo install method")
+        });
+
+        assert_eq!(method, InstallMethod::Binary);
+        assert!(inferred);
+        assert!(validate_pinned_version(Some("v0.332.0"), method).is_ok());
+    }
+
+    #[test]
+    fn omitted_method_without_a_pin_uses_detection() {
+        let (method, inferred) = resolve_install_method(None, None, || InstallMethod::Secondary);
+
+        assert_eq!(method, InstallMethod::Secondary);
+        assert!(!inferred);
+    }
+
+    #[test]
+    fn an_explicit_incompatible_method_with_a_pin_fails_closed() {
+        for method in [
+            InstallMethod::Source,
+            InstallMethod::Homebrew,
+            InstallMethod::Secondary,
+        ] {
+            let (resolved, inferred) =
+                resolve_install_method(Some(method), Some("v0.332.0"), || {
+                    panic!("explicit methods must not trigger detection")
+                });
+
+            assert_eq!(resolved, method);
+            assert!(!inferred);
+            validate_pinned_version(Some("v0.332.0"), resolved)
+                .expect_err("an explicit incompatible method must reject the pin");
         }
     }
 

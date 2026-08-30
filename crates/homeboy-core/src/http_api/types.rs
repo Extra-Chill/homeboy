@@ -28,35 +28,80 @@ pub struct HttpApiResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpEndpoint {
     Components,
-    Component { id: String },
-    ComponentStatus { id: String },
-    ComponentChanges { id: String },
+    Component {
+        id: String,
+    },
+    ComponentStatus {
+        id: String,
+    },
+    ComponentChanges {
+        id: String,
+    },
     Rigs,
-    Rig { id: String },
-    RigCheck { id: String },
+    Rig {
+        id: String,
+    },
+    RigCheck {
+        id: String,
+    },
     Stacks,
-    Stack { id: String },
-    StackStatus { id: String },
+    Stack {
+        id: String,
+    },
+    StackStatus {
+        id: String,
+    },
     Runs,
-    Run { id: String },
-    RunArtifacts { id: String },
-    RunArtifactContent { id: String, artifact_id: String },
-    RunFindings { id: String },
+    Run {
+        id: String,
+    },
+    RunArtifacts {
+        id: String,
+    },
+    RunArtifactContent {
+        id: String,
+        artifact_id: String,
+    },
+    RunFindings {
+        id: String,
+    },
     AuditRuns,
     BenchRuns,
     Activity,
-    ActivityItem { id: String },
+    ActivityItem {
+        id: String,
+    },
     ControlPlaneCapabilities,
-    ControlPlaneRun { id: String },
+    ControlPlaneRun {
+        id: String,
+    },
+    ControlPlaneRunEvents {
+        id: String,
+        cursor: Option<homeboy_control_plane_contract::EventCursor>,
+    },
     Jobs,
-    Job { id: String },
-    JobEvents { id: String },
-    JobCancel { id: String },
-    JobProjectionCancel { id: String },
-    JobReadyRun { kind: JobReadyRunKind },
+    Job {
+        id: String,
+    },
+    JobEvents {
+        id: String,
+    },
+    JobCancel {
+        id: String,
+    },
+    JobProjectionCancel {
+        id: String,
+    },
+    JobReadyRun {
+        kind: JobReadyRunKind,
+    },
     SandboxTools,
-    SandboxTool { id: String },
-    SandboxToolRun { id: String },
+    SandboxTool {
+        id: String,
+    },
+    SandboxToolRun {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +164,7 @@ impl HttpEndpoint {
             Self::ActivityItem { .. } => "activity.show",
             Self::ControlPlaneCapabilities => "control_plane.capabilities",
             Self::ControlPlaneRun { .. } => "control_plane.runs.show",
+            Self::ControlPlaneRunEvents { .. } => "control_plane.runs.events",
             Self::Jobs => "jobs.list",
             Self::Job { .. } => "jobs.show",
             Self::JobEvents { .. } => "jobs.events",

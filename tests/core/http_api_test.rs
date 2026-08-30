@@ -8,9 +8,11 @@ use crate::observation::{
     ArtifactRecord, NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 use homeboy_control_plane_contract::{
-    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneOperation,
-    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, MissionId,
-    RunId, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent,
+    ControlPlaneEventPage, ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneResource,
+    ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, EventCursor, EventId, MissionId,
+    RunId, TaskId, CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 
 use crate::test_support::with_isolated_home;
@@ -255,15 +257,62 @@ fn fixture_control_plane_run() -> ControlPlaneRun {
     resource
 }
 
+fn fixture_control_plane_events(cursor: Option<&EventCursor>) -> ControlPlaneEventPage {
+    let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
+    let after = cursor
+        .map(|cursor| cursor.as_str().parse::<u64>().expect("fixture cursor"))
+        .unwrap_or(0);
+    let events = ["running", "succeeded"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, state)| {
+            let sequence = (index + 1) as u64;
+            ControlPlaneEvent {
+                schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
+                event: EventId::new(format!("{CONTROL_PLANE_FIXTURE_RUN}:event:{sequence}"))
+                    .expect("event"),
+                sequence,
+                occurred_at: Some(format!("2026-01-01T00:00:0{sequence}Z")),
+                mission: Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission")),
+                run: run.clone(),
+                task: Some(TaskId::new("task-a").expect("task")),
+                attempt: None,
+                execution: None,
+                kind: "task.state_changed".to_string(),
+                source: ControlPlaneEventSource {
+                    component: "fixture".to_string(),
+                    instance: None,
+                },
+                data: serde_json::json!({ "state": state }),
+                artifacts: Vec::new(),
+                evidence: Vec::new(),
+            }
+        })
+        .filter(|event| event.sequence > after)
+        .collect::<Vec<_>>();
+    let next_cursor = events
+        .last()
+        .map(|event| EventCursor::new(event.sequence.to_string()).expect("cursor"))
+        .or_else(|| cursor.cloned());
+    ControlPlaneEventPage {
+        schema: CONTROL_PLANE_EVENT_PAGE_SCHEMA.to_string(),
+        run,
+        events,
+        next_cursor,
+        has_more: false,
+    }
+}
+
 struct FixtureControlPlaneProvider;
 
 impl ControlPlaneProvider for FixtureControlPlaneProvider {
     fn capabilities(&self) -> ControlPlaneCapabilities {
         ControlPlaneCapabilities::new(
-            vec![ControlPlaneResource::Run],
+            vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
             vec![
                 ControlPlaneOperation::GetCapabilities,
                 ControlPlaneOperation::GetRun,
+                ControlPlaneOperation::GetRunEvents,
             ],
         )
     }
@@ -276,6 +325,24 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 "agent-task run not found: {requested_id}"
             )))
         }
+    }
+
+    fn events(
+        &self,
+        requested_id: &RunId,
+        cursor: Option<&EventCursor>,
+    ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
+        if requested_id.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found(format!(
+                "agent-task run not found: {requested_id}"
+            )));
+        }
+        if cursor.is_some_and(|cursor| cursor.as_str().parse::<u64>().is_err()) {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane event cursor is invalid",
+            ));
+        }
+        Ok(fixture_control_plane_events(cursor))
     }
 }
 
@@ -293,6 +360,17 @@ fn routes_versioned_control_plane_endpoints() {
         http_api::route(HttpMethod::Get, "/v1/control-plane/runs/run-abc").expect("route"),
         HttpEndpoint::ControlPlaneRun {
             id: "run-abc".to_string()
+        }
+    );
+    assert_eq!(
+        http_api::route(
+            HttpMethod::Get,
+            "/v1/control-plane/runs/run-abc/events?cursor=event-page-2",
+        )
+        .expect("route"),
+        HttpEndpoint::ControlPlaneRunEvents {
+            id: "run-abc".to_string(),
+            cursor: Some(EventCursor::new("event-page-2").expect("cursor")),
         }
     );
     http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc")
@@ -323,7 +401,8 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
         capabilities.operations,
         vec![
             ControlPlaneOperation::GetCapabilities,
-            ControlPlaneOperation::GetRun
+            ControlPlaneOperation::GetRun,
+            ControlPlaneOperation::GetRunEvents,
         ]
     );
 }
@@ -364,6 +443,59 @@ fn control_plane_run_lookup_miss_is_a_structured_not_found() {
     assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
     assert!(!error.retryable);
     assert!(error.message.contains("no-such-agent-task-run"));
+}
+
+#[test]
+fn control_plane_http_events_resume_from_an_opaque_typed_cursor() {
+    register_fixture_control_plane_provider();
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/events?cursor=1"),
+        body: None,
+    })
+    .expect("events");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.events");
+    let result: ControlPlaneResult<ControlPlaneEventPage> =
+        serde_json::from_value(response.body).expect("result");
+    let page = result.resource.expect("resource");
+    assert_eq!(page.schema, CONTROL_PLANE_EVENT_PAGE_SCHEMA);
+    assert_eq!(page.run.as_str(), CONTROL_PLANE_FIXTURE_RUN);
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].sequence, 2);
+    assert_eq!(page.events[0].data["state"], "succeeded");
+    assert_eq!(
+        page.next_cursor.as_ref().map(EventCursor::as_str),
+        Some("2")
+    );
+}
+
+#[test]
+fn control_plane_event_errors_are_typed() {
+    register_fixture_control_plane_provider();
+    for (path, status, class) in [
+        (
+            "/v1/control-plane/runs/no-such-agent-task-run/events",
+            404,
+            ControlPlaneErrorClass::NotFound,
+        ),
+        (
+            "/v1/control-plane/runs/agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751/events?cursor=invalid",
+            400,
+            ControlPlaneErrorClass::InvalidArgument,
+        ),
+    ] {
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: path.to_string(),
+            body: None,
+        })
+        .expect("typed error");
+        assert_eq!(response.status, status);
+        let result: ControlPlaneResult<ControlPlaneEventPage> =
+            serde_json::from_value(response.body).expect("result");
+        assert_eq!(result.error.expect("error").class, class);
+    }
 }
 
 #[test]

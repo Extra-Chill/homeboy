@@ -63,7 +63,7 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(ext_obj) = json.get("extensions").and_then(|e| e.get(ext_id.as_str())) {
                     if let Ok(requirements) = serde_json::from_value::<
-                        homeboy_extension::RuntimeRequirementsConfig,
+                        homeboy_core::extension::RuntimeRequirementsConfig,
                     >(ext_obj.clone())
                     {
                         apply_component_runtime_requirements(
@@ -79,7 +79,7 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
     }
 
     let extension = if let Some(ref ext_id) = extension_id {
-        homeboy_extension::load_extension(ext_id).ok()
+        homeboy_core::extension::load_extension(ext_id).ok()
     } else {
         None
     };
@@ -124,9 +124,9 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
 }
 
 fn run_component_env_detector(
-    extension: &homeboy_extension::ExtensionManifest,
+    extension: &homeboy_core::extension::ExtensionManifest,
     component_path: &Path,
-) -> homeboy::core::Result<Option<homeboy_extension::RuntimeRequirementsConfig>> {
+) -> homeboy::core::Result<Option<homeboy_core::extension::RuntimeRequirementsConfig>> {
     let Some(component_env) = extension.component_env.as_ref() else {
         return Ok(None);
     };
@@ -175,23 +175,24 @@ fn run_component_env_detector(
         return Ok(None);
     }
 
-    let detected = serde_json::from_str::<homeboy_extension::RuntimeRequirementsConfig>(trimmed)
-        .map_err(|error| {
-            homeboy::core::Error::validation_invalid_json(
-                error,
-                Some(format!(
-                    "parse component env detector output for extension '{}'",
-                    extension.id
-                )),
-                Some(trimmed.chars().take(200).collect()),
-            )
-        })?;
+    let detected =
+        serde_json::from_str::<homeboy_core::extension::RuntimeRequirementsConfig>(trimmed)
+            .map_err(|error| {
+                homeboy::core::Error::validation_invalid_json(
+                    error,
+                    Some(format!(
+                        "parse component env detector output for extension '{}'",
+                        extension.id
+                    )),
+                    Some(trimmed.chars().take(200).collect()),
+                )
+            })?;
 
     Ok(Some(detected))
 }
 
 fn apply_component_env_detector_output(
-    detected: homeboy_extension::RuntimeRequirementsConfig,
+    detected: homeboy_core::extension::RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
 ) {
     apply_component_runtime_requirements(detected, runtimes, "component", true);
@@ -199,7 +200,7 @@ fn apply_component_env_detector_output(
 
 fn apply_extension_runtime_requirements(
     extension_id: &str,
-    runtime: &homeboy_extension::RuntimeRequirementsConfig,
+    runtime: &homeboy_core::extension::RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
 ) {
     let source = format!("extension:{}", extension_id);
@@ -207,7 +208,7 @@ fn apply_extension_runtime_requirements(
 }
 
 fn apply_component_runtime_requirements(
-    requirements: homeboy_extension::RuntimeRequirementsConfig,
+    requirements: homeboy_core::extension::RuntimeRequirementsConfig,
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
     source: &str,
     overwrite: bool,
@@ -254,7 +255,7 @@ mod tests {
 
     #[test]
     fn extension_runtime_requirements_fill_missing_component_versions() {
-        let runtime: homeboy_extension::RuntimeRequirementsConfig =
+        let runtime: homeboy_core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "node": { "version": "24" },
@@ -292,7 +293,7 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script, perms).expect("chmod detector");
 
-        let mut extension: homeboy_extension::ExtensionManifest =
+        let mut extension: homeboy_core::extension::ExtensionManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "Demo",
                 "version": "1.0.0",
@@ -312,7 +313,7 @@ mod tests {
 
     #[test]
     fn runtime_requirements_accept_canonical_shape_only() {
-        let generic: homeboy_extension::RuntimeRequirementsConfig =
+        let generic: homeboy_core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "python": { "version": "3.12" },
@@ -327,7 +328,7 @@ mod tests {
 
     #[test]
     fn component_env_detector_output_overrides_component_values_before_runtime_defaults() {
-        let runtime: homeboy_extension::RuntimeRequirementsConfig =
+        let runtime: homeboy_core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "node": { "version": "24" },
@@ -369,7 +370,7 @@ mod tests {
 
     #[test]
     fn component_versions_win_over_extension_runtime_requirements() {
-        let runtime: homeboy_extension::RuntimeRequirementsConfig =
+        let runtime: homeboy_core::extension::RuntimeRequirementsConfig =
             serde_json::from_value(serde_json::json!({
                 "runtimes": {
                     "node": { "version": "24" },

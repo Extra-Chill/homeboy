@@ -32,7 +32,7 @@ use homeboy_core::config::{from_str, set_json_pointer, to_string_pretty};
 use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::local_files;
 use homeboy_core::engine::text;
-use homeboy_extension::ExtensionManifest;
+use homeboy_core::extension::ExtensionManifest;
 use homeboy_extension_contract::HookEvent;
 use serde_json::Value;
 use std::path::Path;

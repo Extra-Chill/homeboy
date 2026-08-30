@@ -306,6 +306,91 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
 }
 
 #[test]
+fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source repository");
+        let worktrees = tempfile::tempdir().expect("linked worktree root");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        fs::write(source.path().join("file.txt"), "linked source\n").expect("source file");
+        git(source.path(), &["init", "--quiet", "-b", "main"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test User"]);
+        git(source.path(), &["add", "file.txt"]);
+        git(source.path(), &["commit", "--quiet", "-m", "source"]);
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "file:///does-not-exist/linked-worktree.git",
+            ],
+        );
+        let linked = worktrees.path().join("task-worktree");
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().expect("linked path"),
+                "HEAD",
+            ],
+        );
+        assert!(
+            linked.join(".git").is_file(),
+            "provider-managed linked task worktree uses a gitdir pointer file"
+        );
+        let source_revision = git_output(&linked, &["rev-parse", "HEAD"]).expect("linked HEAD");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-linked-snapshot-git","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (synced, exit_code) = sync_workspace(
+            "lab-linked-snapshot-git",
+            RunnerWorkspaceSyncOptions {
+                path: linked.display().to_string(),
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        )
+        .expect("snapshot-git materializes a linked worktree");
+
+        let remote = Path::new(&synced.remote_path);
+        assert_eq!(exit_code, 0);
+        assert_eq!(synced.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
+        assert!(
+            remote.join(".git").is_dir(),
+            "handoff workspace must own a Git directory rather than a copied gitdir pointer"
+        );
+        assert_eq!(
+            git_output(remote, &["rev-parse", "--is-inside-work-tree"]).expect("work tree"),
+            "true"
+        );
+        assert_eq!(
+            git_output(remote, &["rev-parse", "--verify", "-q", "HEAD"]).expect("HEAD"),
+            source_revision
+        );
+        assert_eq!(
+            fs::read_to_string(remote.join("file.txt")).expect("linked source content"),
+            "linked source\n"
+        );
+        super::super::util::verify_valid_git_representation(remote)
+            .expect("verified valid .git representation before handoff");
+    });
+}
+
+#[test]
 fn snapshot_git_fails_before_handoff_when_controller_closure_is_unavailable() {
     let _path_guard = PATH_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -1872,7 +1957,7 @@ fn snapshot_staging_uses_one_manifest_policy_for_nested_ignored_directories() {
 fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_execution() {
     let workspace = tempfile::tempdir().expect("workspace");
     let source = workspace.path().join("source");
-    let tracked_build = source.join("crates/homeboy-extension/src/build");
+    let tracked_build = source.join("crates/homeboy-core/src/extension/build");
     fs::create_dir_all(&tracked_build).expect("tracked build source directory");
     fs::create_dir_all(source.join("build")).expect("ignored root build directory");
     fs::write(tracked_build.join("mod.rs"), "pub mod local_permissions;\n")
@@ -1890,7 +1975,7 @@ fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_ex
     assert_eq!(source_manifest, staged_manifest);
     assert_eq!(staged_manifest, current_manifest);
     assert!(staged_source
-        .join("crates/homeboy-extension/src/build/mod.rs")
+        .join("crates/homeboy-core/src/extension/build/mod.rs")
         .is_file());
     assert!(!staged_source.join("build").exists());
 
@@ -1902,7 +1987,7 @@ fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_ex
         homeboy_core::engine::shell::quote_arg(&provider_workspace.display().to_string()),
         homeboy_core::engine::shell::quote_arg(
             &provider_workspace
-                .join("crates/homeboy-extension/src/build/mod.rs")
+                .join("crates/homeboy-core/src/extension/build/mod.rs")
                 .display()
                 .to_string()
         ),

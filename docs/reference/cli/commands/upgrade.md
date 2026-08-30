@@ -15,7 +15,7 @@ Global flags apply to every command and are documented once in [the root command
 ## `homeboy upgrade`
 
 ```sh
-homeboy upgrade [OPTIONS]
+homeboy upgrade [OPTIONS] [COMMAND]
 ```
 
 Upgrade Homeboy to the latest version
@@ -31,4 +31,20 @@ Upgrade Homeboy to the latest version
 | `--runner-only` | flag | Refresh selected runners without promoting the controller |
 | `--method` | `<METHOD>` | Override install method detection (homebrew\|cargo\|source\|binary) |
 | `--source-path` | `<PATH>` | Homeboy source checkout to use with --method source |
-| `--version` | `<TAG>` | Pin the published release tag to install instead of the newest installable release |
+| `--version` | `<TAG>` | Pin a published release tag; infers --method binary when omitted |
+
+| Subcommand | Summary |
+| --- | --- |
+| `homeboy upgrade status` | Inspect a persisted upgrade operation |
+
+## `homeboy upgrade status`
+
+```sh
+homeboy upgrade status [ID]
+```
+
+Inspect a persisted upgrade operation
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `[ID]` | no | Operation id from a previous `homeboy upgrade`. Defaults to the latest upgrade run |

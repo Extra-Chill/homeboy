@@ -25,12 +25,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::bench::parsing::{
+use crate::extension::bench::parsing::{
     parse_bench_results_str, BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy,
     BenchResults, BenchScenario,
 };
-use crate::bench::report::{BenchComparisonDiff, BenchPhaseGroups};
-use crate::bench::test_support::scenario_with_iterations;
+use crate::extension::bench::report::{BenchComparisonDiff, BenchPhaseGroups};
+use crate::extension::bench::test_support::scenario_with_iterations;
 
 fn policy(direction: BenchMetricDirection, phase: Option<BenchMetricPhase>) -> BenchMetricPolicy {
     BenchMetricPolicy {

@@ -74,6 +74,8 @@ Aggregate cleanup across configured external worktree providers
 | `--provider` | `<ID>` | Cleanup a specific configured provider. Repeatable |
 | `--all-providers` | flag | Cleanup every enabled configured provider |
 | `--apply` | flag | Apply cleanup. Omit for provider preview/dry-run output |
+| `--provider-run-id` | `<ID>` | Reviewed provider run identity. Must be paired with `--provider-plan-id` and exactly one provider. Omit both to plan then apply |
+| `--provider-plan-id` | `<ID>` | Reviewed provider plan identity. Must be paired with `--provider-run-id` and exactly one provider. Omit both to plan then apply |
 
 ## `homeboy cleanup retained-storage`
 

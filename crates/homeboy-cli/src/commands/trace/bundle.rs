@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use homeboy::rig::trace_experiment;
-use homeboy_extension::trace as extension_trace;
+use homeboy_core::extension::trace as extension_trace;
 
 use super::output::{
     fmt_delta_avg_ms, fmt_delta_ms, fmt_ms, render_compare_markdown, TraceAggregateInput,

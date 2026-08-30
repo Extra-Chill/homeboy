@@ -2727,7 +2727,7 @@ fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
     let messages: Vec<&str> = log
         .events
         .iter()
-        .filter_map(|event| event.message.as_deref())
+        .filter_map(|event| event.data["message"].as_str())
         .collect();
     assert!(
         messages
@@ -2780,15 +2780,16 @@ fn cancelled_local_provider_retains_runtime_evidence_in_terminal_logs() {
         .events
         .iter()
         .find(|event| {
-            event.status == AgentTaskState::Cancelled
+            event.data["state"] == "cancelled"
                 && event
-                    .message
-                    .as_deref()
+                    .data
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
                     .is_some_and(|message| message.contains("provider execution cancelled"))
         })
         .expect("cancelled provider event");
     let stdout_ref = terminal
-        .artifact_refs
+        .artifacts
         .iter()
         .find(|reference| reference.kind == "provider-runtime-stdout")
         .expect("bounded stdout reference");
@@ -3913,7 +3914,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             )
         });
         assert_eq!(status_record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
+        assert_eq!(log.events[0].data["state"], "succeeded");
         assert!(artifacts.artifacts.is_empty());
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
@@ -4106,6 +4107,51 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
         artifacts[0].path,
         "/home/runner/.homeboy/executor-finalized/patch.diff"
     );
+}
+
+#[test]
+fn terminal_projection_preserves_persisted_observation_creator_version() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let store = lifecycle_store
+        .open_observation_maintained()
+        .expect("observation store");
+    for (run_id, creator_version) in [
+        ("persisted-observation-version", Some("0.364.13")),
+        ("persisted-observation-without-version", None),
+    ] {
+        let submitted = lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+            .expect("submit");
+        let mut persisted = store
+            .get_run(&submitted.run_id)
+            .expect("read observation")
+            .expect("observation exists");
+        persisted.homeboy_version = creator_version.map(str::to_string);
+        store
+            .upsert_imported_run(&persisted)
+            .expect("seed persisted creator version");
+
+        record_run_aggregate_in_store(
+            &lifecycle_store,
+            &submitted.run_id,
+            &plan,
+            &succeeded_aggregate(&plan),
+        )
+        .expect("project terminal observation");
+
+        assert_eq!(
+            store
+                .get_run(&submitted.run_id)
+                .expect("read projected observation")
+                .expect("projected observation exists")
+                .homeboy_version
+                .as_deref(),
+            creator_version
+        );
+    }
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -4333,8 +4379,8 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
         assert_eq!(loaded.state, AgentTaskRunState::Failed);
         assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
         assert!(loaded.provider_handles.is_empty());
-        assert_eq!(log.events[1].status, AgentTaskState::Failed);
-        assert_eq!(mirrored_log.events[1].status, AgentTaskState::Failed);
+        assert_eq!(log.events[1].data["state"], "failed");
+        assert_eq!(mirrored_log.events[1].data["state"], "failed");
         assert_eq!(loaded.metadata["provider_run_ids"], serde_json::json!([]));
         assert_eq!(
             loaded.artifact_refs[0].kind,
@@ -4425,7 +4471,7 @@ fn record_completed_run_exposes_logs_and_artifacts() {
         let artifacts = artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
 
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events[0].status, AgentTaskState::Succeeded);
+        assert_eq!(log.events[0].data["state"], "succeeded");
         assert_eq!(artifacts.artifacts[0].id, "patch");
         assert_eq!(artifacts.evidence_refs[0].kind, "transcript");
     }

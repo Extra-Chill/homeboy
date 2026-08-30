@@ -900,14 +900,14 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
     if record.is_runner_backed() {
         let runner_id = record.runner_id().map(str::to_string);
         let runner_job_id = record.runner_job_id().map(str::to_string);
-        if runner_id.as_deref().is_some_and(|runner_id| {
+        let runner_removed = runner_id.as_deref().is_some_and(|runner_id| {
             super::runner_continuation::with_runner_continuation(|provider| {
                 provider.runner_authority(runner_id) == RunnerAuthority::Removed
             })
-        }) {
-            // A successful registry inventory proved the original daemon
-            // authority was removed. There is no remote job left to cancel, so
-            // reclaim only the durable controller projection.
+        });
+        if runner_removed || record.is_locally_reconcilable_after_runner_idle() {
+            // Removed authority or authoritative idle evidence for exact
+            // zero-work queued residue means no remote job remains to cancel.
             return Ok(LiveCancellationOutcome::NotRunning);
         }
         if let (Some(runner_id), Some(runner_job_id)) =

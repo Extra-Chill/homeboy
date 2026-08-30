@@ -6,7 +6,7 @@
 //! execution, and evidence functions.
 
 use homeboy_agents::agent_task_lifecycle::{
-    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation,
+    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
 use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
 use std::time::Duration;
@@ -202,6 +202,17 @@ impl RunnerContinuationProvider for RunnerContinuation {
         runner_authority_from_inventory(runner_id, super::list(), || super::load(runner_id).is_ok())
     }
 
+    fn runner_live_job_authority(&self, runner_id: &str) -> RunnerLiveJobAuthority {
+        match super::runner_admission_snapshot(runner_id) {
+            Ok(snapshot) => runner_live_job_authority_from_admission(
+                snapshot.summary.active_job_count,
+                snapshot.summary.safe_to_rotate,
+                snapshot.summary.unresolved_retained_projection_count,
+            ),
+            Err(_) => RunnerLiveJobAuthority::Unknown,
+        }
+    }
+
     fn run_continuation_exec(
         &self,
         runner_id: &str,
@@ -236,6 +247,20 @@ impl RunnerContinuationProvider for RunnerContinuation {
     ) -> Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
         super::connection::lookup_reverse_broker_submission(runner_id, submission_key)
     }
+}
+
+fn runner_live_job_authority_from_admission(
+    active_job_count: usize,
+    safe_to_rotate: bool,
+    unresolved_retained_projection_count: usize,
+) -> RunnerLiveJobAuthority {
+    if active_job_count > 0 {
+        return RunnerLiveJobAuthority::Busy;
+    }
+    if safe_to_rotate && unresolved_retained_projection_count == 0 {
+        return RunnerLiveJobAuthority::Idle;
+    }
+    RunnerLiveJobAuthority::Unknown
 }
 
 fn runner_authority_from_inventory(
@@ -478,6 +503,26 @@ mod tests {
         let mut runner = super::super::load("local").expect("built-in local runner");
         runner.id = id.to_string();
         runner
+    }
+
+    #[test]
+    fn live_job_authority_maps_reconciled_idle_busy_and_unknown_admission() {
+        assert_eq!(
+            runner_live_job_authority_from_admission(0, true, 0),
+            RunnerLiveJobAuthority::Idle
+        );
+        assert_eq!(
+            runner_live_job_authority_from_admission(2, false, 0),
+            RunnerLiveJobAuthority::Busy
+        );
+        assert_eq!(
+            runner_live_job_authority_from_admission(0, true, 1),
+            RunnerLiveJobAuthority::Unknown
+        );
+        assert_eq!(
+            runner_live_job_authority_from_admission(0, false, 0),
+            RunnerLiveJobAuthority::Unknown
+        );
     }
 
     #[test]

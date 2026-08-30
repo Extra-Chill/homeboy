@@ -31,7 +31,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `active [--limit <n>] [--cursor <n>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
 | `reconcile <run-id> [--dry-run\|--apply]` | Preview or reconcile one durable run after refreshing its authoritative provider state. |
 | `latest [--limit <n>]` | Show the latest durable run. |
-| `logs <run-id> [--raw]` | Read the canonical durable event stream; `--raw` adds transport frames for diagnostics. |
+| `logs <run-id> [--cursor <cursor>]` | Read or resume the canonical durable event stream. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
@@ -843,19 +843,17 @@ homeboy agent-task controller validate-proof @proof.json
 ## Loop Spec Compilation
 
 `agent-task compile-loop --definition <SPEC>` compiles a declarative loop spec into
-an executable `homeboy/agent-task-plan/v1` without submitting or running it. It
+an executable plan without submitting or running it. It
 accepts Homeboy's native `homeboy/agent-task-loop-definition/v1` shape and the
 repo-authored workflow-oriented loop spec shape used by WPSG-style controllers.
 
-Repo-style compilation is intentionally deterministic: workflow ids become task
-ids, artifact producers are wired to consumers through `output_dependencies`, and
-declared emitted artifacts become `artifact_outputs`. Controller-only sections
-such as transition policies, phases, arbitrary actions, initial events, and
-entity fan-out are rejected with explicit diagnostics instead of being ignored.
+Native loop definitions compile to `homeboy/agent-task-plan/v1`. Repo-style specs
+use the canonical controller-spec compiler and emit a generic Homeboy `agent_task`
+plan. Workflow ids become executable stages, and declared artifact flow becomes
+stage dependencies. This is the same compiler used by controller execution, so
+policies, phases, gates, metrics, and fan-out are validated by one implementation.
 
-Repo-style specs may also declare an `artifact_graph` edge list. The narrow
-compiler support is deliberately limited to direct one-producer, one-consumer
-artifact flow:
+Repo-style specs may also declare an explicit `artifact_graph` edge list:
 
 ```json
 {
@@ -873,12 +871,7 @@ artifact flow:
 ```
 
 `compile-loop` validates graph edges against declared artifacts and workflow
-`emits`/`consumes`, then materializes supported edges as `output_dependencies`
-and `artifact_outputs`. The controller path exposes the same edge records in
-workflow `client_context.artifact_graph_edges` and includes graph producers in
-`artifact_dependencies.producer_workflow_ids`. Fan-out graph edges, joins, gates,
-and retry policy remain controller-only follow-ups and produce deterministic
-diagnostics instead of partial compilation.
+`emits`/`consumes`, then materializes them as executable stage dependencies.
 
 ## Durable Loops
 

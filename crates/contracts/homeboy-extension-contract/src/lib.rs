@@ -6,8 +6,8 @@
 //! lightweight crate that others can depend on without pulling in the whole
 //! core compile unit.
 //!
-//! Modules and types are re-exported from `homeboy_extension` so existing
-//! `crate::extension::*` call sites keep working unchanged.
+//! Modules and types are re-exported from `homeboy_core::extension` for the
+//! product-facing API.
 
 pub use action_types::HttpMethod;
 pub use ci_config::{
@@ -111,6 +111,7 @@ pub mod manifest_deploy_config;
 pub mod manifest_test_config;
 pub mod manifest_toolchain_config;
 pub mod notification_transport_config;
+pub mod worktree_retention;
 pub use notification_transport_config::{
     NotificationRouteResolverConfig, NotificationRouteResolverRequest,
     NotificationRouteResolverResponse, NotificationRouteResolverStatus,
@@ -139,6 +140,14 @@ pub use manifest::ExtensionManifest;
 pub use manifest_artifact_cleanup::{
     ArtifactCleanupCategory, ArtifactCleanupConfig, ArtifactCleanupDeclaration,
     ArtifactCleanupScope, DEFAULT_NESTED_SCOPE_MAX_DEPTH,
+};
+pub use worktree_retention::{
+    WorktreeRetentionBlockers, WorktreeRetentionBounds, WorktreeRetentionContinuation,
+    WorktreeRetentionEffects, WorktreeRetentionInventoryCompleteness, WorktreeRetentionOperation,
+    WorktreeRetentionRef, WorktreeRetentionRequest, WorktreeRetentionResponse,
+    WorktreeRetentionState, DEFAULT_WORKTREE_RETENTION_TIMEOUT_MS,
+    MAX_WORKTREE_RETENTION_OUTPUT_BYTES, MAX_WORKTREE_RETENTION_REQUEST_BYTES,
+    WORKTREE_RETENTION_SCHEMA,
 };
 pub mod source_metadata_repair;
 pub mod test_drift;

@@ -6,8 +6,9 @@
 //! linking `~/.config/homeboy/rigs/<id>.json` to the package spec.
 
 use homeboy_core::error::{Error, Result};
+use homeboy_core::extension;
+use homeboy_core::extension_update_check::is_git_url;
 use homeboy_core::{git, paths};
-use homeboy_extension as extension;
 use homeboy_stack::stack;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1124,7 +1125,7 @@ pub fn read_stack_source_metadata_in_root(
 }
 
 pub(crate) fn prepare_source(config_root: &Path, source: &str) -> Result<PreparedSource> {
-    if extension::is_git_url(source) || source.contains(".git//") {
+    if is_git_url(source) || source.contains(".git//") {
         prepare_git_source(config_root, source)
     } else {
         prepare_local_source(source)

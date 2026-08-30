@@ -426,6 +426,43 @@ pub fn record_fanout_run_batch_failed_admissions<'a>(
         .record_fanout_run_batch_failed_admissions(batch_id, failed_run_ids)
 }
 
+/// Move a fanout child to the canonical durable run that replaced its current
+/// Cook attempt. The batch lock makes concurrent status and coordinator reads
+/// observe either complete roster identity, never a partially rewritten child.
+pub fn record_fanout_child_run_replacement_in_store(
+    store: &AgentTaskBatchStore,
+    batch_id: &str,
+    replaced_run_id: &str,
+    replacement_run_id: &str,
+) -> Result<()> {
+    store.mutate_batch(batch_id, |batch| {
+        if batch
+            .child_runs
+            .iter()
+            .any(|child| child.run_id == replacement_run_id)
+        {
+            return Ok(());
+        }
+        let child = batch
+            .child_runs
+            .iter_mut()
+            .find(|child| child.run_id == replaced_run_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_id",
+                    "replacement Cook run is not the canonical durable fanout child",
+                    Some(replaced_run_id.to_string()),
+                    None,
+                )
+            })?;
+        child.run_id = replacement_run_id.to_string();
+        child.state = AgentTaskRunState::Queued;
+        child.placement = None;
+        batch.updated_at = Some(now_timestamp());
+        Ok(())
+    })
+}
+
 pub fn record_fanout_run_batch_failed_admissions_in_store<'a>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
@@ -692,7 +729,7 @@ where
                 if error.code == ErrorCode::ObservationStoreBusy {
                     observation_fresh = false;
                 }
-                if !child.state.is_terminal() {
+                if batch.state != AgentTaskBatchState::Admitting && !child.state.is_terminal() {
                     unavailable_child_runs.push(child_issue(
                         child,
                         format!("unable to read child run status: {}", error.message),
@@ -710,12 +747,21 @@ where
         }
     }
     totals.unavailable = unavailable_child_runs.len();
-    let mut state = aggregate_state(&totals);
+    let expected = batch.child_runs.len();
+    let admission_pending = batch.state == AgentTaskBatchState::Admitting && admitted < expected;
+    let mut state = if admission_pending {
+        AgentTaskBatchState::Admitting
+    } else {
+        aggregate_state(&totals)
+    };
     if batch.state != state {
         batch.state = state;
     }
-    let dependency_graph =
-        refresh_dependency_graph_with_finalization_statuses(&mut batch, None, &mut child_status)?;
+    let dependency_graph = if admission_pending {
+        batch.metadata.get("dependency_graph").cloned()
+    } else {
+        refresh_dependency_graph_with_finalization_statuses(&mut batch, None, &mut child_status)?
+    };
     if let Some(graph) = &dependency_graph {
         state = aggregate_state_after_graph_refresh(&totals, graph, state);
         if batch.state != state {
@@ -741,7 +787,6 @@ where
     next_actions.truncate(8);
     let resumable = !resumable_child_runs.is_empty();
     let commands = commands(&batch.batch_id);
-    let expected = batch.child_runs.len();
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
         status: state.outcome_status().to_string(),
@@ -2631,6 +2676,88 @@ mod tests {
         let error = submit_plan_batch(&plan, Some("workflow")).expect_err("workflow rejected");
 
         assert!(error.message.contains("independent tasks"));
+    }
+
+    #[test]
+    fn fanout_status_reports_admitting_when_child_records_are_absent() {
+        let (_temp, store) = batch_store();
+        store
+            .persist_fanout_run_batch(
+                "admission-wave",
+                "admission-wave",
+                &[FanoutRunBatchChild {
+                    task_id: "issue-1419".to_string(),
+                    run_id: "cook-issue-1419".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist planned roster");
+        store
+            .claim_fanout_run_batch("admission-wave")
+            .expect("claim")
+            .expect("claim id");
+
+        let report = store
+            .status_with(
+                "admission-wave",
+                |_| {
+                    Err(Error::validation_invalid_argument(
+                        "run_id",
+                        "agent-task run record not found: cook-issue-1419",
+                        Some("cook-issue-1419".to_string()),
+                        None,
+                    ))
+                },
+                |_| Ok(None),
+                |_| Ok(false),
+            )
+            .expect("admission window remains readable");
+
+        assert_eq!(report.status, "admitting");
+        assert_eq!(report.batch.state, AgentTaskBatchState::Admitting);
+        assert_eq!(report.admission.expected, 1);
+        assert_eq!(report.admission.admitted, 0);
+        assert_eq!(report.admission.absent, 1);
+        assert!(report.unavailable_child_runs.is_empty());
+    }
+
+    #[test]
+    fn fanout_child_run_replacement_updates_canonical_lineage() {
+        let (_temp, store) = batch_store();
+        store
+            .persist_fanout_run_batch(
+                "retry-wave",
+                "retry-wave",
+                &[FanoutRunBatchChild {
+                    task_id: "issue-1419".to_string(),
+                    run_id: "cook-issue-1419".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist planned roster");
+
+        record_fanout_child_run_replacement_in_store(
+            &store,
+            "retry-wave",
+            "cook-issue-1419",
+            "cook-issue-1419-transport-retry",
+        )
+        .expect("replace canonical child run");
+        record_fanout_child_run_replacement_in_store(
+            &store,
+            "retry-wave",
+            "cook-issue-1419",
+            "cook-issue-1419-transport-retry",
+        )
+        .expect("replacement is idempotent");
+
+        let batch = store.read_batch("retry-wave").expect("updated roster");
+        assert_eq!(batch.child_runs[0].task_id, "issue-1419");
+        assert_eq!(
+            batch.child_runs[0].run_id,
+            "cook-issue-1419-transport-retry"
+        );
+        assert_eq!(batch.child_runs[0].state, AgentTaskRunState::Queued);
     }
 
     #[test]

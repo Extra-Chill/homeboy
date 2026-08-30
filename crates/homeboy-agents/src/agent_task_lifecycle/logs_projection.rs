@@ -7,37 +7,42 @@ use serde_json::Value;
 
 use super::*;
 
-pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
+pub fn logs(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     logs_in_store(&lifecycle_store, run_id)
+}
+
+pub fn logs_from_cursor(
+    run_id: &str,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    event_page_in_store(&lifecycle_store, run_id, cursor)
 }
 
 /// [`logs`] against explicitly injected durable lifecycle roots.
 pub fn logs_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-) -> Result<AgentTaskRunLog> {
-    logs_with_raw_in_store(lifecycle_store, run_id, false)
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
+    event_page_in_store(lifecycle_store, run_id, None)
 }
 
-pub(crate) fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    logs_with_raw_in_store(&lifecycle_store, run_id, include_raw)
-}
-
-/// [`logs_with_raw`] against explicitly injected durable lifecycle roots.
-///
-/// This projection is a genuine read: the Cook-alias resolution, the record
-/// read, and the aggregate read are the only durable touches, and every event
-/// helper below it works from the record and aggregate already in hand. Both
-/// reads have to name the same installation anyway — resolving the record in
-/// one home and its aggregate in another would report the event stream of a run
-/// that never produced it, and would do so without failing (#7505).
-pub fn logs_with_raw_in_store(
+pub fn control_plane_events_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    include_raw: bool,
-) -> Result<AgentTaskRunLog> {
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
+    event_page_in_store(lifecycle_store, run_id, cursor)
+}
+
+/// One non-reconciling read from the durable record and aggregate. Raw runner
+/// transport is retained only inside the bounded canonical event data.
+fn event_page_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
     // Logs are terminal inspection, not runner reconciliation. The durable
     // record remains readable when a runner is unavailable or wedged.
     let record = persisted_status_in_store(lifecycle_store, run_id)?;
@@ -66,20 +71,11 @@ pub fn logs_with_raw_in_store(
         }
     };
     let events = if raw_events.is_empty() {
-        normalize_progress_events(&run_id, &events, &artifact_refs)
+        normalize_progress_events(&record, &events, &artifact_refs)?
     } else {
-        normalize_runner_job_events(&run_id, &raw_events, &record, &artifact_refs)
+        normalize_runner_job_events(&raw_events, &record, &artifact_refs)?
     };
-    Ok(AgentTaskRunLog {
-        schema: schemas::RUN_LOG.to_string(),
-        run_id,
-        events,
-        raw_events: if include_raw {
-            raw_events
-        } else {
-            Default::default()
-        },
-    })
+    control_plane_event_page(&record, events, cursor)
 }
 
 fn local_provider_execution_artifact_refs(
@@ -219,11 +215,10 @@ fn runner_job_raw_events(record: &AgentTaskRunRecord) -> Vec<Value> {
 }
 
 fn normalize_runner_job_events(
-    run_id: &str,
     raw_events: &[Value],
     record: &AgentTaskRunRecord,
     artifact_refs: &[AgentTaskArtifactRef],
-) -> Vec<AgentTaskEventEnvelope> {
+) -> Result<Vec<homeboy_control_plane_contract::ControlPlaneEvent>> {
     let task_id = record
         .tasks
         .first()
@@ -248,35 +243,37 @@ fn normalize_runner_job_events(
             let activity = string_field(&data, "activity")
                 .or_else(|| string_field(&data, "status_note"))
                 .or_else(|| string_field(&data, "progress"));
-            AgentTaskEventEnvelope {
-                schema: schemas::EVENT.to_string(),
-                run_id: run_id.to_string(),
-                task_id: task_id.clone(),
-                // The lifecycle cursor is positional and has always been one-based.
-                sequence: (index + 1) as u64,
-                event_type: format!("agent_task.runner_{kind}"),
-                status: AgentTaskState::Running,
-                message: raw
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| string_field(&data, "message")),
-                provider: string_field(&data, "provider")
-                    .or_else(|| string_field(&data, "backend"))
-                    .or_else(|| provider.clone()),
-                phase,
-                activity,
-                heartbeat_at_ms: matches!(kind, "progress" | "status")
-                    .then(|| raw.get("timestamp_ms").and_then(Value::as_u64))
-                    .flatten(),
-                progress: json!({ "attempt": 0 }),
-                artifact_refs: artifact_refs
+            let timestamp_ms = raw.get("timestamp_ms").and_then(Value::as_i64);
+            let occurred_at = timestamp_ms
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|value| value.to_rfc3339());
+            control_plane_event(
+                record,
+                (index + 1) as u64,
+                &task_id,
+                &format!("runner.{kind}"),
+                occurred_at,
+                "lab-runner",
+                json!({
+                    "state": AgentTaskState::Running,
+                    "message": raw
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| string_field(&data, "message")),
+                    "provider": string_field(&data, "provider")
+                        .or_else(|| string_field(&data, "backend"))
+                        .or_else(|| provider.clone()),
+                    "phase": phase,
+                    "activity": activity,
+                    "heartbeat_at_ms": matches!(kind, "progress" | "status").then_some(timestamp_ms).flatten(),
+                    "progress": { "attempt": 0 },
+                    "transport": data,
+                }),
+                artifact_refs
                     .iter()
-                    .filter(|reference| reference.task_id == task_id)
-                    .cloned()
-                    .collect(),
-                metadata: data,
-            }
+                    .filter(|reference| reference.task_id == task_id),
+            )
         })
         .collect()
 }

@@ -18,7 +18,6 @@ pub struct RunnerValidationDependencySyncOutput {
     pub role: String,
     pub local_path: String,
     pub remote_path: String,
-    pub evidence_path: String,
 }
 
 pub(super) fn sync_validation_dependency_workspaces(
@@ -44,10 +43,6 @@ pub(super) fn sync_validation_dependency_workspaces(
             id: dependency.remote_name,
             role: "validation_dependency".to_string(),
             local_path: dependency.local_path.display().to_string(),
-            evidence_path: format!(
-                "{}/.homeboy/lab-source-evidence.json",
-                remote_dependency_path.trim_end_matches('/')
-            ),
             remote_path: remote_dependency_path,
         });
     }
@@ -465,28 +460,8 @@ mod tests {
                 output.validation_dependencies[0].remote_path,
                 remote_dependency.display().to_string()
             );
-            assert_eq!(
-                output.validation_dependencies[0].evidence_path,
-                remote_dependency
-                    .join(".homeboy/lab-source-evidence.json")
-                    .display()
-                    .to_string()
-            );
             assert!(remote_dependency.join("lib/runtime.php").exists());
             assert!(!remote_dependency.join(".git").exists());
-            assert!(remote_dependency
-                .join(".homeboy/lab-source-evidence.json")
-                .exists());
-
-            homeboy_core::hygiene::require_checkout_hygiene_without_lifecycle(
-                vec![homeboy_core::hygiene::DependencyCheckout {
-                    id: "shared-runtime".to_string(),
-                    role: "validation_dependency".to_string(),
-                    path: remote_dependency,
-                }],
-                homeboy_core::hygiene::DependencyHygieneOptions { allow_stale: false },
-            )
-            .expect("Lab-materialized validation dependency should retain source evidence");
         });
     }
 
@@ -497,8 +472,8 @@ mod tests {
             // extension subsystem, which registers its runners at binary startup.
             // Register them explicitly here so this test does not depend on a
             // sibling test having populated the process-global runner slots.
-            homeboy_extension::component_script::register_component_script_runner();
-            homeboy_extension::build::register_component_build_runner();
+            homeboy_core::extension::component_script::register_component_script_runner();
+            homeboy_core::extension::build::register_component_build_runner();
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let dependency = workspace_parent.path().join("shared-runtime");
@@ -581,8 +556,8 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             // Register the extension runners this dependency lifecycle needs (see
             // the sibling test above) rather than relying on cross-test global state.
-            homeboy_extension::component_script::register_component_script_runner();
-            homeboy_extension::build::register_component_build_runner();
+            homeboy_core::extension::component_script::register_component_script_runner();
+            homeboy_core::extension::build::register_component_build_runner();
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let dependency = workspace_parent.path().join("shared-runtime");

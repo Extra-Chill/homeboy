@@ -1,10 +1,17 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use homeboy_extension_contract::{
+    WorktreeRetentionBlockers, WorktreeRetentionBounds, WorktreeRetentionContinuation,
+    WorktreeRetentionInventoryCompleteness, WorktreeRetentionOperation, WorktreeRetentionRef,
+    WorktreeRetentionRequest, WorktreeRetentionResponse, MAX_WORKTREE_RETENTION_OUTPUT_BYTES,
+    WORKTREE_RETENTION_SCHEMA,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -161,6 +168,10 @@ pub struct WorktreeProviderCleanupOptions {
     pub apply: bool,
     /// An aggregate owner may cap this provider's normal cleanup timeout.
     pub timeout: Option<Duration>,
+    /// Reviewed provider run identity required to apply a retention plan.
+    pub provider_run_id: Option<String>,
+    /// Reviewed provider plan identity required to apply a retention plan.
+    pub provider_plan_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -432,6 +443,14 @@ pub struct WorktreeProviderCleanupResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parsed_payload: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_progress: Option<String>,
@@ -439,6 +458,14 @@ pub struct WorktreeProviderCleanupResult {
     pub run_refs: Vec<WorktreeProviderRunRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow_up_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<WorktreeRetentionContinuation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_ref: Option<WorktreeRetentionRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_ref: Option<WorktreeRetentionRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blockers: Option<WorktreeRetentionBlockers>,
     /// Normalized projection of `parsed_payload`. The raw payload is preserved
     /// untouched alongside it; this view exists so downstream reporting does
     /// not have to re-parse provider JSON (#9825).
@@ -4132,12 +4159,14 @@ pub fn cleanup_worktree_providers_from_config(
         .into_iter()
         .map(|(id, provider)| (id, provider.clone()))
         .collect::<Vec<_>>();
+    validate_reviewed_retention_identity(&options, providers.len())?;
     let mut results = std::thread::scope(|scope| {
         let mut tasks = Vec::new();
         for (provider_id, provider_config) in providers {
             let mode = mode.clone();
+            let options = options.clone();
             tasks.push(scope.spawn(move || {
-                run_provider_cleanup(&provider_id, &provider_config, mode, options.timeout)
+                run_provider_cleanup(&provider_id, &provider_config, mode, &options)
             }));
         }
         tasks
@@ -4220,13 +4249,82 @@ fn selected_providers<'a>(
     Ok(providers)
 }
 
+fn validate_reviewed_retention_identity(
+    options: &WorktreeProviderCleanupOptions,
+    selected_count: usize,
+) -> Result<()> {
+    let run_id = nonempty_identity(options.provider_run_id.as_deref());
+    let plan_id = nonempty_identity(options.provider_plan_id.as_deref());
+    match (run_id, plan_id) {
+        (None, None) => Ok(()),
+        (Some(_), Some(_)) if selected_count == 1 => Ok(()),
+        (Some(_), Some(_)) => Err(Error::validation_invalid_argument(
+            "provider",
+            "explicit provider run_id and plan_id require exactly one selected provider",
+            None,
+            None,
+        )),
+        _ => Err(Error::validation_invalid_argument(
+            "provider_run_id",
+            "provider_run_id and provider_plan_id must both be supplied",
+            None,
+            None,
+        )),
+    }
+}
+
+/// Invoke one versioned worktree-retention operation (`plan`, `apply`,
+/// `status`, or `evidence`) against a configured provider command.
+pub fn invoke_worktree_retention(
+    provider_id: &str,
+    provider_config: &WorktreeProviderConfig,
+    operation: WorktreeRetentionOperation,
+    run_id: Option<&str>,
+    plan_id: Option<&str>,
+    timeout: Option<Duration>,
+) -> WorktreeProviderCleanupResult {
+    let mode = cleanup_mode_for_retention_operation(&operation);
+    let timeout = match provider_cleanup_timeout(provider_config, &mode, timeout) {
+        Ok(timeout) => timeout,
+        Err(error) => return provider_failure(provider_id, mode, None, &error),
+    };
+    if !provider_config.enabled {
+        return provider_failure(provider_id, mode, Some(timeout), "provider is disabled");
+    }
+    if operation == WorktreeRetentionOperation::Apply && !provider_config.apply_enabled {
+        return provider_failure(
+            provider_id,
+            mode,
+            Some(timeout),
+            "provider apply is not enabled",
+        );
+    }
+    if timeout.is_zero() {
+        return provider_failure(
+            provider_id,
+            mode,
+            Some(timeout),
+            "provider cleanup deadline elapsed",
+        );
+    }
+    invoke_worktree_retention_command(
+        provider_id,
+        provider_config,
+        operation,
+        timeout,
+        run_id,
+        plan_id,
+        PROVIDER_CLEANUP_HEARTBEAT,
+    )
+}
+
 fn run_provider_cleanup(
     provider_id: &str,
     provider_config: &WorktreeProviderConfig,
     mode: WorktreeProviderCleanupMode,
-    timeout: Option<Duration>,
+    options: &WorktreeProviderCleanupOptions,
 ) -> WorktreeProviderCleanupResult {
-    let timeout = match provider_cleanup_timeout(provider_config, &mode, timeout) {
+    let timeout = match provider_cleanup_timeout(provider_config, &mode, options.timeout) {
         Ok(timeout) => timeout,
         Err(error) => return provider_failure(provider_id, mode, None, &error),
     };
@@ -4235,9 +4333,14 @@ fn run_provider_cleanup(
     }
 
     match provider_config.kind {
-        WorktreeProviderKind::Command => {
-            run_command_provider_cleanup(provider_id, provider_config, mode, timeout)
-        }
+        WorktreeProviderKind::Command => run_command_provider_cleanup(
+            provider_id,
+            provider_config,
+            mode,
+            timeout,
+            options.provider_run_id.as_deref(),
+            options.provider_plan_id.as_deref(),
+        ),
     }
 }
 
@@ -4272,9 +4375,13 @@ fn provider_cleanup_timeout(
     mode: &WorktreeProviderCleanupMode,
     aggregate_cap: Option<Duration>,
 ) -> std::result::Result<Duration, String> {
-    let configured_timeout_ms = match mode {
-        WorktreeProviderCleanupMode::Preview => provider.commands.cleanup_preview_timeout_ms,
-        WorktreeProviderCleanupMode::Apply => provider.commands.cleanup_apply_timeout_ms,
+    let configured_timeout_ms = if provider.commands.retention.is_some() {
+        provider.commands.retention_timeout_ms
+    } else {
+        match mode {
+            WorktreeProviderCleanupMode::Preview => provider.commands.cleanup_preview_timeout_ms,
+            WorktreeProviderCleanupMode::Apply => provider.commands.cleanup_apply_timeout_ms,
+        }
     };
     defaults::validate_worktree_provider_cleanup_timeout_ms(configured_timeout_ms)?;
     let configured = Duration::from_millis(configured_timeout_ms);
@@ -4286,12 +4393,16 @@ fn run_command_provider_cleanup(
     provider_config: &WorktreeProviderConfig,
     mode: WorktreeProviderCleanupMode,
     timeout: Duration,
+    run_id: Option<&str>,
+    plan_id: Option<&str>,
 ) -> WorktreeProviderCleanupResult {
     run_command_provider_cleanup_with_liveness(
         provider_id,
         provider_config,
         mode,
         timeout,
+        run_id,
+        plan_id,
         PROVIDER_CLEANUP_HEARTBEAT,
     )
 }
@@ -4301,6 +4412,8 @@ fn run_command_provider_cleanup_with_liveness(
     provider_config: &WorktreeProviderConfig,
     mode: WorktreeProviderCleanupMode,
     timeout: Duration,
+    run_id: Option<&str>,
+    plan_id: Option<&str>,
     heartbeat_interval: Duration,
 ) -> WorktreeProviderCleanupResult {
     if mode == WorktreeProviderCleanupMode::Apply && !provider_config.apply_enabled {
@@ -4309,6 +4422,26 @@ fn run_command_provider_cleanup_with_liveness(
             mode,
             Some(timeout),
             "provider apply is not enabled",
+        );
+    }
+    if timeout.is_zero() {
+        return provider_failure(
+            provider_id,
+            mode,
+            Some(timeout),
+            "provider cleanup deadline elapsed",
+        );
+    }
+
+    if provider_config.commands.retention.is_some() {
+        return run_configured_retention_cleanup(
+            provider_id,
+            provider_config,
+            mode,
+            timeout,
+            run_id,
+            plan_id,
+            heartbeat_interval,
         );
     }
 
@@ -4477,10 +4610,18 @@ fn run_command_provider_cleanup_with_liveness(
                 stdout,
                 stderr,
                 parsed_payload,
+                schema: None,
+                run_id: run_refs.first().and_then(|row| row.run_id.clone()),
+                plan_id: None,
+                state: phase.clone(),
                 phase,
                 last_progress,
                 run_refs,
                 follow_up_command,
+                continuation: None,
+                status_ref: None,
+                evidence_ref: None,
+                blockers: None,
                 effects,
                 warnings,
                 error: (outcome != WorktreeProviderCleanupOutcome::Completed).then(
@@ -4505,6 +4646,499 @@ fn run_command_provider_cleanup_with_liveness(
             0,
             Some(timeout),
         ),
+    }
+}
+
+fn run_configured_retention_cleanup(
+    provider_id: &str,
+    provider_config: &WorktreeProviderConfig,
+    mode: WorktreeProviderCleanupMode,
+    timeout: Duration,
+    run_id: Option<&str>,
+    plan_id: Option<&str>,
+    heartbeat_interval: Duration,
+) -> WorktreeProviderCleanupResult {
+    match mode {
+        WorktreeProviderCleanupMode::Preview => invoke_worktree_retention_command(
+            provider_id,
+            provider_config,
+            WorktreeRetentionOperation::Plan,
+            timeout,
+            None,
+            None,
+            heartbeat_interval,
+        ),
+        WorktreeProviderCleanupMode::Apply => {
+            match (nonempty_identity(run_id), nonempty_identity(plan_id)) {
+                (Some(run_id), Some(plan_id)) => invoke_worktree_retention_command(
+                    provider_id,
+                    provider_config,
+                    WorktreeRetentionOperation::Apply,
+                    timeout,
+                    Some(run_id),
+                    Some(plan_id),
+                    heartbeat_interval,
+                ),
+                (None, None) => orchestrate_retention_plan_then_apply(
+                    provider_id,
+                    provider_config,
+                    timeout,
+                    heartbeat_interval,
+                ),
+                _ => provider_failure(
+                    provider_id,
+                    mode,
+                    Some(timeout),
+                    "provider_run_id and provider_plan_id must both be supplied",
+                ),
+            }
+        }
+    }
+}
+
+fn orchestrate_retention_plan_then_apply(
+    provider_id: &str,
+    provider_config: &WorktreeProviderConfig,
+    timeout: Duration,
+    heartbeat_interval: Duration,
+) -> WorktreeProviderCleanupResult {
+    let started = std::time::Instant::now();
+    let planned = invoke_worktree_retention_command(
+        provider_id,
+        provider_config,
+        WorktreeRetentionOperation::Plan,
+        timeout,
+        None,
+        None,
+        heartbeat_interval,
+    );
+    let Some((run_id, plan_id)) = reviewable_plan_identity(&planned) else {
+        return planned;
+    };
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return planned;
+    }
+    invoke_worktree_retention_command(
+        provider_id,
+        provider_config,
+        WorktreeRetentionOperation::Apply,
+        remaining,
+        Some(&run_id),
+        Some(&plan_id),
+        heartbeat_interval,
+    )
+}
+
+fn reviewable_plan_identity(result: &WorktreeProviderCleanupResult) -> Option<(String, String)> {
+    if !result.success {
+        return None;
+    }
+    let payload = result.parsed_payload.as_ref()?;
+    let response: WorktreeRetentionResponse = serde_json::from_value(payload.clone()).ok()?;
+    response
+        .reviewable_planned_identity()
+        .map(|(run_id, plan_id)| (run_id.to_string(), plan_id.to_string()))
+}
+
+fn cleanup_mode_for_retention_operation(
+    operation: &WorktreeRetentionOperation,
+) -> WorktreeProviderCleanupMode {
+    match operation {
+        WorktreeRetentionOperation::Apply => WorktreeProviderCleanupMode::Apply,
+        WorktreeRetentionOperation::Plan
+        | WorktreeRetentionOperation::Status
+        | WorktreeRetentionOperation::Evidence => WorktreeProviderCleanupMode::Preview,
+    }
+}
+
+fn retention_operation_phase(operation: &WorktreeRetentionOperation) -> &'static str {
+    match operation {
+        WorktreeRetentionOperation::Plan => "plan",
+        WorktreeRetentionOperation::Apply => "apply",
+        WorktreeRetentionOperation::Status => "status",
+        WorktreeRetentionOperation::Evidence => "evidence",
+    }
+}
+
+fn invoke_worktree_retention_command(
+    provider_id: &str,
+    provider_config: &WorktreeProviderConfig,
+    operation: WorktreeRetentionOperation,
+    timeout: Duration,
+    run_id: Option<&str>,
+    plan_id: Option<&str>,
+    heartbeat_interval: Duration,
+) -> WorktreeProviderCleanupResult {
+    let mode = cleanup_mode_for_retention_operation(&operation);
+    let Some(command) = provider_config.commands.retention.as_ref() else {
+        return provider_failure(
+            provider_id,
+            mode,
+            Some(timeout),
+            "provider cleanup command is not configured",
+        );
+    };
+    if command.is_empty() || command[0].trim().is_empty() {
+        return provider_failure(
+            provider_id,
+            mode,
+            Some(timeout),
+            "provider command argv must include an executable",
+        );
+    }
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let phase = retention_operation_phase(&operation);
+    let request = WorktreeRetentionRequest {
+        schema: WORKTREE_RETENTION_SCHEMA.to_string(),
+        provider_id: provider_id.to_string(),
+        operation: operation.clone(),
+        request_id: request_id.clone(),
+        idempotency_key: Some(request_id),
+        run_id: nonempty_identity(run_id).map(ToString::to_string),
+        plan_id: nonempty_identity(plan_id).map(ToString::to_string),
+        bounds: Some(WorktreeRetentionBounds {
+            max_items: None,
+            timeout_ms: Some(timeout.as_millis() as u64),
+        }),
+        deadline_unix_ms: deadline_unix_ms(timeout),
+    };
+    if operation == WorktreeRetentionOperation::Apply {
+        if let Err(error) = request.reviewed_apply_identity() {
+            return provider_failure(provider_id, mode, Some(timeout), &error);
+        }
+    }
+    let request_bytes = match request.protocol_bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => return provider_failure(provider_id, mode, Some(timeout), &error),
+    };
+
+    let mut process = Command::new(&command[0]);
+    process
+        .args(&command[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::engine::command::isolate_process_tree(&mut process);
+    eprintln!("[cleanup.worktrees provider={provider_id} phase={phase}] starting");
+    match process.spawn() {
+        Ok(mut child) => {
+            let started = std::time::Instant::now();
+            let mut heartbeats = 0;
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            let writer = std::thread::spawn(move || stdin.write_all(&request_bytes));
+            let wait_result = crate::engine::command::wait_with_bounded_output_supervised(
+                &mut child,
+                MAX_WORKTREE_RETENTION_OUTPUT_BYTES,
+                timeout,
+                heartbeat_interval,
+                || false,
+                |elapsed, tail| {
+                    heartbeats += 1;
+                    eprintln!(
+                        "[cleanup.worktrees provider={provider_id} phase={phase} elapsed_ms={} remaining_ms={} heartbeat={heartbeats}] {}",
+                        elapsed.as_millis(),
+                        timeout.saturating_sub(elapsed).as_millis(),
+                        tail.lines().last().unwrap_or("waiting for provider output"),
+                    );
+                    Ok(())
+                },
+            );
+            let write_result = writer.join().unwrap_or(Err(std::io::Error::other(
+                "worktree retention stdin writer panicked",
+            )));
+            let elapsed_ms = started.elapsed().as_millis();
+            if let Err(error) = write_result {
+                return provider_failure_with_details(
+                    provider_id,
+                    mode,
+                    Some(command.clone()),
+                    format!("failed to write retention request: {error}"),
+                    elapsed_ms,
+                    heartbeats,
+                    Some(timeout),
+                );
+            }
+            let (output_status, outcome, stdout, stderr) = match wait_result {
+                Ok(output) => {
+                    let outcome = match output.termination {
+                        crate::engine::command::SupervisedCommandTermination::Completed
+                            if output.output.status.success() =>
+                        {
+                            WorktreeProviderCleanupOutcome::Completed
+                        }
+                        crate::engine::command::SupervisedCommandTermination::Completed => {
+                            WorktreeProviderCleanupOutcome::Failed
+                        }
+                        crate::engine::command::SupervisedCommandTermination::TimedOut => {
+                            WorktreeProviderCleanupOutcome::TimedOut
+                        }
+                        crate::engine::command::SupervisedCommandTermination::NoProgress => {
+                            WorktreeProviderCleanupOutcome::TimedOut
+                        }
+                        crate::engine::command::SupervisedCommandTermination::Cancelled => {
+                            WorktreeProviderCleanupOutcome::Cancelled
+                        }
+                    };
+                    (
+                        Some(output.output.status),
+                        outcome,
+                        String::from_utf8_lossy(&output.output.stdout).to_string(),
+                        String::from_utf8_lossy(&output.output.stderr).to_string(),
+                    )
+                }
+                Err(err) => {
+                    return provider_failure_with_details(
+                        provider_id,
+                        mode,
+                        Some(command.clone()),
+                        format!("failed to supervise provider command: {err}"),
+                        elapsed_ms,
+                        heartbeats,
+                        Some(timeout),
+                    );
+                }
+            };
+            let parsed_payload = parse_json_stdout(&stdout);
+            let response = match parsed_payload
+                .as_ref()
+                .map(|payload| parse_worktree_retention_response(provider_id, command, payload))
+            {
+                None => {
+                    return provider_failure_with_output(
+                        provider_id,
+                        mode,
+                        Some(command.clone()),
+                        "provider returned no retention response".to_string(),
+                        elapsed_ms,
+                        heartbeats,
+                        Some(timeout),
+                        output_status.and_then(|status| status.code()),
+                        stdout,
+                        stderr,
+                        parsed_payload,
+                    );
+                }
+                Some(Err(error)) => {
+                    return provider_failure_with_output(
+                        provider_id,
+                        mode,
+                        Some(command.clone()),
+                        error.message,
+                        elapsed_ms,
+                        heartbeats,
+                        Some(timeout),
+                        output_status.and_then(|status| status.code()),
+                        stdout,
+                        stderr,
+                        parsed_payload,
+                    );
+                }
+                Some(Ok(response)) => match response.validate_identity(&request) {
+                    Ok(()) => response,
+                    Err(error) => {
+                        return provider_failure_with_output(
+                            provider_id,
+                            mode,
+                            Some(command.clone()),
+                            error,
+                            elapsed_ms,
+                            heartbeats,
+                            Some(timeout),
+                            output_status.and_then(|status| status.code()),
+                            stdout,
+                            stderr,
+                            parsed_payload,
+                        );
+                    }
+                },
+            };
+            retention_cleanup_result(
+                provider_id,
+                mode,
+                command,
+                timeout,
+                elapsed_ms,
+                heartbeats,
+                output_status.and_then(|status| status.code()),
+                stdout,
+                stderr,
+                parsed_payload,
+                outcome,
+                response,
+            )
+        }
+        Err(err) => provider_failure_with_details(
+            provider_id,
+            mode,
+            Some(command.clone()),
+            format!("failed to execute provider command: {err}"),
+            0,
+            0,
+            Some(timeout),
+        ),
+    }
+}
+
+fn parse_worktree_retention_response(
+    provider_id: &str,
+    command: &[String],
+    payload: &Value,
+) -> Result<WorktreeRetentionResponse> {
+    let serialized = serde_json::to_string(payload).expect("JSON values serialize");
+    let mut deserializer = serde_json::Deserializer::from_str(&serialized);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        provider_lookup_error(
+            provider_id,
+            command,
+            "cleanup",
+            "malformed",
+            "worktree_provider.retention_response",
+            format!(
+                "worktree provider `{provider_id}` returned an invalid retention response at JSON path `{}`: {}",
+                error.path(),
+                error.inner()
+            ),
+            false,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retention_cleanup_result(
+    provider_id: &str,
+    mode: WorktreeProviderCleanupMode,
+    command: &[String],
+    timeout: Duration,
+    elapsed_ms: u128,
+    heartbeat_count: usize,
+    status: Option<i32>,
+    stdout: String,
+    stderr: String,
+    parsed_payload: Option<Value>,
+    outcome: WorktreeProviderCleanupOutcome,
+    response: WorktreeRetentionResponse,
+) -> WorktreeProviderCleanupResult {
+    let continuing = response.bounded_continuation();
+    let failed_state = matches!(
+        response.state,
+        homeboy_extension_contract::WorktreeRetentionState::Failed
+    );
+    let outcome = if failed_state && outcome == WorktreeProviderCleanupOutcome::Completed {
+        WorktreeProviderCleanupOutcome::Failed
+    } else {
+        outcome
+    };
+    let success = outcome == WorktreeProviderCleanupOutcome::Completed && !failed_state;
+    let inventory_completeness = if continuing || !success {
+        WorktreeProviderInventoryCompleteness::Partial
+    } else {
+        match response.inventory_completeness {
+            WorktreeRetentionInventoryCompleteness::Complete => {
+                WorktreeProviderInventoryCompleteness::Complete
+            }
+            WorktreeRetentionInventoryCompleteness::Partial => {
+                WorktreeProviderInventoryCompleteness::Partial
+            }
+        }
+    };
+    let state = retention_state_name(&response.state).to_string();
+    let effects = WorktreeProviderCleanupEffects {
+        worktrees_removed: response.effects.worktrees_removed,
+        locks_pruned: response.effects.locks_pruned,
+        metadata_reconciled: response.effects.metadata_reconciled,
+        bytes_reclaimed: response.effects.bytes_reclaimed,
+        reconciliation_blockers: response.blockers.count,
+        progress_history: if response.blockers.by_reason.is_empty() {
+            Vec::new()
+        } else {
+            vec![WorktreeProviderPhaseObservation {
+                phase: "blockers".to_string(),
+                inventory: response.blockers.by_reason.clone(),
+            }]
+        },
+    };
+    let mut warnings = provider_cleanup_warnings(&outcome, Some(&state), &effects);
+    if continuing {
+        warnings.push("provider reported bounded continuation".to_string());
+    }
+    let follow_up_command = response
+        .status_ref
+        .as_ref()
+        .and_then(|reference| reference.command.clone());
+    let run_refs = vec![WorktreeProviderRunRef {
+        run_id: Some(response.run_id.clone()),
+        status_command: follow_up_command.clone(),
+    }];
+    let last_progress = last_non_empty_line(&stdout).or_else(|| last_non_empty_line(&stderr));
+    let reported_outcome = if success {
+        WorktreeProviderCleanupOutcome::Completed
+    } else {
+        outcome.clone()
+    };
+    WorktreeProviderCleanupResult {
+        provider_id: provider_id.to_string(),
+        success,
+        inventory_completeness,
+        outcome: reported_outcome,
+        elapsed_ms,
+        heartbeat_count,
+        timeout_ms: timeout.as_millis(),
+        mode,
+        command_run: Some(command.to_vec()),
+        status,
+        stdout,
+        stderr,
+        parsed_payload,
+        schema: Some(response.schema.clone()),
+        run_id: Some(response.run_id.clone()),
+        plan_id: Some(response.plan_id.clone()),
+        state: Some(state.clone()),
+        phase: Some(state),
+        last_progress,
+        run_refs,
+        follow_up_command,
+        continuation: response.continuation.clone(),
+        status_ref: response.status_ref.clone(),
+        evidence_ref: response.evidence_ref.clone(),
+        blockers: Some(response.blockers.clone()),
+        effects,
+        warnings,
+        error: (!success).then(|| match outcome {
+            WorktreeProviderCleanupOutcome::TimedOut => {
+                format!("provider timed out after {} ms", timeout.as_millis())
+            }
+            WorktreeProviderCleanupOutcome::Cancelled => {
+                "provider command was cancelled".to_string()
+            }
+            _ if failed_state => "provider reported a failed retention state".to_string(),
+            _ => "provider command failed".to_string(),
+        }),
+    }
+}
+
+fn nonempty_identity(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn deadline_unix_ms(timeout: Duration) -> Option<u64> {
+    SystemTime::now()
+        .checked_add(timeout)
+        .and_then(|deadline| deadline.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|deadline| deadline.as_millis() as u64)
+}
+
+fn retention_state_name(
+    state: &homeboy_extension_contract::WorktreeRetentionState,
+) -> &'static str {
+    match state {
+        homeboy_extension_contract::WorktreeRetentionState::Planned => "planned",
+        homeboy_extension_contract::WorktreeRetentionState::Applying => "applying",
+        homeboy_extension_contract::WorktreeRetentionState::Continuing => "continuing",
+        homeboy_extension_contract::WorktreeRetentionState::Completed => "completed",
+        homeboy_extension_contract::WorktreeRetentionState::Blocked => "blocked",
+        homeboy_extension_contract::WorktreeRetentionState::Failed => "failed",
     }
 }
 
@@ -4579,10 +5213,18 @@ fn provider_failure_with_output(
         stdout,
         stderr,
         parsed_payload,
+        schema: None,
+        run_id: None,
+        plan_id: None,
+        state: phase.clone(),
         phase,
         last_progress: None,
         run_refs: Vec::new(),
         follow_up_command: None,
+        continuation: None,
+        status_ref: None,
+        evidence_ref: None,
+        blockers: None,
         // A provider that never ran reports no effects at all. That absence is
         // the honest answer; a zero here would read as "ran and did nothing".
         effects: WorktreeProviderCleanupEffects::default(),
@@ -4655,6 +5297,7 @@ mod tests {
 
     use super::*;
     use crate::defaults::WorktreeProviderCommands;
+    use homeboy_extension_contract::{WorktreeRetentionOperation, WORKTREE_RETENTION_SCHEMA};
 
     #[test]
     fn deserializes_worktree_provider_config() {
@@ -5850,6 +6493,8 @@ mod tests {
                 all_providers: false,
                 apply: false,
                 timeout: None,
+                provider_run_id: None,
+                provider_plan_id: None,
             },
             config_with_provider(WorktreeProviderConfig {
                 enabled: true,
@@ -6033,8 +6678,19 @@ mod tests {
         ];
 
         for (name, mode, provider) in cases {
-            let result =
-                run_provider_cleanup(name, &provider, mode, Some(Duration::from_millis(750)));
+            let result = run_provider_cleanup(
+                name,
+                &provider,
+                mode.clone(),
+                &WorktreeProviderCleanupOptions {
+                    provider: vec![name.to_string()],
+                    all_providers: false,
+                    apply: mode == WorktreeProviderCleanupMode::Apply,
+                    timeout: Some(Duration::from_millis(750)),
+                    provider_run_id: None,
+                    provider_plan_id: None,
+                },
+            );
             assert_eq!(result.timeout_ms, 750, "{name}");
             assert_eq!(
                 result.outcome,
@@ -6057,6 +6713,8 @@ mod tests {
                     all_providers: false,
                     apply: false,
                     timeout: None,
+                    provider_run_id: None,
+                    provider_plan_id: None,
                 },
                 config_with_provider(WorktreeProviderConfig {
                     enabled: true,
@@ -6141,6 +6799,8 @@ mod tests {
                     all_providers: false,
                     apply: false,
                     timeout: None,
+                    provider_run_id: None,
+                    provider_plan_id: None,
                 },
                 config_with_provider(WorktreeProviderConfig {
                     enabled: true,
@@ -6205,6 +6865,8 @@ mod tests {
                 all_providers: true,
                 apply: false,
                 timeout: Some(Duration::from_millis(1_500)),
+                provider_run_id: None,
+                provider_plan_id: None,
             },
             config,
         )
@@ -6242,6 +6904,8 @@ mod tests {
                 all_providers: false,
                 apply: true,
                 timeout: None,
+                provider_run_id: None,
+                provider_plan_id: None,
             },
             config_with_provider(WorktreeProviderConfig {
                 enabled: true,
@@ -6277,6 +6941,8 @@ mod tests {
                 all_providers: false,
                 apply: true,
                 timeout: None,
+                provider_run_id: None,
+                provider_plan_id: None,
             },
             config_with_provider(WorktreeProviderConfig {
                 enabled: true,
@@ -6300,6 +6966,401 @@ mod tests {
             output.providers[0].parsed_payload,
             Some(json!({ "mode": "apply" }))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_preview_sends_a_plan_request_over_stdin() {
+        let dir = unique_fixture_script_dir();
+        let request_path = dir.join("request.json");
+        let response = retention_response("fixture", "run-1", "plan-1", "planned", "complete");
+        let script = retention_echo_script(&request_path, &response);
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: false,
+                timeout: None,
+                provider_run_id: None,
+                provider_plan_id: None,
+            },
+            config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    retention: Some(vec![script]),
+                    cleanup_preview: Some(vec![fake_provider_script(), "preview".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            }),
+        )
+        .expect("retention preview");
+
+        let request: Value =
+            serde_json::from_slice(&fs::read(&request_path).expect("request captured"))
+                .expect("request json");
+        assert_eq!(request["schema"], WORKTREE_RETENTION_SCHEMA);
+        assert_eq!(request["provider_id"], "fixture");
+        assert_eq!(request["operation"], "plan");
+        assert!(request["run_id"].is_null());
+        assert!(request["plan_id"].is_null());
+        assert_eq!(output.success_count, 1);
+        assert_eq!(
+            output.providers[0].schema.as_deref(),
+            Some(WORKTREE_RETENTION_SCHEMA)
+        );
+        assert_eq!(output.providers[0].run_id.as_deref(), Some("run-1"));
+        assert_eq!(output.providers[0].plan_id.as_deref(), Some("plan-1"));
+        assert_eq!(output.providers[0].state.as_deref(), Some("planned"));
+    }
+
+    #[test]
+    fn retention_apply_wire_request_requires_explicit_identity() {
+        let dir = unique_fixture_script_dir();
+        let spawned = dir.join("spawned");
+        let script = fake_provider_script_body(&format!("touch '{}'\n", spawned.display()));
+        let result = invoke_worktree_retention(
+            "fixture",
+            &retention_provider_config(script, true),
+            WorktreeRetentionOperation::Apply,
+            None,
+            None,
+            None,
+        );
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("apply requires explicit reviewed run_id and plan_id")
+        );
+        assert_eq!(result.command_run, None);
+        assert!(!spawned.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_apply_rejects_mismatched_response_identity() {
+        let dir = unique_fixture_script_dir();
+        let request_path = dir.join("request.json");
+        let response = retention_response("fixture", "run-1", "other-plan", "applying", "complete");
+        let script = retention_echo_script(&request_path, &response);
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: true,
+                timeout: None,
+                provider_run_id: Some("run-1".to_string()),
+                provider_plan_id: Some("plan-1".to_string()),
+            },
+            config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    retention: Some(vec![script]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            }),
+        )
+        .expect("mismatch is reported");
+
+        assert_eq!(output.success_count, 0);
+        assert!(output.providers[0]
+            .error
+            .as_deref()
+            .expect("error")
+            .contains("does not match the reviewed plan"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_bounded_continuation_is_not_failure() {
+        let dir = unique_fixture_script_dir();
+        let request_path = dir.join("request.json");
+        let mut response =
+            retention_response("fixture", "run-1", "plan-1", "continuing", "partial");
+        response["continuation"] = json!({
+            "complete": false,
+            "resume_operation": "apply",
+            "reason": "deadline"
+        });
+        let script = retention_echo_script(&request_path, &response);
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: true,
+                timeout: None,
+                provider_run_id: Some("run-1".to_string()),
+                provider_plan_id: Some("plan-1".to_string()),
+            },
+            config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    retention: Some(vec![script]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            }),
+        )
+        .expect("continuation");
+
+        assert_eq!(output.success_count, 1);
+        assert_eq!(output.failure_count, 0);
+        assert_eq!(
+            output.inventory_completeness,
+            WorktreeProviderInventoryCompleteness::Partial
+        );
+        assert_eq!(output.providers[0].error, None);
+        assert_eq!(output.providers[0].state.as_deref(), Some("continuing"));
+        assert!(output.providers[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("bounded continuation")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exhausted_retention_timeout_does_not_spawn() {
+        let dir = unique_fixture_script_dir();
+        let spawned = dir.join("spawned");
+        let script = fake_provider_script_body(&format!("touch '{}'\n", spawned.display()));
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: false,
+                timeout: Some(Duration::ZERO),
+                provider_run_id: None,
+                provider_plan_id: None,
+            },
+            config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    retention: Some(vec![script]),
+                    ..Default::default()
+                },
+                list_result_mapping: None,
+            }),
+        )
+        .expect("exhausted deadline is reported");
+
+        assert_eq!(output.success_count, 0);
+        assert_eq!(
+            output.providers[0].error.as_deref(),
+            Some("provider cleanup deadline elapsed")
+        );
+        assert_eq!(output.providers[0].command_run, None);
+        assert!(!spawned.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_auto_apply_plans_then_applies_the_same_identity() {
+        let dir = unique_fixture_script_dir();
+        let mut plan = retention_response("fixture", "run-1", "plan-1", "planned", "partial");
+        plan["continuation"] = json!({
+            "complete": false,
+            "resume_operation": "plan",
+            "reason": "inventory_page"
+        });
+        let script = retention_operation_script(
+            &dir,
+            &plan,
+            &retention_response("fixture", "run-1", "plan-1", "completed", "complete"),
+        );
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: true,
+                timeout: None,
+                provider_run_id: None,
+                provider_plan_id: None,
+            },
+            config_with_provider(retention_provider_config(script, true)),
+        )
+        .expect("orchestrated apply");
+
+        let requests = recorded_retention_requests(&dir);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["operation"], "plan");
+        assert!(requests[0]["run_id"].is_null());
+        assert!(requests[0]["plan_id"].is_null());
+        assert_eq!(requests[1]["operation"], "apply");
+        assert_eq!(requests[1]["run_id"], "run-1");
+        assert_eq!(requests[1]["plan_id"], "plan-1");
+        assert_eq!(output.success_count, 1);
+        assert_eq!(output.providers[0].run_id.as_deref(), Some("run-1"));
+        assert_eq!(output.providers[0].plan_id.as_deref(), Some("plan-1"));
+        assert_eq!(output.providers[0].state.as_deref(), Some("completed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_explicit_refs_bypass_plan_and_apply_directly() {
+        let dir = unique_fixture_script_dir();
+        let script = retention_operation_script(
+            &dir,
+            &retention_response("fixture", "run-other", "plan-other", "planned", "complete"),
+            &retention_response("fixture", "run-1", "plan-1", "completed", "complete"),
+        );
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: true,
+                timeout: None,
+                provider_run_id: Some("run-1".to_string()),
+                provider_plan_id: Some("plan-1".to_string()),
+            },
+            config_with_provider(retention_provider_config(script, true)),
+        )
+        .expect("explicit apply");
+
+        let requests = recorded_retention_requests(&dir);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["operation"], "apply");
+        assert_eq!(requests[0]["run_id"], "run-1");
+        assert_eq!(requests[0]["plan_id"], "plan-1");
+        assert_eq!(output.success_count, 1);
+        assert_eq!(output.providers[0].state.as_deref(), Some("completed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_partial_plan_does_not_apply() {
+        let dir = unique_fixture_script_dir();
+        let mut plan = retention_response("fixture", "run-1", "plan-1", "continuing", "partial");
+        plan["continuation"] = json!({
+            "complete": false,
+            "resume_operation": "plan",
+            "reason": "deadline"
+        });
+        let script = retention_operation_script(
+            &dir,
+            &plan,
+            &retention_response("fixture", "run-1", "plan-1", "completed", "complete"),
+        );
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: true,
+                timeout: None,
+                provider_run_id: None,
+                provider_plan_id: None,
+            },
+            config_with_provider(retention_provider_config(script, true)),
+        )
+        .expect("partial plan");
+
+        let requests = recorded_retention_requests(&dir);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["operation"], "plan");
+        assert_eq!(output.success_count, 1);
+        assert_eq!(
+            output.inventory_completeness,
+            WorktreeProviderInventoryCompleteness::Partial
+        );
+        assert_eq!(output.providers[0].state.as_deref(), Some("continuing"));
+    }
+
+    #[test]
+    fn retention_explicit_ids_refuse_multiple_providers() {
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "one".to_string(),
+            retention_provider_config(fake_provider_script(), true),
+        );
+        config.worktree_providers.insert(
+            "two".to_string(),
+            retention_provider_config(fake_provider_script(), true),
+        );
+        let error = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["one".to_string(), "two".to_string()],
+                all_providers: false,
+                apply: true,
+                timeout: None,
+                provider_run_id: Some("run-1".to_string()),
+                provider_plan_id: Some("plan-1".to_string()),
+            },
+            config,
+        )
+        .expect_err("multi-provider explicit ids");
+        assert!(error.message.contains("exactly one selected provider"));
+    }
+
+    #[test]
+    fn retention_explicit_ids_must_be_paired() {
+        let error = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: true,
+                timeout: None,
+                provider_run_id: Some("run-1".to_string()),
+                provider_plan_id: None,
+            },
+            config_with_provider(retention_provider_config(fake_provider_script(), true)),
+        )
+        .expect_err("unpaired identity");
+        assert!(error
+            .message
+            .contains("provider_run_id and provider_plan_id must both be supplied"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_status_uses_the_generic_invocation_path() {
+        let dir = unique_fixture_script_dir();
+        let script = retention_operation_script(
+            &dir,
+            &retention_response("fixture", "run-1", "plan-1", "planned", "complete"),
+            &retention_response("fixture", "run-1", "plan-1", "completed", "complete"),
+        );
+        let status = retention_response("fixture", "run-1", "plan-1", "applying", "partial");
+        fs::write(
+            dir.join("status.json"),
+            serde_json::to_vec(&status).expect("status serializes"),
+        )
+        .expect("write status");
+        let result = invoke_worktree_retention(
+            "fixture",
+            &retention_provider_config(script, false),
+            WorktreeRetentionOperation::Status,
+            Some("run-1"),
+            Some("plan-1"),
+            None,
+        );
+        let requests = recorded_retention_requests(&dir);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["operation"], "status");
+        assert_eq!(requests[0]["run_id"], "run-1");
+        assert_eq!(requests[0]["plan_id"], "plan-1");
+        assert!(result.success);
+        assert_eq!(result.state.as_deref(), Some("applying"));
     }
 
     #[test]
@@ -8127,6 +9188,8 @@ printf '{{"schema":"%s","provider_id":"fixture","handle":"%s","task_url":"%s","p
                 all_providers: false,
                 apply: true,
                 timeout: None,
+                provider_run_id: None,
+                provider_plan_id: None,
             },
             config_with_provider(WorktreeProviderConfig {
                 enabled: true,
@@ -8506,6 +9569,101 @@ printf '{{"schema":"%s","provider_id":"fixture","handle":"%s","task_url":"%s","p
         let dir = fixture_script_root().join(format!("fixture-{id}"));
         fs::create_dir_all(&dir).expect("create fixture script dir");
         dir
+    }
+
+    fn retention_provider_config(script: String, apply_enabled: bool) -> WorktreeProviderConfig {
+        WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                retention: Some(vec![script]),
+                ..Default::default()
+            },
+            list_result_mapping: None,
+        }
+    }
+
+    fn retention_operation_script(dir: &std::path::Path, plan: &Value, apply: &Value) -> String {
+        fs::write(
+            dir.join("plan.json"),
+            serde_json::to_vec(plan).expect("plan serializes"),
+        )
+        .expect("write plan");
+        fs::write(
+            dir.join("apply.json"),
+            serde_json::to_vec(apply).expect("apply serializes"),
+        )
+        .expect("write apply");
+        fake_provider_script_body(&format!(
+            r#"input=$(cat)
+n=1
+while [ -f '{dir}/request-'"$n"'.json' ]; do n=$((n+1)); done
+printf '%s' "$input" > '{dir}/request-'"$n"'.json'
+case "$input" in
+*"\"operation\":\"plan\""*) cat '{dir}/plan.json' ;;
+*"\"operation\":\"apply\""*) cat '{dir}/apply.json' ;;
+*"\"operation\":\"status\""*) cat '{dir}/status.json' ;;
+*"\"operation\":\"evidence\""*) cat '{dir}/evidence.json' ;;
+*) exit 2 ;;
+esac
+"#,
+            dir = dir.display()
+        ))
+    }
+
+    fn recorded_retention_requests(dir: &std::path::Path) -> Vec<Value> {
+        let mut requests = Vec::new();
+        for n in 1.. {
+            let path = dir.join(format!("request-{n}.json"));
+            if !path.exists() {
+                break;
+            }
+            requests.push(
+                serde_json::from_slice(&fs::read(&path).expect("read request"))
+                    .expect("request json"),
+            );
+        }
+        requests
+    }
+
+    fn retention_echo_script(request_path: &std::path::Path, response: &Value) -> String {
+        let dir = unique_fixture_script_dir();
+        let response_path = dir.join("response.json");
+        fs::write(
+            &response_path,
+            serde_json::to_vec(response).expect("response serializes"),
+        )
+        .expect("write response");
+        fake_provider_script_body(&format!(
+            "cat > '{}'\ncat '{}'\n",
+            request_path.display(),
+            response_path.display(),
+        ))
+    }
+
+    fn retention_response(
+        provider_id: &str,
+        run_id: &str,
+        plan_id: &str,
+        state: &str,
+        completeness: &str,
+    ) -> Value {
+        json!({
+            "schema": WORKTREE_RETENTION_SCHEMA,
+            "provider_id": provider_id,
+            "run_id": run_id,
+            "plan_id": plan_id,
+            "state": state,
+            "inventory_completeness": completeness,
+            "status_ref": { "command": format!("provider status {run_id}") },
+            "evidence_ref": { "locator": format!("provider://{run_id}/evidence") },
+            "effects": { "locks_pruned": 1 },
+            "blockers": { "count": 0 }
+        })
     }
 
     fn fake_provider_script() -> String {

@@ -307,9 +307,9 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         // expires unbound controller handoffs, and persists the result. So this
         // answer is not merely a different view from `activity show <id>` — it
         // can also change what a later `activity show` returns. Say so (#W3-15).
-        let bridge_status = agent_task_service::run_status(&target.run_id, args.since_cursor)?;
+        let cursor = parse_event_cursor(args.since_cursor.as_deref(), "since_cursor")?;
+        let bridge_status = agent_task_service::run_status(&target.run_id, cursor)?;
         let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
-        attach_control_plane_identities(&mut value, &target.run_id)?;
         attach_reconciled(&mut value, true);
         if let Some(selection) = target.selection {
             value["candidate_selection"] = selection;
@@ -364,11 +364,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         Err(_) => None,
     };
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
-    attach_control_plane_identities_from_record(&mut value, &record)?;
-    value["action_eligibility"] = serde_json::to_value(
-        agent_task_lifecycle::lifecycle_action_eligibility(&record, eligibility_plan.as_ref()),
-    )
-    .unwrap_or(Value::Null);
+    attach_control_plane_run(&mut value, &record, eligibility_plan.as_ref())?;
     // The default/`--full` status path is a durable-local read: reconciliation
     // has its own explicit command so an unavailable runner cannot hold status
     // hostage. That makes this answer directly comparable to `activity show`,
@@ -560,7 +556,7 @@ fn emit_status_change_event(
     full: bool,
     retained_limit_reached: bool,
 ) -> String {
-    let run_id = snapshot.get("run_id").and_then(Value::as_str).or_else(|| {
+    let run_id = status_run_id(snapshot).or_else(|| {
         snapshot
             .pointer("/identity/resolved_run_id")
             .and_then(Value::as_str)
@@ -569,7 +565,7 @@ fn emit_status_change_event(
         "schema": "homeboy/agent-task-status-watch-event/v2",
         "event": "status_changed",
         "run_id": run_id,
-        "state": snapshot.get("state"),
+        "state": status_run_state(snapshot),
         "poll": poll,
         "change": status_watch_change(snapshot, poll, full),
         "retained_limit_reached": retained_limit_reached,
@@ -580,7 +576,7 @@ fn emit_status_change_event(
     if serialized_len(&event) > STATUS_WATCH_EVENT_BYTE_LIMIT {
         event["change"] = json!({
             "run_id": run_id,
-            "state": snapshot.get("state"),
+            "state": status_run_state(snapshot),
             "change_basis": status_change_digest_projection(snapshot),
             "full_status_ref": snapshot.get("full_command"),
         });
@@ -591,7 +587,7 @@ fn emit_status_change_event(
     }
     event["change"] = json!({
         "run_id": run_id,
-        "state": snapshot.get("state"),
+        "state": status_run_state(snapshot),
         "full_status_ref": snapshot.get("full_command"),
     });
     serde_json::to_string(&event).expect("bounded status watch JSONL event serializes")
@@ -602,8 +598,8 @@ fn emit_status_change_event(
 fn status_watch_change(snapshot: &Value, poll: u64, full: bool) -> Value {
     let mut change = json!({
         "poll": poll,
-        "run_id": snapshot.get("run_id").or_else(|| snapshot.pointer("/identity/resolved_run_id")),
-        "state": snapshot.get("state"),
+        "run_id": status_run_id(snapshot).or_else(|| snapshot.pointer("/identity/resolved_run_id").and_then(Value::as_str)),
+        "state": status_run_state(snapshot),
         "status": snapshot.get("status"),
         "terminal_status": snapshot.get("terminal_status"),
         "child_run_state": snapshot.get("child_run_state"),
@@ -624,11 +620,11 @@ fn status_watch_change(snapshot: &Value, poll: u64, full: bool) -> Value {
     if serialized_len(&change) > STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT {
         return json!({
             "poll": poll,
-            "run_id": snapshot.get("run_id"),
-            "state": snapshot.get("state"),
+            "run_id": status_run_id(snapshot),
+            "state": status_run_state(snapshot),
             "change_basis": status_change_digest_projection(snapshot),
             "full_status_ref": {
-                "run_id": snapshot.get("run_id"),
+                "run_id": status_run_id(snapshot),
                 "command": snapshot.get("full_command"),
             },
         });
@@ -662,7 +658,7 @@ fn status_change_projection(status: &Value) -> Value {
         )
     });
     json!({
-        "state": status.get("state"),
+        "state": status_run_state(status),
         "terminal_status": status.get("terminal_status"),
         "child_run_state": status.get("child_run_state"),
         "totals": status.get("totals"),
@@ -671,7 +667,7 @@ fn status_change_projection(status: &Value) -> Value {
         "task_state_digest": task_state_digest,
         "progress": bounded_value(status.get("progress").unwrap_or(&Value::Null)),
         "liveness": compact_fields(status.get("liveness").unwrap_or(&Value::Null), &["state", "status", "reason"]),
-        "normalized_event_count": status.get("normalized_events").and_then(Value::as_array).map(Vec::len),
+        "event_count": status.pointer("/events/events").and_then(Value::as_array).map(Vec::len),
     })
 }
 
@@ -684,19 +680,19 @@ fn status_change_digest_projection(status: &Value) -> Value {
         "totals": basis.get("totals"),
         "task_count": status.get("tasks").and_then(Value::as_array).map(Vec::len),
         "task_state_digest": basis.get("task_state_digest"),
-        "normalized_event_count": basis.get("normalized_event_count"),
+        "event_count": basis.get("event_count"),
     })
 }
 
 fn status_is_terminal(status: &Value) -> bool {
     !matches!(
-        status.get("state").and_then(Value::as_str),
+        status_run_state(status).and_then(Value::as_str),
         Some("queued" | "running" | "in_flight")
     )
 }
 
 fn status_is_failure(status: &Value) -> bool {
-    let Some(state) = status.get("state").and_then(Value::as_str) else {
+    let Some(state) = status_run_state(status).and_then(Value::as_str) else {
         // Recipe-only Cook status is a successful read whose recovery state is
         // intentionally carried under `status`, not lifecycle `state`.
         return false;
@@ -780,8 +776,8 @@ fn watch_status_output(
 fn status_watch_latest(snapshot: &Value, run_id: &str, full: bool) -> Value {
     let mut latest = json!({
         "schema": "homeboy/agent-task-status-watch-latest/v2",
-        "run_id": snapshot.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
-        "state": snapshot.get("state"),
+        "run_id": status_run_id(snapshot).unwrap_or(run_id),
+        "state": status_run_state(snapshot),
         "status": snapshot.get("status"),
         "terminal_status": snapshot.get("terminal_status"),
         "child_run_state": snapshot.get("child_run_state"),
@@ -844,8 +840,8 @@ fn enforce_watch_output_budget(output: &mut Value, continuation: &str) {
 fn status_watch_terminal_summary(snapshot: &Value, run_id: &str) -> Value {
     enforce_compact_status_budget(json!({
         "schema": "homeboy/agent-task-status-watch-terminal/v1",
-        "run_id": snapshot.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
-        "state": snapshot.get("state"),
+        "run_id": status_run_id(snapshot).unwrap_or(run_id),
+        "state": status_run_state(snapshot),
         "status": snapshot.get("status"),
         "terminal_status": snapshot.get("terminal_status"),
         "child_run_state": snapshot.get("child_run_state"),
@@ -860,6 +856,37 @@ fn status_watch_terminal_summary(snapshot: &Value, run_id: &str) -> Value {
         "actionable": snapshot.get(ACTIONABLE_METADATA_KEY),
         "full_command": snapshot.get("full_command").cloned().unwrap_or_else(|| json!(format!("homeboy agent-task status {} --full", quote_arg(run_id)))),
     }))
+}
+
+fn status_run_id(status: &Value) -> Option<&str> {
+    status.get("run_id").and_then(Value::as_str).or_else(|| {
+        status
+            .pointer("/control_plane_run/run")
+            .and_then(Value::as_str)
+    })
+}
+
+fn status_run_state(status: &Value) -> Option<&Value> {
+    status
+        .get("state")
+        .or_else(|| status.pointer("/control_plane_run/state"))
+}
+
+pub(super) fn parse_event_cursor(
+    cursor: Option<&str>,
+    field: &'static str,
+) -> homeboy::core::Result<Option<homeboy_control_plane_contract::EventCursor>> {
+    cursor
+        .map(homeboy_control_plane_contract::EventCursor::new)
+        .transpose()
+        .map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                field,
+                error.to_string(),
+                cursor.map(str::to_string),
+                None,
+            )
+        })
 }
 
 /// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
@@ -916,41 +943,21 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
 /// other (on `--bridge`) is a reconciling read. That is by design and is not
 /// changed here; it is only made visible, so a consumer can tell which kind of
 /// answer it received without inferring it from the command name (#W3-15).
-fn attach_control_plane_identities(value: &mut Value, run_id: &str) -> homeboy::core::Result<()> {
-    let recorded_attempt = value
-        .pointer("/metadata/cook_attempt")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok());
-    attach_resolved_control_plane(value, run_id, recorded_attempt)
-}
-
-fn attach_control_plane_identities_from_record(
+fn attach_control_plane_run(
     value: &mut Value,
     record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
 ) -> homeboy::core::Result<()> {
-    match agent_task_lifecycle::canonical_control_plane_identities(record)? {
-        Some(identities) => {
-            value["control_plane"] = serde_json::to_value(identities).unwrap_or(Value::Null);
-        }
-        None => {}
-    }
-    Ok(())
-}
-
-fn attach_resolved_control_plane(
-    value: &mut Value,
-    run_id: &str,
-    recorded_attempt: Option<u32>,
-) -> homeboy::core::Result<()> {
-    match agent_task_lifecycle::canonical_control_plane_identities_for_run(
-        run_id,
-        recorded_attempt,
-    )? {
-        Some(identities) => {
-            value["control_plane"] = serde_json::to_value(identities).unwrap_or(Value::Null);
-        }
-        None => {}
-    }
+    let projection =
+        homeboy::agents::orchestration::project_record(record, plan).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "run_id",
+                error.message,
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
+    value["control_plane_run"] = serde_json::to_value(projection).unwrap_or(Value::Null);
     Ok(())
 }
 
@@ -1422,7 +1429,7 @@ fn normalized_full_status(
                 }
             })).unwrap_or(Value::Null),
         },
-        "action_eligibility": value.get("action_eligibility").cloned().unwrap_or(Value::Null),
+        "control_plane_run": value.get("control_plane_run").cloned().unwrap_or(Value::Null),
         "outcome": {
             "run_id": bounded_value(value.get("run_id").unwrap_or(&Value::Null)),
             "state": bounded_value(value.get("state").unwrap_or(&Value::Null)),
@@ -2485,14 +2492,9 @@ fn preserve_controller_owner_placement_with_prefix(
 }
 
 pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
-    let log = if args.raw {
-        agent_task_service_direct::logs_with_raw(&args.run_id)?
-    } else {
-        agent_task_service_direct::logs(&args.run_id)?
-    };
-    let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
-    enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
-    Ok((value, 0))
+    let cursor = parse_event_cursor(args.cursor.as_deref(), "cursor")?;
+    let events = agent_task_service_direct::logs_from_cursor(&args.run_id, cursor.as_ref())?;
+    Ok((serde_json::to_value(events).unwrap_or(Value::Null), 0))
 }
 
 pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {
@@ -2832,7 +2834,7 @@ fn attach_compact_causal_truth(summary: &mut Value, record: &Value, run_id: &str
         "terminal_phase": terminal_phase,
         "root_cause": record.get("diagnostic_summary"),
         "compared_values": record.pointer("/retry_replay/admission/compared_values"),
-        "budget": record.get("action_eligibility"),
+        "budget": record.pointer("/control_plane_run/action_eligibility"),
         "admission": record.pointer("/retry_replay/admission").or_else(|| record.pointer("/metadata/cook_continuation_admission")),
         "next_action": action,
     });
@@ -3035,6 +3037,7 @@ struct DiagnosedFailure {
     phase: Option<String>,
     provider_boundary_exists: bool,
     controller_runtime_recovery_available: bool,
+    provider_budget_consumed: bool,
 }
 
 /// Collect the distinct failure classifications a run actually recorded, first
@@ -3074,6 +3077,7 @@ fn diagnosed_failures(
                 .iter()
                 .any(|evidence| evidence.kind == "executor-input"),
             controller_runtime_recovery_available: controller_runtime_recovery_available(record),
+            provider_budget_consumed: outcome.metadata["provider_budget_consumed"] == true,
         });
     }
     failures
@@ -3278,6 +3282,34 @@ fn classification_next_actions(
             )
             .with_kind(CommandNextActionKind::Show),
         );
+        return actions;
+    }
+
+    if failure.phase.as_deref() == Some("interrupted_owner") {
+        let budget_label = if failure.provider_budget_consumed {
+            "provider budget was consumed and in-flight work may be duplicated"
+        } else {
+            "provider budget was not consumed"
+        };
+        let mut actions = vec![
+            failure_evidence,
+            CommandNextAction::new(
+                format!(
+                    "show the interrupted-owner stop reason and candidate harvest evidence; {budget_label}"
+                ),
+                format!("homeboy agent-task status {run} --full"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        ];
+        if let Some(retry) = retry {
+            actions.push(
+                CommandNextAction::new(
+                    format!("retry this Cook; {budget_label}"),
+                    retry.command.clone(),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+        }
         return actions;
     }
 
@@ -4026,10 +4058,15 @@ mod watch_tests {
     #[test]
     fn bridge_snapshot_is_retained_without_projection_loss() {
         let bridge = json!({
-            "schema": "homeboy/agent-task-run-status/v1",
-            "state": "succeeded",
+            "schema": "homeboy/agent-task-run-status/v3",
+            "control_plane_run": {
+                "run": "run-1",
+                "state": "succeeded"
+            },
             "reconciled": true,
-            "normalized_events": [{ "type": "agent_task.state_changed" }]
+            "events": {
+                "events": [{ "kind": "task.state_changed" }]
+            }
         });
         let mut full_args = args();
         full_args.full = true;
@@ -4113,6 +4150,7 @@ mod diagnose_actionable_tests {
             phase: None,
             provider_boundary_exists: true,
             controller_runtime_recovery_available: false,
+            provider_budget_consumed: false,
         }
     }
 
@@ -4299,6 +4337,7 @@ mod diagnose_actionable_tests {
             phase: None,
             provider_boundary_exists: false,
             controller_runtime_recovery_available: false,
+            provider_budget_consumed: false,
         };
 
         let (actions, basis) =
@@ -4319,6 +4358,7 @@ mod diagnose_actionable_tests {
             phase: Some("controller_admission".to_string()),
             provider_boundary_exists: false,
             controller_runtime_recovery_available: true,
+            provider_budget_consumed: false,
         };
 
         let (actions, basis) = diagnose_next_actions("run-1", &[failure], &[], None, None, false);
@@ -4441,6 +4481,7 @@ mod diagnose_actionable_tests {
                 phase: None,
                 provider_boundary_exists: true,
                 controller_runtime_recovery_available: false,
+                provider_budget_consumed: false,
             }],
             &[],
             None,
@@ -5625,6 +5666,7 @@ fn aggregate_failure_diagnostics(aggregate: &AgentTaskAggregate) -> Vec<Collecte
                 | AgentTaskOutcomeStatus::ProviderError
                 | AgentTaskOutcomeStatus::Timeout
                 | AgentTaskOutcomeStatus::UnableToRemediate
+                | AgentTaskOutcomeStatus::Cancelled
         )
     });
     let scan: Vec<&homeboy::agents::agent_tasks::AgentTaskOutcome> = failed_first.collect();
@@ -5950,9 +5992,9 @@ fn compact_status_summary_with_aggregate(
         "liveness": liveness_summary(record, run_id, canonical_candidate.state()),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });
-    if let Some(control_plane) = record.get("control_plane") {
-        if !control_plane.is_null() {
-            summary["control_plane"] = control_plane.clone();
+    if let Some(control_plane_run) = record.get("control_plane_run") {
+        if !control_plane_run.is_null() {
+            summary["control_plane_run"] = control_plane_run.clone();
         }
     }
 
@@ -6581,6 +6623,19 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                     "field": cause.get("field"),
                 })
             }),
+        });
+    }
+    if let Some(failure) = record.metadata.get("interrupted_owner") {
+        return Some(CollectedDiagnostic {
+            task_id: "controller".to_string(),
+            class: "interrupted_owner".to_string(),
+            message: failure
+                .get("stop_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("local Cook observer was interrupted during provider execution")
+                .to_string(),
+            source: "interrupted_owner".to_string(),
+            data: failure.clone(),
         });
     }
     if let Some(failure) = record.metadata.get("pre_execution_failure") {
@@ -8139,24 +8194,36 @@ mod tests {
     use homeboy::core::Error;
 
     #[test]
-    fn status_attaches_canonical_control_plane_identities() {
+    fn status_attaches_canonical_control_plane_run() {
         const RUN: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
-        let mut value = json!({
-            "metadata": {
-                "cook_attempt": 1
-            }
-        });
+        let record: AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": RUN,
+            "plan_id": "plan",
+            "state": "succeeded",
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "plan_path": "/plan",
+            "metadata": { "cook_attempt": 1 }
+        }))
+        .expect("record");
+        let mut value = json!({});
 
-        attach_control_plane_identities(&mut value, RUN).expect("attach identities");
+        attach_control_plane_run(&mut value, &record, None).expect("attach run");
 
         assert_eq!(
-            value["control_plane"],
-            json!({
-                "mission": "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e",
-                "run": RUN,
-                "attempt": RUN,
-                "attempt_number": 1
-            })
+            value["control_plane_run"]["schema"],
+            "homeboy/control-plane-run/v1"
+        );
+        assert_eq!(
+            value["control_plane_run"]["mission"],
+            "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e"
+        );
+        assert_eq!(value["control_plane_run"]["run"], RUN);
+        assert_eq!(value["control_plane_run"]["attempt"], RUN);
+        assert_eq!(value["control_plane_run"]["attempt_number"], 1);
+        assert_eq!(
+            value["control_plane_run"]["action_eligibility"]["schema"],
+            "homeboy/control-plane-action-eligibility/v1"
         );
     }
 

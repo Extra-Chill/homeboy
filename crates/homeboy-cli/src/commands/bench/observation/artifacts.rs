@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy_extension::bench::{self};
+use homeboy_core::extension::bench::{self};
 
 use super::lifecycle::BenchObservation;
 
 pub(super) fn record_bench_observation_artifacts(
     observation: &BenchObservation,
-    workflow: &mut homeboy_extension::bench::BenchRunWorkflowResult,
+    workflow: &mut homeboy_core::extension::bench::BenchRunWorkflowResult,
     run_dir: &RunDir,
 ) -> bool {
     bench::record_bench_observation_artifacts(&observation.0, workflow, run_dir)

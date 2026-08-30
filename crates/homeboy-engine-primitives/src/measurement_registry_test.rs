@@ -62,8 +62,8 @@
 //! this file is deliberately only the *registration* half of the guard. The
 //! *effect* half — feeding recorded no-measurement fixtures through real gates
 //! and asserting they do not come out green — lives next to each gate:
-//! `homeboy-extension/src/test/run.rs` and
-//! `homeboy-extension/src/test/report.rs`. Both halves are required; neither is
+//! `homeboy-core/src/extension/test/run.rs` and
+//! `homeboy-core/src/extension/test/report.rs`. Both halves are required; neither is
 //! sufficient.
 //!
 //! The gate layer does not get that choice. Registration alone provably would
@@ -181,33 +181,20 @@ const VERDICT_SITES: &[VerdictSite] = &[
                SharedPredicate site in engine.rs.",
     },
     VerdictSite {
-        file: "crates/homeboy-core/src/git/pr_land.rs",
-        basis: MeasurementBasis::Projection,
-        note: "Renders a remote check conclusion. The measurement happened on the forge.",
-    },
-    VerdictSite {
-        file: "crates/homeboy-core/src/validation_progress.rs",
-        basis: MeasurementBasis::Unguarded,
-        note: "completed_count == command_count renders `passed`, which is also true when \
-               command_count is 0. Left as-is deliberately: this is a progress record for \
-               operator display, it gates nothing, and every constructor in the tree passes a \
-               non-empty command list. Recorded here so that stops being true silently.",
-    },
-    VerdictSite {
-        file: "crates/homeboy-extension/src/bench/gate.rs",
+        file: "crates/homeboy-core/src/extension/bench/gate.rs",
         basis: MeasurementBasis::Projection,
         note: "normalized_gate_result_for_scenario projects BenchGateResult::passed, which the \
                metric comparison already decided.",
     },
     VerdictSite {
-        file: "crates/homeboy-extension/src/lint/report.rs",
+        file: "crates/homeboy-core/src/extension/lint/report.rs",
         basis: MeasurementBasis::NotAGate,
         note: "from_lint_fix: the --fix dispatch. Autofixable findings never fail a run by \
                contract (#1459/#1507), so this path returns exit 0 unconditionally and asserts \
                nothing about the tree's health.",
     },
     VerdictSite {
-        file: "crates/homeboy-extension/src/lint/run/findings.rs",
+        file: "crates/homeboy-core/src/extension/lint/run/findings.rs",
         basis: MeasurementBasis::EmptyPopulation,
         note: "mark_zero_finding_producers_passed rewrites a producer to passed only under four \
                simultaneous conditions -- findings WERE produced, the changed-file filter removed \
@@ -215,7 +202,7 @@ const VERDICT_SITES: &[VerdictSite] = &[
                and its findings were scoped out; nothing is being inferred from silence.",
     },
     VerdictSite {
-        file: "crates/homeboy-extension/src/lint/run/workflow.rs",
+        file: "crates/homeboy-core/src/extension/lint/run/workflow.rs",
         basis: MeasurementBasis::Unguarded,
         note:
             "Two greens. The changed-file early exit is EmptyPopulation-shaped, and #10685 gave it \
@@ -228,23 +215,36 @@ const VERDICT_SITES: &[VerdictSite] = &[
                why it is recorded rather than patched here.",
     },
     VerdictSite {
-        file: "crates/homeboy-extension/src/test/parsing.rs",
+        file: "crates/homeboy-core/src/extension/test/parsing.rs",
         basis: MeasurementBasis::NotAGate,
         note: "A parse-spec field NAME that happens to be the string `passed`.",
     },
     VerdictSite {
-        file: "crates/homeboy-extension/src/test/report.rs",
+        file: "crates/homeboy-core/src/extension/test/report.rs",
         basis: MeasurementBasis::Projection,
         note: "test_phase_report/test_phase_failure render the status test_run_status already \
                decided, and add the distinctions a reader needs: timeout (#10644) vs zero \
                executed tests vs real failures.",
     },
     VerdictSite {
-        file: "crates/homeboy-extension/src/test/run.rs",
+        file: "crates/homeboy-core/src/extension/test/run.rs",
         basis: MeasurementBasis::SharedPredicate,
         note: "test_run_status, which had the best local version of this rule before #10685 and \
                supplied its semantics. Also the #8340 changed-scope guard: zero tests selected \
                against a non-empty impacted-source set is Contradicted, a hard error.",
+    },
+    VerdictSite {
+        file: "crates/homeboy-core/src/git/pr_land.rs",
+        basis: MeasurementBasis::Projection,
+        note: "Renders a remote check conclusion. The measurement happened on the forge.",
+    },
+    VerdictSite {
+        file: "crates/homeboy-core/src/validation_progress.rs",
+        basis: MeasurementBasis::Unguarded,
+        note: "completed_count == command_count renders `passed`, which is also true when \
+               command_count is 0. Left as-is deliberately: this is a progress record for \
+               operator display, it gates nothing, and every constructor in the tree passes a \
+               non-empty command list. Recorded here so that stops being true silently.",
     },
     VerdictSite {
         file: "crates/homeboy-fuzz/src/evidence_contract.rs",
@@ -774,7 +774,7 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
 ///
 /// # Why the scan stops at `.github/`
 ///
-/// `crates/homeboy-extension/src/runtime/*.sh` is the other body of shell in
+/// `crates/homeboy-core/src/extension/runtime/*.sh` is the other body of shell in
 /// this repository, and it was swept for this issue rather than assumed
 /// harmless. Those files are evidence *producers*, not verdict renderers: they
 /// write the counts and findings sidecars that Rust gates then read. Registering
@@ -854,7 +854,7 @@ fn is_test_owned(relative: &str) -> bool {
 /// ```
 ///
 /// Truncating there left eleven lines of imports as the entire "production" body
-/// of `homeboy-extension/src/{lint,test}/report.rs`, so two files that build
+/// of `homeboy-core/src/extension/{lint,test}/report.rs`, so two files that build
 /// `passed: true` in real code scanned as producing no verdict at all.
 ///
 /// The old comment here argued this failed open — that a verdict below a

@@ -132,10 +132,12 @@ fn fanout_totals_sentence(payload: &Value) -> Option<String> {
 }
 
 fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
-    if payload.get("schema")?.as_str()? != "homeboy/agent-task-cook-batch/v1"
-        || payload.get("status")?.as_str()? != "blocked"
-    {
+    if payload.get("schema")?.as_str()? != "homeboy/agent-task-cook-batch/v1" {
         return None;
+    }
+    let status = payload.get("status")?.as_str()?;
+    if status != "blocked" {
+        return render_failed_fanout_child_summary(payload, status);
     }
     let fanout_id = payload.get("fanout_id")?.as_str()?;
     let primary = payload.get("primary_failure")?.as_object()?;
@@ -186,6 +188,52 @@ fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Plan: plan_ref.sha256={sha256}"));
     }
     Some(lines.join("\n"))
+}
+
+fn render_failed_fanout_child_summary(payload: &Value, status: &str) -> Option<String> {
+    if !matches!(status, "failed" | "partial_failure") {
+        return None;
+    }
+    let fanout_id = payload.get("fanout_id")?.as_str()?;
+    let primary = payload.get("primary_failure")?.as_object()?;
+    let phase = primary.get("phase")?.as_str()?;
+    let classification = primary.get("classification")?.as_str()?;
+    let reason = primary.get("reason")?.as_str()?.lines().next()?.trim();
+    let next_action = primary
+        .get("next_action")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            primary
+                .get("recovery")
+                .and_then(|recovery| recovery.get("command"))
+                .and_then(Value::as_str)
+        })?;
+    let affected = primary
+        .get("affected_child_count")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            payload
+                .pointer("/causal_failures/total")
+                .and_then(Value::as_u64)
+        })?;
+    let budget = primary
+        .get("provider_budget_consumed")
+        .and_then(Value::as_bool)
+        .map(|consumed| {
+            if consumed {
+                " provider_budget=consumed"
+            } else {
+                " provider_budget=unspent"
+            }
+        })
+        .unwrap_or("");
+    let evidence = payload
+        .pointer("/causal_failures/complete_evidence_path")
+        .and_then(Value::as_str)
+        .unwrap_or("run_result.result.cooks");
+    Some(format!(
+        "Fanout {fanout_id}: {status} phase={phase} classification={classification} children={affected}{budget} reason={reason}; next={next_action}\nEvidence: {evidence} ({affected} child references)"
+    ))
 }
 
 fn render_providers_summary(payload: &Value) -> Option<String> {
@@ -2388,6 +2436,41 @@ mod tests {
             payload, lossless,
             "rendering must not compact structured evidence"
         );
+    }
+
+    #[test]
+    fn failed_fanout_summary_leads_with_shared_child_root_cause() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-batch/v1",
+            "fanout_id": "issue-wave",
+            "status": "failed",
+            "primary_failure": {
+                "phase": "committed_harvest_preflight",
+                "classification": "agent_task.committed_harvest_dirty_workspace",
+                "reason": "refusing committed-change harvest from a workspace with pre-existing uncommitted changes",
+                "provider_budget_consumed": false,
+                "affected_child_count": 3,
+                "next_action": "homeboy agent-task cook-continue cook-1",
+                "child_references": [
+                    {"latest_run_id": "cook-1-replacement"},
+                    {"latest_run_id": "cook-2-replacement"},
+                    {"latest_run_id": "cook-3-replacement"}
+                ]
+            },
+            "causal_failures": {
+                "total": 3,
+                "returned": 3,
+                "omitted": 0,
+                "unique_causes": 1,
+                "complete_evidence_path": "run_result.result.cooks"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::FanoutCookBatch, &payload)
+            .expect("failed fanout summary");
+
+        assert!(summary.starts_with("Fanout issue-wave: failed phase=committed_harvest_preflight classification=agent_task.committed_harvest_dirty_workspace children=3 provider_budget=unspent reason=refusing committed-change harvest from a workspace with pre-existing uncommitted changes; next=homeboy agent-task cook-continue cook-1"), "{summary}");
+        assert!(summary.contains("Evidence: run_result.result.cooks (3 child references)"));
     }
 
     #[test]

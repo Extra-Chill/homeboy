@@ -23,9 +23,10 @@ use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use homeboy::extension::{
     list_summaries_with, load_all_extensions, CliConfig,
-    ExtensionManifest as InstalledExtensionManifest, ExtensionReadinessMode, ExtensionSummary,
+    ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
 };
 use homeboy_agents::agent_task_service::cook_continue_command;
+use homeboy_core::extension_readiness::ExtensionReadinessMode;
 #[cfg(test)]
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
 use homeboy_upgrade::upgrade;
@@ -379,16 +380,16 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     // behavior through the hook. Moves out with deploy/release when they
     // become the homeboy-release crate.
     crate::release::provider_impl::register();
-    homeboy_extension::audit_manifest_provider::register();
-    homeboy_extension::component_script::register_component_script_runner();
-    homeboy_extension::build::register_component_build_runner();
-    homeboy_extension::lifecycle::register_component_install_runner();
+    homeboy_core::extension::audit_manifest_provider::register();
+    homeboy_core::extension::component_script::register_component_script_runner();
+    homeboy_core::extension::build::register_component_build_runner();
+    homeboy_core::extension::lifecycle::register_component_install_runner();
     // Register extension-backed audit providers so code_audit can load
     // grammars, run fallback fingerprint scripts, and collect compiler
     // warnings without depending on the extension registry or script runner.
-    homeboy_extension::audit_fingerprint_script_provider::register();
-    homeboy_extension::audit_grammar_source_provider::register();
-    homeboy_extension::audit_compiler_warning_provider::register();
+    homeboy_core::extension::audit_fingerprint_script_provider::register();
+    homeboy_core::extension::audit_grammar_source_provider::register();
+    homeboy_core::extension::audit_compiler_warning_provider::register();
     // Register the audit recorded-artifact provider so the artifact-portability
     // detector can read past runs' artifacts from the observation store without
     // code_audit depending on observation — the last seam before audit becomes
@@ -455,18 +456,16 @@ fn register_startup_providers_after_reconcile(
     crate::agents::agent_task_service::register_orchestration_driver();
     crate::commands::route::register_unmaterialized_cook_replay_driver();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
-    // New orchestration submissions share one versioned lifecycle driver. The
-    // domain registrations below also retain their v1 recovery adapters for
-    // persisted jobs admitted before the migration.
+    // New orchestration submissions share one versioned lifecycle driver.
     crate::agents::agent_task_service::register_work_job_driver();
     // A locally-placed detached Cook is a daemon-owned durable job: the daemon
     // owns its record, checkpointing, cancellation and HTTP inspection, while
     // the launcher-spawned child keeps the operator's execution environment.
-    crate::agents::agent_task_service::register_cook_job_driver();
+    crate::agents::agent_task_service::register_cook_work_handler();
     // A locally-placed detached fanout wave is daemon-owned on the same terms:
     // the daemon supervises a coordinator it did not spawn, so no branch of its
     // lifecycle can re-run a child that already completed.
-    crate::agents::agent_task_service::register_cook_batch_job_driver();
+    crate::agents::agent_task_service::register_cook_batch_work_handler();
     crate::agents::agent_task_service::register_loop_work_job_handler();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
@@ -2289,7 +2288,7 @@ fn extension_command_health_from_summary(summary: &ExtensionSummary) -> Extensio
     // A command-health contract that treated an absent measurement as ready
     // would reproduce the fail-open defect class in #10685. (#10616)
     let readiness_unknown =
-        summary.readiness == homeboy_extension::ExtensionReadinessState::Unknown;
+        summary.readiness == homeboy_core::extension_readiness::ExtensionReadinessState::Unknown;
 
     let status = if summary.error.is_some() {
         "error"
@@ -2299,7 +2298,9 @@ fn extension_command_health_from_summary(summary: &ExtensionSummary) -> Extensio
         "unknown"
     } else if summary.ready == Some(true) {
         "ready"
-    } else if summary.readiness == homeboy_extension::ExtensionReadinessState::TimedOut {
+    } else if summary.readiness
+        == homeboy_core::extension_readiness::ExtensionReadinessState::TimedOut
+    {
         "timed_out"
     } else {
         "not_ready"
@@ -3130,7 +3131,7 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
     if args.should_use_self_check_dispatch(&passthrough_args)
         && source
             .component
-            .has_script(homeboy_extension::ExtensionCapability::Test)
+            .has_script(homeboy_core::extension::ExtensionCapability::Test)
     {
         return Ok(());
     }
@@ -3139,12 +3140,12 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.comp,
         &args.setting_args,
         &args.extension_override,
-        Some(homeboy_extension::ExtensionCapability::Test),
+        Some(homeboy_core::extension::ExtensionCapability::Test),
     )
 	.and_then(|context| {
 		homeboy::core::extension_execution::resolve_execution_context(
 			&context.component,
-			homeboy_extension::ExtensionCapability::Test,
+			homeboy_core::extension::ExtensionCapability::Test,
 		)
 		.map(|_| ())
 	})
@@ -3242,7 +3243,7 @@ fn run_startup_update_checks(command: &Commands) {
         Commands::Upgrade(_) | Commands::Daemon(_) | Commands::SelfCmd(_)
     ) {
         homeboy_upgrade::upgrade::update_check::run_startup_check();
-        homeboy_extension::update_check::run_startup_check();
+        homeboy_core::extension::update_check::run_startup_check();
     }
 }
 

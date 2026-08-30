@@ -488,14 +488,30 @@ pub(super) fn git_is_repository(cwd: &Path) -> Result<bool, HarvestError> {
 
 /// Report workspace changes while excluding state injected by Homeboy's runner.
 pub(super) fn git_status_ignoring_runner_metadata(cwd: &Path) -> Result<String, HarvestError> {
+    git_status_ignoring_snapshot_excludes(cwd, &[])
+}
+
+/// Same cleanliness surface as [`git_status_ignoring_runner_metadata`], plus
+/// declared snapshot excludes so omitted tracked context is not source dirt.
+pub(super) fn git_status_ignoring_snapshot_excludes(
+    cwd: &Path,
+    sync_excludes: &[String],
+) -> Result<String, HarvestError> {
+    let extra = homeboy_core::source_snapshot::git_exclude_pathspecs(sync_excludes);
     let mut args = vec![
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        "--",
-        ".",
+        "status".to_string(),
+        "--porcelain=v1".to_string(),
+        "--untracked-files=all".to_string(),
+        "--".to_string(),
+        ".".to_string(),
     ];
-    args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    args.extend(
+        RUNNER_METADATA_EXCLUDE_PATHSPECS
+            .iter()
+            .map(|pathspec| (*pathspec).to_string()),
+    );
+    args.extend(extra);
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     git_output(cwd, &args)
 }
 

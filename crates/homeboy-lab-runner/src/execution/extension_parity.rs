@@ -1,8 +1,8 @@
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
+use homeboy_core::extension;
 use homeboy_core::output::MergeOutput;
 use homeboy_core::server::{self, SshClient};
-use homeboy_extension as extension;
 
 use serde::Serialize;
 use serde_json::Value;

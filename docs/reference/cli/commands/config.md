@@ -30,6 +30,8 @@ Manage global Homeboy configuration
 
 ## `homeboy config show`
 
+Aliases: `get`
+
 ```sh
 homeboy config show [OPTIONS] [POINTER]
 ```

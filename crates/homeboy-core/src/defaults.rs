@@ -749,6 +749,18 @@ pub struct WorktreeProviderCommands {
     /// `list_result_mapping`, without creating a branch or checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Vec<String>>,
+    /// Versioned worktree-retention command. It receives one
+    /// `homeboy/worktree-retention/v1` JSON request on stdin and returns one
+    /// JSON response on stdout. Preferred over independent `cleanup_preview`
+    /// and `cleanup_apply` when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Vec<String>>,
+    /// Maximum time allowed for the versioned retention command.
+    #[serde(
+        default = "default_worktree_provider_cleanup_timeout_ms",
+        deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
+    )]
+    pub retention_timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_preview: Option<Vec<String>>,
     /// Maximum time allowed for the cleanup preview command.
@@ -787,6 +799,8 @@ impl Default for WorktreeProviderCommands {
             ensure: None,
             converge: None,
             plan: None,
+            retention: None,
+            retention_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
             cleanup_preview: None,
             cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
             cleanup_apply: None,
@@ -1147,6 +1161,12 @@ mod tests {
             DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
         );
         assert_eq!(
+            config.worktree_providers["fixture"]
+                .commands
+                .retention_timeout_ms,
+            DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
+        );
+        assert_eq!(
             config.worktree_providers["fixture"].lookup_output_limit_bytes,
             DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
         );
@@ -1190,6 +1210,14 @@ mod tests {
                 DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
             ))
         );
+        assert_eq!(
+            serde_json::to_value(&config)
+                .expect("config serializes")
+                .pointer("/worktree_providers/fixture/commands/retention_timeout_ms"),
+            Some(&serde_json::json!(
+                DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
+            ))
+        );
 
         for timeout_ms in [0, MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS + 1] {
             let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
@@ -1220,7 +1248,11 @@ mod tests {
             540_000
         );
 
-        for field in ["cleanup_preview_timeout_ms", "cleanup_apply_timeout_ms"] {
+        for field in [
+            "cleanup_preview_timeout_ms",
+            "cleanup_apply_timeout_ms",
+            "retention_timeout_ms",
+        ] {
             for timeout_ms in [0, MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS + 1] {
                 let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
                     "worktree_providers": {"fixture": {"commands": {field: timeout_ms}}}
@@ -1259,6 +1291,8 @@ mod tests {
             ensure: Some(vec!["provider".to_string(), "ensure".to_string()]),
             converge: None,
             plan: None,
+            retention: None,
+            retention_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
             cleanup_preview: None,
             cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
             cleanup_apply: None,

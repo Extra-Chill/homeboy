@@ -20,11 +20,11 @@ use std::fmt::Write as _;
 use super::top_n::top_n_by;
 use homeboy_code_audit::AuditCommandOutput;
 use homeboy_core::ci_profile::CiRunOutput;
-use homeboy_extension::lint::LintCommandOutput;
-use homeboy_extension::test::{
+use homeboy_core::extension::lint::LintCommandOutput;
+use homeboy_core::extension::test::{
     TestCommandOutput, TestDurations, TestUnitDuration, SLOWEST_UNITS_REPORTED,
 };
-use homeboy_extension::ExtensionPhaseTiming;
+use homeboy_core::extension::ExtensionPhaseTiming;
 use homeboy_finding::HomeboyFinding;
 
 use super::{ReviewCommandOutput, ReviewStage};
@@ -479,13 +479,13 @@ mod tests {
         AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
     };
     use homeboy_core::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};
-    use homeboy_core::quality::{build_quality_plan, QualityPlanOptions};
-    use homeboy_extension::lint::LintCommandOutput;
-    use homeboy_extension::test::{
+    use homeboy_core::extension::lint::LintCommandOutput;
+    use homeboy_core::extension::test::{
         SlowTestFinding, TestCommandOutput, TestCounts, TestDurations, TestUnitDuration,
     };
-    use homeboy_extension::CiJobMapping;
-    use homeboy_extension::{PhaseReport, PhaseStatus, VerificationPhase};
+    use homeboy_core::extension::CiJobMapping;
+    use homeboy_core::extension::{PhaseReport, PhaseStatus, VerificationPhase};
+    use homeboy_core::quality::{build_quality_plan, QualityPlanOptions};
     use homeboy_finding::HomeboyFinding;
 
     // ── Builders for fixture envelopes ──────────────────────────────────

@@ -59,7 +59,7 @@ pub struct LifecycleReadArgs {
     pub bridge: bool,
     /// Resume bridged events after this cursor.
     #[arg(long, value_name = "CURSOR", requires = "bridge")]
-    pub since_cursor: Option<u64>,
+    pub since_cursor: Option<String>,
     /// Return complete lifecycle details instead of the bounded summary.
     #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
@@ -86,7 +86,7 @@ pub struct StatusArgs {
     pub bridge: bool,
     /// Resume bridged status events after this cursor.
     #[arg(long, value_name = "CURSOR", requires = "bridge")]
-    pub since_cursor: Option<u64>,
+    pub since_cursor: Option<String>,
     /// Return complete status details instead of the bounded summary.
     #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
@@ -140,9 +140,9 @@ impl From<StatusArgs> for LifecycleReadArgs {
 pub struct LogsArgs {
     /// Durable run or Cook ID whose logs to retrieve.
     pub run_id: String,
-    /// Include unprojected runner transport frames under `raw_events` for diagnostics.
-    #[arg(long)]
-    pub raw: bool,
+    /// Resume events after this opaque cursor.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct EvidenceArgs {

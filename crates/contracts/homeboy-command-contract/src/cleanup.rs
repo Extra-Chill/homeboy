@@ -194,6 +194,12 @@ pub struct CleanupWorktreesArgs {
     /// Apply cleanup. Omit for provider preview/dry-run output.
     #[arg(long)]
     pub apply: bool,
+    /// Reviewed provider run identity. Must be paired with `--provider-plan-id` and exactly one provider. Omit both to plan then apply.
+    #[arg(long = "provider-run-id", value_name = "ID")]
+    pub provider_run_id: Option<String>,
+    /// Reviewed provider plan identity. Must be paired with `--provider-run-id` and exactly one provider. Omit both to plan then apply.
+    #[arg(long = "provider-plan-id", value_name = "ID")]
+    pub provider_plan_id: Option<String>,
 }
 
 /// Naming for one cleanup category plus its specialist command.

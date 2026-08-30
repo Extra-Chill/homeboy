@@ -30,6 +30,48 @@ struct ServiceRunnerFixture {
     commands: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
+struct IdleRunnerFixture;
+
+impl RunnerContinuationProvider for IdleRunnerFixture {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        Err(Error::internal_unexpected("not used by idle fixture"))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+        RunnerAuthority::Configured
+    }
+
+    fn runner_live_job_authority(&self, _runner_id: &str) -> RunnerLiveJobAuthority {
+        RunnerLiveJobAuthority::Idle
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        Err(Error::internal_unexpected("not used by idle fixture"))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        Err(Error::internal_unexpected("not used by idle fixture"))
+    }
+}
+
 static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn with_strict_config_lock(test: impl FnOnce()) {
@@ -1517,6 +1559,8 @@ fn accepted_runner_cancellation_fails_closed_when_daemon_cannot_be_reached() {
     )
     .expect("accepted runner handoff");
 
+    let _runner = RunnerContinuationTestGuard::install(Box::new(IdleRunnerFixture));
+
     let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
         |_runner_id, _runner_job_id, _durable_run_id| {
             Err(Error::internal_unexpected("runner daemon is unavailable"))
@@ -2726,7 +2770,7 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         assert_eq!(loaded.metadata["remote_run_id"], "remote-run");
         assert_eq!(loaded.metadata["remote_plan_path"], "remote-plan");
         assert_eq!(
-            log.events[0].message.as_deref(),
+            log.events[0].data["message"].as_str(),
             Some("Remote provider agent task failed.")
         );
         assert_eq!(artifacts.evidence_refs[0].kind, "provider-run");
@@ -3413,6 +3457,34 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
             replay.metadata["local_provider_ownership"]["state"],
             json!("owner_dead")
         );
+        assert_eq!(
+            replay.metadata["stop_reason"],
+            json!("local Cook observer was interrupted during provider execution")
+        );
+        assert_eq!(
+            replay.metadata["terminal_failure_classification"],
+            json!("interrupted_owner")
+        );
+        assert_eq!(replay.metadata["provider_executions_consumed"], json!(1));
+        assert_eq!(
+            replay.metadata["interrupted_owner"]["provider_budget_consumed"],
+            json!(true)
+        );
+        assert_eq!(
+            replay.metadata["interrupted_owner"]["in_flight_work_may_be_duplicated"],
+            json!(true)
+        );
+        let aggregate = test_lifecycle_store()
+            .read_aggregate("owner-dead")
+            .expect("interrupted-owner aggregate");
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "interrupted_owner"
+        );
+        assert!(aggregate.outcomes[0]
+            .evidence_refs
+            .iter()
+            .any(|reference| { reference.kind == "interrupted-owner-candidate" }));
     });
 }
 
@@ -3460,15 +3532,22 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
             recovered.metadata["provider_executions"][0]["state"],
             json!("succeeded")
         );
+        assert_eq!(
+            recovered.metadata["terminal_failure_classification"],
+            json!("interrupted_owner")
+        );
+        test_lifecycle_store()
+            .read_aggregate("owner-late-success")
+            .expect("interrupted-owner aggregate");
     });
 }
 
 /// A foreground controller can be interrupted after the provider's terminal
 /// result was persisted but before aggregate harvesting starts. The failed
-/// provider result is sufficient to converge without an aggregate, handle, or
-/// surviving owner process.
+/// provider result still converges, and the interrupted-owner path persists the
+/// aggregate before that terminal transition.
 #[test]
-fn terminal_provider_failure_without_owner_or_aggregate_converges_to_failed() {
+fn terminal_provider_failure_without_owner_persists_interrupted_owner_aggregate() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("provider-failed-no-owner")).expect("submitted");
@@ -3503,11 +3582,22 @@ fn terminal_provider_failure_without_owner_or_aggregate_converges_to_failed() {
         assert_eq!(terminal.state, AgentTaskRunState::Failed);
         assert_eq!(replay.state, AgentTaskRunState::Failed);
         assert!(replay.provider_handles.is_empty());
-        assert!(replay.aggregate_path.is_none());
+        assert!(replay.aggregate_path.is_some());
         assert_eq!(replay.tasks[0].state, AgentTaskState::Failed);
         assert_eq!(
             replay.metadata["local_provider_ownership"]["state"],
             json!("provider_failed")
+        );
+        assert_eq!(
+            replay.metadata["stop_reason"],
+            json!("local Cook observer was interrupted during provider execution")
+        );
+        let aggregate = test_lifecycle_store()
+            .read_aggregate("provider-failed-no-owner")
+            .expect("interrupted-owner aggregate");
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "interrupted_owner"
         );
     });
 }
@@ -3840,21 +3930,35 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
     )
     .expect("recorded");
 
-    let status =
-        run_status_in_store(&lifecycle_store, "run-status-bridge", Some(1)).expect("bridge status");
+    let cursor = homeboy_control_plane_contract::EventCursor::new("1").expect("cursor");
+    let status = run_status_in_store(&lifecycle_store, "run-status-bridge", Some(cursor))
+        .expect("bridge status");
 
     assert_eq!(status.schema, schemas::RUN_STATUS);
-    assert_eq!(status.state, AgentTaskRunState::Succeeded);
-    assert_eq!(status.latest_event_cursor, 2);
-    assert_eq!(status.normalized_events.len(), 1);
-    assert_eq!(status.normalized_events[0].sequence, 2);
-    assert_eq!(status.normalized_events[0].schema, schemas::EVENT);
     assert_eq!(
-        status.normalized_events[0].event_type,
-        "agent_task.state_changed"
+        status.control_plane_run.state,
+        homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
     );
-    assert_eq!(status.normalized_events[0].artifact_refs.len(), 1);
-    assert_eq!(status.artifact_refs[0].kind, "artifact-bundle");
+    assert_eq!(
+        status
+            .events
+            .next_cursor
+            .as_ref()
+            .map(|cursor| cursor.as_str()),
+        Some("2")
+    );
+    assert_eq!(status.events.events.len(), 1);
+    assert_eq!(status.events.events[0].sequence, 2);
+    assert_eq!(
+        status.events.events[0].schema,
+        homeboy_control_plane_contract::CONTROL_PLANE_EVENT_SCHEMA
+    );
+    assert_eq!(status.events.events[0].kind, "task.state_changed");
+    assert_eq!(status.events.events[0].artifacts.len(), 1);
+    assert_eq!(
+        status.control_plane_run.artifacts[0].kind,
+        "artifact-bundle"
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use homeboy_extension as extension;
+use homeboy_core::extension;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -19,7 +19,10 @@ use homeboy::fuzz::{
     FUZZ_RESULTS_FILE_PRODUCER_CONTRACT,
 };
 use homeboy::rig::{self, FuzzPrepareReport, RigSpec};
-use homeboy_extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
+use homeboy_core::{
+    self,
+    extension::{ExtensionCapability, ExtensionRunner, FuzzConfig},
+};
 use uuid::Uuid;
 
 use super::inspect::fuzz_failure_diagnostic;
@@ -335,7 +338,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
 
 pub(super) fn ensure_strict_rig_source_is_clean(
     args: &FuzzRunArgs,
-    rig_package: Option<&homeboy_extension::bench::parsing::RigPackageEvidence>,
+    rig_package: Option<&homeboy_core::extension::bench::parsing::RigPackageEvidence>,
 ) -> homeboy::core::Result<()> {
     if args.effective_gate_profile().as_core() == FuzzGateProfile::Strict
         && rig_package.is_some_and(|package| package.linked && package.source_dirty)
@@ -861,7 +864,7 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) run_id: Option<&'a str>,
     pub(super) component_id: &'a str,
     pub(super) rig_id: Option<&'a str>,
-    pub(super) rig_package: Option<&'a homeboy_extension::bench::parsing::RigPackageEvidence>,
+    pub(super) rig_package: Option<&'a homeboy_core::extension::bench::parsing::RigPackageEvidence>,
     pub(super) workload_id: Option<&'a str>,
     pub(super) workload_path: Option<&'a str>,
     pub(super) status: &'a str,
@@ -1429,7 +1432,7 @@ pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerCon
                 env.push(key.to_string());
             }
         }
-        for key in homeboy_extension::declared_helper_env_names(&config.runtime_helpers) {
+        for key in homeboy_core::extension::declared_helper_env_names(&config.runtime_helpers) {
             if !env.iter().any(|existing| existing == &key) {
                 env.push(key);
             }
@@ -1454,8 +1457,8 @@ fn run_fuzz_extension_script(
     run_dir: &RunDir,
     execution_request_path: &Path,
     sequence_plan_path: Option<&Path>,
-    runtime_helpers: &[homeboy_extension::RuntimeHelperRequirement],
-) -> homeboy::core::Result<homeboy_extension::RunnerOutput> {
+    runtime_helpers: &[homeboy_core::extension::RuntimeHelperRequirement],
+) -> homeboy::core::Result<homeboy_core::extension::RunnerOutput> {
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let env = fuzz_runner_env(
         args,
@@ -1466,7 +1469,7 @@ fn run_fuzz_extension_script(
         Some(execution_request_path),
         sequence_plan_path,
     )?;
-    let helper_provenance = homeboy_extension::provision_declared_helpers(runtime_helpers)?;
+    let helper_provenance = homeboy_core::extension::provision_declared_helpers(runtime_helpers)?;
     let mut helper_env = helper_provenance
         .iter()
         .map(|helper| (helper.env_var.clone(), helper.path.clone()))
@@ -1484,7 +1487,7 @@ fn run_fuzz_extension_script(
     if ctx.component.has_script(ExtensionCapability::Fuzz) {
         let mut component_env = env;
         component_env.extend(helper_env);
-        let output = homeboy_extension::component_script::run_component_scripts_with_run_dir(
+        let output = homeboy_core::extension::component_script::run_component_scripts_with_run_dir(
             &ctx.component,
             ExtensionCapability::Fuzz,
             &ctx.source_path,
@@ -1496,8 +1499,10 @@ fn run_fuzz_extension_script(
         return Ok(output.into());
     }
 
-    let execution_context =
-        extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
+    let execution_context = homeboy_core::extension_execution::resolve_execution_context(
+        &ctx.component,
+        ExtensionCapability::Fuzz,
+    )?;
     if execution_context.script_path.trim().is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "fuzz.extension_script",

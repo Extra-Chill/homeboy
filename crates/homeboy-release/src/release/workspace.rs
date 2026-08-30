@@ -54,13 +54,19 @@ impl ReleaseWorkspace {
 
         let config = defaults::load_config();
         let source_sha = verified_remote_default_sha(component)?;
-        let owner_run_ref = format!("release/{}", Uuid::new_v4());
+        let owner_id = Uuid::new_v4();
+        let owner_run_ref = format!("release/{owner_id}");
         let lifecycle = WorktreeProviderLifecycleIntent {
             purpose: "release_staging".to_string(),
             owner_run_ref: owner_run_ref.clone(),
             cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
         };
-        let branch = format!("release-{}-{}", component.id, &source_sha[..12]);
+        let branch = format!(
+            "release-{}-{}-{}",
+            component.id,
+            &source_sha[..12],
+            &owner_id.simple().to_string()[..12]
+        );
         let handle = homeboy_core::worktree::handle_for_branch(&component.id, &branch);
         let mut intent = WorktreeProviderCreateIntent {
             handle: handle.clone(),
@@ -724,6 +730,9 @@ mod tests {
                 .handle
                 .as_deref()
                 .is_some_and(|handle| handle.starts_with("fixture@release-fixture-")));
+            let second = ReleaseWorkspace::select(&test_roots(), &component, false)
+                .expect("independent staging from the same source");
+            assert_ne!(workspace.output.handle, second.output.handle);
             assert_ne!(workspace.component.local_path, component.local_path);
             assert_eq!(
                 git::head_sha(Path::new(&workspace.component.local_path)),

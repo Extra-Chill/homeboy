@@ -471,7 +471,9 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     // A terminal coordinator failure is the authoritative outcome even when it
     // happened before the first child record existed. Reconciling children first
     // would turn that diagnostic into a misleading "run record not found".
-    let observations = if report.admission_blocker.is_some() {
+    let admission_pending =
+        report.batch.state == batch::AgentTaskBatchState::Admitting && report.admission.absent > 0;
+    let observations = if report.admission_blocker.is_some() || admission_pending {
         BTreeMap::new()
     } else {
         reconcile_fanout_pr_states(&args.batch_id, false)?
@@ -494,7 +496,11 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     // envelope's success/exit_code.
     // The mutating `resume` command keeps the aggregate exit policy, and
     // durable reconciliation / child continuation stay limited to it.
-    let portfolio = reconcile_portfolio(&report.batch)?;
+    let portfolio = if admission_pending {
+        load_portfolio(&report.batch)?.status(&BTreeMap::new())
+    } else {
+        reconcile_portfolio(&report.batch)?
+    };
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-fanout-status/v2",
@@ -1976,6 +1982,8 @@ fn compile_batch_cooks(
                 options.identity.initial_plan.metadata["cook_repository_identity"] =
                     cook.repository_identity.clone();
             }
+            options.identity.initial_plan.metadata["batch_id"] =
+                Value::String(plan.fanout_id.clone());
             if let (Some(workspace), Some(component_id)) = (
                 options.workspace.source_worktree_path.as_deref(),
                 cook.component_id.as_deref(),
@@ -2361,7 +2369,8 @@ fn cook_batch_inner(
     let resume_legal = run_result
         .as_ref()
         .is_some_and(|result| batch_resume_is_legal(&result["result"]));
-    let (primary_failure, causal_failures) = blocked_worktree_failure_projection(&worktrees);
+    let (primary_failure, causal_failures) =
+        fanout_failure_projection(&worktrees, run_result.as_ref());
 
     Ok((
         serde_json::json!({
@@ -2462,6 +2471,201 @@ fn blocked_worktree_failure_projection(
         "complete_evidence_path": "worktrees.rows",
     });
     (primary, summary)
+}
+
+fn fanout_failure_projection(
+    worktrees: &worktree::WorktreeQueueCreateOutput,
+    run_result: Option<&Value>,
+) -> (Option<Value>, Value) {
+    let worktree_projection = blocked_worktree_failure_projection(worktrees);
+    if worktree_projection.0.is_some() {
+        return worktree_projection;
+    }
+    child_failure_projection(run_result)
+}
+
+fn child_failure_projection(run_result: Option<&Value>) -> (Option<Value>, Value) {
+    let Some(cooks) = run_result
+        .and_then(|value| value.pointer("/result/cooks"))
+        .and_then(Value::as_array)
+    else {
+        return empty_causal_failure_projection();
+    };
+    let mut groups: Vec<(String, Value, Vec<Value>)> = Vec::new();
+    let mut failed_children = 0usize;
+    for (index, child) in cooks.iter().enumerate() {
+        if child["exit_code"].as_i64().unwrap_or_default() == 0 {
+            continue;
+        }
+        let Some(cause) = child_causal_failure(child) else {
+            continue;
+        };
+        failed_children += 1;
+        let key = serde_json::to_string(&serde_json::json!({
+            "phase": cause["phase"],
+            "classification": cause["classification"],
+            "reason": cause["reason"],
+            "provider_budget_consumed": cause["provider_budget_consumed"],
+            "provider_executions_consumed": cause["provider_executions_consumed"],
+        }))
+        .expect("bounded child cause serializes");
+        let planned_run_id = child["run_id"]
+            .as_str()
+            .filter(|run_id| !run_id.is_empty())
+            .or_else(|| {
+                child["initial_run_id"]
+                    .as_str()
+                    .filter(|run_id| !run_id.is_empty())
+            })
+            .unwrap_or_default();
+        let latest_run_id = child
+            .pointer("/result/latest_run_id")
+            .and_then(Value::as_str)
+            .filter(|run_id| !run_id.is_empty())
+            .unwrap_or(planned_run_id);
+        let child_ref = serde_json::json!({
+            "cook_id": child["cook_id"],
+            "run_id": planned_run_id,
+            "initial_run_id": child["initial_run_id"],
+            "latest_run_id": latest_run_id,
+            "evidence_ref": format!("homeboy://agent-task/run/{latest_run_id}/status"),
+            "diagnose_command": format!("homeboy agent-task diagnose {latest_run_id} --full"),
+            "result_path": format!("run_result.result.cooks[{index}]"),
+            "recovery": cause["recovery"],
+        });
+        if let Some((_, _, child_refs)) = groups.iter_mut().find(|(known, _, _)| known == &key) {
+            child_refs.push(child_ref);
+        } else {
+            groups.push((key, cause, vec![child_ref]));
+        }
+    }
+    if groups.is_empty() {
+        return empty_causal_failure_projection();
+    }
+
+    let mut projected = groups
+        .into_iter()
+        .map(|(_, mut cause, child_references)| {
+            cause["affected_child_count"] = serde_json::json!(child_references.len());
+            cause["child_references"] = Value::Array(child_references);
+            cause
+        })
+        .collect::<Vec<_>>();
+    let unique_causes = projected.len();
+    let primary = projected.remove(0);
+    (
+        Some(primary),
+        serde_json::json!({
+            "total": failed_children,
+            "returned": failed_children,
+            "omitted": 0,
+            "unique_causes": unique_causes,
+            "additional_failures": projected,
+            "complete_evidence_path": "run_result.result.cooks",
+        }),
+    )
+}
+
+fn child_causal_failure(child: &Value) -> Option<Value> {
+    let result = child.get("result");
+    let context = result.and_then(|result| result.get("failure_context"));
+    let latest_run_id = result
+        .and_then(|result| result.get("latest_run_id"))
+        .and_then(Value::as_str)
+        .filter(|run_id| !run_id.is_empty())
+        .or_else(|| {
+            child
+                .get("run_id")
+                .and_then(Value::as_str)
+                .filter(|run_id| !run_id.is_empty())
+        })
+        .or_else(|| {
+            child
+                .get("initial_run_id")
+                .and_then(Value::as_str)
+                .filter(|run_id| !run_id.is_empty())
+        });
+    let durable_diagnostic = context
+        .and_then(|context| context.get("diagnostic"))
+        .cloned()
+        .or_else(|| latest_run_id.and_then(agent_task_service::attempt_primary_failure_diagnostic));
+    let diagnostic = durable_diagnostic.as_ref();
+    let primary = result.and_then(|result| result.get("primary_failure"));
+    let error = child
+        .get("error")
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            result
+                .and_then(|result| result.get("error"))
+                .filter(|value| !value.is_null())
+        });
+    let phase = result
+        .and_then(|result| result.get("terminal_phase"))
+        .or_else(|| context.and_then(|context| context.get("phase")))
+        .or_else(|| primary.and_then(|primary| primary.get("phase")))
+        .or_else(|| error.and_then(|error| error.pointer("/details/pre_execution_phase")))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let classification = result
+        .and_then(|result| result.get("terminal_failure_classification"))
+        .or_else(|| diagnostic.and_then(|diagnostic| diagnostic.get("class")))
+        .or_else(|| context.and_then(|context| context.get("reason_code")))
+        .or_else(|| diagnostic.and_then(|diagnostic| diagnostic.get("code")))
+        .or_else(|| error.and_then(|error| error.get("code")))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let phase = if classification.starts_with("agent_task.committed_harvest_")
+        && matches!(phase, "unknown" | "provider")
+    {
+        "committed_harvest_preflight"
+    } else {
+        phase
+    };
+    let reason = diagnostic
+        .and_then(|diagnostic| diagnostic.get("message"))
+        .or_else(|| primary.and_then(|primary| primary.get("stderr_excerpt")))
+        .or_else(|| error.and_then(|error| error.get("message")))
+        .or_else(|| result.and_then(|result| result.get("stop_reason")))
+        .and_then(Value::as_str)?;
+    let recovery = context
+        .and_then(|context| context.get("next_actions"))
+        .and_then(Value::as_array)
+        .and_then(|actions| actions.first())
+        .or_else(|| primary.and_then(|primary| primary.get("next_action")))
+        .or_else(|| {
+            context
+                .and_then(|context| context.get("legal_actions"))
+                .and_then(Value::as_array)
+                .and_then(|actions| actions.first())
+        })
+        .cloned();
+    let next_action = recovery
+        .as_ref()
+        .and_then(|recovery| recovery.get("command"))
+        .and_then(Value::as_str);
+
+    Some(serde_json::json!({
+        "phase": phase,
+        "classification": classification,
+        "reason": reason,
+        "provider_budget_consumed": context.and_then(|context| context.get("provider_budget_consumed")).cloned().unwrap_or(Value::Null),
+        "provider_executions_consumed": context.and_then(|context| context.get("provider_executions_consumed")).cloned().unwrap_or(Value::Null),
+        "recovery": recovery,
+        "next_action": next_action,
+    }))
+}
+
+fn empty_causal_failure_projection() -> (Option<Value>, Value) {
+    (
+        None,
+        serde_json::json!({
+            "total": 0,
+            "returned": 0,
+            "omitted": 0,
+            "additional_failures": [],
+            "complete_evidence_path": "worktrees.rows",
+        }),
+    )
 }
 
 /// Static dry-run deliberately stops before any repository, provider, workspace,
@@ -10533,6 +10737,173 @@ fi
     }
 
     #[test]
+    fn identical_child_pre_provider_failures_form_one_complete_primary_cause() {
+        let cooks = (1..=3)
+            .map(|index| {
+                serde_json::json!({
+                    "cook_id": format!("cook-{index}"),
+                    "initial_run_id": format!("cook-{index}-attempt-1"),
+                    "status": "failed",
+                    "exit_code": 1,
+                    "result": {
+                        "latest_run_id": format!("cook-{index}-replacement"),
+                        "terminal_phase": "committed_harvest_preflight",
+                        "terminal_failure_classification": "agent_task.committed_harvest_dirty_workspace",
+                        "failure_context": {
+                            "phase": "committed_harvest_preflight",
+                            "reason_code": "agent_task.committed_harvest_dirty_workspace",
+                            "diagnostic": {
+                                "class": "agent_task.committed_harvest_dirty_workspace",
+                                "message": "refusing committed-change harvest from a workspace with pre-existing uncommitted changes"
+                            },
+                            "provider_budget_consumed": false,
+                            "provider_executions_consumed": 0,
+                            "recovery_legal": true,
+                            "next_actions": [{
+                                "action": "repair",
+                                "command": format!("homeboy agent-task cook-continue cook-{index}")
+                            }]
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let run_result = serde_json::json!({
+            "result": {
+                "status": "failed",
+                "cooks": cooks,
+            }
+        });
+
+        let (primary, causal) = fanout_failure_projection(
+            &worktree_output(vec![worktree_row(
+                "homeboy@fix-a",
+                worktree::WorktreeQueueCreateStatus::Created,
+            )]),
+            Some(&run_result),
+        );
+        let primary = primary.expect("shared primary failure");
+
+        assert_eq!(
+            primary["classification"],
+            "agent_task.committed_harvest_dirty_workspace"
+        );
+        assert_eq!(primary["phase"], "committed_harvest_preflight");
+        assert_eq!(primary["provider_budget_consumed"], false);
+        assert_eq!(primary["provider_executions_consumed"], 0);
+        assert_eq!(primary["affected_child_count"], 3);
+        assert_eq!(primary["child_references"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            primary["child_references"][0]["evidence_ref"],
+            "homeboy://agent-task/run/cook-1-replacement/status"
+        );
+        assert_eq!(
+            primary["child_references"][2]["diagnose_command"],
+            "homeboy agent-task diagnose cook-3-replacement --full"
+        );
+        assert_eq!(
+            primary["recovery"]["command"],
+            "homeboy agent-task cook-continue cook-1"
+        );
+        assert_eq!(causal["total"], 3);
+        assert_eq!(causal["returned"], 3);
+        assert_eq!(causal["omitted"], 0);
+        assert_eq!(causal["unique_causes"], 1);
+        assert_eq!(causal["additional_failures"], serde_json::json!([]));
+        assert_eq!(causal["complete_evidence_path"], "run_result.result.cooks");
+    }
+
+    #[test]
+    fn identical_child_failures_group_across_distinct_stop_reasons_and_wire_run_ids() {
+        let cooks = (1..=3)
+            .map(|index| {
+                serde_json::json!({
+                    "cook_id": format!("cook-{index}"),
+                    "run_id": format!("cook-{index}-attempt-1"),
+                    "status": "failed",
+                    "exit_code": 1,
+                    "result": {
+                        "latest_run_id": format!("cook-{index}-replacement"),
+                        "stop_reason": format!("agent-task run cook-{index}-replacement ended in state Failed"),
+                        "failure_context": {
+                            "phase": "provider",
+                            "reason_code": "failed",
+                            "diagnostic": {
+                                "class": "agent_task.committed_harvest_dirty_workspace",
+                                "message": "refusing committed-change harvest from a workspace with pre-existing uncommitted changes"
+                            },
+                            "provider_budget_consumed": false,
+                            "provider_executions_consumed": 0,
+                            "next_actions": [{
+                                "action": "diagnose",
+                                "command": format!("homeboy agent-task diagnose cook-{index}-replacement")
+                            }]
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let run_result = serde_json::json!({ "result": { "status": "failed", "cooks": cooks } });
+
+        let (primary, causal) = fanout_failure_projection(
+            &worktree_output(vec![worktree_row(
+                "homeboy@fix-a",
+                worktree::WorktreeQueueCreateStatus::Created,
+            )]),
+            Some(&run_result),
+        );
+        let primary = primary.expect("shared primary failure");
+
+        assert_eq!(primary["phase"], "committed_harvest_preflight");
+        assert_eq!(
+            primary["classification"],
+            "agent_task.committed_harvest_dirty_workspace"
+        );
+        assert_eq!(primary["affected_child_count"], 3);
+        assert_eq!(causal["unique_causes"], 1);
+        assert_eq!(primary["child_references"][1]["run_id"], "cook-2-attempt-1");
+    }
+
+    #[test]
+    fn blocked_worktrees_remain_the_primary_cause_when_children_also_failed() {
+        let mut row = worktree_row("homeboy@fix-a", worktree::WorktreeQueueCreateStatus::Failed);
+        row.error = Some("worktree create failed".to_string());
+        let run_result = serde_json::json!({
+            "result": {
+                "status": "failed",
+                "cooks": [{
+                    "cook_id": "cook-1",
+                    "run_id": "cook-1",
+                    "exit_code": 1,
+                    "result": {
+                        "latest_run_id": "cook-1",
+                        "terminal_phase": "committed_harvest_preflight",
+                        "terminal_failure_classification": "agent_task.committed_harvest_dirty_workspace",
+                        "failure_context": {
+                            "phase": "committed_harvest_preflight",
+                            "reason_code": "agent_task.committed_harvest_dirty_workspace",
+                            "diagnostic": {
+                                "class": "agent_task.committed_harvest_dirty_workspace",
+                                "message": "refusing committed-change harvest from a workspace with pre-existing uncommitted changes"
+                            },
+                            "provider_budget_consumed": false,
+                            "provider_executions_consumed": 0,
+                            "next_actions": [{"action": "repair", "command": "homeboy agent-task cook-continue cook-1"}]
+                        }
+                    }
+                }]
+            }
+        });
+
+        let (primary, causal) =
+            fanout_failure_projection(&worktree_output(vec![row]), Some(&run_result));
+        let primary = primary.expect("worktree primary failure");
+
+        assert_eq!(primary["phase"], "worktree_preflight");
+        assert_eq!(causal["complete_evidence_path"], "worktrees.rows");
+    }
+
+    #[test]
     fn blocked_workspace_owner_action_round_trips_complete_argv() {
         let owner_argv = vec![
             "workspace-owner".to_string(),
@@ -10977,6 +11348,112 @@ fi
                     .metadata["coordinator"]["admission_deadline_at"],
                 before
             );
+        });
+    }
+
+    #[test]
+    fn public_status_reports_admitting_before_the_first_child_exists() {
+        with_isolated_home(|_| {
+            let batch_id = "status-during-admission";
+            batch::persist_fanout_run_batch(
+                batch_id,
+                batch_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id: "child".to_string(),
+                    run_id: "synthesized-child-run".to_string(),
+                }],
+                json!({}),
+            )
+            .expect("persist batch before child admission");
+            batch::claim_fanout_run_batch(batch_id)
+                .expect("claim batch")
+                .expect("coordinator claim");
+
+            let (value, exit_code) = batch_status(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: batch_id.to_string(),
+                },
+                Placement::Lab,
+            )
+            .expect("admission window remains a readable fanout status");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["batch"]["status"], "admitting");
+            assert_eq!(value["batch"]["batch"]["state"], "admitting");
+            assert_eq!(value["batch"]["admission"]["admitted"], 0);
+            assert_eq!(value["batch"]["admission"]["absent"], 1);
+            assert!(value["batch"]["unavailable_child_runs"]
+                .as_array()
+                .is_none_or(Vec::is_empty));
+        });
+    }
+
+    #[test]
+    fn detached_lab_transport_retry_replaces_the_canonical_fanout_child() {
+        with_isolated_home(|_| {
+            let mut plan = test_batch_plan();
+            plan.cooks.truncate(1);
+            plan.rekey("detached-lab-transport-retry".to_string());
+            let cook = &plan.cooks[0];
+            let task_id = cook.cook_id.clone();
+            let mut options = cook
+                .to_cook_invocation(&plan)
+                .expect("compile child invocation")
+                .options;
+            materialize_test_child(&mut options);
+            options.identity.initial_plan.metadata["batch_id"] = json!(plan.fanout_id);
+            options.provider_transport.attempt_dispatcher = Some(Arc::new(LabRecipeDispatcher));
+            agent_task_service::persist_initial_recipe(&options)
+                .expect("persist detached Lab recipe");
+            let initial_run_id = options.identity.initial_run_id.clone();
+            batch::persist_fanout_run_batch(
+                &plan.fanout_id,
+                &plan.fanout_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id,
+                    run_id: initial_run_id.clone(),
+                }],
+                json!({}),
+            )
+            .expect("persist fanout roster");
+
+            let retry_run_id = format!("{initial_run_id}-transport-retry");
+            let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()
+                .expect("recipe store");
+            let recipe = recipe_store
+                .record_recipe_attempt_replacement(
+                    &options.identity.cook_id,
+                    &initial_run_id,
+                    &retry_run_id,
+                )
+                .expect("record transport replacement");
+            assert_eq!(
+                recipe.promotion_transport["attempt_dispatch"]["kind"],
+                "lab"
+            );
+            agent_task_lifecycle::submit_plan(
+                &recipe.attempts.last().expect("replacement attempt").plan,
+                Some(&retry_run_id),
+            )
+            .expect("materialize replacement child");
+
+            let (value, exit_code) = batch_status(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: plan.fanout_id.clone(),
+                },
+                Placement::Lab,
+            )
+            .expect("original fanout id resolves replacement child");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                value["batch"]["batch"]["child_runs"][0]["run_id"],
+                retry_run_id
+            );
+            assert_eq!(value["batch"]["admission"]["admitted"], 1);
+            assert!(value["batch"]["unavailable_child_runs"]
+                .as_array()
+                .is_none_or(Vec::is_empty));
         });
     }
 

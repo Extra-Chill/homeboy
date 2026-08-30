@@ -2392,6 +2392,28 @@ fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
 }
 
 #[test]
+fn logs_exposes_only_the_canonical_cursor_surface() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "logs",
+        "run-1",
+        "--cursor",
+        "event-page-2",
+    ])
+    .expect("canonical cursor parses");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Logs(args) = agent_task.command else {
+        panic!("expected logs command");
+    };
+    assert_eq!(args.run_id, "run-1");
+    assert_eq!(args.cursor.as_deref(), Some("event-page-2"));
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "logs", "run-1", "--raw"]).is_err());
+}
+
+#[test]
 fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
     with_temp_home(|| {
         let command = vec![
@@ -2420,14 +2442,14 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
         .expect("controller status resolves");
         let (logs_value, logs_exit) = logs(LogsArgs {
             run_id: "run-cli-controller-proxy".to_string(),
-            raw: false,
+            cursor: None,
         })
         .expect("controller logs resolve");
 
         assert_eq!(status_exit, 0);
         assert_eq!(logs_exit, 0);
         assert_eq!(status_value["outcome"]["state"], "queued");
-        assert_eq!(logs_value["run_id"], "run-cli-controller-proxy");
+        assert_eq!(logs_value["run"], "run-cli-controller-proxy");
     });
 }
 
@@ -2695,34 +2717,34 @@ fn submit_run_status_reports_terminal_state() {
         let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
             bridge: true,
-            since_cursor: Some(0),
+            since_cursor: Some("0".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
         .expect("bridge status loaded");
         assert_eq!(
-            status_json["action_eligibility"]["schema"],
-            "homeboy/agent-task-lifecycle-action-eligibility/v1"
+            status_json["control_plane_run"]["action_eligibility"]["schema"],
+            "homeboy/control-plane-action-eligibility/v1"
         );
         assert_eq!(run_exit_code, 1);
         assert_eq!(status_exit_code, 0);
         assert_eq!(bridge_status_exit_code, 0);
         assert_eq!(
             bridge_status_json["schema"],
-            "homeboy/agent-task-run-status/v1"
+            "homeboy/agent-task-run-status/v3"
         );
-        assert!(bridge_status_json["normalized_events"].is_array());
+        assert!(bridge_status_json["events"]["events"].is_array());
         assert_eq!(
-            bridge_status_json["action_eligibility"]["schema"],
-            "homeboy/agent-task-lifecycle-action-eligibility/v1"
+            bridge_status_json["control_plane_run"]["action_eligibility"]["schema"],
+            "homeboy/control-plane-action-eligibility/v1"
         );
         assert_eq!(status_json["outcome"]["state"], "failed");
     });
 }
 
 #[test]
-fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
+fn logs_return_canonical_events_while_diagnostics_stay_on_status_and_review() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnostic-summary";
         run_loaded_plan(
@@ -2741,7 +2763,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         .expect("status loaded");
         let (logs_value, _) = logs(LogsArgs {
             run_id: run_id.to_string(),
-            raw: false,
+            cursor: None,
         })
         .expect("logs loaded");
         let (review_value, _) = review::review(ReviewArgs {
@@ -2753,7 +2775,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         })
         .expect("review loaded");
 
-        for value in [&status_value, &logs_value, &review_value] {
+        for value in [&status_value, &review_value] {
             assert_eq!(
                 value["diagnostic_summary"]["message"],
                 "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
@@ -2761,6 +2783,11 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
             assert_eq!(value["diagnostic_summary"]["class"], "provider_discovery");
             assert_eq!(value["diagnostic_summary"]["task_id"], "task-a");
         }
+        assert_eq!(
+            logs_value["schema"],
+            homeboy_control_plane_contract::CONTROL_PLANE_EVENT_PAGE_SCHEMA
+        );
+        assert!(logs_value.get("diagnostic_summary").is_none());
     });
 }
 
@@ -3486,6 +3513,68 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
                 format!("homeboy agent-task evidence {run_id} --task task-a --failure-only"),
                 format!("homeboy agent-task review {run_id}"),
             ]
+        );
+    });
+}
+
+#[test]
+#[cfg(unix)]
+fn diagnose_interrupted_local_owner_names_budget_and_duplication_instead_of_generic_retry() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-interrupted-owner";
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+        agent_task_lifecycle::mark_running(run_id).expect("running");
+        let mut owner = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start cook observer");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"] = json!([{
+                "key": "task-a:1",
+                "task_id": "task-a",
+                "attempt": 1,
+                "backend": "test",
+                "state": "running",
+                "owner_pid": owner.id(),
+                "owner_linux_starttime_ticks": null,
+                "owner_identity": format!("{run_id}:task-a:1"),
+            }]);
+            record.metadata["provider_executions_consumed"] = json!(1);
+        })
+        .expect("observer fixture");
+        owner.kill().expect("kill cook observer");
+        owner.wait().expect("reap cook observer");
+
+        let record = lifecycle_status(run_id).expect("reconcile interrupted owner");
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            record.metadata["stop_reason"],
+            "local Cook observer was interrupted during provider execution"
+        );
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose interrupted owner");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["root_cause"]["class"], "interrupted_owner");
+        assert_eq!(value["next_action_basis"], "diagnosis");
+        assert_ne!(value["next_action_basis"], "generic_fallback");
+        let commands: Vec<&str> = value["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .map(|action| action["label"].as_str().unwrap_or_default())
+            .collect();
+        assert!(
+            commands.iter().any(|label| {
+                label.contains("provider budget was consumed")
+                    && label.contains("may be duplicated")
+            }),
+            "{commands:?}"
         );
     });
 }
@@ -4968,7 +5057,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         let (value, exit_code) = resume(StatusArgs {
             run_id: run_id.to_string(),
             bridge: true,
-            since_cursor: Some(1),
+            since_cursor: Some("1".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
@@ -4976,14 +5065,13 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         .expect("bridge resume reconciles terminal projection");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(value["schema"], "homeboy/agent-task-run-status/v1");
-        assert_eq!(value["latest_event_cursor"], 2);
-        assert_eq!(value["normalized_events"].as_array().map(Vec::len), Some(1));
-        assert_eq!(
-            value["normalized_events"][0]["type"],
-            "agent_task.state_changed"
-        );
-        assert_eq!(value["normalized_events"][0]["status"], "succeeded");
+        assert_eq!(value["schema"], "homeboy/agent-task-run-status/v3");
+        assert_eq!(value["control_plane_run"]["run"], run_id);
+        assert_eq!(value["control_plane_run"]["state"], "succeeded");
+        assert_eq!(value["events"]["next_cursor"], "2");
+        assert_eq!(value["events"]["events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["events"]["events"][0]["kind"], "task.state_changed");
+        assert_eq!(value["events"]["events"][0]["data"]["state"], "succeeded");
         let artifacts = store.list_artifacts(run_id).expect("projected artifacts");
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_type, "file");
@@ -5000,7 +5088,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         resume(StatusArgs {
             run_id: run_id.to_string(),
             bridge: true,
-            since_cursor: Some(1),
+            since_cursor: Some("1".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()

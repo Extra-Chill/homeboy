@@ -7,9 +7,9 @@ use crate::release::pipeline_capabilities::{
 use crate::release::scope::ReleaseScope;
 use crate::release::types::{ReleaseChangelogPlan, ReleaseOptions};
 use homeboy_core::component::Component;
+use homeboy_core::extension::{ExtensionCapability, ExtensionManifest};
 use homeboy_core::plan::PlanStep;
 use homeboy_core::Result;
-use homeboy_extension::{ExtensionCapability, ExtensionManifest};
 
 pub(in crate::release) fn build_release_steps_with_reconciliation(
     component: &Component,

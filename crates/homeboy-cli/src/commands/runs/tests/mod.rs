@@ -1513,13 +1513,16 @@ fn artifacts_command_lists_copy_paste_get_commands_with_names() {
         );
 
         let downloaded = home.path().join("downloaded-named.json");
-        let (output, _) = artifact_get(RunsArtifactGetArgs {
-            run_id: run.id.clone(),
-            artifact_id: "readable-report".to_string(),
-            runner: None,
-            output: Some(downloaded.clone()),
-            field: Vec::new(),
-        })
+        let (output, _) = artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id.clone(),
+                artifact_id: "readable-report".to_string(),
+                runner: None,
+                output: Some(downloaded.clone()),
+                field: Vec::new(),
+            },
+        )
         .expect("get by readable name");
         let RunsOutput::ArtifactGet(output) = output else {
             panic!("expected artifact get output");
@@ -1547,13 +1550,16 @@ fn artifact_get_copies_registered_file_without_raw_path_lookup() {
             .expect("record artifact");
         let output_path = home.path().join("downloaded.json");
 
-        let (output, _) = artifact_get(RunsArtifactGetArgs {
-            run_id: run.id.clone(),
-            artifact_id: artifact.id.clone(),
-            runner: None,
-            output: Some(output_path.clone()),
-            field: Vec::new(),
-        })
+        let (output, _) = artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id.clone(),
+                artifact_id: artifact.id.clone(),
+                runner: None,
+                output: Some(output_path.clone()),
+                field: Vec::new(),
+            },
+        )
         .expect("get artifact");
 
         let RunsOutput::ArtifactGet(output) = output else {
@@ -1566,13 +1572,16 @@ fn artifact_get_copies_registered_file_without_raw_path_lookup() {
             br#"{"ok":true}"#
         );
 
-        let err = match artifact_get(RunsArtifactGetArgs {
-            run_id: run.id,
-            artifact_id: artifact_path.display().to_string(),
-            runner: None,
-            output: Some(home.path().join("bad.json")),
-            field: Vec::new(),
-        }) {
+        let err = match artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id,
+                artifact_id: artifact_path.display().to_string(),
+                runner: None,
+                output: Some(home.path().join("bad.json")),
+                field: Vec::new(),
+            },
+        ) {
             Ok(_) => panic!("raw paths are not accepted as artifact ids"),
             Err(err) => err,
         };
@@ -1595,13 +1604,16 @@ fn artifact_get_field_selector_projects_only_requested_fields() {
             .expect("record artifact");
         let output_path = home.path().join("downloaded.json");
 
-        let (output, _) = artifact_get(RunsArtifactGetArgs {
-            run_id: run.id.clone(),
-            artifact_id: artifact.id.clone(),
-            runner: None,
-            output: Some(output_path.clone()),
-            field: vec!["$.output_path".to_string(), "$.artifact_id".to_string()],
-        })
+        let (output, _) = artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id.clone(),
+                artifact_id: artifact.id.clone(),
+                runner: None,
+                output: Some(output_path.clone()),
+                field: vec!["$.output_path".to_string(), "$.artifact_id".to_string()],
+            },
+        )
         .expect("get artifact with field selector");
 
         // The artifact bytes are still written even when fields are projected.
@@ -1700,13 +1712,16 @@ fn artifact_get_fetches_nested_publication_artifact_store_ref() {
         assert_eq!(nested.path, materialized.to_string_lossy());
 
         let output_path = home.path().join("downloaded-nested.json");
-        let (output, _) = artifact_get(RunsArtifactGetArgs {
-            run_id: run.id.clone(),
-            artifact_id: "nested-result".to_string(),
-            runner: None,
-            output: Some(output_path.clone()),
-            field: Vec::new(),
-        })
+        let (output, _) = artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id.clone(),
+                artifact_id: "nested-result".to_string(),
+                runner: None,
+                output: Some(output_path.clone()),
+                field: Vec::new(),
+            },
+        )
         .expect("get nested artifact");
 
         let RunsOutput::ArtifactGet(output) = output else {
@@ -1779,13 +1794,16 @@ fn artifacts_index_and_fetch_nested_visual_summary_refs_from_public_urls() {
         }
 
         let output_path = home.path().join("visual-source.png");
-        let (fetched, _) = artifact_get(RunsArtifactGetArgs {
-            run_id: run.id.clone(),
-            artifact_id: "visual_compare_15-saas_source".to_string(),
-            runner: None,
-            output: Some(output_path.clone()),
-            field: Vec::new(),
-        })
+        let (fetched, _) = artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id.clone(),
+                artifact_id: "visual_compare_15-saas_source".to_string(),
+                runner: None,
+                output: Some(output_path.clone()),
+                field: Vec::new(),
+            },
+        )
         .expect("fetch public fallback");
         let RunsOutput::ArtifactGet(fetched) = fetched else {
             panic!("expected artifact get")

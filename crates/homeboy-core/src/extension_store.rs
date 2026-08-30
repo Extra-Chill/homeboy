@@ -450,7 +450,7 @@ pub fn find_extension_by_tool(tool: &str) -> Option<ExtensionManifest> {
 ///
 /// It is not routed through `resolve_owner` here because this function has no
 /// `&Component` in scope and neither do any of its nine callers (all returning
-/// `Option`, across homeboy-refactor / homeboy-extension / core's symbol
+/// `Option`, across homeboy-refactor and core's extension and symbol
 /// graph). Threading component linkage through them is a separate change.
 ///
 /// The contradiction is currently latent rather than live: among shipped

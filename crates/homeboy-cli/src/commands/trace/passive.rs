@@ -7,7 +7,7 @@ use homeboy::core::git::short_head_revision_at;
 use homeboy::core::io::{write_output_file_atomically, OutputWriteOptions};
 use homeboy::core::observation::{ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::core::Error;
-use homeboy_extension::trace::{
+use homeboy_core::extension::trace::{
     PassiveTraceCapture, TraceArtifact, TraceCommandOutput, TracePassiveOutput, TraceProbeConfig,
     TraceResults,
 };
@@ -139,7 +139,7 @@ fn error_results(component_id: String, failure: String) -> TraceResults {
     TraceResults {
         component_id,
         scenario_id: "observe".to_string(),
-        status: homeboy_extension::trace::TraceStatus::Error,
+        status: homeboy_core::extension::trace::TraceStatus::Error,
         summary: Some("Passive trace timeline".to_string()),
         failure: Some(failure),
         rig: None,

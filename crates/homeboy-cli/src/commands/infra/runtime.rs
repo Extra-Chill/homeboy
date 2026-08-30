@@ -189,7 +189,7 @@ pub(crate) fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String
     match args.command {
         RuntimeCommand::Helper { command } => match command {
             RuntimeHelperCommand::Path { helper, .. } => {
-                let path = homeboy_extension::helper_path(&helper)?;
+                let path = homeboy_core::extension::helper_path(&helper)?;
                 Ok((format!("{}\n", path.to_string_lossy()), 0))
             }
         },
@@ -313,7 +313,7 @@ fn promotion_takeover() -> CmdResult<RuntimeOutput> {
 }
 
 fn helper_path(helper: &str) -> CmdResult<RuntimeOutput> {
-    let path = homeboy_extension::helper_path(helper)?;
+    let path = homeboy_core::extension::helper_path(helper)?;
 
     Ok((
         RuntimeOutput::HelperPath(RuntimeHelperPathOutput {

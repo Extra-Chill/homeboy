@@ -100,7 +100,7 @@ fn run_list_serializes_installed_rig_package_evidence() {
                 assert!(!evidence.freshness_verified);
                 assert_eq!(
                     evidence.freshness,
-                    homeboy_extension::bench::parsing::RigPackageFreshness::Unknown
+                    homeboy_core::extension::bench::parsing::RigPackageFreshness::Unknown
                 );
                 assert!(evidence
                     .refresh_command

@@ -1,4 +1,4 @@
-use homeboy_extension as extension;
+use homeboy_core::extension;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -10,7 +10,7 @@ use homeboy::fuzz::{
     FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA,
 };
 use homeboy::rig::{self, RigSpec};
-use homeboy_extension::{self, ExtensionCapability};
+use homeboy_core::{self, extension::ExtensionCapability};
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use super::report::fuzz_provenance;

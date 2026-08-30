@@ -1,4 +1,4 @@
-use clap::Args;
+use clap::{Args, Subcommand};
 use homeboy_upgrade::upgrade;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -65,12 +65,31 @@ pub struct UpgradeArgs {
     #[arg(long, value_name = "PATH")]
     pub source_path: Option<PathBuf>,
 
-    /// Pin the published release tag to install instead of the newest installable release
+    /// Pin a published release tag; infers --method binary when omitted
     #[arg(long = "version", value_name = "TAG", conflicts_with = "check")]
     pub pin_version: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<UpgradeCommand>,
+}
+
+#[derive(Subcommand)]
+pub enum UpgradeCommand {
+    /// Inspect a persisted upgrade operation
+    Status {
+        /// Operation id from a previous `homeboy upgrade`. Defaults to the latest upgrade run.
+        id: Option<String>,
+    },
 }
 
 pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
+    if let Some(UpgradeCommand::Status { id }) = args.command {
+        let result = upgrade::load_upgrade_operation_status(id.as_deref())?;
+        let json = serde_json::to_value(result)
+            .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+        return Ok((json, 0));
+    }
+
     if args.check {
         let result = upgrade::check_for_updates()?;
         // A check that quietly withholds an update because the newest release
@@ -382,6 +401,7 @@ mod tests {
             extensions_unrefreshed: Vec::new(),
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
+            operation_id: None,
         }
     }
 }

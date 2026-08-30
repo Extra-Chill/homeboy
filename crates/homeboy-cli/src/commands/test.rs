@@ -7,14 +7,14 @@ use homeboy::core::observation::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,
     merge_metadata, ActiveObservation, NewRunRecord, RunStatus,
 };
-use homeboy_extension::test as extension_test;
-use homeboy_extension::test::{
+use homeboy_core::extension::test as extension_test;
+use homeboy_core::extension::test::{
     build_test_summary, detect_test_drift, parse_test_failures_from_text,
     parse_test_results_failures_file, parse_test_results_file, parse_test_results_text, report,
     run_self_check_test_workflow_with_progress, test_failure_summary_items, TestAnalysisInput,
     TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
-use homeboy_extension::ExtensionCapability;
+use homeboy_core::extension::ExtensionCapability;
 #[cfg(test)]
 use homeboy_extension_contract::test_results::TestInventoryRejection;
 use serde_json::Value;
@@ -1527,7 +1527,7 @@ mod tests {
     use homeboy::core::component::Component;
     use homeboy::core::observation::{FindingListFilter, ObservationStore};
     use homeboy::refactor::{build_test_refactor_request, TestSourceOptions};
-    use homeboy_extension::test::{TestAnalysisInput, TestCounts, TestFailure};
+    use homeboy_core::extension::test::{TestAnalysisInput, TestCounts, TestFailure};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2042,7 +2042,7 @@ mod tests {
                 test_scope: None,
                 summary: None,
                 raw_output: None,
-                extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+                extension_phase_timings: vec![homeboy_core::extension::ExtensionPhaseTiming {
                     name: "provider-test".to_string(),
                     duration_ms: 1,
                     status: Some("failed".to_string()),
@@ -2282,7 +2282,7 @@ mod tests {
                 start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
                     .expect("observation");
             let run_id = observation.active.run_id().to_string();
-            let timing = homeboy_extension::ExtensionPhaseTiming {
+            let timing = homeboy_core::extension::ExtensionPhaseTiming {
                 name: "provider-test".to_string(),
                 duration_ms: 1,
                 status: Some("failed".to_string()),
@@ -2469,7 +2469,7 @@ mod tests {
                     test_scope: None,
                     summary: None,
                     raw_output: None,
-                    extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+                    extension_phase_timings: vec![homeboy_core::extension::ExtensionPhaseTiming {
                         name: "provider-test".to_string(),
                         duration_ms: 1,
                         status: Some("completed".to_string()),
@@ -2550,7 +2550,7 @@ mod tests {
                 stdout_limit_bytes: 0,
                 stderr_limit_bytes: 0,
             }),
-            extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+            extension_phase_timings: vec![homeboy_core::extension::ExtensionPhaseTiming {
                 name: "provider".to_string(),
                 duration_ms: 0,
                 status: None,

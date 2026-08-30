@@ -141,8 +141,8 @@ pub use super::agent_task_loop_controller::{
     AgentTaskLoopControllerState, AgentTaskLoopTaskLineage,
 };
 pub use super::agent_task_loop_definition::{
-    compile_loop_definition, compile_loop_spec_value, AgentTaskLoopDefinition,
-    AgentTaskLoopDefinitionTask, AGENT_TASK_LOOP_DEFINITION_SCHEMA,
+    compile_loop_definition, AgentTaskLoopDefinition, AgentTaskLoopDefinitionTask,
+    AGENT_TASK_LOOP_DEFINITION_SCHEMA,
 };
 
 // Secret-env status type is referenced from review/dispatch commands.
@@ -344,21 +344,19 @@ pub mod lifecycle {
         transition_execution_placement_for_continuation_in_store, AgentTaskAcceptanceAttestation,
         AgentTaskAcceptanceRecord, AgentTaskAcceptanceRequirement, AgentTaskAcceptanceVerdict,
         AgentTaskAcceptanceVerificationRequest, AgentTaskAcceptanceVerifier,
-        AgentTaskAcceptanceVerifierProvenance, AgentTaskActionAvailability,
-        AgentTaskActionConfirmation, AgentTaskArtifactRef, AgentTaskCookIndex,
+        AgentTaskAcceptanceVerifierProvenance, AgentTaskArtifactRef, AgentTaskCookIndex,
         AgentTaskCookIndexAttempt, AgentTaskDurableLocalRead, AgentTaskDurableReadUnavailable,
-        AgentTaskEventEnvelope, AgentTaskLifecycleAction, AgentTaskLifecycleActionEligibility,
-        AgentTaskLifecycleActionEligibilityReport, AgentTaskLifecycleStore,
-        AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem, AgentTaskRecordHealthReason,
-        AgentTaskRecordHealthSummary, AgentTaskRecordReconciliationItem,
-        AgentTaskRecordReconciliationReport, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
-        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
-        AgentTaskRunStatus, AgentTaskRunTask, AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe,
-        AgentTaskRunnerProbePlan, AgentTaskStatusOptions, AgentTaskStatusOutcome,
-        CanonicalControlPlaneIdentities, ClaimOutcome, ControllerRuntimePruneResult,
-        DetachedCookMaterializingAttempt, DetachedLabRunRecord, LabOffloadProxyPlan,
-        LocalCookRetryLaunchClaim, RunnerPinnedRuntime, RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT,
-        RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL, RUNNER_PROBE_SKIPPED_NOT_RUNNING,
+        AgentTaskLifecycleStore, AgentTaskPreDispatchFailure, AgentTaskRecordHealthItem,
+        AgentTaskRecordHealthReason, AgentTaskRecordHealthSummary,
+        AgentTaskRecordReconciliationItem, AgentTaskRecordReconciliationReport,
+        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunProviderHandle,
+        AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus, AgentTaskRunTask,
+        AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe, AgentTaskRunnerProbePlan,
+        AgentTaskStatusOptions, AgentTaskStatusOutcome, CanonicalControlPlaneIdentities,
+        ClaimOutcome, ControllerRuntimePruneResult, DetachedCookMaterializingAttempt,
+        DetachedLabRunRecord, LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
+        RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT, RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL,
+        RUNNER_PROBE_SKIPPED_NOT_RUNNING,
     };
     pub use super::super::agent_task_lifecycle::{
         cook_index_exists, mark_running, record_run_aggregate, record_runner_job_identity,
@@ -404,8 +402,8 @@ pub mod loop_controller {
 /// Declarative loop definitions compiled into scheduler plans.
 pub mod loop_definition {
     pub use super::super::agent_task_loop_definition::{
-        compile_loop_definition, compile_loop_spec_value, AgentTaskLoopDefinition,
-        AgentTaskLoopDefinitionTask, AGENT_TASK_LOOP_DEFINITION_SCHEMA,
+        compile_loop_definition, AgentTaskLoopDefinition, AgentTaskLoopDefinitionTask,
+        AGENT_TASK_LOOP_DEFINITION_SCHEMA,
     };
 }
 
@@ -510,8 +508,9 @@ pub mod service {
         adopt_cook_candidate_with_options_and_dispatcher,
         adopt_cook_candidate_with_options_dispatcher_and_executor,
         adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt, aggregate_exit_code,
-        authorize_cook_continue_route, authorize_cook_continue_route_with_artifact, cancel,
-        claim_continuation_for, claim_continuation_for_recovery_in_store, compile_cook_attempt,
+        attempt_primary_failure_diagnostic, authorize_cook_continue_route,
+        authorize_cook_continue_route_with_artifact, cancel, claim_continuation_for,
+        claim_continuation_for_recovery_in_store, compile_cook_attempt,
         compile_cook_attempt_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_readiness_cache, consume_claimed_terminal_with_dispatcher,
         consume_claimed_with_dispatcher, continuation_state_in_store, cook_batch_job_submission,
@@ -528,7 +527,8 @@ pub mod service {
         reconstruct_adoption_options_with_dispatcher,
         reconstruct_options_for_pre_execution_recovery, reconstruct_options_with_dispatcher,
         reconstruct_options_with_local_placement_override, record_replacement_gate_proof,
-        recover_cook_pr, recover_terminal_transport_proxy_evidence, register_cook_batch_job_driver,
+        recover_cook_pr, recover_terminal_transport_proxy_evidence,
+        register_cook_batch_work_handler, register_cook_work_handler,
         register_promotion_job_driver, resolve_supervision_policy, resume, resume_cook,
         resume_cook_batch, retry_with_timeout_override, review_form_timeout_ms, run_cook_batch,
         run_cook_batch_with_control, run_loaded_plan, run_next, run_next_with_cook_dispatcher,
@@ -543,7 +543,7 @@ pub mod service {
         AgentTaskDiscoveryReport, AgentTaskDiscoveryRun, AgentTaskHydratedEvidence,
         AgentTaskPromotionJob, AgentTaskPromotionJobDriver, AgentTaskPromotionJobPhase,
         AgentTaskPromotionRequest, AgentTaskRetryServiceResult, AgentTaskRunResult,
-        CookActivityProbe, CookBatchJobDriver, CookContinuationState, CookMode, CookProgressEvent,
+        CookActivityProbe, CookContinuationState, CookMode, CookProgressEvent,
         CookProviderActivity, CookRecipeStore, CookRequest, CookRuntime, CookService,
         CookSupervisionTick, CookSupervisor, AGENT_TASK_COOK_BATCH_JOB_TYPE,
         AGENT_TASK_COOK_BATCH_JOB_VERSION, AGENT_TASK_PROMOTION_JOB_TYPE,

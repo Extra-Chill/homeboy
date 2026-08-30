@@ -4,6 +4,84 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.365.0] - 2026-08-30
+
+### Added
+- add plan-bound worktree retention
+
+### Changed
+- Add native worktree import and finalization commands
+- Remove extension merge re-export
+- Remove unused extension store re-exports
+- Remove extension execution-context re-exports
+- remove dead work error projections
+- delete legacy cook work drivers
+- Return canonical event pages from logs
+
+## [0.364.21] - 2026-08-30
+
+### Changed
+- root artifact handlers at dispatch
+
+### Fixed
+- infer binary method for release pins
+
+## [0.364.20] - 2026-08-30
+
+### Changed
+- Remove extension update-check re-exports
+- Remove dead extension scope aliases
+- Remove extension readiness re-exports
+- Remove extension grammar re-exports
+- Remove core extension glob re-export
+- Unify control-plane event streams
+
+### Fixed
+- persist canonical child lineage
+- preserve shared child root cause
+- honor snapshot excludes during harvest
+- persist inspectable operation progress
+- report child execution placement
+- persist interrupted local owner cause
+
+## [0.364.19] - 2026-08-30
+
+### Changed
+- Move bridge status onto control-plane run
+- Fold extension subsystem into core
+- Unify canonical control-plane run detail
+
+## [0.364.18] - 2026-08-30
+
+### Changed
+- remove dead retry handoff helper
+- remove stale scheduler and retry fixtures
+- drop fabricated dependency evidence paths
+- remove stale promotion review fixtures
+
+### Fixed
+- preserve gitignore reinclusions
+- keep job logs concise
+- preserve observation creator version
+- scope staging handles to owners
+- reconcile idle queued runner residue
+- Fix Lab linked worktree materialization
+
+## [0.364.17] - 2026-08-30
+
+### Changed
+- Type lifecycle hook events
+- group durable Cook request
+- remove stale direct routing fixtures
+- Delete control-plane compatibility scaffolding
+- Simplify the control-plane read API
+
+### Fixed
+- bound compact provider dispatchability
+- separate lifecycle and tracker identity
+- reconcile terminal job observations
+- preserve Lab proxy ownership through provider_start
+
 ## [0.364.16] - 2026-08-30
 
 ### Changed

@@ -18,12 +18,12 @@
 //! declared and not enforced, and every handler that keeps its own open is one
 //! more place that has to be revisited before the ambient entry point can go.
 //!
-//! `resume_plan`, `env`, and `artifacts_from_args` now take the store the
-//! dispatcher already holds.
+//! Run detail, artifact, and resource handlers now take the store the dispatcher
+//! already holds.
 //!
 //! ## What this test pins
 //!
-//! That those three keep taking an injected store. It deliberately does not
+//! That those handlers keep taking an injected store. It deliberately does not
 //! assert a total count for the module: `show_run` uses `open_readonly`, which
 //! is a different mode chosen so a read cannot create or migrate a database,
 //! and several sibling commands are still their own boundaries.
@@ -40,24 +40,41 @@ fn source(relative: &str) -> String {
 
 #[test]
 fn dispatched_handlers_do_not_reopen_the_store_they_were_given() {
-    let handlers = source("handlers.rs");
-    for name in ["resume_plan", "artifacts_from_args", "env"] {
-        let start = handlers
-            .find(&format!("fn {name}("))
-            .unwrap_or_else(|| panic!("`{name}` still exists in handlers.rs"));
-        let rest = &handlers[start..];
-        let end = rest.find("\n}\n").expect("terminated body");
-        let body = &rest[..end];
-        assert!(
-            body.contains("store: &ObservationStore"),
-            "`{name}` stopped taking the dispatcher's store (#7505)."
-        );
-        assert!(
-            !body.contains("ObservationStore::open_initialized()"),
-            "`{name}` takes an injected store and then opens another one. That \
+    for (relative, names) in [
+        (
+            "handlers.rs",
+            &[
+                "resume_plan",
+                "artifacts_from_args",
+                "env",
+                "artifact_command",
+                "artifact_preview_handle",
+                "artifact_get_inner",
+                "artifact_get_handle",
+            ][..],
+        ),
+        ("remote_artifact.rs", &["attach", "preview", "capture"]),
+        ("resources.rs", &["runs_resources_in_store"]),
+    ] {
+        let source = source(relative);
+        for name in names {
+            let start = source
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("`{name}` still exists in {relative}"));
+            let rest = &source[start..];
+            let end = rest.find("\n}\n").expect("terminated body");
+            let body = &rest[..end];
+            assert!(
+                body.contains("store: &ObservationStore"),
+                "`{name}` stopped taking the dispatcher's store (#7505)."
+            );
+            assert!(
+                !body.contains("ObservationStore::open_initialized()"),
+                "`{name}` takes an injected store and then opens another one. That \
              is the shape the compiler cannot catch: the signature looks rooted \
              while the body still resolves the environment for itself (#7505)."
-        );
+            );
+        }
     }
 }
 
@@ -68,6 +85,8 @@ fn the_dispatcher_hands_its_store_to_those_handlers() {
         "handlers::resume_plan(&store, &run_id)",
         "handlers::env(&store, &run_id)",
         "handlers::artifacts_from_args(&store, args)",
+        "handlers::artifact_command(&store, args)",
+        "resources::runs_resources_in_store(&store, roots.config(), args)",
     ] {
         assert!(
             dispatch.contains(call),

@@ -180,7 +180,7 @@ impl RunDir {
     /// This is the measurable form of the narrowing question in #11121: as long
     /// as a shipped extension's runner reads one of these without declaring it,
     /// filtering [`Self::legacy_env_vars_for`] down to declared keys breaks
-    /// that extension. `homeboy-extension` pins the current gap against the
+    /// that extension. Core's extension tests pin the current gap against the
     /// shipped manifest fixtures, so the day the gap closes the pin fails and
     /// says so.
     pub fn legacy_env_sidecar_keys() -> Vec<&'static str> {
@@ -221,7 +221,7 @@ impl RunDir {
     ///
     /// That precondition is now measured rather than asserted in prose:
     /// [`Self::legacy_env_sidecar_keys`] exposes what core exports
-    /// unconditionally, and `homeboy-extension` pins the undeclared remainder
+    /// unconditionally, and core's extension tests pin the undeclared remainder
     /// against the shipped manifest fixtures. When that pin reports an empty
     /// gap, this may become a filter.
     ///
