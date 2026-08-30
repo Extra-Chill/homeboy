@@ -14,6 +14,7 @@ mod notes_tests;
 mod repair_tests;
 mod result_builders;
 mod start_tag_tests;
+mod upload_recovery_tests;
 
 pub(super) fn test_repo() -> GitHubRepo {
     GitHubRepo {
