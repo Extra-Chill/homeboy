@@ -4,8 +4,19 @@
 //! `file` and `command` probes exercise the full one-of-three logic,
 //! short-circuit on validation errors, and cover substring matching.
 
-use crate::check::evaluate;
+use crate::check::{evaluate, evaluate_with_http_wait_ready_budget};
 use crate::spec::{CheckSpec, RigSpec};
+
+fn set_modified(path: &std::path::Path, seconds_since_epoch: u64) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open file for mtime update")
+        .set_times(std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds_since_epoch),
+        ))
+        .expect("set file mtime");
+}
 
 fn minimal_rig() -> RigSpec {
     RigSpec {
@@ -164,9 +175,9 @@ fn test_evaluate_newer_than_left_newer_passes() {
     let older = tmp_dir.path().join("older.txt");
     let newer = tmp_dir.path().join("newer.txt");
     std::fs::write(&older, "x").expect("write");
-    // Sleep a beat so mtimes are distinguishable at second granularity.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(&newer, "x").expect("write");
+    set_modified(&older, 1);
+    set_modified(&newer, 2);
 
     let rig = minimal_rig();
     let spec = CheckSpec {
@@ -192,8 +203,9 @@ fn test_evaluate_newer_than_left_older_fails() {
     let older = tmp_dir.path().join("older.txt");
     let newer = tmp_dir.path().join("newer.txt");
     std::fs::write(&older, "x").expect("write");
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(&newer, "x").expect("write");
+    set_modified(&older, 1);
+    set_modified(&newer, 2);
 
     let rig = minimal_rig();
     // left = older, right = newer ⇒ check fails.
@@ -383,18 +395,20 @@ fn test_http_check_exhausts_budget_when_nothing_ever_listens() {
         ..Default::default()
     };
     let start = std::time::Instant::now();
-    let err = evaluate(&rig, &spec).expect_err("no listener => fail");
+    let err =
+        evaluate_with_http_wait_ready_budget(&rig, &spec, std::time::Duration::from_millis(200))
+            .expect_err("no listener => fail");
     let elapsed = start.elapsed();
 
-    // Budget is 10s; allow generous slack for slow CI but cap below a
-    // pathological hang.
+    // The injected budget preserves the production retry path without making
+    // this test wait out the production ten-second ceiling.
     assert!(
-        elapsed >= std::time::Duration::from_secs(9),
+        elapsed >= std::time::Duration::from_millis(180),
         "must exhaust the wait-ready budget; elapsed = {:?}",
         elapsed
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(20),
+        elapsed < std::time::Duration::from_secs(2),
         "must not hang past the budget; elapsed = {:?}",
         elapsed
     );

@@ -18,6 +18,14 @@ use homeboy_core::http_probe;
 
 /// Run a check against the current rig state. Err on fail.
 pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
+    evaluate_with_http_wait_ready_budget(rig, check, HTTP_WAIT_READY_BUDGET)
+}
+
+pub(crate) fn evaluate_with_http_wait_ready_budget(
+    rig: &RigSpec,
+    check: &CheckSpec,
+    http_wait_ready_budget: Duration,
+) -> Result<()> {
     let mut set = 0;
     if check.http.is_some() {
         set += 1;
@@ -53,7 +61,12 @@ pub fn evaluate(rig: &RigSpec, check: &CheckSpec) -> Result<()> {
     }
 
     if let Some(url) = &check.http {
-        return http_check(rig, url, check.expect_status.unwrap_or(200));
+        return http_check(
+            rig,
+            url,
+            check.expect_status.unwrap_or(200),
+            http_wait_ready_budget,
+        );
     }
     if let Some(path) = &check.file {
         return file_check(rig, path, check.contains.as_deref());
@@ -88,9 +101,14 @@ const HTTP_WAIT_READY_BUDGET: Duration = Duration::from_secs(10);
 /// that we don't spin the CPU against a slow-starting daemon.
 const HTTP_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 
-fn http_check(rig: &RigSpec, url: &str, expect_status: u16) -> Result<()> {
+fn http_check(
+    rig: &RigSpec,
+    url: &str,
+    expect_status: u16,
+    wait_ready_budget: Duration,
+) -> Result<()> {
     let resolved = expand_vars(rig, url);
-    let deadline = std::time::Instant::now() + HTTP_WAIT_READY_BUDGET;
+    let deadline = std::time::Instant::now() + wait_ready_budget;
 
     loop {
         match http_probe::get_status(&resolved, Duration::from_secs(5)) {
