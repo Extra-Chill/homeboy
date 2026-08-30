@@ -79,6 +79,9 @@ pub enum HttpEndpoint {
         id: String,
         cursor: Option<homeboy_control_plane_contract::EventCursor>,
     },
+    ControlPlaneRunActions {
+        id: String,
+    },
     Jobs,
     Job {
         id: String,
@@ -165,6 +168,7 @@ impl HttpEndpoint {
             Self::ControlPlaneCapabilities => "control_plane.capabilities",
             Self::ControlPlaneRun { .. } => "control_plane.runs.show",
             Self::ControlPlaneRunEvents { .. } => "control_plane.runs.events",
+            Self::ControlPlaneRunActions { .. } => "control_plane.runs.actions",
             Self::Jobs => "jobs.list",
             Self::Job { .. } => "jobs.show",
             Self::JobEvents { .. } => "jobs.events",

@@ -6,16 +6,21 @@
 //! resolve ambient stores or providers itself.
 
 use homeboy_control_plane_contract::{
-    ControlPlaneBlocker, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
-    ControlPlaneEvidenceRef, ControlPlaneLocation, ControlPlaneOperation, ControlPlaneOwner,
-    ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunState,
-    ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId, ProviderSessionId, RunId,
+    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
+    ControlPlaneActionRequest, ControlPlaneBlocker, ControlPlaneCapabilities, ControlPlaneError,
+    ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation, ControlPlaneOperation,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
+    ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId,
+    ProviderSessionId, RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 
 use crate::agent_task_lifecycle::{
-    canonical_control_plane_identities, lifecycle_action_eligibility, AgentTaskLifecycleStore,
-    AgentTaskRunRecord, AgentTaskRunState, CanonicalControlPlaneIdentities,
+    canonical_control_plane_identities, claim_operation_with_intent_in_store,
+    complete_cook_operation_in_store, lifecycle_action_eligibility, now_timestamp,
+    resolve_run_id_in_store, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+    CanonicalControlPlaneIdentities, ClaimOutcome,
 };
 use crate::agent_task_schedule::AgentTaskPlan;
 
@@ -26,6 +31,9 @@ const GATE_BOUND: usize = 12;
 pub(crate) const REF_BOUND: usize = 32;
 const URI_BOUND: usize = 512;
 const EVENT_PAGE_BOUND: usize = 100;
+const ACTION_INPUT_BOUND: usize = 128;
+const ACTION_REASON_BOUND: usize = 1_024;
+const ACTION_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One bounded non-reconciling read of the durable record and optional plan.
 #[derive(Debug, Clone)]
@@ -111,8 +119,8 @@ impl<L: RunLookup> OrchestrationService<L> {
         Self { lookup }
     }
 
-    /// Operations actually wired in this build. Mutations are not advertised.
-    pub fn capabilities() -> ControlPlaneCapabilities {
+    /// Operations available to a read-only injected lookup.
+    pub fn read_capabilities() -> ControlPlaneCapabilities {
         ControlPlaneCapabilities::new(
             vec![ControlPlaneResource::Run, ControlPlaneResource::Event],
             vec![
@@ -129,6 +137,166 @@ impl<L: RunLookup> OrchestrationService<L> {
             ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
         })?;
         project_record(&snapshot.record, snapshot.plan.as_ref())
+    }
+}
+
+impl OrchestrationService<LifecycleStoreLookup> {
+    /// Operations wired by the durable lifecycle-backed provider.
+    pub fn capabilities() -> ControlPlaneCapabilities {
+        let mut capabilities = Self::read_capabilities();
+        capabilities
+            .operations
+            .push(ControlPlaneOperation::ExecuteRunAction);
+        capabilities
+    }
+
+    /// Execute the canonical run mutation against the same durable lifecycle
+    /// store used by status and events.
+    pub fn execute_action(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        validate_action_request(request)?;
+        let resolved = resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
+            .map_err(map_lifecycle_error)?;
+        let record = self
+            .lookup
+            .store
+            .read_record(&resolved)
+            .map_err(map_lifecycle_error)?;
+        let operation_key = format!("control-plane-action:cancel:{}", request.idempotency_key);
+        let intent = serde_json::to_value(request)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+        match claim_operation_with_intent_in_store(
+            &self.lookup.store,
+            &resolved,
+            &operation_key,
+            ACTION_LEASE,
+            &intent,
+        )
+        .map_err(map_lifecycle_error)?
+        {
+            ClaimOutcome::AlreadyCompleted(result) => {
+                serde_json::from_value(result).map_err(|error| {
+                    ControlPlaneError::unavailable(format!("stored action result: {error}"))
+                })
+            }
+            ClaimOutcome::LeaseHeld => Err(ControlPlaneError::unavailable(
+                "this idempotent action is already in progress",
+            )),
+            ClaimOutcome::Acquired => {
+                let accepted_at = now_timestamp();
+                let acknowledgement = format!(
+                    "{}:action:cancel:{}",
+                    record.run_id, request.idempotency_key
+                );
+                let (outcome, resource, message) = if request
+                    .expected_updated_at
+                    .as_ref()
+                    .is_some_and(|expected| record.updated_at.as_ref() != Some(expected))
+                {
+                    (
+                        ControlPlaneActionOutcome::Failed,
+                        project_record(&record, None)?,
+                        Some("run changed since the supplied precondition".to_string()),
+                    )
+                } else if record.state.is_terminal() {
+                    (
+                        ControlPlaneActionOutcome::AlreadySatisfied,
+                        project_record(&record, None)?,
+                        Some("run is already terminal".to_string()),
+                    )
+                } else {
+                    match crate::agent_task_lifecycle::cancel_run_in_store(
+                        &self.lookup.store,
+                        requested_id.as_str(),
+                        request.reason.as_deref(),
+                    ) {
+                        Ok(cancelled) => (
+                            ControlPlaneActionOutcome::Succeeded,
+                            project_record(&cancelled, None)?,
+                            None,
+                        ),
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                };
+                let result = ControlPlaneActionAcknowledgement {
+                    schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
+                    acknowledgement,
+                    run: RunId::new(&record.run_id)
+                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+                    action: request.action,
+                    idempotency_key: request.idempotency_key.clone(),
+                    actor: request.actor.clone(),
+                    accepted_at,
+                    completed_at: now_timestamp(),
+                    outcome,
+                    resource,
+                    message,
+                };
+                complete_cook_operation_in_store(
+                    &self.lookup.store,
+                    &resolved,
+                    &operation_key,
+                    serde_json::to_value(&result).map_err(|error| {
+                        ControlPlaneError::unavailable(format!("serialize action result: {error}"))
+                    })?,
+                )
+                .map_err(map_lifecycle_error)?;
+                Ok(result)
+            }
+        }
+    }
+}
+
+fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), ControlPlaneError> {
+    if request.schema != CONTROL_PLANE_ACTION_REQUEST_SCHEMA {
+        return Err(ControlPlaneError::invalid_argument(
+            "unsupported control-plane action request schema",
+        ));
+    }
+    if request.action != ControlPlaneAction::Cancel {
+        return Err(ControlPlaneError::invalid_argument(
+            "only the cancel run action is currently wired",
+        ));
+    }
+    for (name, value) in [
+        ("idempotency_key", request.idempotency_key.as_str()),
+        ("actor", request.actor.as_str()),
+    ] {
+        if value.trim().is_empty() || value.len() > ACTION_INPUT_BOUND {
+            return Err(ControlPlaneError::invalid_argument(format!(
+                "{name} must contain 1 to {ACTION_INPUT_BOUND} bytes"
+            )));
+        }
+    }
+    if request
+        .reason
+        .as_ref()
+        .is_some_and(|reason| reason.len() > ACTION_REASON_BOUND)
+    {
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "reason exceeds {ACTION_REASON_BOUND} bytes"
+        )));
+    }
+    if !request.confirmed {
+        return Err(ControlPlaneError::invalid_argument(
+            "cancel requires explicit confirmation",
+        ));
+    }
+    Ok(())
+}
+
+fn map_lifecycle_error(error: homeboy_core::Error) -> ControlPlaneError {
+    if error.code == homeboy_core::ErrorCode::ValidationInvalidArgument {
+        ControlPlaneError::invalid_argument(error.message)
+    } else {
+        ControlPlaneError::unavailable(error.message)
     }
 }
 
@@ -168,6 +336,36 @@ pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<Contro
                     "run_id",
                     error.message,
                     Some(run_id.to_string()),
+                    None,
+                )
+            }
+            ControlPlaneErrorClass::Unavailable => {
+                homeboy_core::Error::internal_unexpected(error.message)
+            }
+        })
+}
+
+pub fn execute_action_from_current_environment(
+    run_id: &str,
+    request: &ControlPlaneActionRequest,
+) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    let requested_id = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    OrchestrationService::new(LifecycleStoreLookup::new(store))
+        .execute_action(&requested_id, request)
+        .map_err(|error| match error.class {
+            ControlPlaneErrorClass::NotFound | ControlPlaneErrorClass::InvalidArgument => {
+                homeboy_core::Error::validation_invalid_argument(
+                    "action",
+                    error.message,
+                    None,
                     None,
                 )
             }
@@ -622,6 +820,17 @@ impl ControlPlaneProvider for RegisteredProvider {
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).events(requested_id, cursor)
     }
+
+    fn execute_action(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store))
+            .execute_action(requested_id, request)
+    }
 }
 
 /// Register the orchestration service as the HTTP control-plane provider.
@@ -631,16 +840,21 @@ pub fn register() {
 
 #[cfg(test)]
 mod tests {
-    use super::{event_page, project_record, OrchestrationService, RunLookup, RunSnapshot};
-    use crate::agent_task_lifecycle::AgentTaskRunRecord;
+    use super::{
+        event_page, project_record, LifecycleStoreLookup, OrchestrationService, RunLookup,
+        RunSnapshot,
+    };
+    use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunRecord};
     use crate::agent_task_schedule::AgentTaskPlan;
     use homeboy_control_plane_contract::{
-        ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneErrorClass,
-        ControlPlaneEvent, ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState,
-        EventCursor, EventId, RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
+        ControlPlaneActionRequest, ControlPlaneErrorClass, ControlPlaneEvent,
+        ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneRunState, EventCursor, EventId,
+        RunId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
         CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
+    use homeboy_core::test_support::with_isolated_home;
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -796,17 +1010,77 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_advertise_only_wired_reads() {
-        let capabilities = OrchestrationService::<MapLookup>::capabilities();
+    fn capabilities_advertise_only_wired_operations() {
+        let capabilities = OrchestrationService::<LifecycleStoreLookup>::capabilities();
         assert_eq!(
             capabilities.operations,
             vec![
                 ControlPlaneOperation::GetCapabilities,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
+                ControlPlaneOperation::ExecuteRunAction,
             ]
         );
         assert!(!capabilities.operations.is_empty());
+    }
+
+    #[test]
+    fn terminal_cancel_is_replayed_and_conflicting_key_reuse_is_rejected() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "cancel-request-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: Some("2026-01-01T00:01:00Z".to_string()),
+                reason: Some("no longer needed".to_string()),
+                confirmed: true,
+            };
+            let first = service
+                .execute_action(&run, &request)
+                .expect("first action");
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::AlreadySatisfied);
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
+                first
+            );
+            let events = service.events(&run, None).expect("action events");
+            let action_kinds: Vec<_> = events
+                .events
+                .iter()
+                .filter(|event| event.kind.starts_with("action."))
+                .map(|event| event.kind.as_str())
+                .collect();
+            assert_eq!(
+                action_kinds,
+                vec!["action.accepted", "action.already_satisfied"]
+            );
+
+            let mut conflicting = request;
+            conflicting.reason = Some("different reason".to_string());
+            let error = service
+                .execute_action(&run, &conflicting)
+                .expect_err("conflicting key");
+            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+
+            let stale = ControlPlaneActionRequest {
+                idempotency_key: "cancel-request-stale".to_string(),
+                expected_updated_at: Some("2025-12-31T23:59:59Z".to_string()),
+                ..conflicting
+            };
+            let acknowledgement = service
+                .execute_action(&run, &stale)
+                .expect("failed acknowledgement");
+            assert_eq!(acknowledgement.outcome, ControlPlaneActionOutcome::Failed);
+            assert!(acknowledgement
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("precondition")));
+        });
     }
 
     #[test]

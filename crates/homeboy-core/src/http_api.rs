@@ -107,6 +107,11 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 cursor,
             })
         }
+        (HttpMethod::Post, ["v1", "control-plane", "runs", id, "actions"]) => {
+            Ok(HttpEndpoint::ControlPlaneRunActions {
+                id: (*id).to_string(),
+            })
+        }
         (HttpMethod::Get, ["jobs"]) => Ok(HttpEndpoint::Jobs),
         (HttpMethod::Get, ["jobs", id]) => Ok(HttpEndpoint::Job {
             id: (*id).to_string(),
@@ -169,6 +174,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /v1/control-plane/capabilities".to_string(),
                 "GET /v1/control-plane/runs/:id".to_string(),
                 "GET /v1/control-plane/runs/:id/events".to_string(),
+                "POST /v1/control-plane/runs/:id/actions".to_string(),
                 "GET /jobs".to_string(),
                 "GET /jobs/:id".to_string(),
                 "GET /jobs/:id/events".to_string(),
@@ -210,6 +216,9 @@ where
         }
         HttpEndpoint::ControlPlaneCapabilities => {
             return control_plane_capabilities_response();
+        }
+        HttpEndpoint::ControlPlaneRunActions { id } => {
+            return control_plane_action_response(endpoint.clone(), id, request.body.as_ref());
         }
         _ => {}
     }
@@ -372,6 +381,7 @@ where
         }),
         HttpEndpoint::ControlPlaneRun { .. }
         | HttpEndpoint::ControlPlaneRunEvents { .. }
+        | HttpEndpoint::ControlPlaneRunActions { .. }
         | HttpEndpoint::ControlPlaneCapabilities => {
             unreachable!("returned before store open")
         }
@@ -486,6 +496,38 @@ fn control_plane_events_response(
 ) -> Result<HttpApiResponse> {
     match control_plane_events(run_id, cursor) {
         Ok(events) => control_plane_ok(endpoint, events),
+        Err(error) => control_plane_err(endpoint, error),
+    }
+}
+
+fn control_plane_action_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    body: Option<&Value>,
+) -> Result<HttpApiResponse> {
+    let result = body
+        .cloned()
+        .ok_or_else(|| {
+            homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                "control-plane action request body is required",
+            )
+        })
+        .and_then(|body| {
+            serde_json::from_value::<homeboy_control_plane_contract::ControlPlaneActionRequest>(
+                body,
+            )
+            .map_err(|error| {
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(format!(
+                    "invalid control-plane action request: {error}"
+                ))
+            })
+        })
+        .and_then(|request| {
+            control_plane_run_id(run_id)
+                .and_then(|run_id| crate::control_plane::execute_action(&run_id, &request))
+        });
+    match result {
+        Ok(acknowledgement) => control_plane_ok(endpoint, acknowledgement),
         Err(error) => control_plane_err(endpoint, error),
     }
 }

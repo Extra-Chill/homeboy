@@ -46,7 +46,7 @@ pub fn lifecycle_action_eligibility(
                 cancellation,
                 ControlPlaneActionConfirmation::Required,
                 Vec::new(),
-                false,
+                true,
                 "agent_task_run",
             ),
             action(

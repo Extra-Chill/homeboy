@@ -4373,6 +4373,7 @@ fn cancel_command_marks_queued_run_cancelled() {
         let (value, exit_code) = cancel(CancelArgs {
             run_id: "run-cli-cancel".to_string(),
             reason: Some("not selected".to_string()),
+            idempotency_key: Some("cli-cancel-1".to_string()),
         })
         .expect("cancelled");
         // The reported outcome must describe the durable effect, not merely that
@@ -4380,6 +4381,17 @@ fn cancel_command_marks_queued_run_cancelled() {
         assert_eq!(value["cancellation"]["outcome"], "cancelled");
         assert_eq!(value["cancellation"]["terminal"], true);
         assert_eq!(value["cancellation"]["run_id"], "run-cli-cancel");
+        let replay = cancel(CancelArgs {
+            run_id: "run-cli-cancel".to_string(),
+            reason: Some("not selected".to_string()),
+            idempotency_key: Some("cli-cancel-1".to_string()),
+        })
+        .expect("replayed cancellation")
+        .0;
+        assert_eq!(
+            replay["cancellation"]["acknowledgement"],
+            value["cancellation"]["acknowledgement"]
+        );
         let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
 
         assert_eq!(exit_code, 0);
@@ -4408,6 +4420,7 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
         let (value, exit_code) = cancel(CancelArgs {
             run_id: run_id.to_string(),
             reason: None,
+            idempotency_key: Some("cli-cancel-deferred-1".to_string()),
         })
         .expect("cancellation request accepted");
 

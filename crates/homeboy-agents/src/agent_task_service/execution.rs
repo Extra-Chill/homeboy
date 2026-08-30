@@ -2311,10 +2311,6 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     agent_task_lifecycle::artifacts(run_id)
 }
 
-pub fn cancel(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
-    agent_task_lifecycle::cancel_run(run_id, reason)
-}
-
 pub fn normalize_plan_workspaces(plan: &mut AgentTaskPlan) -> Result<()> {
     for request in &mut plan.tasks {
         normalize_component_worktree_workspace(request)?;

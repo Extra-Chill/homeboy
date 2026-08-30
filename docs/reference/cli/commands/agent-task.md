@@ -648,6 +648,7 @@ Mark a queued or stale-running durable run as cancelled
 | Option | Value | Description |
 | --- | --- | --- |
 | `--reason` | `<TEXT>` | Optional explanation recorded with the cancellation |
+| `--idempotency-key` | `<KEY>` | Stable caller key for safely replaying this cancellation request |
 
 ## `homeboy agent-task quarantine`
 

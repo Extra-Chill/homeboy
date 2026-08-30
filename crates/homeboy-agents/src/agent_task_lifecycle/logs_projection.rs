@@ -75,7 +75,68 @@ fn event_page_in_store(
     } else {
         normalize_runner_job_events(&raw_events, &record, &artifact_refs)?
     };
+    let events = append_control_plane_action_events(&record, events)?;
     control_plane_event_page(&record, events, cursor)
+}
+
+fn append_control_plane_action_events(
+    record: &AgentTaskRunRecord,
+    mut events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
+) -> Result<Vec<homeboy_control_plane_contract::ControlPlaneEvent>> {
+    let task_id = record
+        .tasks
+        .first()
+        .map(|task| task.task_id.as_str())
+        .unwrap_or(record.run_id.as_str());
+    let claims = record
+        .metadata
+        .get("cook_operation_claims")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|claim| {
+            claim["operation_key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("control-plane-action:"))
+        });
+    for claim in claims {
+        let mut accepted = control_plane_event(
+            record,
+            events.len() as u64 + 1,
+            task_id,
+            "action.accepted",
+            claim["leased_at"].as_str().map(str::to_string),
+            "control-plane",
+            json!({
+                "operation_key": claim["operation_key"],
+                "request": claim["intent"],
+            }),
+            std::iter::empty(),
+        )?;
+        accepted.task = None;
+        events.push(accepted);
+        let Some(result) = claim.get("result") else {
+            continue;
+        };
+        let kind = match result["outcome"].as_str() {
+            Some("already_satisfied") => "action.already_satisfied",
+            Some("failed") => "action.failed",
+            _ => "action.succeeded",
+        };
+        let mut terminal = control_plane_event(
+            record,
+            events.len() as u64 + 1,
+            task_id,
+            kind,
+            claim["completed_at"].as_str().map(str::to_string),
+            "control-plane",
+            result.clone(),
+            std::iter::empty(),
+        )?;
+        terminal.task = None;
+        events.push(terminal);
+    }
+    Ok(events)
 }
 
 fn local_provider_execution_artifact_refs(

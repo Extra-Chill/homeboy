@@ -464,6 +464,9 @@ pub struct CancelArgs {
     /// Optional explanation recorded with the cancellation.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// Stable caller key for safely replaying this cancellation request.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct QuarantineArgs {

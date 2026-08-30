@@ -7,6 +7,7 @@
 //! and the shared result envelope once. They depend only on serde, which
 //! keeps this a leaf crate other crates can depend on without pulling in core.
 
+pub mod action;
 pub mod capabilities;
 pub mod control_plane_ref;
 pub mod event;
@@ -14,6 +15,10 @@ pub mod identity;
 pub mod resolve;
 pub mod resource;
 
+pub use action::{
+    ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome, ControlPlaneActionRequest,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+};
 pub use capabilities::{
     ControlPlaneCapabilities, ControlPlaneOperation, ControlPlaneResource,
     CONTROL_PLANE_CAPABILITIES_SCHEMA,

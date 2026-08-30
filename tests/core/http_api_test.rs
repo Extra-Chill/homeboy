@@ -8,11 +8,13 @@ use crate::observation::{
     ArtifactRecord, NewFindingRecord, NewRunRecord, ObservationStore, RunRecord, RunStatus,
 };
 use homeboy_control_plane_contract::{
-    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvent,
-    ControlPlaneEventPage, ControlPlaneEventSource, ControlPlaneOperation, ControlPlaneResource,
-    ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, EventCursor, EventId, MissionId,
-    RunId, TaskId, CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
+    ControlPlaneActionRequest, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneEvent, ControlPlaneEventPage, ControlPlaneEventSource, ControlPlaneOperation,
+    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, EventCursor,
+    EventId, MissionId, RunId, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 
 use crate::test_support::with_isolated_home;
@@ -313,6 +315,7 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
                 ControlPlaneOperation::GetCapabilities,
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::GetRunEvents,
+                ControlPlaneOperation::ExecuteRunAction,
             ],
         )
     }
@@ -344,6 +347,29 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
         }
         Ok(fixture_control_plane_events(cursor))
     }
+
+    fn execute_action(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        if requested_id.as_str() != CONTROL_PLANE_FIXTURE_RUN {
+            return Err(ControlPlaneError::not_found("fixture run not found"));
+        }
+        Ok(ControlPlaneActionAcknowledgement {
+            schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
+            acknowledgement: format!("fixture:{}", request.idempotency_key),
+            run: requested_id.clone(),
+            action: request.action,
+            idempotency_key: request.idempotency_key.clone(),
+            actor: request.actor.clone(),
+            accepted_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: "2026-01-01T00:00:01Z".to_string(),
+            outcome: ControlPlaneActionOutcome::AlreadySatisfied,
+            resource: fixture_control_plane_run(),
+            message: None,
+        })
+    }
 }
 
 fn register_fixture_control_plane_provider() {
@@ -373,8 +399,14 @@ fn routes_versioned_control_plane_endpoints() {
             cursor: Some(EventCursor::new("event-page-2").expect("cursor")),
         }
     );
+    assert_eq!(
+        http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc/actions").expect("route"),
+        HttpEndpoint::ControlPlaneRunActions {
+            id: "run-abc".to_string()
+        }
+    );
     http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc")
-        .expect_err("control-plane mutations are not wired");
+        .expect_err("only the canonical actions route mutates runs");
     http_api::route(HttpMethod::Get, "/agent-task/runs/run-abc")
         .expect_err("the unversioned compatibility route is removed");
     http_api::route(HttpMethod::Get, "/v1/control-plane/missions")
@@ -403,7 +435,38 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
             ControlPlaneOperation::GetCapabilities,
             ControlPlaneOperation::GetRun,
             ControlPlaneOperation::GetRunEvents,
+            ControlPlaneOperation::ExecuteRunAction,
         ]
+    );
+}
+
+#[test]
+fn control_plane_action_http_uses_the_typed_provider_contract() {
+    register_fixture_control_plane_provider();
+    let request = ControlPlaneActionRequest {
+        schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+        action: ControlPlaneAction::Cancel,
+        idempotency_key: "http-request-1".to_string(),
+        actor: "test-client".to_string(),
+        expected_updated_at: None,
+        reason: Some("stop".to_string()),
+        confirmed: true,
+    };
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Post,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/actions"),
+        body: Some(serde_json::to_value(&request).expect("request")),
+    })
+    .expect("action");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.endpoint, "control_plane.runs.actions");
+    let result: ControlPlaneResult<ControlPlaneActionAcknowledgement> =
+        serde_json::from_value(response.body).expect("result");
+    let acknowledgement = result.resource.expect("acknowledgement");
+    assert_eq!(acknowledgement.idempotency_key, "http-request-1");
+    assert_eq!(
+        acknowledgement.outcome,
+        ControlPlaneActionOutcome::AlreadySatisfied
     );
 }
 

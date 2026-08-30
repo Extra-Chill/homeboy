@@ -5,8 +5,9 @@
 //! here so core stays agent-task-agnostic.
 
 use homeboy_control_plane_contract::{
-    ControlPlaneCapabilities, ControlPlaneError, ControlPlaneEventPage, ControlPlaneOperation,
-    ControlPlaneRun, EventCursor, RunId,
+    ControlPlaneActionAcknowledgement, ControlPlaneActionRequest, ControlPlaneCapabilities,
+    ControlPlaneError, ControlPlaneEventPage, ControlPlaneOperation, ControlPlaneRun, EventCursor,
+    RunId,
 };
 
 /// Supplies control-plane capabilities and resource reads to the HTTP adapter.
@@ -26,6 +27,16 @@ pub trait ControlPlaneProvider: Send + Sync {
         requested_id: &RunId,
         _cursor: Option<&EventCursor>,
     ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
+        Err(ControlPlaneError::not_found(format!(
+            "control-plane run not found: {requested_id}"
+        )))
+    }
+
+    fn execute_action(
+        &self,
+        requested_id: &RunId,
+        _request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         Err(ControlPlaneError::not_found(format!(
             "control-plane run not found: {requested_id}"
         )))
@@ -60,6 +71,13 @@ pub fn events(
     cursor: Option<&EventCursor>,
 ) -> Result<ControlPlaneEventPage, ControlPlaneError> {
     with_provider(|provider| provider.events(requested_id, cursor))
+}
+
+pub fn execute_action(
+    requested_id: &RunId,
+    request: &ControlPlaneActionRequest,
+) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+    with_provider(|provider| provider.execute_action(requested_id, request))
 }
 
 #[cfg(test)]
