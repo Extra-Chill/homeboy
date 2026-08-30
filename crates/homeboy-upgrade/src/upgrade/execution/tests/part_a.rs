@@ -63,6 +63,19 @@ fn annotate_truncation_leaves_untruncated_detail_unchanged() {
 }
 
 #[test]
+fn upgrade_failure_detail_preserves_stderr_and_structured_stdout() {
+    let detail = upgrade_failure_detail(
+        b"homeboy upgrade: target darwin-arm64, asset homeboy.tar.xz",
+        br#"{"status":"failed","recovery_command":"homeboy agent-task reconcile run-id --apply"}"#,
+    )
+    .expect("failure detail");
+
+    assert!(detail.contains("stderr:\nhomeboy upgrade: target darwin-arm64"));
+    assert!(detail.contains("stdout:\n{\"status\":\"failed\""));
+    assert!(detail.contains("homeboy agent-task reconcile run-id --apply"));
+}
+
+#[test]
 fn parses_homeboy_version_output() {
     assert_eq!(
         parse_cli_version_output("homeboy 0.158.0").as_deref(),
