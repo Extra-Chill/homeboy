@@ -1939,6 +1939,160 @@ fn upgrade_admission_keeps_configured_disconnected_runner_ownership() {
 }
 
 #[test]
+fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reconciliation() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-queued-after-runner-reconcile";
+        let run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::configured_idle(),
+        ));
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&run_id)).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.metadata["cook_id"] = serde_json::json!(cook_id);
+            record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+            record.metadata["runner_job_id"] = serde_json::json!("stale-zero-live-job");
+            record.metadata["provider_executions_consumed"] = serde_json::json!(0);
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata")
+                .remove("runner_pid");
+        })
+        .expect("record ownerless queued runner child");
+
+        let queued = agent_task_lifecycle::exact_record(&run_id).expect("queued record");
+        assert!(queued.is_ownerless_zero_artifact_queued_runner_record());
+        assert!(queued.is_locally_reconcilable_after_runner_idle());
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let blocked =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(blocked.blockers.len(), 1);
+        assert_eq!(blocked.blockers[0].run_id, run_id);
+        assert_eq!(blocked.blockers[0].owner, "durable_agent_tasks");
+        assert_eq!(
+            blocked.blockers[0].reason,
+            "ownerless_queued_after_runner_reconciliation"
+        );
+        assert_eq!(
+            blocked.blockers[0].recovery_command,
+            format!("homeboy --placement local agent-task reconcile {run_id} --apply")
+        );
+        assert!(!blocked.blockers[0]
+            .recovery_command
+            .contains("runner reconcile"));
+
+        let repaired = reconcile_run(&run_id, false).expect("bounded agent-task repair");
+        assert_eq!(repaired.reconciled, 1, "{repaired:?}");
+        assert_eq!(repaired.runs[0].action, "reconciled");
+        assert_eq!(
+            agent_task_lifecycle::exact_record(&run_id)
+                .expect("terminal repaired record")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admitted =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert!(admitted.allows_controller_replacement(), "{admitted:?}");
+        assert!(admitted.blockers.is_empty());
+    });
+}
+
+#[test]
+fn upgrade_admission_keeps_ownerless_queued_runner_record_on_runner_plane_without_idle_evidence() {
+    with_isolated_home(|_| {
+        let run_id = "queued-without-idle-runner-evidence";
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::configured_disconnected(),
+        ));
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+            record.metadata["runner_job_id"] = serde_json::json!("unverified-job");
+            record.metadata["provider_executions_consumed"] = serde_json::json!(0);
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata")
+                .remove("runner_pid");
+        })
+        .expect("record ownerless queued runner child");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        assert_eq!(admission.blockers.len(), 1);
+        assert_eq!(admission.blockers[0].owner, "runner_generations");
+        assert_eq!(
+            admission.blockers[0].recovery_command,
+            "homeboy runner reconcile homeboy-lab"
+        );
+        let report = reconcile_run(run_id, false).expect("runner plane remains fail-closed");
+        assert_eq!(report.reconciled, 0);
+        assert_eq!(report.runs[0].action, "no-op");
+    });
+}
+
+#[test]
+fn idle_runner_evidence_does_not_reclaim_live_or_ambiguous_queued_records() {
+    with_isolated_home(|_| {
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::configured_idle(),
+        ));
+        let now = chrono::Utc::now();
+        for run_id in ["queued-without-job", "queued-planned", "queued-supervised"] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+                record.metadata["runner_job_id"] = serde_json::json!("stale-job");
+                match run_id {
+                    "queued-without-job" => {
+                        record
+                            .metadata
+                            .as_object_mut()
+                            .expect("metadata")
+                            .remove("runner_job_id");
+                    }
+                    "queued-planned" => {
+                        record.metadata["runner_execution_record"] = serde_json::json!({
+                            "status": "planned",
+                            "agent_task_run_id": run_id,
+                            "runner_id": "homeboy-lab",
+                        });
+                    }
+                    "queued-supervised" => {
+                        record.metadata["cook_id"] = serde_json::json!("supervised-cook");
+                        record.metadata["local_cook_supervisor"] = serde_json::json!({
+                            "state": "supervising",
+                            "pinned_run_id": run_id,
+                            "lease_started_at": now.to_rfc3339(),
+                            "lease_expires_at": (now
+                                + chrono::Duration::seconds(
+                                    agent_task_lifecycle::LOCAL_COOK_SUPERVISOR_LEASE_SECONDS
+                                ))
+                            .to_rfc3339(),
+                        });
+                    }
+                    _ => unreachable!(),
+                }
+            })
+            .expect("record queued runner state");
+
+            let record = agent_task_lifecycle::exact_record(run_id).expect("queued record");
+            assert!(!record.is_ownerless_zero_artifact_queued_runner_record());
+            assert!(!record.is_locally_reconcilable_after_runner_idle());
+        }
+
+        record_stale_accepted_lab_handoff("accepted-idle-runner", "homeboy-lab");
+        let accepted = agent_task_lifecycle::exact_record("accepted-idle-runner")
+            .expect("accepted runner record");
+        assert!(!accepted.is_ownerless_zero_artifact_queued_runner_record());
+        assert!(!accepted.is_locally_reconcilable_after_runner_idle());
+    });
+}
+
+#[test]
 fn upgrade_admission_keeps_provider_unavailable_runner_ownership() {
     with_isolated_home(|_| {
         let cook_id = "unknown-offline-cook-run";
@@ -3077,6 +3231,7 @@ fn record_stale_accepted_lab_handoff(run_id: &str, runner_id: &str) {
 struct RunnerAuthorityFixture {
     authority: agent_task_lifecycle::RunnerAuthority,
     connected: bool,
+    live_job_authority: agent_task_lifecycle::RunnerLiveJobAuthority,
 }
 
 impl RunnerAuthorityFixture {
@@ -3084,6 +3239,15 @@ impl RunnerAuthorityFixture {
         Self {
             authority: agent_task_lifecycle::RunnerAuthority::Configured,
             connected: false,
+            live_job_authority: agent_task_lifecycle::RunnerLiveJobAuthority::Unknown,
+        }
+    }
+
+    fn configured_idle() -> Self {
+        Self {
+            authority: agent_task_lifecycle::RunnerAuthority::Configured,
+            connected: true,
+            live_job_authority: agent_task_lifecycle::RunnerLiveJobAuthority::Idle,
         }
     }
 
@@ -3091,6 +3255,7 @@ impl RunnerAuthorityFixture {
         Self {
             authority: agent_task_lifecycle::RunnerAuthority::Removed,
             connected: false,
+            live_job_authority: agent_task_lifecycle::RunnerLiveJobAuthority::Unknown,
         }
     }
 
@@ -3098,6 +3263,7 @@ impl RunnerAuthorityFixture {
         Self {
             authority: agent_task_lifecycle::RunnerAuthority::Unknown,
             connected: false,
+            live_job_authority: agent_task_lifecycle::RunnerLiveJobAuthority::Unknown,
         }
     }
 }
@@ -3119,6 +3285,13 @@ impl agent_task_lifecycle::RunnerContinuationProvider for RunnerAuthorityFixture
 
     fn runner_authority(&self, _runner_id: &str) -> agent_task_lifecycle::RunnerAuthority {
         self.authority
+    }
+
+    fn runner_live_job_authority(
+        &self,
+        _runner_id: &str,
+    ) -> agent_task_lifecycle::RunnerLiveJobAuthority {
+        self.live_job_authority
     }
 
     fn run_continuation_exec(
