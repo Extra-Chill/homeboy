@@ -355,9 +355,7 @@ mod tests {
     }
 }
 
-// RunnerWorkspaceLease now lives in the shared runner-contract crate (core's
-// dev_run names it). Re-exported so runner-internal call sites resolve.
-pub use homeboy_lab_runner_contract::RunnerWorkspaceLease;
+pub use homeboy_runner_contract::RunnerWorkspaceLease;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerNamedWorkspaceLease {
