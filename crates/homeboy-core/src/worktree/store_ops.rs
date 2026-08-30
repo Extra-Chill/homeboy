@@ -42,6 +42,120 @@ pub(super) fn adopt_with_store(
     Ok(WorktreeAdoptOutput { record })
 }
 
+pub(super) fn import_with_store(
+    options: WorktreeImportOptions,
+    store_dir: &Path,
+) -> Result<WorktreeImportOutput> {
+    with_task_worktree_registry_write_lock(|| {
+        let target = component::resolve_target(TargetSpec {
+            component_id: Some(&options.component_id),
+            path_override: None,
+            project: None,
+            capability: None,
+            allow_synthetic: false,
+            accept_bare_directory: false,
+            ..TargetSpec::default()
+        })?;
+        let source_checkout = source_checkout_for_worktree(&target)?;
+        let path = PathBuf::from(&options.path)
+            .canonicalize()
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "path",
+                    "Imported worktree path must exist on the controller",
+                    Some(format!("{} ({error})", options.path)),
+                    None,
+                )
+            })?;
+        let expected_handle = format!("{}@{}", target.component_id, branch_slug(&options.branch));
+        if options.handle != expected_handle {
+            return Err(Error::validation_invalid_argument(
+                "handle",
+                "Imported worktree handle must exactly match its component and branch",
+                Some(options.handle),
+                Some(vec![format!("expected: {expected_handle}")]),
+            ));
+        }
+        let expected_path = source_checkout
+            .parent()
+            .ok_or_else(|| Error::internal_unexpected("source checkout has no parent"))?
+            .join(&expected_handle);
+        if path == source_checkout || path != normalize_missing_path(&expected_path) {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                "Imported worktree must be the exact non-primary path for its native handle",
+                Some(path.display().to_string()),
+                Some(vec![format!("expected: {}", expected_path.display())]),
+            ));
+        }
+        let registration = branch_worktree_registrations(&source_checkout, &options.branch)?
+            .into_iter()
+            .find(|registration| registration.path == path && !registration.prunable)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "path",
+                    "Imported path is not the live exact Git worktree registration for its branch",
+                    Some(path.display().to_string()),
+                    None,
+                )
+            })?;
+        verify_linked_worktree_identity(&source_checkout, &path, &options.branch)?;
+
+        let identity = task_worktree_workspace_identity(&target.component_id, &expected_handle)?;
+        if record_path(store_dir, &expected_handle).exists() {
+            let record = read_record(store_dir, &expected_handle)?;
+            let exact_replay = record.component_id == target.component_id
+                && normalize_missing_path(Path::new(&record.source_checkout)) == source_checkout
+                && normalize_missing_path(Path::new(&record.worktree_path)) == path
+                && record.branch == options.branch
+                && record.base_ref == options.base_ref
+                && record.task_url == options.task_url
+                && record.run_id == options.run_id
+                && record.cleanup_policy == options.cleanup_policy
+                && record.state == TaskWorktreeState::Active
+                && record.terminal_disposition.is_none()
+                && record.effective_workspace_identity()? == identity;
+            if !exact_replay {
+                return Err(Error::validation_invalid_argument(
+                    "handle",
+                    "Imported worktree conflicts with the existing native lifecycle record",
+                    Some(expected_handle),
+                    None,
+                ));
+            }
+            return Ok(WorktreeImportOutput {
+                record,
+                imported: false,
+            });
+        }
+
+        let record = TaskWorktreeRecord {
+            id: expected_handle,
+            component_id: target.component_id,
+            source_checkout: source_checkout.display().to_string(),
+            worktree_path: path.display().to_string(),
+            branch: options.branch,
+            base_ref: options.base_ref,
+            workspace_identity: Some(identity),
+            task_url: options.task_url,
+            run_id: options.run_id,
+            cleanup_policy: options.cleanup_policy,
+            terminal_disposition: None,
+            branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            state: TaskWorktreeState::Active,
+            lifecycle_revision: 0,
+            terminal_workspace_authority: None,
+        };
+        let _ = registration;
+        write_record_unlocked(store_dir, &record)?;
+        Ok(WorktreeImportOutput {
+            record,
+            imported: true,
+        })
+    })
+}
+
 pub(super) fn cleanup_with_store(
     options: WorktreeCleanupOptions,
     store: &Path,

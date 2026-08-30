@@ -355,6 +355,24 @@ pub struct WorktreeCreateOutput {
     pub reconciliation: Option<WorktreeCreateReconciliation>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorktreeImportOptions {
+    pub component_id: String,
+    pub handle: String,
+    pub path: String,
+    pub branch: String,
+    pub base_ref: String,
+    pub task_url: Option<String>,
+    pub run_id: Option<String>,
+    pub cleanup_policy: CleanupPolicy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeImportOutput {
+    pub record: TaskWorktreeRecord,
+    pub imported: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeAdoptOutput {
     pub record: AdoptedWorkspaceRecord,
