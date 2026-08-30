@@ -655,6 +655,15 @@
           ]
         },
         "name": "extensions-use-canonical-invoke-api"
+      },
+      {
+        "forbid": {
+          "glob": "crates/**",
+          "patterns": [
+            "\\bextension_readiness\\b"
+          ]
+        },
+        "name": "extensions-use-canonical-readiness-api"
       }
     ]
   },

@@ -1,5 +1,5 @@
 use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
-use homeboy_core::extension_readiness::extension_ready_status;
+use homeboy_core::extension::readiness::extension_ready_status;
 use homeboy_core::extension_update_check::{check_update_available, read_source_revision};
 
 use super::types::FuzzDoctorArgs;

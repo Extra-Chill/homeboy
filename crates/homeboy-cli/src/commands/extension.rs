@@ -11,10 +11,10 @@ use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
 use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
-use homeboy_core::extension::{invoke::run_setup, ExtensionSummary};
-use homeboy_core::extension_readiness::{
+use homeboy_core::extension::readiness::{
     extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
+use homeboy_core::extension::{invoke::run_setup, ExtensionSummary};
 use homeboy_extension_contract as extension_contract;
 use homeboy_extension_contract::update_output::UpdateEntry;
 use std::collections::BTreeMap;

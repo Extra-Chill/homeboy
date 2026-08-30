@@ -16,6 +16,7 @@ pub mod lint;
 mod maintenance;
 mod manifest;
 mod manifest_sidecar;
+pub mod readiness;
 pub mod recipe_run;
 mod refactor_protocol;
 pub mod resolve;

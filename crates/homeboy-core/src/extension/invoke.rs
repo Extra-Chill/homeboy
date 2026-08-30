@@ -19,7 +19,6 @@ mod action;
 mod context;
 mod environment;
 mod scope;
-// readiness relocated to homeboy_core::extension_readiness (core glue)
 mod settings;
 
 use super::env_provider;
@@ -37,7 +36,7 @@ pub(crate) use environment::prepare_capability_run;
 use environment::{
     build_action_env, build_exec_env, execute_extension_command, execute_extension_runtime,
 };
-use homeboy_core::extension_readiness::extension_ready_status;
+use homeboy_core::extension::readiness::extension_ready_status;
 use settings::serialize_settings;
 pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
 

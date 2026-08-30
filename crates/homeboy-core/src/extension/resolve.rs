@@ -2,11 +2,12 @@
 
 use crate::component::Component;
 use crate::error::{Error, ErrorCode, Result};
+use crate::project::Project;
 use std::path::{Path, PathBuf};
 
 use crate::extension::catalog::{extension_path, load_extension, load_extension_in_root};
 use crate::extension::invoke::ResolvedExtensionInvocationContext;
-use homeboy_extension_contract::ExtensionCapability;
+use homeboy_extension_contract::{ExtensionCapability, ExtensionManifest};
 
 mod surface;
 
@@ -15,6 +16,28 @@ pub use surface::{
     resolve_file_extension_in_root, FileExtensionCapability, FILE_EXTENSIONS_SURFACE,
     REMOTE_PATH_SURFACE, SINCE_TAG_SURFACE,
 };
+
+/// Whether an extension's declared dependencies are available in this context.
+pub fn is_extension_compatible(extension: &ExtensionManifest, project: Option<&Project>) -> bool {
+    let Some(requires) = extension.requires.as_ref() else {
+        return true;
+    };
+
+    if requires
+        .extensions
+        .iter()
+        .any(|extension_id| load_extension(extension_id).is_err())
+    {
+        return false;
+    }
+
+    project.is_none_or(|project| {
+        requires
+            .components
+            .iter()
+            .all(|component_id| crate::project::has_component(project, component_id))
+    })
+}
 
 pub fn stderr_tail(stderr: &str) -> String {
     const MAX_LINES: usize = 20;
@@ -896,6 +919,43 @@ mod tests {
                     .expect("installed fallback");
 
             assert_eq!(resolved.id, "alpha");
+        });
+    }
+
+    #[test]
+    fn compatibility_requires_installed_extensions_and_project_components() {
+        crate::test_support::with_isolated_home(|home| {
+            let extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+                "name": "consumer",
+                "version": "1.0.0",
+                "requires": {
+                    "extensions": ["provider"],
+                    "components": ["database"]
+                }
+            }))
+            .expect("extension manifest");
+            let project = Project {
+                id: "site".to_string(),
+                components: vec![crate::project::ProjectComponentAttachment {
+                    id: "database".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            assert!(!is_extension_compatible(&extension, Some(&project)));
+
+            write_extension_manifest(home.path(), "provider", "deps");
+            assert!(is_extension_compatible(&extension, Some(&project)));
+
+            let missing_component = Project {
+                id: "other".to_string(),
+                ..Default::default()
+            };
+            assert!(!is_extension_compatible(
+                &extension,
+                Some(&missing_component)
+            ));
         });
     }
 
