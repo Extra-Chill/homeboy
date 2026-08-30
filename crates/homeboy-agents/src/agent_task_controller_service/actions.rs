@@ -615,8 +615,41 @@ pub(super) fn execute_retry_action(
     action: &AgentTaskLoopPolicyActionRecord,
     target_run_id: &str,
 ) -> Result<(Value, i32)> {
-    let retry = agent_task_service::retry(target_run_id, None, false, false)?;
-    let retry_run_id = retry.record.run_id.clone();
+    let acknowledgement = crate::orchestration::execute_action_from_current_environment(
+        target_run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+            idempotency_key: uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                format!("{}:{}:{target_run_id}", record.loop_id, action.action_id).as_bytes(),
+            )
+            .to_string(),
+            actor: "homeboy-controller".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({ "force": false }),
+            },
+            confirmed: true,
+        },
+    )?;
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Err(Error::validation_invalid_argument(
+            "retry",
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "retry action failed".to_string()),
+            Some(target_run_id.to_string()),
+            None,
+        ));
+    }
+    let retry_record: crate::agent_task_lifecycle::AgentTaskRunRecord =
+        serde_json::from_value(acknowledgement.result.data["record"].clone())
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let retry_run_id = retry_record.run_id.clone();
     if !record
         .task_lineage
         .iter()
@@ -648,9 +681,9 @@ pub(super) fn execute_retry_action(
         serde_json::json!({
             "mode": "retry",
             "target_run_id": target_run_id,
-            "retry_run_id": retry.record.run_id,
-            "record": retry.record,
-            "run": retry.run,
+            "retry_run_id": retry_record.run_id,
+            "record": retry_record,
+            "run": acknowledgement.result.data["runnable"],
         }),
         0,
     ))
