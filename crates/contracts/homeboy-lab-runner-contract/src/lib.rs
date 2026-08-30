@@ -28,6 +28,11 @@ pub use execution_placement::{
     CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
 };
 /// Compatibility exports for established Lab runner consumers. Generic runner
+/// execution-context vocabulary is canonical in `homeboy-runner-contract`.
+pub use homeboy_runner_contract::{
+    is_internal_control_env, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
+};
+/// Compatibility exports for established Lab runner consumers. Generic runner
 /// artifact results are canonical in `homeboy-runner-contract`.
 pub use homeboy_runner_contract::{RunnerArtifactRef, RunnerMutationArtifacts};
 /// Compatibility exports for established Lab runner consumers. Generic runner
@@ -87,23 +92,6 @@ pub struct RunnerWorkspaceSyncOptions {
     /// execution supplies this token; callers that explicitly opt into a stable
     /// identity must reject an already-owned path before materialization.
     pub run_isolation_token: Option<String>,
-}
-
-/// Set while a hosted exec runs inside a runner (as opposed to the local host).
-pub const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
-
-/// Private process marker added only while a runner exec crosses a remote
-/// runner boundary. Intentionally absent from CLI parsing and argv.
-pub const RUNNER_PLACEMENT_RESOLVED_ENV: &str = "HOMEBOY_RUNNER_PLACEMENT_RESOLVED";
-
-/// Identifies the runner an exec is bound to.
-pub const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
-
-/// Whether an env-var name is an internal runner control marker (not a
-/// user-facing variable). Contract-level classification, so it lives here and
-/// core can call it without a core -> runner edge.
-pub fn is_internal_control_env(name: &str) -> bool {
-    name == RUNNER_PLACEMENT_RESOLVED_ENV
 }
 
 /// A lab runner capability prepared from a contract, ready to preflight.
