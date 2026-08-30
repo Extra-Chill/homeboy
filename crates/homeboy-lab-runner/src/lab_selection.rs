@@ -8,7 +8,7 @@ use homeboy_core::runtime_promotion::RuntimePromotionWaitEvent;
 use homeboy_core::{Error, ErrorCode, Result};
 
 use super::{
-    default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
+    default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode, Runner,
     RunnerActiveJobSource, RunnerAvailability, RunnerConnectReport, RunnerStaleDaemonWarning,
     RunnerStatusReport, RunnerTunnelMode,
 };
@@ -338,9 +338,11 @@ struct PlacementReadinessObservation {
     status: RunnerStatusReport,
     capacity: Option<usize>,
     mode: RunnerTunnelMode,
+    capability_runner: Option<Runner>,
     capability_inventory: Option<super::RunnerCapabilityInventory>,
     provider_catalog: Option<Vec<homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider>>,
     command_prefix_required_tools: Vec<super::RunnerRequiredTool>,
+    require_exact_runner_version: bool,
 }
 
 pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
@@ -354,6 +356,9 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
         Ok(PlacementReadinessObservation {
             capacity: runner.settings.concurrency_limit,
             mode: status_tunnel_mode(&status),
+            require_exact_runner_version:
+                super::lab::offload::metadata::require_exact_runner_version(&runner.settings),
+            capability_runner: Some(runner),
             capability_inventory: None,
             provider_catalog: matches!(
                 request.invocation,
@@ -384,7 +389,6 @@ fn placement_readiness_with_transport(
             .expect("validated invocation has one source path"),
     );
     let observation = observe(request, source_path)?;
-    let runner = load(&request.runner_id)?;
     let provider_admission =
         provider_admission_for_request(request, observation.provider_catalog.as_deref());
     let routed = build_routed_lab_admission_command(
@@ -435,7 +439,11 @@ fn placement_readiness_with_transport(
             super::LabRunnerGateMode::Explicit,
         ),
         None => super::evaluate_lab_runner_capabilities_for_runner(
-            &runner,
+            observation.capability_runner.as_ref().ok_or_else(|| {
+                Error::internal_unexpected(
+                    "placement readiness observation omitted its capability runner",
+                )
+            })?,
             &plan.capability,
             super::LabRunnerGateMode::Explicit,
         )?,
@@ -447,7 +455,7 @@ fn placement_readiness_with_transport(
         observation.mode,
         capability,
         observation.provider_catalog.as_deref(),
-        super::lab::offload::metadata::require_exact_runner_version(&runner.settings),
+        observation.require_exact_runner_version,
     ))
 }
 
@@ -1828,6 +1836,7 @@ mod placement_readiness_tests {
             status: status(),
             capacity: Some(1),
             mode: RunnerTunnelMode::DirectSsh,
+            capability_runner: None,
             capability_inventory: Some(super::super::RunnerCapabilityInventory {
                 runtime_ids: std::collections::BTreeSet::from(["runner-homeboy".to_string()]),
                 capabilities: std::collections::BTreeSet::from([
@@ -1840,6 +1849,7 @@ mod placement_readiness_tests {
             command_prefix_required_tools: vec![super::super::RunnerRequiredTool::new(
                 "runner-homeboy",
             )],
+            require_exact_runner_version: false,
         }
     }
 
