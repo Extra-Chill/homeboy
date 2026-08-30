@@ -19,6 +19,7 @@ mod manifest_sidecar;
 pub mod readiness;
 pub mod recipe_run;
 mod refactor_protocol;
+pub mod registry;
 pub mod resolve;
 mod runner;
 mod runtime_helper;
