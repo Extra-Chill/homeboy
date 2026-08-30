@@ -140,7 +140,7 @@ mod tests {
 
     impl AuditExtensionManifestProvider for StoreManifestProvider {
         fn load_all(&self) -> Vec<AuditExtensionManifest> {
-            homeboy_core::extension_store::load_all_extensions()
+            homeboy_core::extension::catalog::load_all_extensions()
                 .unwrap_or_default()
                 .iter()
                 .map(project_manifest)
@@ -148,7 +148,7 @@ mod tests {
         }
 
         fn load(&self, id: &str) -> Option<AuditExtensionManifest> {
-            homeboy_core::extension_store::load_extension(id)
+            homeboy_core::extension::catalog::load_extension(id)
                 .ok()
                 .map(|m| project_manifest(&m))
         }
@@ -255,7 +255,7 @@ mod tests {
                 }))
                 .expect("manifest");
             manifest.id = "fixture".to_string();
-            homeboy_core::extension_store::save_manifest(&manifest)
+            homeboy_core::extension::catalog::save_manifest(&manifest)
                 .expect("save fixture extension");
 
             let config = audit_config_for(

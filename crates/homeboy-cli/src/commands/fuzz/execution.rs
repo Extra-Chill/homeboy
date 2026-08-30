@@ -73,7 +73,9 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let extension_id = ctx.extension_id.clone();
     let fuzz_config = extension_id
         .as_deref()
-        .and_then(|extension_id| homeboy_core::extension_store::load_extension(extension_id).ok())
+        .and_then(|extension_id| {
+            homeboy_core::extension::catalog::load_extension(extension_id).ok()
+        })
         .and_then(|manifest| manifest.fuzz);
     let workloads = fuzz_workloads(
         &ctx.component,

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use homeboy::core::process::{force_terminate_process_tree_bounded, ProcessContainment};
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy_core::extension_store::load_all_extensions;
+use homeboy_core::extension::catalog::load_all_extensions;
 #[cfg(not(windows))]
 use homeboy_engine_primitives::command::terminate_process_tree_and_reap;
 use homeboy_engine_primitives::command::{terminate_remaining_process_group, ControllerChildGuard};

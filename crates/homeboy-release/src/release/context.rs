@@ -17,10 +17,10 @@ pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionM
     if let Some(configured) = component.extensions.as_ref() {
         let mut extension_ids: Vec<String> = configured.keys().cloned().collect();
         extension_ids.sort();
-        let suggestions = homeboy_core::extension_store::available_extension_ids();
+        let suggestions = homeboy_core::extension::catalog::available_extension_ids();
         for extension_id in extension_ids {
-            let manifest =
-                homeboy_core::extension_store::load_extension(&extension_id).map_err(|_| {
+            let manifest = homeboy_core::extension::catalog::load_extension(&extension_id)
+                .map_err(|_| {
                     Error::extension_not_found(extension_id.to_string(), suggestions.clone())
                 })?;
             extensions.push(manifest);

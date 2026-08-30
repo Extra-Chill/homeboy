@@ -14,7 +14,7 @@ use homeboy_core::paths;
 
 use super::install_sources::{install_linked_shared_assets, rename_dir, resolve_cloned_extension};
 use super::{source_metadata, UpdateResult};
-use crate::extension_store::{is_extension_linked, load_extension};
+use crate::extension::catalog::{is_extension_linked, load_extension};
 use homeboy_extension_contract::update_output::ExtensionSourceUpdate;
 
 /// Update an installed extension by pulling latest changes.

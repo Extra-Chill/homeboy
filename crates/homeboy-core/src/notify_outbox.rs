@@ -817,7 +817,7 @@ mod tests {
             }))
             .unwrap();
         manifest.id = "outbox-test-transport".to_string();
-        crate::extension_store::save_manifest(&manifest).unwrap();
+        crate::extension::catalog::save_manifest(&manifest).unwrap();
     }
 
     fn set_default_transport(id: &str) {

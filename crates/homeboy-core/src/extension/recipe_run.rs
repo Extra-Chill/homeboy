@@ -2,7 +2,7 @@
 
 use homeboy_core::error::{Error, Result};
 
-use crate::extension_store::DiscoveredExtension;
+use crate::extension::catalog::DiscoveredExtension;
 use homeboy_extension_contract::{
     ExtensionManifest, RecipeRunProviderDeclaration, RecipeRunProviderDescriptor,
 };
@@ -135,7 +135,7 @@ impl RecipeRunProviderInventoryEntry {
 }
 
 fn discover_recipe_run_providers() -> Vec<DiscoveredProvider> {
-    let mut providers = crate::extension_store::discover_extensions()
+    let mut providers = crate::extension::catalog::discover_extensions()
         .into_iter()
         .flat_map(|extension| match extension {
             DiscoveredExtension::Valid(manifest) => declarations_from_manifest(&manifest),

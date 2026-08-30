@@ -90,7 +90,7 @@ pub struct CiResolvedJob {
 }
 
 pub fn list_for_extension(source_path: &Path, extension_id: &str) -> Result<CiInventory> {
-    let extension = crate::extension_store::load_extension(extension_id)?;
+    let extension = crate::extension::catalog::load_extension(extension_id)?;
     Ok(list_from_manifest(source_path, extension_id, &extension))
 }
 
@@ -135,12 +135,12 @@ pub fn run_for_extension(
     extension_id: &str,
     selection: CiRunSelection,
 ) -> Result<CiRunOutput> {
-    let extension = crate::extension_store::load_extension(extension_id)?;
+    let extension = crate::extension::catalog::load_extension(extension_id)?;
     run_from_manifest(source_path, extension_id, &extension, selection)
 }
 
 pub fn resolve_job_for_extension(extension_id: &str, job_id: &str) -> Result<CiResolvedJob> {
-    let extension = crate::extension_store::load_extension(extension_id)?;
+    let extension = crate::extension::catalog::load_extension(extension_id)?;
     let ci = extension.ci.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "extension",
@@ -169,7 +169,7 @@ pub fn resolve_profile_jobs_for_extension(
     extension_id: &str,
     profile_id: &str,
 ) -> Result<Vec<CiResolvedJob>> {
-    let extension = crate::extension_store::load_extension(extension_id)?;
+    let extension = crate::extension::catalog::load_extension(extension_id)?;
     let ci = extension.ci.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "extension",
@@ -511,7 +511,7 @@ mod tests {
         crate::test_support::with_isolated_home(|home| {
             let mut extension = manifest_with_ci();
             extension.id = "fixture-ci".to_string();
-            crate::extension_store::save_manifest(&extension).expect("save extension");
+            crate::extension::catalog::save_manifest(&extension).expect("save extension");
 
             let inventory = list_for_extension(home.path(), "fixture-ci").expect("list inventory");
 
@@ -601,7 +601,7 @@ mod tests {
                 }
             }))
             .expect("parse manifest");
-            crate::extension_store::save_manifest(&manifest).expect("save extension");
+            crate::extension::catalog::save_manifest(&manifest).expect("save extension");
 
             let output =
                 run_for_extension(tmp.path(), "test", CiRunSelection::Job("smoke".to_string()))
@@ -630,7 +630,7 @@ mod tests {
                 }
             }))
             .expect("parse manifest");
-            crate::extension_store::save_manifest(&manifest).expect("save extension");
+            crate::extension::catalog::save_manifest(&manifest).expect("save extension");
 
             let job = resolve_job_for_extension("test", "unit").expect("resolve CI job");
 
@@ -659,7 +659,7 @@ mod tests {
                 }
             }))
             .expect("parse manifest");
-            crate::extension_store::save_manifest(&manifest).expect("save extension");
+            crate::extension::catalog::save_manifest(&manifest).expect("save extension");
 
             let jobs = resolve_profile_jobs_for_extension("test", "perf")
                 .expect("resolve CI profile jobs");

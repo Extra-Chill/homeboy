@@ -10,7 +10,7 @@ use homeboy_core::code_audit::extension_manifests::{
     register_audit_extension_manifest_provider, AuditExtensionManifest,
     AuditExtensionManifestProvider,
 };
-use homeboy_core::extension_store::{load_all_extensions, load_extension};
+use homeboy_core::extension::catalog::{load_all_extensions, load_extension};
 use homeboy_extension_contract::ExtensionManifest;
 
 /// Project a loaded `ExtensionManifest` into the audit-relevant view.

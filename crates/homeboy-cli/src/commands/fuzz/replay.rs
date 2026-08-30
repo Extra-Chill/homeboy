@@ -336,7 +336,7 @@ fn resolve_replay_context(
         &ctx.component,
         ExtensionCapability::Fuzz,
     )?;
-    let command = homeboy_core::extension_store::load_extension(&execution_context.extension_id)
+    let command = homeboy_core::extension::catalog::load_extension(&execution_context.extension_id)
         .ok()
         .and_then(|manifest| manifest.fuzz)
         .and_then(|fuzz| match mode {

@@ -397,7 +397,7 @@ pub(super) fn fuzz_workloads(
 
     if let Some(extensions) = component.extensions.as_ref() {
         for extension_id in extensions.keys() {
-            if let Ok(manifest) = homeboy_core::extension_store::load_extension(extension_id) {
+            if let Ok(manifest) = homeboy_core::extension::catalog::load_extension(extension_id) {
                 workloads.extend(manifest.fuzz_workloads().iter().map(|workload| {
                     FuzzWorkloadOutput {
                         id: workload.id.clone(),

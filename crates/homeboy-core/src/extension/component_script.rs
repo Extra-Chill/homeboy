@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::runner::ExtensionRunner;
+use crate::extension::catalog::load_extension;
 use crate::extension::env_provider;
 use crate::extension::RunnerOutput;
-use crate::extension_store::load_extension;
 use homeboy_core::component::Component;
 pub use homeboy_core::component_script_provider::ComponentScriptOutput;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};

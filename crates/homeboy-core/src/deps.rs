@@ -743,7 +743,7 @@ fn dependency_install_invocation(argv: Vec<String>) -> Result<DependencyInstallI
             ));
         }
     }
-    for extension in crate::extension_store::load_all_extensions()? {
+    for extension in crate::extension::catalog::load_all_extensions()? {
         let Some(root) = extension.extension_path else {
             continue;
         };

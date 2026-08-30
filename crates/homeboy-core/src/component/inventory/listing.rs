@@ -621,11 +621,14 @@ fn extension_provides_artifact_pattern_core(
         .as_ref()
         .map(|extensions| {
             extensions.keys().any(|extension_id| {
-                crate::extension_store::load_extension_in_optional_root(config_root, extension_id)
-                    .ok()
-                    .and_then(|m| m.build)
-                    .and_then(|b| b.artifact_pattern)
-                    .is_some()
+                crate::extension::catalog::load_extension_in_optional_root(
+                    config_root,
+                    extension_id,
+                )
+                .ok()
+                .and_then(|m| m.build)
+                .and_then(|b| b.artifact_pattern)
+                .is_some()
             })
         })
         .unwrap_or(false)
@@ -639,7 +642,7 @@ pub(in crate::component) fn build_cleanup_paths(component: &Component) -> Vec<(S
     };
 
     for extension_id in extensions.keys() {
-        let Ok(manifest) = crate::extension_store::load_extension(extension_id) else {
+        let Ok(manifest) = crate::extension::catalog::load_extension(extension_id) else {
             continue;
         };
         let Some(build) = manifest.build.as_ref() else {

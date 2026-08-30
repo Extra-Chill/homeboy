@@ -8,7 +8,7 @@ use crate::engine::shell;
 use crate::engine::template::{render_map, TemplateVars};
 use crate::engine::text;
 use crate::error::ErrorCode;
-use crate::extension_store::find_extension_by_tool;
+use crate::extension::catalog::find_extension_by_tool;
 use crate::project::{self, Project};
 use crate::server;
 use crate::server::{execute_local_command, CommandOutput};
@@ -231,7 +231,7 @@ fn build_project_command(
     variables.insert(TemplateVars::CLI_PATH.to_string(), cli_path);
 
     // Add extension_path so {{extension_path}} resolves in command templates
-    let extension_dir = crate::extension_store::extension_path(extension_id);
+    let extension_dir = crate::extension::catalog::extension_path(extension_id);
     if extension_dir.exists() {
         variables.insert(
             TemplateVars::EXTENSION_PATH.to_string(),

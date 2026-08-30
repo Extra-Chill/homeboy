@@ -182,7 +182,7 @@ fn changed_file_routes_for_component(component: &Component) -> Vec<LintChangedFi
 
     extensions
         .keys()
-        .filter_map(|extension_id| crate::extension_store::load_extension(extension_id).ok())
+        .filter_map(|extension_id| crate::extension::catalog::load_extension(extension_id).ok())
         .filter_map(|manifest| manifest.lint)
         .flat_map(|lint| lint.changed_file_routes)
         .collect()

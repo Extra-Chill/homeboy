@@ -1156,7 +1156,7 @@ mod tests {
             let base_path = home.path().join("runtime");
             std::fs::create_dir_all(&base_path).expect("runtime root");
             let managed_root = base_path.join("wp-content");
-            homeboy_core::extension_store::save_manifest(&ExtensionManifest {
+            homeboy_core::extension::catalog::save_manifest(&ExtensionManifest {
                 id: "managed-paths".to_string(),
                 name: "Managed Paths".to_string(),
                 version: "1.0.0".to_string(),

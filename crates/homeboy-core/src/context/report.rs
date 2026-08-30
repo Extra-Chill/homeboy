@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::component::{self, Component};
+use crate::extension::catalog::{is_extension_linked, load_all_extensions};
 use crate::extension_readiness::is_extension_compatible;
-use crate::extension_store::{is_extension_linked, load_all_extensions};
 use crate::project::{self, Project};
 use crate::release_provider::{self, ReleaseStateEntry};
 use crate::server::{self, Server};

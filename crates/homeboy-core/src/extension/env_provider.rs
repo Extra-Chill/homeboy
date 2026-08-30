@@ -29,7 +29,7 @@ pub struct EnvProviderContribution {
 }
 
 pub fn declared_secret_names(extension_id: &str) -> Result<Vec<String>> {
-    let extension = homeboy_core::extension_store::load_extension(extension_id)?;
+    let extension = homeboy_core::extension::catalog::load_extension(extension_id)?;
     let Some(config) = extension.env_provider else {
         return Err(Error::validation_invalid_argument(
             "extension_env",
@@ -53,7 +53,7 @@ pub fn resolve_installed(
     component_path: &Path,
     base_env: &[(String, String)],
 ) -> Result<EnvProviderContribution> {
-    let extension = homeboy_core::extension_store::load_extension(extension_id)?;
+    let extension = homeboy_core::extension::catalog::load_extension(extension_id)?;
     let Some(script) = extension.env_provider_script() else {
         return Err(Error::validation_invalid_argument(
             "extension_env",

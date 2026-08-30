@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::project::Project;
 use std::collections::HashMap;
 
-use crate::extension_store::load_extension;
+use crate::extension::catalog::load_extension;
 use homeboy_extension_contract::ExtensionManifest;
 
 /// Settings resolution for extensions with project/component context.

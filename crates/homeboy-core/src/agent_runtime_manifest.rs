@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::extension_store::load_all_extensions;
+use crate::extension::catalog::load_all_extensions;
 use crate::{config, paths, Error, Result};
 use homeboy_extension_contract::{ExtensionManifest, RequirementsConfig};
 

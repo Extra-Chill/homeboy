@@ -405,7 +405,7 @@ fn parse_component_version(content: &str, pattern: Option<&str>, filename: &str)
 
 /// Find deploy verification config from extensions.
 pub(super) fn find_deploy_verification(target_path: &str) -> Option<DeployVerification> {
-    for extension in homeboy_core::extension_store::load_all_extensions().unwrap_or_default() {
+    for extension in homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default() {
         for verification in extension.deploy_verifications() {
             if target_path.contains(&verification.path_pattern) {
                 return Some(verification.clone());
@@ -424,7 +424,7 @@ pub(super) fn find_deploy_verification(target_path: &str) -> Option<DeployVerifi
 pub(super) fn find_deploy_override(
     target_path: &str,
 ) -> Option<(DeployOverride, ExtensionManifest)> {
-    for extension in homeboy_core::extension_store::load_all_extensions().unwrap_or_default() {
+    for extension in homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default() {
         for override_config in extension.deploy_overrides() {
             if target_path.contains(&override_config.path_pattern) {
                 return Some((override_config.clone(), extension));

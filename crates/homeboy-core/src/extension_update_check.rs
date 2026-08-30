@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::extension_store::{is_extension_linked, load_extension};
+use crate::extension::catalog::{is_extension_linked, load_extension};
 use crate::git;
 use crate::paths;
 

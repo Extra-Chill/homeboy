@@ -23,10 +23,10 @@ use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use homeboy::extension::{list_summaries_with, ExtensionSummary};
 use homeboy_agents::agent_task_service::cook_continue_command;
+use homeboy_core::extension::catalog::load_all_extensions;
 use homeboy_core::extension_readiness::ExtensionReadinessMode;
 #[cfg(test)]
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
-use homeboy_core::extension_store::load_all_extensions;
 use homeboy_extension_contract::{
     CliConfig, ExtensionCapability, ExtensionManifest as InstalledExtensionManifest,
 };

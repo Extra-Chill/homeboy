@@ -5,8 +5,8 @@ use crate::component::Component;
 use crate::error::{Error, ErrorCode, Result};
 use std::path::{Path, PathBuf};
 
+use crate::extension::catalog::{extension_path, load_extension, load_extension_in_root};
 use crate::extension_invocation_context::ResolvedExtensionInvocationContext;
-use crate::extension_store::{extension_path, load_extension, load_extension_in_root};
 use homeboy_extension_contract::ExtensionCapability;
 
 pub fn stderr_tail(stderr: &str) -> String {

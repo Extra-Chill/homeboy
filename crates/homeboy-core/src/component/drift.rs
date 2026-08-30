@@ -42,7 +42,7 @@ use std::path::Path;
 /// audit baseline (`homeboy.json`) is always first; remaining entries are
 /// the union of extension-declared lockfiles and component-declared extras.
 ///
-/// Extension manifests are loaded via [`crate::extension_store::load_extension`].
+/// Extension manifests are loaded via [`crate::extension::catalog::load_extension`].
 /// Extensions that fail to load are silently skipped — drift resolution is
 /// a non-essential side query and should not break callers.
 pub fn drift_file_paths(component: &Component) -> Vec<String> {
@@ -69,7 +69,7 @@ pub fn extension_declared_lockfile_paths(component: &Component) -> Vec<String> {
     let mut paths = BTreeSet::new();
     if let Some(extensions) = component.extensions.as_ref() {
         for extension_id in extensions.keys() {
-            let Ok(manifest) = crate::extension_store::load_extension(extension_id) else {
+            let Ok(manifest) = crate::extension::catalog::load_extension(extension_id) else {
                 continue;
             };
             let Some(build) = manifest.build.as_ref() else {

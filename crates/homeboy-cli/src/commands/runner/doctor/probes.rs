@@ -26,7 +26,7 @@ pub(crate) fn capabilities_from(
 
 pub(crate) fn declared_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
     let mut by_source = declared_extension_tool_specs_by_source(
-        &homeboy_core::extension_store::load_all_extensions().unwrap_or_default(),
+        &homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default(),
     );
     by_source.extend(declared_tool_specs_by_source_from_manifests(
         &agent_runtime_manifest::discover_agent_runtime_tool_diagnostic_manifests(),

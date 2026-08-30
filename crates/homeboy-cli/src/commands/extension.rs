@@ -10,11 +10,11 @@ use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
+use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
 use homeboy_core::extension::{run_setup, ExtensionSummary};
 use homeboy_core::extension_readiness::{
     extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
-use homeboy_core::extension_store::{is_extension_linked, load_extension};
 use homeboy_extension_contract as extension_contract;
 use homeboy_extension_contract::update_output::UpdateEntry;
 use std::collections::BTreeMap;
@@ -1315,11 +1315,11 @@ fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
 /// Extension-only convergence intentionally has no controller-upgrade admission
 /// or runtime-promotion lease: it never replaces the controller binary.
 fn converge_extensions() -> CmdResult<ExtensionOutput> {
-    let extension_ids = homeboy_core::extension_store::available_extension_ids();
+    let extension_ids = homeboy_core::extension::catalog::available_extension_ids();
     let compatibility = extension_ids
         .iter()
         .map(|id| {
-            let manifest = homeboy_core::extension_store::load_extension(id)?;
+            let manifest = homeboy_core::extension::catalog::load_extension(id)?;
             let source_revision = homeboy_core::extension_update_check::read_source_revision(id);
             let report = extension_contract::core_compat::evaluate_core_compatibility(
                 manifest
@@ -1588,7 +1588,7 @@ fn set_extension(
     json: &str,
     replace_fields: &[String],
 ) -> CmdResult<ExtensionOutput> {
-    match homeboy_core::extension_store::merge(extension_id, json, replace_fields)? {
+    match homeboy_core::extension::catalog::merge(extension_id, json, replace_fields)? {
         homeboy::core::MergeOutput::Single(result) => Ok((
             ExtensionOutput::Set {
                 extension_id: result.id,

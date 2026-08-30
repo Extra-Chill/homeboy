@@ -18,7 +18,7 @@ use homeboy_extension_contract::{
 };
 
 use crate::{
-    extension_store::load_all_extensions,
+    extension::catalog::load_all_extensions,
     notification_route::{NotificationRoute, NotificationRouteResolution},
 };
 
@@ -393,7 +393,7 @@ mod tests {
             }))
             .unwrap();
         manifest.id = id.to_string();
-        crate::extension_store::save_manifest(&manifest).unwrap();
+        crate::extension::catalog::save_manifest(&manifest).unwrap();
     }
 
     #[cfg(unix)]

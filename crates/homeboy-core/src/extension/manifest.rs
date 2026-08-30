@@ -15,7 +15,7 @@ pub fn deployment_provider_layered_input(
     extension_id: &str,
     provider_id: &str,
 ) -> Result<Option<DeploymentProviderLayeredInputManifest>> {
-    let extension = crate::extension_store::load_extension(extension_id)?;
+    let extension = crate::extension::catalog::load_extension(extension_id)?;
     let provider = deployment_providers(&extension)
         .iter()
         .find(|provider| provider.id == provider_id)

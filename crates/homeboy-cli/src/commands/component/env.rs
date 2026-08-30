@@ -80,7 +80,7 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
     }
 
     let extension = if let Some(ref ext_id) = extension_id {
-        homeboy_core::extension_store::load_extension(ext_id).ok()
+        homeboy_core::extension::catalog::load_extension(ext_id).ok()
     } else {
         None
     };

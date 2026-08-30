@@ -29,7 +29,7 @@ const MAX_SCOPE_SCAN_DIRECTORIES: usize = 20_000;
 /// Extension load failures are non-fatal: a broken or unreadable manifest must
 /// not take down cleanup inventory for every other declaration.
 pub(super) fn extension_artifact_declarations(worktree: &Path) -> Vec<ArtifactDeclaration> {
-    let Ok(extensions) = crate::extension_store::load_all_extensions() else {
+    let Ok(extensions) = crate::extension::catalog::load_all_extensions() else {
         return Vec::new();
     };
 

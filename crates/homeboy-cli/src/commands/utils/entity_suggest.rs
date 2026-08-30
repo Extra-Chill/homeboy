@@ -70,7 +70,7 @@ fn load_entity_suggestion_snapshot() -> Vec<EntityIdList> {
         },
         EntityIdList {
             entity_type: EntityType::Extension,
-            ids: homeboy_core::extension_store::available_extension_ids(),
+            ids: homeboy_core::extension::catalog::available_extension_ids(),
         },
     ]
 }

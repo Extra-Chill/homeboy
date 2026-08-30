@@ -111,7 +111,7 @@ fn materialize_lab_job_extension_overlay_snapshots(
 ) -> Result<Vec<LabJobExtensionOverlay>> {
     let mut overlays = Vec::new();
     for id in extension_ids {
-        let manifest = homeboy_core::extension_store::load_extension(id)?;
+        let manifest = homeboy_core::extension::catalog::load_extension(id)?;
         let source_path = manifest.extension_path.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "extensions",

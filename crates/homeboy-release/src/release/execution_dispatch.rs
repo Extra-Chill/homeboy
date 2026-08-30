@@ -1114,7 +1114,7 @@ mod tests {
             }))
             .expect("extension manifest");
             extension.id = "registry".to_string();
-            homeboy_core::extension_store::save_manifest(&extension)
+            homeboy_core::extension::catalog::save_manifest(&extension)
                 .expect("save extension manifest");
             let component = Component {
                 id: "fixture".to_string(),
@@ -1167,7 +1167,8 @@ mod tests {
                  printf '[{{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}}]'",
                 counter = counter.display(),
             ));
-            homeboy_core::extension_store::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
 
             let component = Component {
                 id: "fixture".to_string(),
@@ -1231,7 +1232,8 @@ mod tests {
                 "printf '9.9.9\n' > VERSION; printf artifact > fixture.zip; \
                  printf '[{\"path\":\"fixture.zip\",\"type\":\"archive\"}]'",
             );
-            homeboy_core::extension_store::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: repo.path().to_string_lossy().to_string(),
@@ -1293,7 +1295,8 @@ mod tests {
                  printf package > fixture-1.2.3.tgz; \
                  printf '[{\"path\":\"fixture-1.2.3.tgz\",\"type\":\"archive\"}]'",
             );
-            homeboy_core::extension_store::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: repo.path().to_string_lossy().to_string(),
@@ -1358,7 +1361,8 @@ mod tests {
                 "mkdir -p build; printf diagnostic > build/output; \
                  printf partial > fixture-1.2.3.tgz; printf failed >&2; exit 1",
             );
-            homeboy_core::extension_store::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: repo.path().to_string_lossy().to_string(),
@@ -1398,7 +1402,7 @@ mod tests {
                  printf partial > fixture-1.2.3.tgz; \
                  printf '[{\"path\":\"fixture-1.2.3.tgz\",\"type\":\"archive\"}]'",
             );
-            homeboy_core::extension_store::save_manifest(&package)
+            homeboy_core::extension::catalog::save_manifest(&package)
                 .expect("replace package extension");
             let recovery_extensions = vec![package];
             let mut recovery = ReleaseExecutionContext {
@@ -1449,7 +1453,8 @@ mod tests {
             let package = package_extension(
                 "mkdir -p build/stage; cp plugin.php build/stage/plugin.php; (cd build && zip -q fixture.zip stage/plugin.php); printf '[{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}]'",
             );
-            homeboy_core::extension_store::save_manifest(&package).expect("save package extension");
+            homeboy_core::extension::catalog::save_manifest(&package)
+                .expect("save package extension");
 
             let component = Component {
                 id: "fixture".to_string(),
@@ -2004,7 +2009,7 @@ mod tests {
                 }))
                 .expect("extension manifest");
             extension.id = "registry".to_string();
-            homeboy_core::extension_store::save_manifest(&extension).expect("save extension");
+            homeboy_core::extension::catalog::save_manifest(&extension).expect("save extension");
 
             let component = Component {
                 id: "fixture".to_string(),

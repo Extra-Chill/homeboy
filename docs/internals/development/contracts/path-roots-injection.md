@@ -212,7 +212,7 @@ nothing calls it *yet* because the callers above it have not been rooted. It is
 ahead of demand, not behind it. Deleting it means re-adding the same five lines
 when that layer's turn comes.
 
-`extension_store` has one of each, side by side:
+`extension::catalog` has one of each, side by side:
 
 | function | callers | verdict |
 |---|---|---|

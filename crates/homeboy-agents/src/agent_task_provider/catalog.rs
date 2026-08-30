@@ -689,7 +689,7 @@ fn default_backend_from_policy(component_id: Option<&str>) -> homeboy_core::Resu
     let component = component_id.and_then(|id| component::load(id).ok());
     default_backend_from_policy_sources(
         component.as_ref(),
-        homeboy_core::extension_store::load_all_extensions().unwrap_or_default(),
+        homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default(),
         || defaults::load_config().agent_task.default_backend,
     )
 }

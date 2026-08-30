@@ -239,7 +239,7 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
         .as_ref()
         .map(|extensions| {
             extensions.keys().any(|extension_id| {
-                crate::extension_store::load_extension(extension_id)
+                crate::extension::catalog::load_extension(extension_id)
                     .ok()
                     .is_some_and(|m| m.has_build())
             })
@@ -336,7 +336,7 @@ pub fn build_component_info(component: &component::Component) -> ContainedCompon
 }
 
 fn extension_suggestions_for_path(local_path: &Path) -> Vec<String> {
-    crate::extension_store::load_all_extensions()
+    crate::extension::catalog::load_all_extensions()
         .map(|extensions| extension_suggestions_from_manifests(local_path, &extensions))
         .unwrap_or_default()
 }

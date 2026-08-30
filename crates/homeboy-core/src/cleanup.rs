@@ -4750,7 +4750,7 @@ mod tests {
             }))
             .expect("fixture manifest parses");
         manifest.id = id.to_string();
-        crate::extension_store::save_manifest(&manifest).expect("save fixture extension");
+        crate::extension::catalog::save_manifest(&manifest).expect("save fixture extension");
     }
 
     /// A declaration for a reinstallable dependency tree resolved beside a

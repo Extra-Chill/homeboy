@@ -56,7 +56,7 @@ pub fn resolve_hooks(component: &Component, event: HookEvent) -> Result<Vec<Stri
         let mut extension_ids: Vec<_> = extensions.keys().collect();
         extension_ids.sort();
         for extension_id in extension_ids {
-            manifests.push(crate::extension_store::load_extension(extension_id)?);
+            manifests.push(crate::extension::catalog::load_extension(extension_id)?);
         }
     }
     resolve_hooks_with_extensions(component, &manifests, event)
@@ -318,8 +318,8 @@ mod tests {
                 vec!["echo alpha", "echo zebra"]
             );
             let manifests = vec![
-                crate::extension_store::load_extension("zebra").unwrap(),
-                crate::extension_store::load_extension("alpha").unwrap(),
+                crate::extension::catalog::load_extension("zebra").unwrap(),
+                crate::extension::catalog::load_extension("alpha").unwrap(),
             ];
             assert_eq!(
                 resolve_hooks_with_extensions(&component, &manifests, HookEvent::PreVersionBump)

@@ -5,6 +5,7 @@ pub mod audit_manifest_provider;
 pub mod bench;
 pub mod build;
 mod capability;
+pub mod catalog;
 mod compiler_warning_contract;
 pub mod component_script;
 mod env_provider;

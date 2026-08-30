@@ -1,6 +1,6 @@
 use homeboy_core::error::Result;
 
-use homeboy_core::extension_store::{is_extension_linked, load_extension};
+use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
 use homeboy_extension_contract::version;
 
 /// Validate that all extensions declared in a component's `extensions` field are installed.
@@ -282,7 +282,7 @@ mod tests {
             write_extension_manifest(&source, "wordpress", "1.0.0");
             crate::extension::lifecycle::install(&source.to_string_lossy(), Some("wordpress"))
                 .expect("install linked extension");
-            assert!(homeboy_core::extension_store::is_extension_linked(
+            assert!(homeboy_core::extension::catalog::is_extension_linked(
                 "wordpress"
             ));
 
@@ -302,7 +302,7 @@ mod tests {
             // versions are caught.
             let extensions_dir = home.path().join(".config/homeboy/extensions/postgres");
             write_extension_manifest(&extensions_dir, "postgres", "1.0.0");
-            assert!(!homeboy_core::extension_store::is_extension_linked(
+            assert!(!homeboy_core::extension::catalog::is_extension_linked(
                 "postgres"
             ));
 

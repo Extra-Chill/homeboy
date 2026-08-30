@@ -525,7 +525,7 @@ fn artifact_pattern_providers_core(
 
     for extension_id in extensions.keys() {
         let Ok(manifest) =
-            crate::extension_store::load_extension_in_optional_root(config_root, extension_id)
+            crate::extension::catalog::load_extension_in_optional_root(config_root, extension_id)
         else {
             continue;
         };
