@@ -23,9 +23,10 @@ use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use homeboy::extension::{
     list_summaries_with, load_all_extensions, CliConfig,
-    ExtensionManifest as InstalledExtensionManifest, ExtensionReadinessMode, ExtensionSummary,
+    ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
 };
 use homeboy_agents::agent_task_service::cook_continue_command;
+use homeboy_core::extension_readiness::ExtensionReadinessMode;
 #[cfg(test)]
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
 use homeboy_upgrade::upgrade;
@@ -2289,7 +2290,7 @@ fn extension_command_health_from_summary(summary: &ExtensionSummary) -> Extensio
     // A command-health contract that treated an absent measurement as ready
     // would reproduce the fail-open defect class in #10685. (#10616)
     let readiness_unknown =
-        summary.readiness == homeboy_core::extension::ExtensionReadinessState::Unknown;
+        summary.readiness == homeboy_core::extension_readiness::ExtensionReadinessState::Unknown;
 
     let status = if summary.error.is_some() {
         "error"
@@ -2299,7 +2300,9 @@ fn extension_command_health_from_summary(summary: &ExtensionSummary) -> Extensio
         "unknown"
     } else if summary.ready == Some(true) {
         "ready"
-    } else if summary.readiness == homeboy_core::extension::ExtensionReadinessState::TimedOut {
+    } else if summary.readiness
+        == homeboy_core::extension_readiness::ExtensionReadinessState::TimedOut
+    {
         "timed_out"
     } else {
         "not_ready"

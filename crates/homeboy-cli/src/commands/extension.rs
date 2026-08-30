@@ -11,8 +11,10 @@ use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
 use homeboy_core::extension::{
-    extension_ready_status_with, is_extension_linked, load_extension, run_setup,
-    ExtensionReadinessMode, ExtensionSummary, UpdateEntry,
+    is_extension_linked, load_extension, run_setup, ExtensionSummary, UpdateEntry,
+};
+use homeboy_core::extension_readiness::{
+    extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -521,7 +523,7 @@ pub struct ExtensionDetail {
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_ready_check: Option<bool>,
-    pub readiness: homeboy_core::extension::ExtensionReadinessState,
+    pub readiness: ExtensionReadinessState,
     pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
@@ -2313,7 +2315,7 @@ mod tests {
             runtime: "platform".to_string(),
             compatible: true,
             core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(None),
-            readiness: homeboy_core::extension::ExtensionReadinessState::Ready,
+            readiness: ExtensionReadinessState::Ready,
             ready: Some(true),
             ready_reason: None,
             ready_detail: None,
@@ -2379,7 +2381,7 @@ mod tests {
                 core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(
                     None,
                 ),
-                readiness: homeboy_core::extension::ExtensionReadinessState::Ready,
+                readiness: ExtensionReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,
@@ -2434,7 +2436,7 @@ mod tests {
                 core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(
                     None,
                 ),
-                readiness: homeboy_core::extension::ExtensionReadinessState::Ready,
+                readiness: ExtensionReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,

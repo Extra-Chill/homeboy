@@ -62,10 +62,8 @@ pub use env_provider::{
 pub(crate) use execution::build_settings_json_from_manifest;
 pub use execution::execute_action;
 pub use execution::{
-    extension_ready_status, extension_ready_status_with, is_extension_compatible, run_action,
-    run_deployment_provider, run_extension, run_setup, ExtensionExecutionMode,
-    ExtensionReadinessMode, ExtensionReadinessState, ExtensionReadyStatus, ExtensionRunResult,
-    ExtensionSetupResult, ExtensionStepFilter,
+    run_action, run_deployment_provider, run_extension, run_setup, ExtensionExecutionMode,
+    ExtensionRunResult, ExtensionSetupResult, ExtensionStepFilter,
 };
 pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateDefinitionFact, AggregateFieldFact,
