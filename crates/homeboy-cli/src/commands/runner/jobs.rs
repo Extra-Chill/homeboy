@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use homeboy::core::api_jobs::{JobEvent, JobStatus};
+use homeboy::core::api_jobs::{JobEvent, JobEventKind, JobStatus};
 use homeboy::runner::runners::{self as runner, runner_job_log_snapshot};
 
 use super::super::CmdResult;
@@ -47,10 +47,11 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
             follow,
             poll_ms,
             cursor,
+            json,
             compact,
             tail_kb,
         } => map_daemon_job(job_logs(
-            &runner_id, &job_id, follow, poll_ms, cursor, compact, tail_kb,
+            &runner_id, &job_id, follow, poll_ms, cursor, json, compact, tail_kb,
         )),
         RunnerJobCommand::Cancel { runner_id, job_id } => {
             map_daemon_job(job_cancel(&runner_id, &job_id))
@@ -273,12 +274,14 @@ fn job_logs(
     follow: bool,
     poll_ms: u64,
     cursor: Option<u64>,
+    json: bool,
     compact: bool,
     tail_kb: Option<usize>,
 ) -> CmdResult<RunnerJobOutput> {
     reject_unknown_daemon_owner(job_id)?;
     let poll_interval = Duration::from_millis(poll_ms.max(100));
-    let mut emitted_sequence = cursor.unwrap_or(0);
+    let requested_cursor = cursor.unwrap_or(0);
+    let mut emitted_sequence = requested_cursor;
     const MAX_RECONNECTS: u8 = 3;
     let mut reconnects = 0;
     let mut recovery_session = None;
@@ -316,7 +319,8 @@ fn job_logs(
         }
     };
 
-    emit_new_job_events(&snapshot.events, &mut emitted_sequence);
+    let stream_human_events = follow && !json && !compact && tail_kb.is_none();
+    emit_new_job_events(&snapshot.events, &mut emitted_sequence, stream_human_events);
     let stop = Arc::new(AtomicBool::new(false));
     if follow {
         // The handler only requests a cooperative exit; it never cancels the
@@ -385,7 +389,7 @@ fn job_logs(
                 ));
             }
         };
-        emit_new_job_events(&snapshot.events, &mut emitted_sequence);
+        emit_new_job_events(&snapshot.events, &mut emitted_sequence, stream_human_events);
     }
     let runner_job = homeboy::runner::runners::RunnerJob::from_job(
         runner_id,
@@ -396,14 +400,26 @@ fn job_logs(
     );
 
     let tail_bytes = tail_kb.map(|kb| kb.saturating_mul(1024));
-    // Follow renders each unseen event to stderr immediately. Keep the final
-    // JSON envelope event-free so its terminal response cannot replay them.
-    let events = if follow {
-        Vec::new()
-    } else {
-        job_events_after_cursor(snapshot.events, cursor.unwrap_or(0))
-    };
+    let events = job_events_after_cursor(snapshot.events, requested_cursor);
+    let human_events =
+        (!json && !stream_human_events && !compact && tail_bytes.is_none()).then(|| events.clone());
     let projection = super::log_projection::project_job_log(events, compact, tail_bytes);
+    if !json {
+        if !stream_human_events {
+            eprint!(
+                "{}",
+                render_human_job_events(human_events.as_deref(), &projection)
+            );
+        }
+        let exit = projection
+            .exit_code
+            .map(|code| format!(" exit {code}"))
+            .unwrap_or_default();
+        eprintln!(
+            "job {job_id} {}{exit} through cursor {emitted_sequence}",
+            format!("{:?}", snapshot.job.status).to_ascii_lowercase(),
+        );
+    }
     if let Some(session) = recovery_session.take() {
         runner::close_reconnected_job_log_owner(&session);
     }
@@ -418,11 +434,13 @@ fn job_logs(
             compact,
             job: snapshot.job,
             runner_job,
-            events: projection.events,
+            // Human mode rendered this page already. Keep its terminal envelope
+            // concise; --json retains the structured page for machine callers.
+            events: job_log_payload_events(json, projection.events),
             exit_code: projection.exit_code,
             orchestration_provenance: projection.orchestration_provenance,
-            stdout: projection.stdout,
-            stderr: projection.stderr,
+            stdout: json.then_some(projection.stdout).flatten(),
+            stderr: json.then_some(projection.stderr).flatten(),
             next_cursor: emitted_sequence,
             resume_command: Some(resume_command(runner_id, job_id, emitted_sequence, poll_ms)),
         },
@@ -442,9 +460,70 @@ fn reject_unknown_daemon_owner(job_id: &str) -> homeboy::core::Result<()> {
     Ok(())
 }
 
-fn emit_new_job_events(events: &[JobEvent], emitted_sequence: &mut u64) {
+fn emit_new_job_events(events: &[JobEvent], emitted_sequence: &mut u64, render: bool) {
+    let has_stdout = events
+        .iter()
+        .any(|event| event.kind == JobEventKind::Stdout);
+    let has_stderr = events
+        .iter()
+        .any(|event| event.kind == JobEventKind::Stderr);
     for event in new_job_events(events, emitted_sequence) {
-        eprintln!("{}", format_job_event(event));
+        if render {
+            eprintln!(
+                "{}",
+                format_job_event_with_streams(event, !has_stdout, !has_stderr)
+            );
+        }
+    }
+}
+
+fn render_human_job_events(
+    events: Option<&[JobEvent]>,
+    projection: &super::log_projection::JobLogProjection,
+) -> String {
+    let events = events.unwrap_or(&projection.events);
+    let has_stdout = events
+        .iter()
+        .any(|event| event.kind == JobEventKind::Stdout);
+    let has_stderr = events
+        .iter()
+        .any(|event| event.kind == JobEventKind::Stderr);
+    let mut rendered = events
+        .iter()
+        .map(|event| format_job_event_with_streams(event, !has_stdout, !has_stderr))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !rendered.is_empty() {
+        rendered.push('\n');
+    }
+    for (label, stream) in [
+        ("stdout", projection.stdout.as_ref()),
+        ("stderr", projection.stderr.as_ref()),
+    ] {
+        let Some(stream) = stream else {
+            continue;
+        };
+        if stream.truncated {
+            rendered.push_str(&format!(
+                "[{label} tail: {} of {} bytes]\n",
+                stream.returned_bytes, stream.total_bytes
+            ));
+        } else {
+            rendered.push_str(&format!("[{label}]\n"));
+        }
+        rendered.push_str(&stream.tail);
+        if !stream.tail.ends_with('\n') {
+            rendered.push('\n');
+        }
+    }
+    rendered
+}
+
+fn job_log_payload_events(json: bool, events: Vec<JobEvent>) -> Vec<JobEvent> {
+    if json {
+        events
+    } else {
+        Vec::new()
     }
 }
 
@@ -515,13 +594,35 @@ fn classify_follow_error(
     follow_recovery_error(runner_id, job_id, cursor, poll_ms, error)
 }
 
+#[cfg(test)]
 pub(super) fn format_job_event(event: &JobEvent) -> String {
+    format_job_event_with_streams(event, true, true)
+}
+
+fn format_job_event_with_streams(
+    event: &JobEvent,
+    include_result_stdout: bool,
+    include_result_stderr: bool,
+) -> String {
     let kind = format!("{:?}", event.kind).to_ascii_lowercase();
     let message = event.message.as_deref().unwrap_or("");
     let data = event
         .data
         .as_ref()
-        .map(|data| serde_json::to_string(data).unwrap_or_else(|_| "null".to_string()))
+        .map(|data| {
+            let mut data = data.clone();
+            if event.kind == JobEventKind::Result {
+                if let Some(data) = data.as_object_mut() {
+                    if !include_result_stdout {
+                        data.remove("stdout");
+                    }
+                    if !include_result_stderr {
+                        data.remove("stderr");
+                    }
+                }
+            }
+            serde_json::to_string(&data).unwrap_or_else(|_| "null".to_string())
+        })
         .unwrap_or_default();
     match (message.is_empty(), data.is_empty()) {
         (true, true) => format!("#{:04} {}", event.sequence, kind),
@@ -541,7 +642,7 @@ fn runner_job_terminal(status: JobStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::api_jobs::{JobClaimMetadata, JobEventKind};
+    use homeboy::core::api_jobs::JobClaimMetadata;
     use homeboy::runner::runners::{RunnerGenerationJobOwners, RunnerJob, RunnerLifecycleOwner};
     use homeboy::runner::{
         runners::{RunnerSession, RunnerSessionRole, RunnerTunnelMode},
@@ -822,6 +923,72 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![3, 4]
         );
+    }
+
+    #[test]
+    fn failed_job_human_and_json_views_each_render_child_stdout_once() {
+        let blob = "unique-failure-output".repeat(200);
+        let events = vec![
+            JobEvent {
+                kind: JobEventKind::Stdout,
+                message: Some(blob.clone()),
+                ..event(1)
+            },
+            JobEvent {
+                kind: JobEventKind::Result,
+                data: Some(serde_json::json!({
+                    "exit_code": 1,
+                    "stdout": blob,
+                    "stderr": "terminal diagnostic"
+                })),
+                ..event(2)
+            },
+        ];
+        let projection = super::super::log_projection::project_job_log(events.clone(), false, None);
+
+        let human = render_human_job_events(Some(&events), &projection);
+        assert_eq!(human.matches("unique-failure-output").count(), 200);
+        assert!(human.contains("terminal diagnostic"));
+
+        let json = serde_json::to_string(&projection.events).expect("serialize JSON event page");
+        assert_eq!(json.matches("unique-failure-output").count(), 200);
+        assert!(job_log_payload_events(false, projection.events.clone()).is_empty());
+        assert_eq!(
+            job_log_payload_events(true, projection.events.clone()).len(),
+            projection.events.len()
+        );
+    }
+
+    #[test]
+    fn compact_human_presentation_is_bounded_and_keeps_terminal_diagnostics() {
+        let blob = "x".repeat(20_000);
+        let events = vec![
+            JobEvent {
+                kind: JobEventKind::Stdout,
+                message: Some(blob.clone()),
+                ..event(1)
+            },
+            JobEvent {
+                kind: JobEventKind::Result,
+                data: Some(serde_json::json!({
+                    "exit_code": 17,
+                    "stdout": blob,
+                    "stderr": "bounded failure cause"
+                })),
+                ..event(2)
+            },
+        ];
+        let projection = super::super::log_projection::project_job_log(events, true, None);
+
+        let human = render_human_job_events(None, &projection);
+
+        assert!(
+            human.len() < 5_000,
+            "compact presentation was {} bytes",
+            human.len()
+        );
+        assert!(human.contains("4096 of 20000 bytes"));
+        assert!(human.contains("bounded failure cause"));
     }
 
     #[test]
