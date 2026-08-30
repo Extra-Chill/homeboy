@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.16] - 2026-08-30
+
+### Changed
+- load leases from the config root
+- remove stale lint integration fixtures
+- decouple digest cache from pin setup reads
+- prune stale policy and help assertions
+- remove obsolete explicit run id rejections
+- remove stale scope migration checklist
+
+### Fixed
+- keep cleanup noise out of command results
+- honor injected readiness observation
+
 ## [0.364.15] - 2026-08-30
 
 ### Changed
