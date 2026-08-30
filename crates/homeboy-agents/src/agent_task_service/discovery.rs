@@ -530,8 +530,14 @@ pub(crate) fn controller_upgrade_admission_for_records(
                     .get(record.run_id.as_str())
                     .copied()
                     .unwrap_or(&record.run_id);
+                let locally_reconcilable_after_runner_idle =
+                    record.is_locally_reconcilable_after_runner_idle();
                 let recovery_command = if invalid_handoff_parents.contains(record.run_id.as_str()) {
                     "homeboy agent-task reconcile-records --dry-run".to_string()
+                } else if locally_reconcilable_after_runner_idle {
+                    format!(
+                        "homeboy --placement local agent-task reconcile {group_run_id} --apply"
+                    )
                 } else {
                     match record.runner_id() {
                         Some(runner)
@@ -587,7 +593,9 @@ pub(crate) fn controller_upgrade_admission_for_records(
                     scope,
                     postcondition: postcondition.to_string(),
                     liveness: liveness.as_str(),
-                    reason: if runner_unverified {
+                    reason: if locally_reconcilable_after_runner_idle {
+                        "ownerless_queued_after_runner_reconciliation".to_string()
+                    } else if runner_unverified {
                         "runner_job_unverified_after_daemon_restart".to_string()
                     } else {
                         stale_reason_for_record(record)

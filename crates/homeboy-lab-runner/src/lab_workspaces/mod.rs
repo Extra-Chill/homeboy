@@ -248,7 +248,6 @@ pub(super) fn workspace_mapping_entry_for_validation_dependency(
         dependency_freshness: Some(serde_json::json!({
             "id": dependency.id.as_str(),
             "local_path": dependency.local_path.as_str(),
-            "evidence_path": dependency.evidence_path.as_str(),
             "source_provenance": "validation_dependency_sibling",
         })),
         source_provenance: None,

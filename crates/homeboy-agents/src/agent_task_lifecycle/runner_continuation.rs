@@ -45,6 +45,16 @@ impl RunnerAuthority {
     }
 }
 
+/// Authoritative live-job evidence for one runner after generation
+/// reconciliation. Unknown must keep runner-generation ownership: a missing
+/// probe cannot prove the daemon is idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerLiveJobAuthority {
+    Idle,
+    Busy,
+    Unknown,
+}
+
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
 /// resuming a run that was handed off to a remote runner.
 pub trait RunnerContinuationProvider: Send + Sync {
@@ -149,6 +159,12 @@ pub trait RunnerContinuationProvider: Send + Sync {
         } else {
             RunnerAuthority::Unknown
         }
+    }
+
+    /// Live-job evidence after runner-generation reconciliation. Default is
+    /// unknown so older providers cannot turn a missing probe into idle proof.
+    fn runner_live_job_authority(&self, _runner_id: &str) -> RunnerLiveJobAuthority {
+        RunnerLiveJobAuthority::Unknown
     }
 
     /// Execute a continuation command on the runner, returning the exit code.
@@ -262,6 +278,12 @@ pub fn runner_authority(runner_id: &str) -> RunnerAuthority {
     with_runner_continuation(|provider| provider.runner_authority(runner_id))
 }
 
+/// Resolve whether a runner currently has zero live jobs and a resolved
+/// generation projection. A missing provider remains unknown, not idle.
+pub fn runner_live_job_authority(runner_id: &str) -> RunnerLiveJobAuthority {
+    with_runner_continuation(|provider| provider.runner_live_job_authority(runner_id))
+}
+
 /// Clear any registered runner-continuation provider so a fresh test starts from
 /// the no-op default. The provider slot is a process-global; without this reset a
 /// provider registered by one test would leak into every later test in the same
@@ -363,6 +385,17 @@ mod tests {
         ) -> Result<Job> {
             Err(Error::internal_unexpected("unused in fixture"))
         }
+    }
+
+    #[test]
+    fn default_live_job_authority_is_unknown() {
+        assert_eq!(
+            LegacyProvider {
+                runner_exists: true,
+            }
+            .runner_live_job_authority("legacy-runner"),
+            RunnerLiveJobAuthority::Unknown
+        );
     }
 
     #[test]
