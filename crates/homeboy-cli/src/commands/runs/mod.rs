@@ -57,12 +57,17 @@ pub(crate) fn attach_runner_artifact(
     path: String,
     name: String,
 ) -> homeboy::core::Result<serde_json::Value> {
-    let (output, _) = remote_artifact::attach(types::RunsArtifactAttachArgs {
-        run_id,
-        runner,
-        path,
-        name,
-    })?;
+    let roots = homeboy::core::paths::PathRoots::from_environment()?;
+    let store = homeboy::core::observation::ObservationStore::open_initialized_in_roots(&roots)?;
+    let (output, _) = remote_artifact::attach(
+        &store,
+        types::RunsArtifactAttachArgs {
+            run_id,
+            runner,
+            path,
+            name,
+        },
+    )?;
     serde_json::to_value(output)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))
 }

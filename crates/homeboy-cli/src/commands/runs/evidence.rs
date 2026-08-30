@@ -953,12 +953,15 @@ mod tests {
 
             assert_eq!(artifact.artifact_type, "directory");
 
-            let (preview, _) = artifact_command(RunsArtifactArgs {
-                command: RunsArtifactCommand::PreviewHandle(RunsArtifactPreviewHandleArgs {
-                    handle: handle.to_string(),
-                    port: None,
-                }),
-            })
+            let (preview, _) = artifact_command(
+                &test_store(),
+                RunsArtifactArgs {
+                    command: RunsArtifactCommand::PreviewHandle(RunsArtifactPreviewHandleArgs {
+                        handle: handle.to_string(),
+                        port: None,
+                    }),
+                },
+            )
             .expect("preview selected directory diagnostic by handle");
             let RunsOutput::ArtifactPreview(preview) = preview else {
                 panic!("expected directory preview output");
