@@ -2,7 +2,7 @@
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::runner::RunnerExecutionProvider;
-use homeboy_core::runner_execution_envelope::{
+use homeboy_runner_contract::{
     PathMaterializationPlan, RunnerExecutionEnvelope, RunnerExecutionRecord,
 };
 
@@ -70,6 +70,18 @@ fn options_from_request(
         .as_ref()
         .map(|plan| plan.secret_env_names())
         .unwrap_or_default();
+    let mut env: std::collections::HashMap<String, String> = request
+        .secret_env
+        .as_ref()
+        .map(|plan| plan.public_env.clone().into_iter().collect())
+        .unwrap_or_default();
+    env.extend(dispatch.env);
+    let env_materialization = request.env_materialization.or_else(|| {
+        request
+            .secret_env
+            .as_ref()
+            .and_then(|plan| plan.env_materialization.clone())
+    });
 
     Ok(crate::execution::RunnerExecOptions {
         execution_context:
@@ -79,10 +91,10 @@ fn options_from_request(
         cwd: dispatch.cwd,
         project_id: dispatch.project_id,
         command: dispatch.command,
-        env: dispatch.env,
+        env,
         secret_env_names,
         secret_env_plan: request.secret_env,
-        env_materialization: request.env_materialization,
+        env_materialization,
         capture_patch: request.mutation_policy.capture_patch,
         raw_exec: true,
         source_snapshot: dispatch.source_snapshot,
@@ -108,9 +120,10 @@ pub fn register() {
 mod tests {
     use std::collections::HashMap;
 
-    use homeboy_core::runner_execution_envelope::{
+    use homeboy_runner_contract::{
         RunnerExecutionDispatch, RunnerExecutionEnvelope, RunnerExecutionMutationPolicy,
     };
+    use homeboy_core::secret_env_plan::SecretEnvPlan;
 
     use super::options_from_request;
 
@@ -132,6 +145,12 @@ mod tests {
             capture_patch: true,
             ..Default::default()
         };
+        request.secret_env = Some(SecretEnvPlan {
+            public_env: [("FROM_PLAN".to_string(), "projected".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
 
         let options = options_from_request(request).expect("compile request");
 
@@ -139,6 +158,10 @@ mod tests {
         assert_eq!(options.project_id.as_deref(), Some("project-a"));
         assert_eq!(options.cwd.as_deref(), Some("/workspace"));
         assert_eq!(options.env.get("PUBLIC").map(String::as_str), Some("value"));
+        assert_eq!(
+            options.env.get("FROM_PLAN").map(String::as_str),
+            Some("projected")
+        );
         assert_eq!(options.require_paths, vec!["/cache"]);
         assert_eq!(options.required_extensions, vec!["runtime-a"]);
         assert_eq!(options.extension_env_providers, vec!["runtime-a"]);
