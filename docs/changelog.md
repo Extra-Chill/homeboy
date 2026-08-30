@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.366.1] - 2026-08-30
+
+### Changed
+- Trust reconciled runner version
+- Dissolve mixed extension maintenance ownership
+- Remove stale runner recovery wrapper
+- Consolidate runner lifecycle contracts
+- remove duplicate legacy runtime accessor
+- Complete extension invocation runner ownership
+- Route controller retries through control plane actions
+- Validate action payloads before admission
+- Route durable promotions through control plane actions
+- Route resume consumers through control plane actions
+- Route retry consumers through control plane actions
+- Route reconcile apply through control plane actions
+- Add canonical idempotent cancel action
+- Stop duplicate generated release runs
+- Consolidate extension lifecycle source APIs
+
+### Fixed
+- Fix Cook continuation remediation
+- Fix interrupted release asset recovery
+- Fix source upgrade runner revision
+- Fix native Cook workspace readmission
+
 ## [0.366.0] - 2026-08-30
 
 ### Added
