@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
@@ -106,6 +106,82 @@ pub(crate) fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Confirm a materialized workspace has a Git representation Git itself can
+/// use: a `.git` directory, or a gitdir pointer file whose target exists, with
+/// a resolvable HEAD. Linked worktrees use the pointer-file form; a copied
+/// gitfile whose gitdir was not materialized is not valid.
+pub(crate) fn verify_valid_git_representation(workspace: &Path) -> Result<()> {
+    let git_path = workspace.join(".git");
+    let metadata = std::fs::symlink_metadata(&git_path).map_err(|error| {
+        Error::internal_io(
+            format!("workspace is missing a valid .git representation: {error}"),
+            Some(git_path.display().to_string()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "workspace .git must be a regular pointer file or directory",
+            Some(git_path.display().to_string()),
+            None,
+        ));
+    }
+    if metadata.file_type().is_file() {
+        let content = std::fs::read_to_string(&git_path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(git_path.display().to_string()))
+        })?;
+        let target = content
+            .strip_prefix("gitdir:")
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "workspace .git pointer must reference an existing Git directory",
+                    Some(git_path.display().to_string()),
+                    None,
+                )
+            })?;
+        let resolved = if Path::new(target).is_absolute() {
+            PathBuf::from(target)
+        } else {
+            workspace.join(target)
+        };
+        let canonical = std::fs::canonicalize(&resolved).map_err(|error| {
+            Error::validation_invalid_argument(
+                "workspace",
+                format!("workspace .git pointer must reference an existing Git directory: {error}"),
+                Some(git_path.display().to_string()),
+                None,
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "workspace",
+                "workspace .git pointer must reference an existing Git directory",
+                Some(git_path.display().to_string()),
+                None,
+            ));
+        }
+    } else if !metadata.file_type().is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "workspace .git must be a regular pointer file or directory",
+            Some(git_path.display().to_string()),
+            None,
+        ));
+    }
+    if git_output(workspace, &["rev-parse", "--is-inside-work-tree"])? != "true" {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "workspace .git representation is not a Git work tree",
+            Some(workspace.display().to_string()),
+            None,
+        ));
+    }
+    git_output(workspace, &["rev-parse", "--verify", "-q", "HEAD"]).map(|_| ())
 }
 
 pub(super) fn owner_capture_shell(reference: &str) -> String {

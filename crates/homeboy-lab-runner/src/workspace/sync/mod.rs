@@ -3,7 +3,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
@@ -2966,7 +2966,10 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 fn exclude_homeboy_metadata_from_git_status(workspace_path: &Path) -> Result<()> {
-    let git_dir = workspace_path.join(".git");
+    let git_dir = match git_output(workspace_path, &["rev-parse", "--absolute-git-dir"]) {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => return Ok(()),
+    };
     if !git_dir.is_dir() {
         return Ok(());
     }

@@ -964,9 +964,11 @@ fn private_at_file_snapshot_directory() -> std::io::Result<std::path::PathBuf> {
     ))
 }
 
-/// Snapshot transport intentionally excludes `.git`. Reconstruct the verified,
-/// deterministic baseline before the nested agent-task command starts so its
-/// provider and harvest share the exact accepted workspace provenance.
+/// Snapshot transport intentionally excludes `.git`. Reconstruct or verify the
+/// Git baseline before the nested agent-task command starts so its provider and
+/// harvest share the exact accepted workspace provenance. Snapshot-git must
+/// already own a valid `.git` representation; this gate refuses a dangling
+/// linked-worktree gitfile before handoff.
 fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Result<()> {
     let Some(dispatch) = envelope.dispatch.as_ref() else {
         return Ok(());
@@ -983,7 +985,7 @@ fn materialize_snapshot_git_baseline(envelope: &RunnerExecutionEnvelope) -> Resu
     let lab = reverse_worker_lab_offload(lab)?;
     if !matches!(
         lab.get("sync_mode").and_then(serde_json::Value::as_str),
-        Some("snapshot" | "filesystem_snapshot")
+        Some("snapshot" | "filesystem_snapshot" | "snapshot-git")
     ) {
         return Ok(());
     }
