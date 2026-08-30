@@ -101,11 +101,6 @@ homeboy daemon recover-missing-child-identity \
   --child-starttime-ticks <child-starttime-ticks>
 ```
 
-The released `adopt-orphan --recover-missing-child-identity` and
-`--confirm-untracked-child-dead <job-id>` flags remain accepted migration
-aliases. They must be supplied together when used, return the exact command and
-all required evidence fields above, and never mutate jobs.
-
 For a proven unexpected daemon exit where exact active jobs have no persisted
 child identity, use the explicit all-active-job-set recovery command. It requires
 the dead lease, every active job ID, and an operator attestation that workload

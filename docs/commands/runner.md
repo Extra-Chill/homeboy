@@ -27,12 +27,6 @@ homeboy daemon recover-missing-child-identity --lease-id <expected-lease> \
   --child-pid <child-pid> --child-starttime-ticks <child-starttime-ticks>
 ```
 
-The released `homeboy daemon adopt-orphan --recover-missing-child-identity`
-and `--confirm-untracked-child-dead <job-id>` flags are accepted only as paired
-migration aliases. They return this exact remediation and never terminalize
-work. Runner connection recovery should surface the exact daemon command rather
-than retrying those aliases.
-
 ### `lifecycle`
 
 Inspect runner workspace lifecycle and finalization readiness.

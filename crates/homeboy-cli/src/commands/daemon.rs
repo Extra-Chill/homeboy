@@ -63,9 +63,6 @@ enum DaemonCommand {
         /// Exact lease ID reported by `homeboy daemon status`
         #[arg(long)]
         lease_id: String,
-        /// Accepted migration alias for legacy child recovery. It never mutates jobs.
-        #[arg(long)]
-        recover_missing_child_identity: bool,
         /// Confirm the one expired PID-less reservation to terminalize before replacement.
         #[arg(long = "confirm-untracked-child-dead")]
         confirm_untracked_child_dead: Vec<Uuid>,
@@ -300,22 +297,16 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         ),
         DaemonCommand::AdoptOrphan {
             lease_id,
-            recover_missing_child_identity,
             confirm_untracked_child_dead,
             addr,
-        } => {
-            if recover_missing_child_identity {
-                return Err(legacy_child_recovery_migration_error());
-            }
-            Ok((
-                DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(
-                    &lease_id,
-                    &confirm_untracked_child_dead,
-                    &addr,
-                )?),
-                0,
-            ))
-        }
+        } => Ok((
+            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(
+                &lease_id,
+                &confirm_untracked_child_dead,
+                &addr,
+            )?),
+            0,
+        )),
         // `confirm_workload_processes_absent` stays load-bearing: no PID exists
         // for these jobs, so only the operator can attest workload absence.
         DaemonCommand::ReconcileDeadLeaseOrphans {
@@ -737,19 +728,6 @@ fn rendered_plan(plan: &daemon::recovery_actions::DaemonRecoveryPlan) -> String 
         .map(|step| step.command.as_str())
         .collect::<Vec<_>>()
         .join(" && ")
-}
-
-fn legacy_child_recovery_migration_error() -> Error {
-    Error::validation_invalid_argument(
-        "recover_missing_child_identity",
-        "--recover-missing-child-identity is migration-only. Recover each job with exact persisted evidence instead"
-            .to_string(),
-        None,
-        Some(vec![
-            "Use `homeboy daemon recover-missing-child-identity --lease-id <expected-lease> --recorded-daemon-pid <recorded-daemon-pid> --recorded-daemon-endpoint <recorded-daemon-endpoint> --job-id <job-id> --child-pid <child-pid> --child-starttime-ticks <child-starttime-ticks>`.".to_string(),
-            "Required exact evidence: expected lease, recorded daemon PID, recorded daemon endpoint, job ID, child PID, and child starttime ticks.".to_string(),
-        ]),
-    )
 }
 
 fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
@@ -1553,38 +1531,6 @@ mod tests {
             "lease-live",
         ])
         .is_ok());
-    }
-
-    #[test]
-    fn legacy_child_recovery_alias_remains_migration_only() {
-        with_isolated_home(|_| {
-            let cli = Cli::try_parse_from([
-                "homeboy",
-                "daemon",
-                "adopt-orphan",
-                "--lease-id",
-                "lease-dead",
-                "--recover-missing-child-identity",
-            ])
-            .expect("legacy alias still parses");
-            let Commands::Daemon(args) = cli.command else {
-                panic!("expected daemon command");
-            };
-
-            let error = run(args).expect_err("legacy alias must not mutate");
-            assert!(error.message.contains("migration-only"));
-            let rendered = format!("{error:?}");
-            for field in [
-                "recover-missing-child-identity",
-                "expected-lease",
-                "recorded-daemon-pid",
-            ] {
-                assert!(
-                    rendered.contains(field),
-                    "missing remediation field {field}"
-                );
-            }
-        });
     }
 
     #[test]

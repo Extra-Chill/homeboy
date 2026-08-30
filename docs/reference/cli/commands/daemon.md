@@ -90,7 +90,6 @@ Explicitly replace one proven-dead daemon lease and reconcile its durable jobs
 | Option | Value | Description |
 | --- | --- | --- |
 | `--lease-id` | `<LEASE_ID>` | Exact lease ID reported by `homeboy daemon status` |
-| `--recover-missing-child-identity` | flag | Accepted migration alias for legacy child recovery. It never mutates jobs |
 | `--confirm-untracked-child-dead` | `<CONFIRM_UNTRACKED_CHILD_DEAD>` | Confirm the one expired PID-less reservation to terminalize before replacement |
 | `--addr` | `<ADDR>` | _no help text_ |
 
