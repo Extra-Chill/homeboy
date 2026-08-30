@@ -3148,25 +3148,29 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     preflight: bool,
     backend: &mut B,
 ) -> Result<Value> {
-    let recipe = if super::cook_recipe::recipe_exists(run_or_cook_id)? {
-        super::cook_recipe::load_recipe(run_or_cook_id)?
+    let (recipe, recovered_retry) = if super::cook_recipe::recipe_exists(run_or_cook_id)? {
+        (super::cook_recipe::load_recipe(run_or_cook_id)?, false)
+    } else if let Some(recipe) = super::cook_recipe::load_recipe_for_attempt(run_or_cook_id)? {
+        (recipe, false)
+    } else if let Some(recipe) = cook_recipe_for_retry_lineage(run_or_cook_id)? {
+        (recipe, true)
     } else {
-        match super::cook_recipe::load_recipe_for_attempt(run_or_cook_id)? {
-            Some(recipe) => recipe,
-            None => {
-                return recover_manual_finalization_pr(
-                    run_or_cook_id,
-                    overrides,
-                    preflight,
-                    backend,
-                )
-            }
-        }
+        return recover_manual_finalization_pr(run_or_cook_id, overrides, preflight, backend);
     };
-    if let Some(receipt) = completed_finalization_receipt_for_recovery(&recipe, run_or_cook_id)? {
+    let completed = if recovered_retry {
+        completed_finalization_receipt_for_run(run_or_cook_id)?
+    } else {
+        completed_finalization_receipt_for_recovery(&recipe, run_or_cook_id)?
+    };
+    if let Some(receipt) = completed {
         return Ok(receipt);
     }
-    if let Some(report) = manual_finalization_intent_for_recovery(&recipe, run_or_cook_id)? {
+    let manual_report = if recovered_retry {
+        None
+    } else {
+        manual_finalization_intent_for_recovery(&recipe, run_or_cook_id)?
+    };
+    if let Some(report) = manual_report {
         if !overrides.is_empty() {
             return Err(Error::validation_invalid_argument(
                 "review_overrides",
@@ -3218,10 +3222,11 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         }
         return Ok(value);
     }
-    let run_id = if recipe
-        .attempts
-        .iter()
-        .any(|attempt| attempt.run_id == run_or_cook_id)
+    let run_id = if recovered_retry
+        || recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.run_id == run_or_cook_id)
     {
         run_or_cook_id.to_string()
     } else {
@@ -3254,7 +3259,19 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         )
     })?;
-    let options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
+    let mut options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
+    if recovered_retry {
+        let verified_base = promotion.verified_base.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.verified_base",
+                "detached Cook retry recovery requires the typed base snapshot verified by promotion",
+                Some(run_id.clone()),
+                None,
+            )
+        })?;
+        options.finalization.base = verified_base.base.clone();
+        options.finalization.head = promotion.target.branch.clone();
+    }
     // An explicitly accepted inherited baseline failure is finalizable (#11460),
     // so it is recoverable too. Judge it with the cook's own
     // accept_inherited_failures rather than requiring a green-gate Applied.
@@ -3290,6 +3307,47 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
     }
     Ok(value)
+}
+
+/// Resolve an ordinary durable retry back to the Cook attempt whose policy it
+/// inherited. The retry remains the publication and gate-proof authority; the
+/// ancestor recipe supplies only the immutable Cook finalization policy.
+fn cook_recipe_for_retry_lineage(
+    run_id: &str,
+) -> Result<Option<super::cook_recipe::AgentTaskCookRecipe>> {
+    const MAX_RETRY_LINEAGE_DEPTH: usize = 64;
+
+    let mut current = run_id.to_string();
+    let mut visited = BTreeSet::new();
+    for _ in 0..MAX_RETRY_LINEAGE_DEPTH {
+        if !visited.insert(current.clone()) {
+            return Err(Error::validation_invalid_argument(
+                "retry_of",
+                "durable retry lineage contains a cycle",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        let record = match agent_task_lifecycle::exact_record(&current) {
+            Ok(record) => record,
+            Err(_) if current == run_id => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(parent) = record.metadata.get("retry_of").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        if let Some(recipe) = super::cook_recipe::load_recipe_for_attempt(parent)? {
+            return Ok(Some(recipe));
+        }
+        current = parent.to_string();
+    }
+
+    Err(Error::validation_invalid_argument(
+        "retry_of",
+        "durable retry lineage exceeds the supported depth",
+        Some(run_id.to_string()),
+        None,
+    ))
 }
 
 /// Finalize a verified no-change Cook without routing it through patch publication.
@@ -3657,6 +3715,26 @@ fn completed_finalization_receipt_for_recovery(
         return Ok(Some(value.clone()));
     }
     Ok(None)
+}
+
+fn completed_finalization_receipt_for_run(run_id: &str) -> Result<Option<Value>> {
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
+    let Some(value) = record.metadata.get("cook_finalization") else {
+        return Ok(None);
+    };
+    if value["status"].as_str() == Some("intentional_no_change_finalized") {
+        return Ok(Some(value.clone()));
+    }
+    if !matches!(
+        value["status"].as_str(),
+        Some("review_ready" | "draft_published")
+    ) {
+        return Ok(None);
+    }
+    if value["manual_finalization"] == true {
+        return manual_finalization_receipt_for_run(&record, run_id);
+    }
+    Ok(Some(value.clone()))
 }
 
 fn manual_finalization_receipt_for_run(
@@ -4840,16 +4918,33 @@ fn cook_ai_lineage_with_stores(
     let recipe = store.load_recipe(&options.identity.cook_id)?;
     let mut attempts = recipe.attempts;
     attempts.sort_by_key(|attempt| attempt.attempt);
-    let Some(terminal_index) = attempts
+    let terminal_index = match attempts
         .iter()
         .position(|attempt| attempt.run_id == successful_run_id)
-    else {
-        return Err(Error::validation_invalid_argument(
-            "successful_run_id",
-            "finalizing Cook run is absent from its persisted recipe lineage",
-            Some(successful_run_id.to_string()),
-            None,
-        ));
+    {
+        Some(index) => index,
+        None if retry_descends_from_recipe(lifecycle_store, &attempts, successful_run_id)? => {
+            let attempt = attempts
+                .iter()
+                .map(|attempt| attempt.attempt)
+                .max()
+                .unwrap_or_default()
+                .saturating_add(1);
+            attempts.push(super::cook_recipe::AgentTaskCookRecipeAttempt {
+                attempt,
+                run_id: successful_run_id.to_string(),
+                plan: agent_task_lifecycle::load_plan_in_store(lifecycle_store, successful_run_id)?,
+            });
+            attempts.len() - 1
+        }
+        None => {
+            return Err(Error::validation_invalid_argument(
+                "successful_run_id",
+                "finalizing Cook run is absent from its persisted recipe lineage",
+                Some(successful_run_id.to_string()),
+                None,
+            ));
+        }
     };
     attempts.truncate(terminal_index + 1);
     let terminal = cook_attempt_execution_in_store(lifecycle_store, successful_run_id)?;
@@ -4948,6 +5043,45 @@ fn cook_ai_lineage_with_stores(
         composed_model_disclosure: true,
         preserve_used_for_disclosure: false,
     })
+}
+
+fn retry_descends_from_recipe(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    attempts: &[super::cook_recipe::AgentTaskCookRecipeAttempt],
+    run_id: &str,
+) -> Result<bool> {
+    const MAX_RETRY_LINEAGE_DEPTH: usize = 64;
+
+    let recipe_runs = attempts
+        .iter()
+        .map(|attempt| attempt.run_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut current = run_id.to_string();
+    let mut visited = BTreeSet::new();
+    for _ in 0..MAX_RETRY_LINEAGE_DEPTH {
+        if !visited.insert(current.clone()) {
+            return Err(Error::validation_invalid_argument(
+                "retry_of",
+                "durable retry lineage contains a cycle",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        let record = lifecycle_store.read_record(&current)?;
+        let Some(parent) = record.metadata.get("retry_of").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        if recipe_runs.contains(parent) {
+            return Ok(true);
+        }
+        current = parent.to_string();
+    }
+    Err(Error::validation_invalid_argument(
+        "retry_of",
+        "durable retry lineage exceeds the supported depth",
+        Some(run_id.to_string()),
+        None,
+    ))
 }
 
 /// Load and validate the AI-authored review form for a finalizing run.
