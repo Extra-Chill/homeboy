@@ -1293,11 +1293,15 @@ process.exit(0);
 	const quotaVariants = [
 		'AI_APICallError: Weekly Limit Exhausted. Your limit will reset at 2026-07-20T00:00:00Z.',
 		'AI_APICallError: Monthly Limit Exhausted. Your limit will reset at 2026-08-01T00:00:00Z.',
+		'AI_APICallError: Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-08-31 12:00:00.',
 		'AI_APICallError: Provider quota exhausted.',
 		'AI_APICallError: Provider quota exceeded.',
 		'AI_APICallError: Rate limit exceeded.',
 		'AI_APICallError: Usage limit exhausted.',
 		'AI_APICallError: Usage limit reached for 5 hours. Your limit will reset later.',
+		'AI_APICallError: Monthly usage limit reached. Resets in 8 days.',
+		"AI_APICallError: This request would exceed your account's rate limit. Please try again later.",
+		'AI_APICallError: personal-team-blocked:spending-limit: You have run out of credits or need a subscription.',
 	];
 	for (const [index, quotaError] of quotaVariants.entries()) {
 		const quotaInvocationPath = path.join(root, `opencode-quota-${index}-invocations`);
@@ -1343,6 +1347,80 @@ setInterval(() => process.stderr.write('OpenCode retrying after provider backoff
 			assert.equal(fs.readFileSync(artifact.path, 'utf8').includes('access-token-must-not-leak'), false);
 		}
 	}
+
+	for (const [index, diagnosticError] of [
+		'AI_APICallError: Monthly usage limit reached. Resets in 8 days.',
+		"AI_APICallError: This request would exceed your account's rate limit. Please try again later.",
+	].entries()) {
+		const diagnosticLogPath = path.join(root, `opencode-diagnostic-quota-${index}.log`);
+		const diagnosticTerminationPath = path.join(root, `opencode-diagnostic-quota-${index}-terminated`);
+		const diagnosticCliPath = path.join(root, `mock-opencode-diagnostic-quota-${index}.cjs`);
+		fs.writeFileSync(diagnosticLogPath, '');
+		fs.writeFileSync(diagnosticCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+const sessionID = 'current-diagnostic-session-${index}';
+process.on('SIGTERM', () => {
+  fs.writeFileSync(${JSON.stringify(diagnosticTerminationPath)}, 'SIGTERM');
+  process.exit(0);
+});
+process.stdout.write(JSON.stringify({ type: 'step_start', sessionID }) + '\\n');
+fs.appendFileSync(${JSON.stringify(diagnosticLogPath)}, 'timestamp=2026-08-30T00:00:00.000Z level=ERROR run=fixture message="stream error" providerID=opencode-go modelID=kimi-k3 session.id=' + sessionID + ' small=false agent=build mode=primary error.error=' + JSON.stringify(${JSON.stringify(diagnosticError)}) + '\\n');
+setInterval(() => {}, 1000);
+`);
+		const diagnosticResult = await Promise.race([
+			executeOpenCodeAgentTask({
+				...request,
+				task_id: `opencode-diagnostic-quota-${index}`,
+				executor: {
+					...request.executor,
+					model: 'opencode-go/kimi-k3',
+					config: {
+						...request.executor.config,
+						command_args: [diagnosticCliPath],
+						diagnostic_log_path: diagnosticLogPath,
+					},
+				},
+			}, { env: fixtureEnv }),
+			new Promise((_, reject) => setTimeout(() => reject(new Error('OpenCode executor did not fail fast on a structured diagnostic provider limit')), 3000)),
+		]);
+		assert.equal(diagnosticResult.status, 'provider_error');
+		assert.equal(diagnosticResult.failure_code, 'agent_task.opencode_usage_limit');
+		assert.equal(fs.readFileSync(diagnosticTerminationPath, 'utf8'), 'SIGTERM');
+	}
+
+	const diagnosticFalsePositiveLogPath = path.join(root, 'opencode-diagnostic-false-positive.log');
+	const diagnosticFalsePositiveTerminationPath = path.join(root, 'opencode-diagnostic-false-positive-terminated');
+	const diagnosticFalsePositiveCliPath = path.join(root, 'mock-opencode-diagnostic-false-positive.cjs');
+	fs.writeFileSync(diagnosticFalsePositiveLogPath, '');
+	fs.writeFileSync(diagnosticFalsePositiveCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+const sessionID = 'current-healthy-session';
+const fixtureText = 'AI_APICallError: Provider quota exceeded.';
+process.on('SIGTERM', () => {
+  fs.writeFileSync(${JSON.stringify(diagnosticFalsePositiveTerminationPath)}, 'SIGTERM');
+  process.exit(0);
+});
+process.stdout.write(JSON.stringify({ type: 'step_start', sessionID }) + '\\n');
+process.stdout.write(JSON.stringify({ type: 'tool_use', sessionID, output: fixtureText }) + '\\n');
+fs.appendFileSync(${JSON.stringify(diagnosticFalsePositiveLogPath)}, 'timestamp=2026-08-30T00:00:00.000Z level=INFO run=fixture message="tool result: ' + fixtureText + '"\\n');
+fs.appendFileSync(${JSON.stringify(diagnosticFalsePositiveLogPath)}, 'timestamp=2026-08-30T00:00:00.001Z level=ERROR run=fixture message="stream error" providerID=openai modelID=gpt-5.6-terra session.id=unrelated-session small=false agent=build mode=primary error.error=' + JSON.stringify(fixtureText) + '\\n');
+setTimeout(() => process.exit(0), 1250);
+`);
+	const diagnosticFalsePositiveResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-diagnostic-false-positive',
+		executor: {
+			...request.executor,
+			model: 'openai/gpt-5.6-terra',
+			config: {
+				...request.executor.config,
+				command_args: [diagnosticFalsePositiveCliPath],
+				diagnostic_log_path: diagnosticFalsePositiveLogPath,
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(diagnosticFalsePositiveResult.status, 'succeeded', JSON.stringify(diagnosticFalsePositiveResult.diagnostics));
+	assert.equal(fs.existsSync(diagnosticFalsePositiveTerminationPath), false);
 
 	const transientQuotaCliPath = path.join(root, 'mock-opencode-transient-rate-limit.cjs');
 	fs.writeFileSync(transientQuotaCliPath, `#!/usr/bin/env node

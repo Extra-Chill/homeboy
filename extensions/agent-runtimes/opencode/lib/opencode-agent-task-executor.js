@@ -42,7 +42,7 @@ const OPENCODE_SECRET_ENV = [
 ];
 const OPENCODE_FATAL_LOG_PATTERNS = [
 	{
-		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\b(?:weekly|monthly)\s+limit\s+exhausted\b/i,
+		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\b(?:weekly(?:\/monthly)?|monthly)\s+limit\s+exhausted\b/i,
 		code: 'agent_task.opencode_usage_limit',
 		summary: 'OpenCode provider usage limit was reached.',
 		classification: 'provider_quota',
@@ -61,6 +61,24 @@ const OPENCODE_FATAL_LOG_PATTERNS = [
 	},
 	{
 		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\busage\s+limit\s+reached\b[\s\S]{0,200}\blimit\s+will\s+reset\b/i,
+		code: 'agent_task.opencode_usage_limit',
+		summary: 'OpenCode provider usage limit was reached.',
+		classification: 'provider_quota',
+	},
+	{
+		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\bmonthly\s+usage\s+limit\s+reached\b[\s\S]{0,200}\bresets?\s+in\b/i,
+		code: 'agent_task.opencode_usage_limit',
+		summary: 'OpenCode provider usage limit was reached.',
+		classification: 'provider_quota',
+	},
+	{
+		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\bwould\s+exceed\s+your\s+account's\s+rate\s+limit\b/i,
+		code: 'agent_task.opencode_usage_limit',
+		summary: 'OpenCode provider usage limit was reached.',
+		classification: 'provider_quota',
+	},
+	{
+		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\bpersonal-team-blocked:spending-limit\b/i,
 		code: 'agent_task.opencode_usage_limit',
 		summary: 'OpenCode provider usage limit was reached.',
 		classification: 'provider_quota',
@@ -1438,6 +1456,7 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		timeoutMs: timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0,
 		runtimeLogPaths,
 		diagnosticLogPath: openCodeDiagnosticLogPath(config, spawnExtra.env),
+		expectedModel: config.model || request.executor?.model || request.model || '',
 		progress: createOpenCodeProgressAdapter({
 			taskId: request.task_id,
 			cwd,
@@ -1561,6 +1580,7 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 		const stdoutChunks = [];
 		const stderrChunks = [];
 		const fatalStreamBuffers = { stdout: '', stderr: '' };
+		const sessionIds = new Set();
 		let settled = false;
 		let timedOut = false;
 		let fatalRuntimeError = null;
@@ -1595,10 +1615,16 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 				fs.appendFileSync(filePath, content);
 			}
 			options.progress?.consume(stream, content);
-			fatalStreamBuffers[stream] = `${fatalStreamBuffers[stream]}${content}`.slice(-1200);
-			const matched = findOpenCodeFatalRuntimeError(fatalStreamBuffers[stream]);
-			if (matched) {
-				reportFatalRuntimeError(matched);
+			const lines = `${fatalStreamBuffers[stream]}${content}`.split(/\r?\n/);
+			fatalStreamBuffers[stream] = lines.pop().slice(-64 * 1024);
+			for (const line of lines) {
+				for (const sessionId of openCodeSessionIds(line)) {
+					sessionIds.add(sessionId);
+				}
+				const matched = findOpenCodeFatalStreamError(line);
+				if (matched) {
+					reportFatalRuntimeError(matched);
+				}
 			}
 		};
 
@@ -1640,6 +1666,8 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			logPath: options.diagnosticLogPath,
 			initialOffset: diagnosticLogOffset,
 			env: options.env,
+			expectedModel: options.expectedModel,
+			sessionIds,
 			onFatal: (detected) => {
 				reportFatalRuntimeError(detected);
 			},
@@ -1685,12 +1713,13 @@ function diagnosticLogInitialOffset(logPath) {
 	}
 }
 
-function startOpenCodeDiagnosticLogMonitor({ logPath, initialOffset = 0, env = process.env, onFatal }) {
+function startOpenCodeDiagnosticLogMonitor({ logPath, initialOffset = 0, env = process.env, expectedModel = '', sessionIds = new Set(), onFatal }) {
 	if (!logPath || typeof onFatal !== 'function') {
 		return null;
 	}
 	let offset = initialOffset;
 	let reported = false;
+	let remainder = '';
 	return setInterval(() => {
 		let stat;
 		try {
@@ -1715,8 +1744,10 @@ function startOpenCodeDiagnosticLogMonitor({ logPath, initialOffset = 0, env = p
 			const buffer = Buffer.alloc(length);
 			fs.readSync(fd, buffer, 0, length, offset);
 			offset = stat.size;
-			const content = redactKnownSecrets(buffer.toString('utf8'), env);
-			const matched = findOpenCodeFatalRuntimeError(content);
+			const lines = `${remainder}${redactKnownSecrets(buffer.toString('utf8'), env)}`.split(/\r?\n/);
+			remainder = lines.pop();
+			const content = lines.join('\n');
+			const matched = findOpenCodeFatalDiagnosticError(content, { expectedModel, sessionIds });
 			if (matched) {
 				reported = true;
 				onFatal(matched);
@@ -1727,6 +1758,63 @@ function startOpenCodeDiagnosticLogMonitor({ logPath, initialOffset = 0, env = p
 			}
 		}
 	}, 1000);
+}
+
+function findOpenCodeFatalStreamError(content = '') {
+	for (const event of parseJsonObjectsFromText(content)) {
+		if (event.type !== 'error' || typeof event.error !== 'string') {
+			continue;
+		}
+		const matched = findOpenCodeFatalRuntimeError(event.error);
+		if (matched) {
+			return matched;
+		}
+	}
+	return null;
+}
+
+function findOpenCodeFatalDiagnosticError(content = '', options = {}) {
+	const [expectedProvider, ...expectedModelParts] = String(options.expectedModel || '').split('/');
+	const expectedModel = expectedModelParts.join('/');
+	for (const line of String(content).split(/\r?\n/)) {
+		if (diagnosticLogValue(line, 'level') !== 'ERROR' || diagnosticLogValue(line, 'message') !== 'stream error') {
+			continue;
+		}
+		const sessionId = diagnosticLogValue(line, 'session.id');
+		if (!expectedModel && options.sessionIds?.size === 0) {
+			continue;
+		}
+		if (expectedModel && (
+			diagnosticLogValue(line, 'providerID') !== expectedProvider
+			|| diagnosticLogValue(line, 'modelID') !== expectedModel
+		)) {
+			continue;
+		}
+		if (options.sessionIds?.size > 0 && !options.sessionIds.has(sessionId)) {
+			continue;
+		}
+		const matched = findOpenCodeFatalRuntimeError(diagnosticLogValue(line, 'error.error'));
+		if (matched) {
+			return matched;
+		}
+	}
+	return null;
+}
+
+function diagnosticLogValue(line, key) {
+	const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const matched = String(line).match(new RegExp(`(?:^|\\s)${escapedKey}=(?:"((?:\\\\.|[^"\\\\])*)"|(\\S+))`));
+	if (!matched) {
+		return '';
+	}
+	if (matched[1] === undefined) {
+		return matched[2];
+	}
+	try {
+		return JSON.parse(`"${matched[1]}"`);
+	} catch {
+		return matched[1];
+	}
 }
 
 function findOpenCodeFatalRuntimeError(content = '') {
