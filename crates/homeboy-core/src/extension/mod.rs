@@ -13,7 +13,6 @@ mod fingerprint;
 pub mod invoke;
 pub mod lifecycle;
 pub mod lint;
-mod maintenance;
 mod manifest;
 mod manifest_sidecar;
 pub mod readiness;
@@ -43,7 +42,6 @@ pub use env_provider::{
 };
 pub use fingerprint::run_fingerprint_script;
 pub(crate) use invoke::build_settings_json_from_manifest;
-pub use maintenance::{exec_tool, update_all};
 pub use manifest::{
     deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
     structured_sidecars,

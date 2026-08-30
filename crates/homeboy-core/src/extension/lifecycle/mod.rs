@@ -39,10 +39,12 @@ pub struct UpdateResult {
         Option<homeboy_extension_contract::source_metadata_repair::SourceMetadataRepair>,
 }
 
+mod maintenance;
 mod repair;
 mod source;
 pub mod source_metadata;
 
+pub use maintenance::update_all;
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 pub use source::{
     check_update_available, check_update_available_until, is_git_url, read_source_cleanliness,
@@ -378,13 +380,13 @@ pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::update_all;
     use super::{
         install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
         load_extension, read_source_revision, read_source_url, refresh,
         register_component_install_runner, shared_assets_for_extension_source, source_metadata,
         uninstall, update,
     };
-    use crate::extension::update_all;
     use homeboy_core::component;
     use homeboy_core::test_support::with_isolated_home;
     use std::fs;
