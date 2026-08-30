@@ -451,8 +451,7 @@ mod tests {
     /// #11102: controllers negotiate the daemon-recovery contract from this
     /// envelope instead of scraping `--help` text. The field name is a wire
     /// contract read by `homeboy_lab_runner::connection::remote_daemon`, so
-    /// renaming or dropping it here must fail loudly rather than silently
-    /// reverting every controller to the help scrape.
+    /// renaming or dropping it here must fail loudly.
     #[test]
     fn identity_report_advertises_the_daemon_recovery_capabilities() {
         let report = super::identity_report();
