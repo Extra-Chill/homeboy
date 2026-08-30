@@ -9,8 +9,10 @@ use crate::extension::catalog::{extension_path, load_extension, load_extension_i
 use crate::extension::invoke::ResolvedExtensionInvocationContext;
 use homeboy_extension_contract::{ExtensionCapability, ExtensionManifest};
 
+mod requirements;
 mod surface;
 
+pub use requirements::{validate_extension_requirements, validate_required_extensions};
 pub use surface::{
     find_installed_file_extension, find_installed_file_extension_in_root, resolve_file_extension,
     resolve_file_extension_in_root, FileExtensionCapability, FILE_EXTENSIONS_SURFACE,

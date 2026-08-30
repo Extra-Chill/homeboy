@@ -59,6 +59,15 @@ impl ResolvedBuildCommand {
     }
 }
 
+fn extension_provides_build(component: &Component) -> bool {
+    component.extensions.as_ref().is_some_and(|extensions| {
+        extensions.keys().any(|extension_id| {
+            crate::extension::catalog::load_extension(extension_id)
+                .is_ok_and(|extension| extension.has_build())
+        })
+    })
+}
+
 /// Resolve build command for a component using extension-managed build configuration.
 ///
 /// Priority:
@@ -126,7 +135,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
         }
     }
 
-    if extension::extension_provides_build(component) {
+    if extension_provides_build(component) {
         Err(Error::validation_invalid_argument(
             "buildCommand",
             format!(
@@ -462,7 +471,7 @@ fn execute_build_component(
 
     // Validate required extensions are installed before resolving build commands.
     // Without this, missing extensions cause vague "no build command" errors.
-    extension::validate_required_extensions(comp)?;
+    extension::resolve::validate_required_extensions(comp)?;
 
     // Validate local_path before attempting build
     let validated_path = component::validate_local_path(comp)?;
@@ -913,6 +922,11 @@ fn run_pre_build_scripts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_without_extensions_has_no_extension_build() {
+        assert!(!extension_provides_build(&Component::default()));
+    }
 
     #[test]
     fn build_timeout_preserves_long_default_and_accepts_override() {

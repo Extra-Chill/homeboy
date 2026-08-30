@@ -21,7 +21,6 @@ pub mod self_check;
 mod setup_env;
 pub mod test;
 pub mod trace;
-mod validation;
 
 pub use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
@@ -39,9 +38,6 @@ pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
     RewrittenImport,
-};
-pub use validation::{
-    extension_provides_build, validate_extension_requirements, validate_required_extensions,
 };
 
 #[cfg(test)]

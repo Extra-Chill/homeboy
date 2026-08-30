@@ -193,23 +193,6 @@ fn extension_source(ext_config: &homeboy_core::component::ScopedExtensionConfig)
         .filter(|value| !value.trim().is_empty())
 }
 
-/// Check if any of the component's linked extensions provide build configuration.
-pub fn extension_provides_build(component: &homeboy_core::component::Component) -> bool {
-    let extensions = match &component.extensions {
-        Some(m) => m,
-        None => return false,
-    };
-
-    for extension_id in extensions.keys() {
-        if let Ok(extension) = load_extension(extension_id) {
-            if extension.has_build() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,16 +216,6 @@ mod tests {
         };
 
         assert!(validate_extension_requirements(&component).is_ok());
-    }
-
-    #[test]
-    fn test_extension_provides_build() {
-        let component = Component {
-            id: "plain".to_string(),
-            ..Default::default()
-        };
-
-        assert!(!extension_provides_build(&component));
     }
 
     fn component_requiring(extension_id: &str, version: &str) -> Component {

@@ -785,7 +785,7 @@ fn validate_required_extensions_passes_with_no_modules() {
         id: "test-component".to_string(),
         ..Default::default()
     };
-    assert!(validate_required_extensions(&comp).is_ok());
+    assert!(resolve::validate_required_extensions(&comp).is_ok());
 }
 
 #[test]
@@ -795,7 +795,7 @@ fn validate_required_extensions_passes_with_empty_modules() {
         extensions: Some(HashMap::new()),
         ..Default::default()
     };
-    assert!(validate_required_extensions(&comp).is_ok());
+    assert!(resolve::validate_required_extensions(&comp).is_ok());
 }
 
 #[test]
@@ -810,7 +810,7 @@ fn validate_required_extensions_fails_with_missing_module() {
         extensions: Some(extensions),
         ..Default::default()
     };
-    let err = validate_required_extensions(&comp).unwrap_err();
+    let err = resolve::validate_required_extensions(&comp).unwrap_err();
     assert_eq!(err.code, homeboy_core::error::ErrorCode::ExtensionNotFound);
     assert!(err.message.contains("nonexistent-extension-abc123"));
     assert!(err.message.contains("test-component"));
@@ -846,7 +846,7 @@ fn validate_required_extensions_uses_declared_extension_source_hint() {
         ..Default::default()
     };
 
-    let err = validate_required_extensions(&comp).unwrap_err();
+    let err = resolve::validate_required_extensions(&comp).unwrap_err();
     let hints = err
         .hints
         .iter()
@@ -876,7 +876,7 @@ fn validate_required_extensions_reports_all_missing() {
         extensions: Some(extensions),
         ..Default::default()
     };
-    let err = validate_required_extensions(&comp).unwrap_err();
+    let err = resolve::validate_required_extensions(&comp).unwrap_err();
     // Error should mention both missing extensions
     assert!(err.message.contains("missing-mod-a"));
     assert!(err.message.contains("missing-mod-b"));
@@ -890,7 +890,7 @@ fn test_validate_extension_requirements() {
         id: "test-component".to_string(),
         ..Default::default()
     };
-    assert!(validate_extension_requirements(&comp).is_ok());
+    assert!(resolve::validate_extension_requirements(&comp).is_ok());
 }
 
 #[test]
