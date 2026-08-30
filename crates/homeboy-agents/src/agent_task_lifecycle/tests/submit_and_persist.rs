@@ -4108,6 +4108,51 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
     );
 }
 
+#[test]
+fn terminal_projection_preserves_persisted_observation_creator_version() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let store = lifecycle_store
+        .open_observation_maintained()
+        .expect("observation store");
+    for (run_id, creator_version) in [
+        ("persisted-observation-version", Some("0.364.13")),
+        ("persisted-observation-without-version", None),
+    ] {
+        let submitted = lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+            .expect("submit");
+        let mut persisted = store
+            .get_run(&submitted.run_id)
+            .expect("read observation")
+            .expect("observation exists");
+        persisted.homeboy_version = creator_version.map(str::to_string);
+        store
+            .upsert_imported_run(&persisted)
+            .expect("seed persisted creator version");
+
+        record_run_aggregate_in_store(
+            &lifecycle_store,
+            &submitted.run_id,
+            &plan,
+            &succeeded_aggregate(&plan),
+        )
+        .expect("project terminal observation");
+
+        assert_eq!(
+            store
+                .get_run(&submitted.run_id)
+                .expect("read projected observation")
+                .expect("projected observation exists")
+                .homeboy_version
+                .as_deref(),
+            creator_version
+        );
+    }
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The artifact is imported directly into an observation database and
 /// then *reused* by terminal reconciliation, so the import, the reconciliation

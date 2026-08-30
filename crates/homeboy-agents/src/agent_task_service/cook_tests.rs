@@ -12110,8 +12110,23 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
         let recipe = super::super::load_recipe(cook_id).expect("transport retries are durable");
         assert_eq!(recipe.attempts.len(), 2);
         assert!(recipe.attempts.iter().all(|attempt| attempt.attempt == 1));
+        let observation_store = test_lifecycle_store()
+            .open_observation_initialized()
+            .expect("observation store");
         for (transport_attempt, run_id) in result.value.history_run_ids.iter().enumerate() {
             let record = agent_task_lifecycle::status(run_id).expect("retry attempt exists");
+            let observation = observation_store
+                .get_run(run_id)
+                .expect("read retry observation")
+                .expect("retry observation exists");
+            assert_eq!(
+                observation.homeboy_version.as_deref(),
+                Some(homeboy_core::build_identity::current().version.as_str())
+            );
+            assert_eq!(
+                record.metadata["controller_identity"],
+                homeboy_core::build_identity::current().display
+            );
             assert!(record.provider_handles.is_empty());
             assert!(record.lab_handoff.is_none());
             assert!(record.runner_job_id().is_none());
