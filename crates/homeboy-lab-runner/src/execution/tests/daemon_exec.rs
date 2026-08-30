@@ -188,8 +188,11 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
         )
         .expect("provider executable");
     }
-    homeboy_core::extension::install(&extension.path().display().to_string(), Some("fixture"))
-        .expect("install fixture extension");
+    homeboy_core::extension::lifecycle::install(
+        &extension.path().display().to_string(),
+        Some("fixture"),
+    )
+    .expect("install fixture extension");
     let store = JobStore::default();
     let response = route_with_body(
         "POST",

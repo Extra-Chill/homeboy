@@ -1289,8 +1289,11 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
             std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
                 .expect("provider executable");
         }
-        homeboy_core::extension::install(&extension.path().display().to_string(), Some("fixture"))
-            .expect("install provider fixture");
+        homeboy_core::extension::lifecycle::install(
+            &extension.path().display().to_string(),
+            Some("fixture"),
+        )
+        .expect("install provider fixture");
 
         let (output, exit_code) = exec(
             "lab-local",

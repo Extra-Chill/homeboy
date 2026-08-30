@@ -279,7 +279,7 @@ mod tests {
             .expect("provider script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("provider executable");
-        crate::extension::install(&source.display().to_string(), Some(id))
+        crate::extension::lifecycle::install(&source.display().to_string(), Some(id))
             .expect("install provider fixture");
     }
 

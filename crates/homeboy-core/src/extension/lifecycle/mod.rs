@@ -39,7 +39,10 @@ pub struct UpdateResult {
         Option<homeboy_extension_contract::source_metadata_repair::SourceMetadataRepair>,
 }
 
+mod repair;
 pub mod source_metadata;
+
+pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 
 pub fn slugify_id(value: &str) -> Result<String> {
     identifier::slugify_id(value, "extension_id")
@@ -168,7 +171,7 @@ pub fn refresh(
     let extension_dir = paths::extension(&extension_id)?;
     let uninstalled_previous = std::fs::symlink_metadata(&extension_dir).is_ok();
     let installed = if uninstalled_previous {
-        let replaced = crate::extension::repair::replace_with_revision(
+        let replaced = repair::replace_with_revision(
             &install_source,
             Some(&extension_id),
             effective_revision,

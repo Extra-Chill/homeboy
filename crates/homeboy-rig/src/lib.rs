@@ -408,7 +408,7 @@ fn read_spec_from_path(
     if spec.id.is_empty() {
         spec.id = id_hint.unwrap_or_default().to_string();
     }
-    spec.id = homeboy_core::extension::slugify_id(&spec.id)?;
+    spec.id = homeboy_core::extension::lifecycle::slugify_id(&spec.id)?;
     remember_local_package_root(&spec.id, package_root);
     apply_trace_workload_defaults(&mut spec)?;
     validate_rig_spec(&spec)?;
@@ -576,7 +576,7 @@ pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
         discover_rigs(&path)?
     };
     if let Some(id) = id {
-        let id = homeboy_core::extension::slugify_id(id)?;
+        let id = homeboy_core::extension::lifecycle::slugify_id(id)?;
         if rigs.is_empty() {
             return Err(Error::validation_invalid_argument(
                 "id",
