@@ -417,6 +417,7 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     // core depending on runner behavior. (Runner is still in-crate today;
     // this registration is the seam that lets it become its own crate.)
     crate::runner::register_runner_evidence_provider();
+    crate::runner::register_runner_execution_provider();
     // Register the runner job-preparation provider so api_jobs can compute
     // the secret-env plan and validate workload dispatch for remote-runner
     // jobs without core depending on runner behavior.
