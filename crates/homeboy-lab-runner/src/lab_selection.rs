@@ -1701,7 +1701,7 @@ mod daemon_repair_step_tests {
         assert_eq!(steps[0].code, daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE);
         assert_eq!(
             steps[0].command,
-            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead --confirm-pid-dead"
+            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead"
         );
         assert_eq!(
             daemon_repair_command("homeboy-lab", &report),

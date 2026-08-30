@@ -238,7 +238,7 @@ mod tests {
                     termination_evidence: None,
                     repair_plan: vec![homeboy::core::daemon::DaemonRepairStep::text(
                         "runner_reconcile_leaseless_orphans",
-                        "homeboy runner connect lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+                        "homeboy runner connect lab --reconcile-leaseless-orphans",
                     )],
                 }),
                 admission_summary: None,

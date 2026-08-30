@@ -1899,7 +1899,7 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
     );
     assert_eq!(
         status.freshness.adoption_command.as_deref(),
-        Some("homeboy daemon adopt-orphan --lease-id test-lease --confirm-pid-dead")
+        Some("homeboy daemon adopt-orphan --lease-id test-lease")
     );
 }
 

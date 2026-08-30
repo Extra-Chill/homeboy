@@ -262,7 +262,7 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
             "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
         )],
     });
     let mut admission = admission_fixture();
@@ -298,7 +298,7 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
             "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect 'homeboy lab' --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+            "homeboy runner connect 'homeboy lab' --reconcile-leaseless-orphans",
         )],
     });
 
@@ -688,9 +688,11 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             restartable: false,
             lease_id: Some("lease-23456".to_string()),
             pid: Some(23456),
-        recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
+            recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
             ownership_evidence: None,
-            adoption_command: Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string()),
+            adoption_command: Some(
+                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans".to_string(),
+            ),
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -871,7 +873,7 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
             "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
         )],
     });
     let generations = vec![RunnerDaemonGenerationStatus {

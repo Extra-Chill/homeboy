@@ -96,10 +96,6 @@ pub fn adopt_orphan(lease_id: &str) -> ExecutableAction {
             "adopt-orphan".to_string(),
             "--lease-id".to_string(),
             lease_id.to_string(),
-            // Released spelling. The flag is a no-op — adoption proves PID death
-            // itself, under the lifecycle lock — but it is retained so the
-            // rendered command stays copy-pasteable against a released binary.
-            "--confirm-pid-dead".to_string(),
         ],
         ActionSafety::Mutating,
     )
@@ -112,7 +108,6 @@ pub fn reconcile_leaseless_orphans() -> ExecutableAction {
         [
             "daemon".to_string(),
             "reconcile-leaseless-orphans".to_string(),
-            "--confirm-no-daemon-owner".to_string(),
         ],
         ActionSafety::Mutating,
     )
@@ -359,11 +354,11 @@ mod tests {
         assert_eq!(start().render_command(), "homeboy daemon start");
         assert_eq!(
             adopt_orphan("lease-dead").render_command(),
-            "homeboy daemon adopt-orphan --lease-id lease-dead --confirm-pid-dead"
+            "homeboy daemon adopt-orphan --lease-id lease-dead"
         );
         assert_eq!(
             reconcile_leaseless_orphans().render_command(),
-            "homeboy daemon reconcile-leaseless-orphans --confirm-no-daemon-owner"
+            "homeboy daemon reconcile-leaseless-orphans"
         );
         assert_eq!(diagnose().render_command(), "homeboy daemon status");
     }

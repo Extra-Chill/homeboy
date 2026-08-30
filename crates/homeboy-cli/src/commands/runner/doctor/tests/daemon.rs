@@ -232,8 +232,7 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
             "remote daemon status over SSH proved PID 4545 is dead".to_string(),
         ),
         adoption_command: Some(
-            "homeboy runner connect lab --adopt-orphan-lease lease-dead --confirm-pid-dead"
-                .to_string(),
+            "homeboy runner connect lab --adopt-orphan-lease lease-dead".to_string(),
         ),
         binary_hash: None,
         daemon_version: Some("0.284.0".to_string()),
@@ -433,7 +432,7 @@ mod repair_dispatch {
     fn an_adoption_step_takes_its_lease_from_the_report() {
         let step = DaemonRepairStep::text(
             daemon_repair_codes::RUNNER_ADOPT_ORPHAN_LEASE,
-            "homeboy runner connect lab --adopt-orphan-lease lease-in-text --confirm-pid-dead",
+            "homeboy runner connect lab --adopt-orphan-lease lease-in-text",
         );
 
         assert_eq!(
@@ -449,7 +448,7 @@ mod repair_dispatch {
     fn an_adoption_step_without_a_lease_refuses_rather_than_guessing() {
         let step = DaemonRepairStep::text(
             daemon_repair_codes::RUNNER_ADOPT_ORPHAN_LEASE,
-            "homeboy runner connect lab --adopt-orphan-lease lease-in-text --confirm-pid-dead",
+            "homeboy runner connect lab --adopt-orphan-lease lease-in-text",
         );
 
         let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step, None) else {
@@ -521,7 +520,7 @@ mod repair_dispatch {
             dispatch_for(
                 &DaemonRepairStep::text(
                     daemon_repair_codes::RUNNER_RECONCILE_LEASELESS_ORPHANS,
-                    "homeboy runner connect lab --reconcile-leaseless-orphans --confirm-no-daemon-owner"
+                    "homeboy runner connect lab --reconcile-leaseless-orphans"
                 ),
                 None
             ),

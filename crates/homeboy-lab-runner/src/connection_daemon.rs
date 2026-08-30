@@ -1107,14 +1107,13 @@ mod tests {
         eligible.stale_reason_code = Some(DaemonStaleReasonCode::PidDead);
         eligible.recovery_evidence = Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead);
         eligible.active_jobs = 0;
-        eligible.adoption_command = Some(
-            "homeboy daemon adopt-orphan --lease-id lease-dead --confirm-pid-dead".to_string(),
-        );
+        eligible.adoption_command =
+            Some("homeboy daemon adopt-orphan --lease-id lease-dead".to_string());
 
         let eligible = into_controller_frame(eligible, "remote-lab");
         assert_eq!(
             eligible.adoption_command.as_deref(),
-            Some("homeboy runner connect remote-lab --adopt-orphan-lease lease-dead --confirm-pid-dead")
+            Some("homeboy runner connect remote-lab --adopt-orphan-lease lease-dead")
         );
         assert_eq!(eligible.repair_plan.len(), 1);
     }

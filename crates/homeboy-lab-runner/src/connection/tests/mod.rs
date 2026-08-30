@@ -784,7 +784,7 @@ pub(super) fn remote_daemon_status_for_test_with_reason(
                 recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
                 ownership_evidence: None,
                 adoption_command: Some(format!(
-                    "homeboy daemon adopt-orphan --lease-id {lease_id} --confirm-pid-dead"
+                    "homeboy daemon adopt-orphan --lease-id {lease_id}"
                 )),
                 binary_hash: None,
                 daemon_version: None,

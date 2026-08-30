@@ -1475,7 +1475,7 @@ mod status_serialization_tests {
             termination_evidence: None,
             repair_plan: vec![homeboy_core::daemon::DaemonRepairStep::text(
                 "runner_reconcile_leaseless_orphans",
-                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
             )],
         });
 
