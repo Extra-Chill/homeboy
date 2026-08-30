@@ -52,7 +52,6 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use homeboy_core::daemon::controller_job_driver::ControllerJobPublicError;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, ProcessIdentityState, ProcessStartIdentity,
 };
@@ -373,13 +372,6 @@ impl WorkJobHandler for CookBatchWorkHandler {
             "children_terminal": result.get("children_terminal").cloned().unwrap_or(Value::Null),
             "terminal_state": result.get("terminal_state").cloned().unwrap_or(Value::Null),
         }))
-    }
-
-    fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
-        ControllerJobPublicError {
-            message: "controller-owned cook batch supervision failed".to_string(),
-            data: json!({ "code": format!("{:?}", error.code) }),
-        }
     }
 
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
@@ -826,17 +818,14 @@ mod tests {
         assert!(!result.to_string().contains("private task text"));
     }
 
-    /// A batch error can quote a child cook's error, which can quote provider
-    /// output, which can quote the prompt. Only the typed code may cross.
+    /// Work errors use the actual daemon projection, which withholds child
+    /// error text that could quote provider output or the prompt.
     #[test]
     fn the_public_error_carries_only_a_code() {
         let public =
-            CookBatchWorkHandler.public_error(&invalid_cook_batch_job("prompt: the private text"));
+            WorkJobDriver.public_error(&invalid_cook_batch_job("prompt: the private text"));
 
-        assert_eq!(
-            public.message,
-            "controller-owned cook batch supervision failed"
-        );
+        assert_eq!(public.message, "controller-owned work failed");
         assert!(!public.data.to_string().contains("private text"));
     }
 

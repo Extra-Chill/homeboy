@@ -69,7 +69,6 @@ pub trait WorkJobHandler: Send + Sync {
     fn public_request(&self, request: &Value) -> Result<Value>;
     fn public_progress(&self, progress: &Value) -> Result<Value>;
     fn public_result(&self, result: &Value) -> Result<Value>;
-    fn public_error(&self, error: &Error) -> ControllerJobPublicError;
     fn validate_secret_references(&self, request: &Value) -> Result<()>;
     fn prepare(&self, request: Value) -> Result<Value>;
     fn advance(

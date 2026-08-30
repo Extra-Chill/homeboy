@@ -40,7 +40,6 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
 
-use homeboy_core::daemon::controller_job_driver::ControllerJobPublicError;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, ProcessIdentityState, ProcessStartIdentity,
 };
@@ -280,13 +279,6 @@ impl WorkJobHandler for CookWorkHandler {
             "run_id": result.get("run_id").cloned().unwrap_or(Value::Null),
             "terminal_state": result.get("terminal_state").cloned().unwrap_or(Value::Null),
         }))
-    }
-
-    fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
-        ControllerJobPublicError {
-            message: "controller-owned cook supervision failed".to_string(),
-            data: json!({ "code": format!("{:?}", error.code) }),
-        }
     }
 
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
@@ -955,14 +947,13 @@ mod tests {
         assert!(!result.to_string().contains("private task text"));
     }
 
-    /// A cook's error text can quote provider output, which can quote the
-    /// prompt. Only the typed code may cross into public job state.
+    /// Work errors use the actual daemon projection, which withholds domain
+    /// error text that could quote provider output or the prompt.
     #[test]
     fn the_public_error_carries_only_a_code() {
-        let public =
-            CookWorkHandler.public_error(&invalid_cook_job("prompt: the private task text"));
+        let public = WorkJobDriver.public_error(&invalid_cook_job("prompt: the private task text"));
 
-        assert_eq!(public.message, "controller-owned cook supervision failed");
+        assert_eq!(public.message, "controller-owned work failed");
         assert!(!public.data.to_string().contains("private task text"));
     }
 
