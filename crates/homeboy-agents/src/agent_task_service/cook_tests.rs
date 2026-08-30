@@ -7384,6 +7384,19 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
         let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
         let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
+        assert!(
+            homeboy_core::defaults::load_config()
+                .worktree_providers
+                .is_empty(),
+            "native lifecycle must not require a configured worktree provider"
+        );
+        let remote = tempfile::tempdir().expect("bare origin");
+        assert!(Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .current_dir(remote.path())
+            .status()
+            .expect("initialize bare origin")
+            .success());
         let source = home.path().join("Developer/fixture");
         std::fs::create_dir_all(&source).expect("source directory");
         for args in [
@@ -7412,15 +7425,76 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             .status()
             .expect("git commit")
             .success());
-        let base_sha = String::from_utf8(
+        assert!(Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("origin path")
+            ])
+            .current_dir(&source)
+            .status()
+            .expect("add origin")
+            .success());
+        assert!(Command::new("git")
+            .args(["push", "--quiet", "-u", "origin", "main"])
+            .current_dir(&source)
+            .status()
+            .expect("push base")
+            .success());
+        let upstream = tempfile::tempdir().expect("upstream checkout");
+        assert!(Command::new("git")
+            .args([
+                "clone",
+                "--quiet",
+                "--branch",
+                "main",
+                remote.path().to_str().expect("origin path"),
+                upstream.path().to_str().expect("upstream path"),
+            ])
+            .status()
+            .expect("clone origin")
+            .success());
+        for args in [
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(upstream.path())
+                .status()
+                .expect("configure upstream checkout")
+                .success());
+        }
+        std::fs::write(upstream.path().join("moving-base.txt"), "new base\n")
+            .expect("advance upstream base");
+        assert!(Command::new("git")
+            .args(["add", "moving-base.txt"])
+            .current_dir(upstream.path())
+            .status()
+            .expect("stage moving base")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "advance base"])
+            .current_dir(upstream.path())
+            .status()
+            .expect("commit moving base")
+            .success());
+        assert!(Command::new("git")
+            .args(["push", "--quiet"])
+            .current_dir(upstream.path())
+            .status()
+            .expect("push moving base")
+            .success());
+        let moving_base = String::from_utf8(
             Command::new("git")
                 .args(["rev-parse", "HEAD"])
-                .current_dir(&source)
+                .current_dir(upstream.path())
                 .output()
-                .expect("git rev-parse runs")
+                .expect("resolve moving base")
                 .stdout,
         )
-        .expect("base SHA is UTF-8")
+        .expect("moving base SHA is UTF-8")
         .trim()
         .to_string();
         let components = home.path().join(".config/homeboy/components");
@@ -7440,7 +7514,6 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.to_worktree = "fixture@native-provision".to_string();
-        options.workspace.task_base_sha = Some(base_sha);
         options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
             "action": "lookup_pending",
             "kind": "provider",
@@ -7470,6 +7543,10 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
 
         materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
             .expect("ensure native Cook destination");
+        assert_eq!(
+            options.workspace.task_base_sha.as_deref(),
+            Some(moving_base.as_str())
+        );
         let first_path = options
             .workspace
             .source_worktree_path
@@ -7478,7 +7555,22 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         materialize_pending_cook_workspace(&lifecycle_store, &mut options, None)
             .expect("re-admit native Cook destination");
         validate_cook_workspace(&options)
-            .expect("invocation-created native destination remains valid for provider dispatch");
+            .expect("native destination converges during the first post-materialization preflight");
+        validate_cook_workspace(&options).expect(
+            "native destination remains valid during the second post-materialization preflight",
+        );
+        let destination_head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&first_path)
+                .output()
+                .expect("resolve native destination HEAD")
+                .stdout,
+        )
+        .expect("native destination SHA is UTF-8")
+        .trim()
+        .to_string();
+        assert_eq!(destination_head, moving_base);
 
         let record = homeboy_core::worktree::resolve_if_present(&options.workspace.to_worktree)
             .expect("native lookup")
