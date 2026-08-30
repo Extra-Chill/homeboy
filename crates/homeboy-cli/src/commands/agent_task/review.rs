@@ -2182,6 +2182,12 @@ fn compact_provider(
     dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
 ) -> Value {
     let readiness = provider_credential_readiness(provider);
+    let compact_check = |ready: bool, reason: Option<&str>| {
+        serde_json::json!({
+            "ready": ready,
+            "reason": reason.map(|value| bounded_text(value, 128)),
+        })
+    };
     serde_json::json!({
         "id": bounded_text(&provider.id, 160),
         "label": provider.label.as_deref().map(|value| bounded_text(value, 160)),
@@ -2189,10 +2195,25 @@ fn compact_provider(
         "runtime_id": provider.runtime_id.as_deref().map(|value| bounded_text(value, 160)),
         "extension_id": provider.extension_id.as_deref().map(|value| bounded_text(value, 160)),
         "status": provider_status(provider, dispatchability),
-        "reason": readiness.reason().map(|value| bounded_text(&value, DEFAULT_TEXT_LIMIT)).or_else(|| (!dispatchability.ready).then(|| bounded_text(&dispatchability.reason, DEFAULT_TEXT_LIMIT))),
-        "dispatchability": dispatchability,
+        "reason": readiness.reason().map(|value| bounded_text(&value, 128)).or_else(|| (!dispatchability.ready).then(|| bounded_text(&dispatchability.reason, 128))),
+        "dispatchability": {
+            "state": dispatchability.state,
+            "ready": dispatchability.ready,
+            "reason": bounded_text(&dispatchability.reason, 128),
+            "checks": {
+                "route": compact_check(dispatchability.checks.route.ready, dispatchability.checks.route.reason.as_deref()),
+                "model": compact_check(dispatchability.checks.model.ready, dispatchability.checks.model.reason.as_deref()),
+                "credentials": {
+                    "ready": dispatchability.checks.credentials.ready,
+                    "missing": dispatchability.checks.credentials.missing.iter().take(8).map(|value| bounded_text(value, 96)).collect::<Vec<_>>(),
+                    "verified": dispatchability.checks.credentials.verified,
+                },
+                "configuration": compact_check(dispatchability.checks.configuration.ready, dispatchability.checks.configuration.reason.as_deref()),
+                "runtime": compact_check(dispatchability.checks.runtime.ready, dispatchability.checks.runtime.reason.as_deref()),
+            },
+        },
         "default_backend": provider.default_backend,
-        "capabilities": provider.capabilities.iter().take(8).map(|value| bounded_text(value, 96)).collect::<Vec<_>>(),
+        "capabilities": provider.capabilities.iter().take(8).map(|value| bounded_text(value, 64)).collect::<Vec<_>>(),
     })
 }
 
@@ -3347,7 +3368,8 @@ mod tests {
         }));
 
         assert_eq!(providers.len(), DEFAULT_PROVIDER_LIMIT);
-        assert!(serde_json::to_vec(&providers).expect("provider JSON").len() < 20_000);
+        let provider_bytes = serde_json::to_vec(&providers).expect("provider JSON").len();
+        assert!(provider_bytes < 20_000, "{provider_bytes}");
         assert!(diagnostic["message"].as_str().expect("message").len() <= DEFAULT_TEXT_LIMIT + 3);
         assert_eq!(diagnostic["response_body"]["omitted_bytes"], 100_000);
     }

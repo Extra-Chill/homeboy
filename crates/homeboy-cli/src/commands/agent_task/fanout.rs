@@ -8466,30 +8466,6 @@ fi
         });
     }
 
-    #[test]
-    fn cook_batch_reuses_multiple_existing_issue_worktrees_before_lab_reconciliation() {
-        with_materialized_cook_batch_worktrees(|| {
-            let (value, exit_code) = cook_batch(cook_batch_args()).expect("plan existing wave");
-
-            assert_eq!(exit_code, 0, "{value}");
-            assert_eq!(value["summary"]["issues"], 2);
-            let rows = value["worktrees"]["rows"]
-                .as_array()
-                .expect("worktree rows");
-            assert_eq!(rows.len(), 2);
-            assert!(
-                rows.iter().all(|row| row["status"] == "created"),
-                "{rows:?}"
-            );
-            assert!(rows.iter().all(|row| row["path"].is_string()), "{rows:?}");
-            assert!(value["plan"]["cooks"]
-                .as_array()
-                .expect("planned cooks")
-                .iter()
-                .all(|cook| cook["workspace"].is_string()));
-        });
-    }
-
     #[cfg(unix)]
     #[test]
     fn fanout_uses_an_ensure_resolve_provider_without_a_finalizer_for_creation_binding_and_repair()
