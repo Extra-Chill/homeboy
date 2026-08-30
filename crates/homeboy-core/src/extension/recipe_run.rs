@@ -2,7 +2,7 @@
 
 use homeboy_core::error::{Error, Result};
 
-use crate::manifest::ExtensionManifest;
+use crate::extension::manifest::ExtensionManifest;
 use crate::DiscoveredExtension;
 
 const AVAILABLE_ID_LIMIT: usize = 20;
@@ -160,7 +160,7 @@ fn declarations_from_manifest(manifest: &ExtensionManifest) -> Vec<DiscoveredPro
             let executable = declaration.declared_str("executable");
             let descriptor = match declaration {
                 RecipeRunProviderDeclaration::Descriptor(descriptor) => {
-                    Some((**descriptor).clone())
+                    Some(descriptor.as_ref().clone())
                 }
                 RecipeRunProviderDeclaration::Malformed(_) => None,
             };

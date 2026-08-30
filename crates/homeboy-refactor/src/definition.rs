@@ -18,8 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use homeboy_core::extension;
 use homeboy_core::Error;
-use homeboy_extension as extension;
 
 /// A located definition: the file it lives in and its extracted source block.
 pub(crate) struct LocatedDefinition {

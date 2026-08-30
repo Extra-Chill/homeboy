@@ -6,8 +6,8 @@
 //! lightweight crate that others can depend on without pulling in the whole
 //! core compile unit.
 //!
-//! Modules and types are re-exported from `homeboy_extension` so existing
-//! `crate::extension::*` call sites keep working unchanged.
+//! Modules and types are re-exported from `homeboy_core::extension` for the
+//! product-facing API.
 
 pub use action_types::HttpMethod;
 pub use ci_config::{

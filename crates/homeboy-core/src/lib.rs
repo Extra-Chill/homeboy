@@ -28,6 +28,7 @@ pub fn is_zero_u32(v: &u32) -> bool {
 // a compatibility surface from the production homeboy-core package.
 #[cfg(test)]
 extern crate self as homeboy;
+extern crate self as homeboy_core;
 #[cfg(test)]
 pub use crate as core;
 #[cfg(test)]
@@ -100,6 +101,8 @@ pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
 pub mod expand;
+pub mod extension;
+pub use extension::*;
 pub mod extension_execution;
 pub mod extension_invocation_context;
 pub mod extension_provider_discovery;

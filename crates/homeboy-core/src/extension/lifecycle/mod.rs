@@ -167,7 +167,7 @@ pub fn refresh(
     let extension_dir = paths::extension(&extension_id)?;
     let uninstalled_previous = std::fs::symlink_metadata(&extension_dir).is_ok();
     let installed = if uninstalled_previous {
-        let replaced = crate::repair::replace_with_revision(
+        let replaced = crate::extension::repair::replace_with_revision(
             &install_source,
             Some(&extension_id),
             effective_revision,

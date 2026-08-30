@@ -1957,7 +1957,7 @@ fn snapshot_staging_uses_one_manifest_policy_for_nested_ignored_directories() {
 fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_execution() {
     let workspace = tempfile::tempdir().expect("workspace");
     let source = workspace.path().join("source");
-    let tracked_build = source.join("crates/homeboy-extension/src/build");
+    let tracked_build = source.join("crates/homeboy-core/src/extension/build");
     fs::create_dir_all(&tracked_build).expect("tracked build source directory");
     fs::create_dir_all(source.join("build")).expect("ignored root build directory");
     fs::write(tracked_build.join("mod.rs"), "pub mod local_permissions;\n")
@@ -1975,7 +1975,7 @@ fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_ex
     assert_eq!(source_manifest, staged_manifest);
     assert_eq!(staged_manifest, current_manifest);
     assert!(staged_source
-        .join("crates/homeboy-extension/src/build/mod.rs")
+        .join("crates/homeboy-core/src/extension/build/mod.rs")
         .is_file());
     assert!(!staged_source.join("build").exists());
 
@@ -1987,7 +1987,7 @@ fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_ex
         homeboy_core::engine::shell::quote_arg(&provider_workspace.display().to_string()),
         homeboy_core::engine::shell::quote_arg(
             &provider_workspace
-                .join("crates/homeboy-extension/src/build/mod.rs")
+                .join("crates/homeboy-core/src/extension/build/mod.rs")
                 .display()
                 .to_string()
         ),

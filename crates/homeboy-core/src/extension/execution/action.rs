@@ -6,7 +6,7 @@ use homeboy_core::server::http::ApiClient;
 use homeboy_engine_primitives::validation;
 
 use super::{build_action_env, execute_extension_command, load_extension, ExtensionExecutionMode};
-use crate::manifest::{ActionConfig, ActionType, HttpMethod};
+use crate::extension::manifest::{ActionConfig, ActionType, HttpMethod};
 use crate::ExtensionScope;
 
 pub fn execute_action(

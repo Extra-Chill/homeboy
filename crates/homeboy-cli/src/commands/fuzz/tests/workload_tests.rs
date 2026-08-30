@@ -154,7 +154,7 @@ fn resolve_fuzz_context_preserves_rig_extensions_with_explicit_path_when_registr
             &comp,
             &SettingArgs::default(),
             &ExtensionOverrideArgs::default(),
-            homeboy_extension::ExtensionCapability::Fuzz,
+            homeboy_core::ExtensionCapability::Fuzz,
             Some(&context),
         )
         .expect("resolve fuzz context");
@@ -217,7 +217,7 @@ fn resolve_fuzz_context_infers_single_rig_fuzz_workload_extension() {
             &comp,
             &SettingArgs::default(),
             &ExtensionOverrideArgs::default(),
-            homeboy_extension::ExtensionCapability::Fuzz,
+            homeboy_core::ExtensionCapability::Fuzz,
             Some(&context),
         )
         .expect("resolve fuzz context");
@@ -272,7 +272,7 @@ fn resolve_fuzz_context_reports_explicit_extension_without_fuzz_capability() {
             &comp,
             &SettingArgs::default(),
             &extension_override,
-            homeboy_extension::ExtensionCapability::Fuzz,
+            homeboy_core::ExtensionCapability::Fuzz,
             Some(&context),
         )
         .expect_err("old extension manifest should fail explicitly");

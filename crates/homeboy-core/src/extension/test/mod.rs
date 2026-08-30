@@ -156,8 +156,14 @@ pub fn declared_secret_env_names(component: &Component) -> homeboy_core::Result<
         return Ok(Vec::new());
     }
 
-    let prepared =
-        crate::execution::prepare_capability_run(&context, Some(component), None, &[], &[], false)?;
+    let prepared = crate::extension::execution::prepare_capability_run(
+        &context,
+        Some(component),
+        None,
+        &[],
+        &[],
+        false,
+    )?;
 
     effective_secret_env_names(&static_names, &projections, &prepared.settings_json)
 }
@@ -1424,12 +1430,12 @@ mod tests {
             Some("src/core/audit_test.rs".to_string())
         );
         assert_eq!(
-            changed_test_file_for_path("crates/homeboy-extension/src/test/report.rs"),
-            Some("crates/homeboy-extension/src/test/report.rs".to_string())
+            changed_test_file_for_path("crates/homeboy-core/src/extension/test/report.rs"),
+            Some("crates/homeboy-core/src/extension/test/report.rs".to_string())
         );
         assert_eq!(
-            changed_test_file_for_path("crates/homeboy-extension/src/test/run.rs"),
-            Some("crates/homeboy-extension/src/test/run.rs".to_string())
+            changed_test_file_for_path("crates/homeboy-core/src/extension/test/run.rs"),
+            Some("crates/homeboy-core/src/extension/test/run.rs".to_string())
         );
     }
 

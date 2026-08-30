@@ -1,7 +1,7 @@
 use homeboy::core::ci_profile::{self, CiResolvedJob};
 use homeboy::core::component::Component;
 use homeboy::core::engine::execution_context::{self, ExecutionContext, ResolveOptions};
-use homeboy_extension::ExtensionCapability;
+use homeboy_core::ExtensionCapability;
 
 use crate::commands::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 

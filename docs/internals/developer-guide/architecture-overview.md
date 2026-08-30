@@ -183,7 +183,7 @@ Changelog operations:
 
 ### Extension System
 
-**Location:** `crates/homeboy-extension/src/lib.rs`
+**Location:** `crates/homeboy-core/src/extension/lib.rs`
 
 Extension management:
 - Install from git or local path

@@ -5,8 +5,8 @@ use crate::commands::trace::compare_artifacts::{
     prepare_matrix_cell_dir, prepare_matrix_output_dir, prepare_variant_matrix_output_dir,
     write_json_artifact, write_matrix_summary, write_variant_matrix_summary,
 };
-use homeboy_extension::trace as extension_trace;
-use homeboy_extension::trace::TraceCommandOutput;
+use homeboy_core::trace as extension_trace;
+use homeboy_core::trace::TraceCommandOutput;
 
 use super::output::{
     compare_trace_aggregates_with_focus, render_matrix_markdown, TraceAggregateIdentity,

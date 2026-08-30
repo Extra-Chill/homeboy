@@ -5,8 +5,8 @@ use crate::commands::trace::compare_artifacts::{self, CompareArtifactSet, Compar
 use homeboy::core::component;
 use homeboy::core::git;
 use homeboy::core::observation::{NewRunRecord, RunStatus};
-use homeboy_extension::trace as extension_trace;
-use homeboy_extension::trace::{TraceCheckoutProvenance, TraceCommandOutput};
+use homeboy_core::trace as extension_trace;
+use homeboy_core::trace::{TraceCheckoutProvenance, TraceCommandOutput};
 
 use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,

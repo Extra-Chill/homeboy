@@ -40,7 +40,7 @@ component path so existing runner helpers can identify the source.
 
 Extensions may omit any capability. Detection uses `has_lint()` /
 `has_test()` / `has_build()` accessors on the manifest (see
-`crates/homeboy-extension/src/manifest.rs`). If a capability is missing, the
+`crates/homeboy-core/src/extension/manifest.rs`). If a capability is missing, the
 corresponding homeboy command exits cleanly with a "not applicable"
 message rather than failing.
 
@@ -236,7 +236,7 @@ Trace runners also receive trace-specific variables when invoked by `homeboy tra
 ## Core-provided runtime helpers
 
 Core ships shell helpers as embedded assets
-(`crates/homeboy-extension/src/runtime/`) and injects their absolute paths via
+(`crates/homeboy-core/src/extension/runtime/`) and injects their absolute paths via
 `HOMEBOY_RUNTIME_*` env vars. Extensions source them at the top of the
 runner script with a fallback to a bundled copy:
 
@@ -419,7 +419,7 @@ Each produces a distinct `FAILED_STEP` label and either dumps
 diagnostics or replays the tool output.
 
 **Consolidation target:** factor this classifier into a future shared
-runtime helper under `crates/homeboy-extension/src/runtime/` (tracked in
+runtime helper under `crates/homeboy-core/src/extension/runtime/` (tracked in
 [Extra-Chill/homeboy#1459](https://github.com/Extra-Chill/homeboy/issues/1459))
 so rust, swift, and future extensions produce the same categorized
 surface without re-implementing the logic. The helper does not exist

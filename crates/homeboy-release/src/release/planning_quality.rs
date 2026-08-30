@@ -1,8 +1,8 @@
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{ActionSafety, CommandEvidence, Error, ExecutableAction, Result};
-use homeboy_extension as extension;
-use homeboy_extension::{self, ExtensionCapability};
+use homeboy_core::extension;
+use homeboy_core::{self, ExtensionCapability};
 use std::path::Path;
 
 use super::scope::ReleaseScope;
@@ -501,7 +501,7 @@ mod tests {
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
     use homeboy_core::error::Error;
-    use homeboy_extension::RunnerOutput;
+    use homeboy_core::RunnerOutput;
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
@@ -907,7 +907,7 @@ mod tests {
             std::env::set_var("DECLARED_RELEASE_SECRET", "static-release-secret");
             std::env::set_var("PROJECTED_RELEASE_SECRET", "projected-release-secret");
 
-            homeboy_extension::test::resolve_test_command(&component)
+            homeboy_core::test::resolve_test_command(&component)
                 .expect("conditional release test extension resolves");
 
             let error = validate_test_quality(&component)

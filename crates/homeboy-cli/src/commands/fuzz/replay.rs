@@ -1,4 +1,4 @@
-use homeboy_extension as extension;
+use homeboy_core::extension;
 use std::path::{Path, PathBuf};
 
 use homeboy::core::artifact_address::{ArtifactAddress, ArtifactAddressKind};
@@ -10,7 +10,7 @@ use homeboy::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::runner::runners::is_retrievable_runner_artifact;
-use homeboy_extension::{self, ExtensionCapability, ExtensionRunner};
+use homeboy_core::{self, ExtensionCapability, ExtensionRunner};
 
 use super::super::utils::args::PositionalComponentArgs;
 use super::types::{
@@ -307,7 +307,7 @@ impl ReplayLikeMode {
 
 #[derive(Clone)]
 struct ResolvedReplayContext {
-    execution_context: homeboy_extension::ExtensionExecutionContext,
+    execution_context: homeboy_core::ExtensionExecutionContext,
     component: homeboy::core::component::Component,
     command: Option<String>,
 }

@@ -1,7 +1,7 @@
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::extension;
 use homeboy_core::{build_identity, git};
-use homeboy_extension as extension;
 use semver::Version;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -850,7 +850,7 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
                     .requires
                     .as_ref()
                     .and_then(|requirements| requirements.homeboy.as_deref());
-                match homeboy_extension::evaluate_core_compatibility_for_version(
+                match homeboy_core::evaluate_core_compatibility_for_version(
                     requires,
                     homeboy_core::extension_update_check::read_source_revision(&extension_id),
                     candidate_version,
@@ -1461,7 +1461,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                         git_root: None,
                         source_url,
                         source_revision: homeboy_core::extension_update_check::read_source_revision(&extension_id),
-                        source_update: homeboy_extension::ExtensionSourceUpdate {
+                        source_update: homeboy_core::ExtensionSourceUpdate {
                             update_note,
                             ..Default::default()
                         },
@@ -1476,7 +1476,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                     git_root: None,
                     source_url: None,
                     source_revision: None,
-                    source_update: homeboy_extension::ExtensionSourceUpdate {
+                    source_update: homeboy_core::ExtensionSourceUpdate {
                         update_note: Some(format!(
                             "unrefreshable extension manifest: {}",
                             err.message
@@ -1963,7 +1963,7 @@ fn git_commits_behind_upstream(git_root: &Path) -> Option<u32> {
     count.trim().parse::<u32>().ok()
 }
 
-fn portable_extension_source_url(result: &homeboy_extension::UpdateResult) -> Option<String> {
+fn portable_extension_source_url(result: &homeboy_core::UpdateResult) -> Option<String> {
     if let Some(git_root) = result.git_root.as_ref() {
         return git::remote_origin_url(git_root);
     }
@@ -2228,7 +2228,7 @@ mod runner_source_upgrade_tests {
             Vec::new(),
             || {
                 events.borrow_mut().push("runner manifest revalidation");
-                let compatible = homeboy_extension::evaluate_core_compatibility_for_version(
+                let compatible = homeboy_core::evaluate_core_compatibility_for_version(
                     Some(changed_manifest_requires_homeboy),
                     None,
                     "2.1.0",

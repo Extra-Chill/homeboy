@@ -265,7 +265,9 @@ fn find_scenario<'a>(results: &'a BenchResults, id: &str) -> Option<&'a BenchSce
     results.scenarios.iter().find(|s| s.id == id)
 }
 
-pub(in crate::bench) fn comparison_metrics(scenario: &BenchScenario) -> BTreeMap<String, f64> {
+pub(in crate::extension::bench) fn comparison_metrics(
+    scenario: &BenchScenario,
+) -> BTreeMap<String, f64> {
     let mut metrics = scenario.metrics.values.clone();
     for (group, values) in &scenario.metric_groups {
         for (name, value) in values {
@@ -518,5 +520,5 @@ fn format_diagnostic_hint_suffix(diagnostics: &[BenchDiagnostic]) -> String {
 
 #[cfg(test)]
 #[cfg(test)]
-#[path = "../../../../../tests/core/extension/bench/report_comparison_test.rs"]
+#[path = "../../../../../../tests/core/extension/bench/report_comparison_test.rs"]
 mod tests;

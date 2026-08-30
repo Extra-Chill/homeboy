@@ -17,8 +17,8 @@ use homeboy_core::agent_runtime_manifest::{
     AGENT_RUNTIME_REVISION_PROBE_TIMEOUT,
 };
 use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
+use homeboy_core::{load_extension, ExtensionManifest};
 use homeboy_core::{Error, Result};
-use homeboy_extension::{load_extension, ExtensionManifest};
 
 use super::AgentTaskExecutorProvider;
 

@@ -1,4 +1,4 @@
-use crate::manifest::ExtensionManifest;
+use crate::extension::manifest::ExtensionManifest;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
 use homeboy_core::server::execute_local_command_in_dir;
