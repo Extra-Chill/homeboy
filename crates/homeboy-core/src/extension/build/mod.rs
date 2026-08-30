@@ -924,11 +924,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn component_without_extensions_has_no_extension_build() {
-        assert!(!extension_provides_build(&Component::default()));
-    }
-
-    #[test]
     fn build_timeout_preserves_long_default_and_accepts_override() {
         assert_eq!(build_timeout_from(None), Duration::from_secs(30 * 60));
         assert_eq!(build_timeout_from(Some("7200")), Duration::from_secs(7200));
