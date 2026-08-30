@@ -168,30 +168,6 @@ impl DependencyProvider {
         }
     }
 
-    pub(crate) fn install_command(
-        &self,
-        component: &Component,
-        path: &Path,
-    ) -> Result<Option<DependencyProviderCommand>> {
-        let context = DependencyProviderContext { component, path };
-        match self {
-            DependencyProvider::Manifest(provider) => provider.install_command(context),
-            DependencyProvider::Adapter(provider) => provider.install_command(context),
-            DependencyProvider::ComponentScript(provider) => provider.install_command(context),
-            DependencyProvider::Extension(provider) => provider.install_command(context),
-        }
-    }
-
-    pub(crate) fn install_outputs(&self) -> Result<Vec<DependencyInstallOutput>> {
-        match self {
-            DependencyProvider::Manifest(provider) => provider.install_outputs(),
-            DependencyProvider::Adapter(provider) => provider.install_outputs(),
-            DependencyProvider::Extension(_) | DependencyProvider::ComponentScript(_) => {
-                Ok(Vec::new())
-            }
-        }
-    }
-
     pub(crate) fn hydration_plan(
         &self,
         component: &Component,
@@ -340,25 +316,33 @@ impl AdapterDependencyProvider {
 
     fn load(path: &Path) -> Result<Vec<Self>> {
         let extensions_dir = paths::extensions()?;
-        let Ok(entries) = fs::read_dir(extensions_dir) else {
+        let Ok(entries) = fs::read_dir(&extensions_dir) else {
             return Ok(Vec::new());
         };
 
+        let mut index_paths = vec![extensions_dir.join(DEPENDENCY_ADAPTER_INDEX)];
+        index_paths.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path().join(DEPENDENCY_ADAPTER_INDEX)),
+        );
+        index_paths.sort();
+        index_paths.dedup();
+
         let mut adapters = Vec::new();
-        let mut seen_manifests = HashSet::new();
-        for entry in entries.flatten() {
-            let index_path = entry.path().join(DEPENDENCY_ADAPTER_INDEX);
+        let mut seen_adapter_ids = HashSet::new();
+        for index_path in index_paths {
             if !index_path.is_file() {
                 continue;
             }
             for manifest in read_dependency_adapter_index(&index_path)? {
+                if !seen_adapter_ids.insert(manifest.id.clone()) {
+                    continue;
+                }
                 let manifest_path = index_path
                     .parent()
                     .expect("dependency adapter index has a parent")
                     .join(&manifest.path);
-                if !seen_manifests.insert(manifest_path.clone()) {
-                    continue;
-                }
                 let adapter = read_installed_dependency_adapter(&manifest_path)?;
                 if adapter.id != manifest.id || adapter.ecosystem != manifest.ecosystem {
                     return Err(Error::validation_invalid_argument(
@@ -530,19 +514,6 @@ impl AdapterDependencyProvider {
             return Ok(None);
         };
         Ok(Some(self.run(command, "install")?))
-    }
-
-    fn install_command(
-        &self,
-        _context: DependencyProviderContext<'_>,
-    ) -> Result<Option<DependencyProviderCommand>> {
-        Ok(self
-            .adapter
-            .package_manager()
-            .commands
-            .install
-            .as_ref()
-            .map(|command| self.command(command)))
     }
 }
 
@@ -1023,18 +994,6 @@ impl ManifestDependencyProvider {
         let command = self.command(command, context, None, None);
         Ok(Some(run_dependency_provider_command(&command, "install")?))
     }
-
-    fn install_command(
-        &self,
-        context: DependencyProviderContext<'_>,
-    ) -> Result<Option<DependencyProviderCommand>> {
-        Ok(self
-            .manifest
-            .commands
-            .install
-            .as_ref()
-            .map(|command| self.command(command, context, None, None)))
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1221,13 +1180,6 @@ impl ComponentScriptDependencyProvider {
             stderr: output.stderr,
         }))
     }
-
-    fn install_command(
-        &self,
-        _context: DependencyProviderContext<'_>,
-    ) -> Result<Option<DependencyProviderCommand>> {
-        Ok(None)
-    }
 }
 
 pub(crate) struct ExtensionDependencyProvider {
@@ -1295,29 +1247,6 @@ impl ExtensionDependencyProvider {
             stdout: output.stdout,
             stderr: output.stderr,
         }))
-    }
-
-    fn install_command(
-        &self,
-        context: DependencyProviderContext<'_>,
-    ) -> Result<Option<DependencyProviderCommand>> {
-        let args = vec!["install-command".to_string()];
-        let output = self.run(context.component, context.path, &args)?;
-        let plan: ExtensionInstallCommandOutput =
-            parse_extension_output(&output.stdout, "deps install-command")?;
-        if plan.command.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "dependency_provider",
-                "Dependency provider install-command returned an empty command".to_string(),
-                None,
-                None,
-            ));
-        }
-        Ok(Some(DependencyProviderCommand::new(
-            plan.command.first().cloned().unwrap_or_default(),
-            plan.command.into_iter().skip(1).collect(),
-            context.path,
-        )))
     }
 
     fn hydration_plan(
@@ -1660,7 +1589,7 @@ mod tests {
                     "{\"package_manager\":\"fixture\",\"packages\":[]}\n"
                 }
                 [action] if action == "install-command" => {
-                    "{\"command\":[\"fixture-pm\",\"install\",\"--locked\"]}\n"
+                    "{\"command\":[\"fixture-pm\",\"install\",\"--locked\"],\"outputs\":[{\"path\":\"deps\",\"kind\":\"directory\"}]}\n"
                 }
                 _ => unreachable!("unexpected fixture command: {script_args:?}"),
             };
@@ -1736,15 +1665,25 @@ esac
             .unwrap();
         assert_eq!(status.package_manager, "fixture");
 
-        let command = provider
-            .install_command(DependencyProviderContext {
+        let plan = provider
+            .hydration_plan(DependencyProviderContext {
                 component: &component,
                 path: &component_path,
             })
             .unwrap()
             .unwrap();
-        assert_eq!(command.argv(), vec!["fixture-pm", "install", "--locked"]);
-        assert_eq!(command.cwd, component_path);
+        assert_eq!(
+            plan.install.argv(),
+            vec!["fixture-pm", "install", "--locked"]
+        );
+        assert_eq!(plan.install.cwd, component_path);
+        assert_eq!(
+            plan.outputs,
+            vec![DependencyInstallOutput {
+                path: "deps".to_string(),
+                kind: DependencyInstallOutputKind::Directory,
+            }]
+        );
     }
 
     #[test]
@@ -1873,6 +1812,51 @@ esac
                 providers.as_slice(),
                 [DependencyProvider::Manifest(_)]
             ));
+        });
+    }
+
+    #[test]
+    fn global_and_extension_indexes_do_not_duplicate_adapter_ids() {
+        crate::test_support::with_isolated_home(|_| {
+            let project = tempdir().unwrap();
+            fs::write(project.path().join("fixture.json"), "{}").unwrap();
+            let extensions = paths::extensions().unwrap();
+            for root in [
+                extensions.join("dependency-adapters"),
+                extensions.join("fixture-extension/dependency-adapters"),
+            ] {
+                fs::create_dir_all(&root).unwrap();
+                fs::write(
+                    root.join("index.json"),
+                    r#"{
+                        "schema": "homeboy-extension/dependency-adapter-index/v1",
+                        "manifests": [{ "id": "fixture", "ecosystem": "fixture", "path": "fixture.json" }]
+                    }"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("fixture.json"),
+                    r#"{
+                        "schema": "homeboy-extension/dependency-adapter-manifest/v1",
+                        "id": "fixture",
+                        "version": 1,
+                        "ecosystem": "fixture",
+                        "project_signals": { "root_files": ["fixture.json"] },
+                        "package_managers": [{
+                            "id": "fixture-pm",
+                            "selection": { "priority": 1, "default": true },
+                            "commands": { "install": { "command": "true" } },
+                            "outputs": [{ "kind": "directory", "path": "deps" }]
+                        }]
+                    }"#,
+                )
+                .unwrap();
+            }
+
+            let providers = AdapterDependencyProvider::load(project.path()).unwrap();
+
+            assert_eq!(providers.len(), 1);
+            assert_eq!(providers[0].adapter.id, "fixture");
         });
     }
 
