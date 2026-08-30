@@ -2493,10 +2493,8 @@ fn preserve_controller_owner_placement_with_prefix(
 
 pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     let cursor = parse_event_cursor(args.cursor.as_deref(), "cursor")?;
-    let log = agent_task_service_direct::logs_from_cursor(&args.run_id, cursor.as_ref(), args.raw)?;
-    let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
-    enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
-    Ok((value, 0))
+    let events = agent_task_service_direct::logs_from_cursor(&args.run_id, cursor.as_ref())?;
+    Ok((serde_json::to_value(events).unwrap_or(Value::Null), 0))
 }
 
 pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {

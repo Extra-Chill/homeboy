@@ -135,8 +135,6 @@ pub enum AgentTaskCommand {
     /// Show the latest durable run.
     Latest(LatestArgs),
     /// Read the canonical durable event stream for a run.
-    ///
-    /// `--raw` additionally emits transport frames for diagnostics.
     Logs(LogsArgs),
     /// List artifacts and evidence refs recorded for a completed run.
     Artifacts(LifecycleReadArgs),

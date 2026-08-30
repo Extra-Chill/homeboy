@@ -531,6 +531,7 @@ Show or follow durable runner daemon job events
 | `--follow` | flag | Poll until the remote job reaches a terminal state, printing new events to stderr |
 | `--poll-ms` | `<POLL_MS>` | Poll interval in milliseconds when --follow is set |
 | `--cursor` | `<CURSOR>` | Resume after this previously displayed event sequence |
+| `--json` | flag | Emit one structured document without human event rendering |
 | `--compact` | flag | Return only lifecycle events, exit code, and a bounded stdout/stderr tail |
 | `--tail` | `<KB>` | Bound embedded stdout/stderr to the last N kilobytes, surfaced as a tail |
 

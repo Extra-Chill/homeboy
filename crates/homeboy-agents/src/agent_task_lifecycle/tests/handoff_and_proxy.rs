@@ -800,7 +800,6 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
         logs_in_store(&lifecycle_store, "agent-task-controller-proxy")
             .expect("logs resolve")
             .events
-            .events
             .len(),
         1
     );
@@ -1851,7 +1850,6 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
     assert_eq!(
         logs_in_store(&lifecycle_store, &record.run_id)
             .expect("controller logs")
-            .events
             .run
             .as_str(),
         record.run_id
@@ -2051,8 +2049,8 @@ fn running_child_snapshot_persists_provider_handle_and_live_log_progress() {
         "provider-run-live"
     );
     let log = logs_in_store(&lifecycle_store, &record.run_id).expect("live logs");
-    assert_eq!(log.events.events.len(), 1);
-    assert!(log.events.events[0].data["message"]
+    assert_eq!(log.events.len(), 1);
+    assert!(log.events[0].data["message"]
         .as_str()
         .is_some_and(|message| message.contains("provider dispatch accepted")));
 }
@@ -2506,7 +2504,7 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
             "/runner/workspace/repo"
         );
         assert_eq!(
-            log.events.events[0].data["message"].as_str(),
+            log.events[0].data["message"].as_str(),
             Some("Remote provider agent task failed.")
         );
         assert_eq!(artifacts.evidence_refs[0].kind, "logs");

@@ -31,7 +31,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `active [--limit <n>] [--cursor <n>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
 | `reconcile <run-id> [--dry-run\|--apply]` | Preview or reconcile one durable run after refreshing its authoritative provider state. |
 | `latest [--limit <n>]` | Show the latest durable run. |
-| `logs <run-id> [--raw]` | Read the canonical durable event stream; `--raw` adds transport frames for diagnostics. |
+| `logs <run-id> [--cursor <cursor>]` | Read or resume the canonical durable event stream. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |

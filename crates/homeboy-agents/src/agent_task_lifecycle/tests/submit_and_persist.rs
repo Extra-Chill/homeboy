@@ -2726,7 +2726,6 @@ fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
         logs_in_store(&lifecycle_store, run_id).expect("logs resolve for a running local cook");
     let messages: Vec<&str> = log
         .events
-        .events
         .iter()
         .filter_map(|event| event.data["message"].as_str())
         .collect();
@@ -2778,7 +2777,6 @@ fn cancelled_local_provider_retains_runtime_evidence_in_terminal_logs() {
 
     let log = logs_in_store(&lifecycle_store, run_id).expect("terminal logs");
     let terminal = log
-        .events
         .events
         .iter()
         .find(|event| {
@@ -2948,7 +2946,7 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
         .expect("controller identity resolves artifacts");
     assert_eq!(status.run_id, run_id);
     assert_eq!(status.metadata["runner_job_id"], "job-8341");
-    assert!(!logs.events.events.is_empty());
+    assert!(!logs.events.is_empty());
     assert!(artifacts.artifacts.is_empty());
 
     let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
@@ -3916,7 +3914,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             )
         });
         assert_eq!(status_record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events.events[0].data["state"], "succeeded");
+        assert_eq!(log.events[0].data["state"], "succeeded");
         assert!(artifacts.artifacts.is_empty());
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
@@ -4381,8 +4379,8 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
         assert_eq!(loaded.state, AgentTaskRunState::Failed);
         assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
         assert!(loaded.provider_handles.is_empty());
-        assert_eq!(log.events.events[1].data["state"], "failed");
-        assert_eq!(mirrored_log.events.events[1].data["state"], "failed");
+        assert_eq!(log.events[1].data["state"], "failed");
+        assert_eq!(mirrored_log.events[1].data["state"], "failed");
         assert_eq!(loaded.metadata["provider_run_ids"], serde_json::json!([]));
         assert_eq!(
             loaded.artifact_refs[0].kind,
@@ -4473,7 +4471,7 @@ fn record_completed_run_exposes_logs_and_artifacts() {
         let artifacts = artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
 
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events.events[0].data["state"], "succeeded");
+        assert_eq!(log.events[0].data["state"], "succeeded");
         assert_eq!(artifacts.artifacts[0].id, "patch");
         assert_eq!(artifacts.evidence_refs[0].kind, "transcript");
     }

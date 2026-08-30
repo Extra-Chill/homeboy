@@ -484,9 +484,7 @@ Show the latest durable run
 homeboy agent-task logs [OPTIONS] <RUN_ID>
 ```
 
-Read the canonical durable event stream for a run.
-
-`--raw` additionally emits transport frames for diagnostics.
+Read the canonical durable event stream for a run
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -494,7 +492,7 @@ Read the canonical durable event stream for a run.
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--raw` | flag | Include unprojected runner transport frames under `raw_events` for diagnostics |
+| `--cursor` | `<CURSOR>` | Resume events after this opaque cursor |
 
 ## `homeboy agent-task artifacts`
 

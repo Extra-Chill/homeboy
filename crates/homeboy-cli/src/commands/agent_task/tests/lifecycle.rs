@@ -2392,6 +2392,28 @@ fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
 }
 
 #[test]
+fn logs_exposes_only_the_canonical_cursor_surface() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "logs",
+        "run-1",
+        "--cursor",
+        "event-page-2",
+    ])
+    .expect("canonical cursor parses");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Logs(args) = agent_task.command else {
+        panic!("expected logs command");
+    };
+    assert_eq!(args.run_id, "run-1");
+    assert_eq!(args.cursor.as_deref(), Some("event-page-2"));
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "logs", "run-1", "--raw"]).is_err());
+}
+
+#[test]
 fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
     with_temp_home(|| {
         let command = vec![
@@ -2421,14 +2443,13 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
         let (logs_value, logs_exit) = logs(LogsArgs {
             run_id: "run-cli-controller-proxy".to_string(),
             cursor: None,
-            raw: false,
         })
         .expect("controller logs resolve");
 
         assert_eq!(status_exit, 0);
         assert_eq!(logs_exit, 0);
         assert_eq!(status_value["outcome"]["state"], "queued");
-        assert_eq!(logs_value["events"]["run"], "run-cli-controller-proxy");
+        assert_eq!(logs_value["run"], "run-cli-controller-proxy");
     });
 }
 
@@ -2723,7 +2744,7 @@ fn submit_run_status_reports_terminal_state() {
 }
 
 #[test]
-fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
+fn logs_return_canonical_events_while_diagnostics_stay_on_status_and_review() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnostic-summary";
         run_loaded_plan(
@@ -2743,7 +2764,6 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         let (logs_value, _) = logs(LogsArgs {
             run_id: run_id.to_string(),
             cursor: None,
-            raw: false,
         })
         .expect("logs loaded");
         let (review_value, _) = review::review(ReviewArgs {
@@ -2755,7 +2775,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         })
         .expect("review loaded");
 
-        for value in [&status_value, &logs_value, &review_value] {
+        for value in [&status_value, &review_value] {
             assert_eq!(
                 value["diagnostic_summary"]["message"],
                 "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
@@ -2763,6 +2783,11 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
             assert_eq!(value["diagnostic_summary"]["class"], "provider_discovery");
             assert_eq!(value["diagnostic_summary"]["task_id"], "task-a");
         }
+        assert_eq!(
+            logs_value["schema"],
+            homeboy_control_plane_contract::CONTROL_PLANE_EVENT_PAGE_SCHEMA
+        );
+        assert!(logs_value.get("diagnostic_summary").is_none());
     });
 }
 

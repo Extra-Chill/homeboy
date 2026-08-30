@@ -143,9 +143,6 @@ pub struct LogsArgs {
     /// Resume events after this opaque cursor.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
-    /// Include unprojected runner transport frames under `raw_events` for diagnostics.
-    #[arg(long)]
-    pub raw: bool,
 }
 #[derive(Args, Debug)]
 pub struct EvidenceArgs {
