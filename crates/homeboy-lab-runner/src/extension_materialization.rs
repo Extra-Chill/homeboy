@@ -1275,8 +1275,11 @@ mod tests {
                 "#!/bin/sh\nset -eu\nexec node --test \"$1\"\n",
             )
             .expect("shared node runner");
-            homeboy_core::extension::install(&nodejs.display().to_string(), Some("nodejs"))
-                .expect("install linked nodejs extension");
+            homeboy_core::extension::lifecycle::install(
+                &nodejs.display().to_string(),
+                Some("nodejs"),
+            )
+            .expect("install linked nodejs extension");
 
             let runner_root = tempfile::tempdir().expect("runner root");
             crate::create(

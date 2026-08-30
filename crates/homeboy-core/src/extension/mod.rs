@@ -17,7 +17,6 @@ mod manifest;
 mod manifest_sidecar;
 pub mod recipe_run;
 mod refactor_protocol;
-mod repair;
 mod runner;
 mod runtime_helper;
 pub mod self_check;
@@ -48,12 +47,6 @@ pub use execution::{
     ExtensionRunResult, ExtensionSetupResult, ExtensionStepFilter,
 };
 pub use fingerprint::run_fingerprint_script;
-pub use lifecycle::source_metadata::{resolve_source_url, resolve_source_url_read_only};
-pub use lifecycle::{
-    derive_id_from_url, extension_update_dirty_paths, install, install_for_component,
-    install_with_revision, refresh, slugify_id, uninstall, update, InstallForComponentResult,
-    InstallResult, RefreshResult, UpdateResult,
-};
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{
     deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
@@ -68,7 +61,6 @@ pub use refactor_protocol::{
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
     RewrittenImport,
 };
-pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
 pub use runtime_helper::{
     declared_helper_env_names, helper_path, provision_declared_helpers, RuntimeHelperProvision,

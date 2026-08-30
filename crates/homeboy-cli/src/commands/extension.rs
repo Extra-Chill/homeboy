@@ -1112,7 +1112,7 @@ fn install_extension(
     replace: bool,
 ) -> CmdResult<ExtensionOutput> {
     if replace {
-        let result = homeboy_core::extension::replace_with_revision(
+        let result = homeboy_core::extension::lifecycle::replace_with_revision(
             source,
             id.as_deref(),
             revision.as_deref(),
@@ -1131,8 +1131,11 @@ fn install_extension(
         ));
     }
 
-    let result =
-        homeboy_core::extension::install_with_revision(source, id.as_deref(), revision.as_deref())?;
+    let result = homeboy_core::extension::lifecycle::install_with_revision(
+        source,
+        id.as_deref(),
+        revision.as_deref(),
+    )?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1153,7 +1156,7 @@ fn refresh_extension(
     id: Option<&str>,
     revision: Option<&str>,
 ) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::extension::refresh(source, id, revision)?;
+    let result = homeboy_core::extension::lifecycle::refresh(source, id, revision)?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1175,7 +1178,7 @@ fn refresh_extension(
 }
 
 fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::extension::relink(extension_id, source)?;
+    let result = homeboy_core::extension::lifecycle::relink(extension_id, source)?;
 
     Ok((
         ExtensionOutput::Replace {
@@ -1205,7 +1208,7 @@ fn dev_run_extension(
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy_core::extension::install_for_component(&component, source)?;
+    let result = homeboy_core::extension::lifecycle::install_for_component(&component, source)?;
 
     let installed = result
         .installed
@@ -1269,7 +1272,7 @@ fn update_extension(
     // Capture version before update
     let old_version = load_extension(extension_id).ok().map(|m| m.version.clone());
 
-    let result = extension::update(extension_id, force)?;
+    let result = extension::lifecycle::update(extension_id, force)?;
 
     // Capture version after update
     let new_version = load_extension(&result.extension_id)
@@ -1432,7 +1435,7 @@ fn bounded_diagnostic(message: &str) -> String {
 
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     let was_linked = is_extension_linked(extension_id);
-    let path = homeboy_core::extension::uninstall(extension_id)?;
+    let path = homeboy_core::extension::lifecycle::uninstall(extension_id)?;
 
     Ok((
         ExtensionOutput::Uninstall {

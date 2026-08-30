@@ -6,7 +6,7 @@
 //! item-count threshold (#5241).
 
 use homeboy_core::error::{Error, ErrorCode, Result};
-use homeboy_core::extension;
+use homeboy_core::extension::lifecycle;
 use homeboy_stack::stack;
 use serde::Serialize;
 use std::fs;
@@ -41,7 +41,7 @@ pub(crate) fn discover_rigs_for_install(
     let Some(id) = id else {
         return discover_rigs(package_path);
     };
-    discover_rigs_matching(package_path, Some(&extension::slugify_id(id)?))
+    discover_rigs_matching(package_path, Some(&lifecycle::slugify_id(id)?))
 }
 
 /// Discover every package member before returning a schema failure so `--all`
@@ -157,7 +157,7 @@ fn discover_rig_paths(
                     let candidate = path
                         .file_name()
                         .and_then(|name| name.to_str())
-                        .map(extension::slugify_id)
+                        .map(lifecycle::slugify_id)
                         .transpose()?;
                     if candidate.as_deref() != Some(only_id) {
                         continue;
@@ -278,7 +278,7 @@ fn discovered_from_path(
         };
     }
     Ok(DiscoveredRig {
-        id: extension::slugify_id(&spec.id)?,
+        id: lifecycle::slugify_id(&spec.id)?,
         description: spec.description,
         rig_path: path.to_path_buf(),
     })
@@ -320,7 +320,7 @@ pub(crate) fn select_rigs(
         return Ok(rigs);
     }
     if let Some(id) = id {
-        let id = extension::slugify_id(id)?;
+        let id = lifecycle::slugify_id(id)?;
         let found: Vec<_> = rigs.into_iter().filter(|rig| rig.id == id).collect();
         if found.is_empty() {
             return Err(Error::validation_invalid_argument(

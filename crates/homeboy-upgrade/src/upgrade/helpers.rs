@@ -1,6 +1,6 @@
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension;
+use homeboy_core::extension::lifecycle;
 use homeboy_core::extension_store::{discover_extensions, DiscoveredExtension};
 use homeboy_core::extension_update_check::is_git_url;
 use homeboy_core::{build_identity, git};
@@ -1491,7 +1491,8 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
             |extension_id| match homeboy_core::extension_store::load_extension(&extension_id) {
                 Ok(manifest) => {
                     let (source_url, update_note) =
-                        match extension::resolve_source_url_read_only(&extension_id) {
+                        match lifecycle::source_metadata::resolve_source_url_read_only(&extension_id)
+                        {
                             Ok(source_url) if is_git_url(&source_url) => {
                                 (Some(source_url), None)
                             }
@@ -1740,7 +1741,7 @@ fn update_all_extensions(
         let update_result = run_with_upgrade_heartbeats(
             UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
             |elapsed| report_extension_progress(operation_id, id, current, total, elapsed),
-            || extension::update(id, false),
+            || lifecycle::update(id, false),
         );
 
         match update_result {
@@ -1995,7 +1996,7 @@ fn detect_unrefreshed_in_extensions_dir(
             // gate uses. A dirty clone is reported as blocked with its
             // offending paths named; an unreadable status is treated as
             // blocked rather than risking a command we cannot verify (#12181).
-            let dirty_paths = extension::extension_update_dirty_paths(&git_root, &target);
+            let dirty_paths = lifecycle::extension_update_dirty_paths(&git_root, &target);
             // Unknown status is blocked (like the update gate) rather than
             // risking a recovery command we cannot verify.
             let dirty = dirty_paths.as_ref().is_none_or(|paths| !paths.is_empty());
@@ -2059,7 +2060,9 @@ fn git_commits_behind_upstream(git_root: &Path) -> Option<u32> {
     count.trim().parse::<u32>().ok()
 }
 
-fn portable_extension_source_url(result: &homeboy_core::extension::UpdateResult) -> Option<String> {
+fn portable_extension_source_url(
+    result: &homeboy_core::extension::lifecycle::UpdateResult,
+) -> Option<String> {
     if let Some(git_root) = result.git_root.as_ref() {
         return git::remote_origin_url(git_root);
     }
