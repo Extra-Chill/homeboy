@@ -13,7 +13,6 @@ pub mod component_script;
 mod env_provider;
 mod execution;
 mod fingerprint;
-// invocation_context relocated to homeboy_core::extension_invocation_context
 pub mod lifecycle;
 pub mod lint;
 mod maintenance;
@@ -27,7 +26,6 @@ mod refactor_protocol;
 mod repair;
 mod runner;
 mod runtime_helper;
-// scope relocated to homeboy_core::extension_scope (core glue over the contract manifest)
 pub mod self_check;
 mod setup_env;
 mod summary;
@@ -71,8 +69,6 @@ pub use fingerprint::{
     FactLocation, FieldAccessFact, FieldAccessKind, FingerprintOutput, HookRef, MethodCallFact,
     ProjectionFieldFact, UnusedParam,
 };
-pub use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
-pub use homeboy_core::extension_scope::ExtensionScope;
 pub use homeboy_core::extension_store::{
     available_extension_ids, discover_extensions, extension_path, find_extension_by_tool,
     find_extension_for_file_ext, is_extension_linked, load_all_extensions, load_extension, merge,
