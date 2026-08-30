@@ -4,8 +4,13 @@
 //! boundaries. Execution behavior and service ownership remain outside this
 //! crate.
 
+mod capability;
 mod lifecycle;
 
+pub use capability::{
+    RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
+    RunnerToolchainReadinessProbe,
+};
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 
 use serde::{Deserialize, Serialize};
