@@ -4,12 +4,14 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::bench::baseline::BenchBaselineComparison;
-use crate::bench::diagnostic::BenchDiagnostic;
-use crate::bench::parsing::RigPackageEvidence;
-use crate::bench::parsing::{BenchResults, BenchRunExecution, BenchScenario};
-use crate::bench::phase_events::BenchPhaseFailureClassification;
-use crate::bench::responsiveness::{BenchFailureMemorySample, BenchResponsivenessSummary};
+use crate::extension::bench::baseline::BenchBaselineComparison;
+use crate::extension::bench::diagnostic::BenchDiagnostic;
+use crate::extension::bench::parsing::RigPackageEvidence;
+use crate::extension::bench::parsing::{BenchResults, BenchRunExecution, BenchScenario};
+use crate::extension::bench::phase_events::BenchPhaseFailureClassification;
+use crate::extension::bench::responsiveness::{
+    BenchFailureMemorySample, BenchResponsivenessSummary,
+};
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_core::gate::HomeboyGateResult;
 use homeboy_engine_primitives::baseline::BaselineFlags;

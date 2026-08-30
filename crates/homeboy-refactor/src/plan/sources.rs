@@ -2,8 +2,8 @@ use crate::auto::FixResultsSummary;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::engine::undo::UndoSnapshot;
+use homeboy_core::extension::test::compute_changed_test_files;
 use homeboy_core::git;
-use homeboy_core::test::compute_changed_test_files;
 use homeboy_core::Error;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -101,7 +101,7 @@ pub struct LintSourceOptions {
     pub summary: bool,
     pub file: Option<String>,
     pub glob: Option<String>,
-    pub sniff_filters: homeboy_core::lint::LintSniffFilters,
+    pub sniff_filters: homeboy_core::extension::lint::LintSniffFilters,
     pub category: Option<String>,
 }
 

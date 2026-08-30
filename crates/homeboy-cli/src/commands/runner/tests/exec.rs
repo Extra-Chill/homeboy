@@ -113,7 +113,7 @@ fn synced_node_workload_receives_runner_extension_environment() {
             )
             .expect("provider executable");
         }
-        homeboy_core::install(&extension.path().display().to_string(), Some("fixture"))
+        homeboy_core::extension::install(&extension.path().display().to_string(), Some("fixture"))
             .expect("install fixture extension");
         runner::create(
             &format!(

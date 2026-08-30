@@ -4,8 +4,8 @@
 //! produce domain-specific result types. This module provides the unified output
 //! envelope and builder functions that assemble results into command-ready output.
 
-use crate::test::TestCounts;
-use crate::{
+use crate::extension::test::TestCounts;
+use crate::extension::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
 };
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn serializes_extension_phase_timings_as_opaque_metadata() {
         let mut result = workflow_result(None);
-        result.extension_phase_timings = vec![crate::ExtensionPhaseTiming {
+        result.extension_phase_timings = vec![crate::extension::ExtensionPhaseTiming {
             name: "opaque-provider-phase".to_string(),
             duration_ms: 4321,
             status: Some("waiting".to_string()),

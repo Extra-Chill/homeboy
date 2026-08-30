@@ -943,7 +943,7 @@ fn build_exec_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract_component_extension_settings;
+    use crate::extension::extract_component_extension_settings;
     use homeboy_core::component::Component;
 
     fn make_executable(path: &Path) {
@@ -1681,15 +1681,15 @@ mod tests {
         assert_eq!(output.stderr, "");
     }
 
-    fn lint_execution_context() -> crate::ExtensionExecutionContext {
-        crate::ExtensionExecutionContext {
+    fn lint_execution_context() -> crate::extension_execution::ExtensionExecutionContext {
+        crate::extension_execution::ExtensionExecutionContext {
             component: Component::new(
                 "fixture".to_string(),
                 "/configured/path".to_string(),
                 "fixture-extension".to_string(),
                 None,
             ),
-            capability: crate::ExtensionCapability::Lint,
+            capability: crate::extension::ExtensionCapability::Lint,
             extension_id: "fixture-extension".to_string(),
             extension_path: std::path::PathBuf::from("/tmp/fixture-extension"),
             script_path: "lint.sh".to_string(),

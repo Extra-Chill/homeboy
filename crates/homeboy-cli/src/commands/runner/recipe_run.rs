@@ -24,10 +24,10 @@ pub(super) fn recipe_run(
             None,
         ));
     }
-    let descriptor = homeboy_core::resolve_recipe_run_provider(provider_id)?;
-    let command = homeboy_core::render_recipe_run_command(
+    let descriptor = homeboy_core::extension::resolve_recipe_run_provider(provider_id)?;
+    let command = homeboy_core::extension::render_recipe_run_command(
         &descriptor,
-        &homeboy_core::RecipeRunRequest {
+        &homeboy_core::extension::RecipeRunRequest {
             recipe_path: recipe,
             artifact_path: artifacts.clone(),
         },
@@ -109,7 +109,7 @@ mod tests {
             .to_string(),
         )
         .expect("manifest");
-        homeboy_core::install(&source.path().display().to_string(), Some(id))
+        homeboy_core::extension::install(&source.path().display().to_string(), Some(id))
             .expect("install extension");
         // Installed extensions are linked to their source. Keep the fixture
         // alive until discovery and execution complete.

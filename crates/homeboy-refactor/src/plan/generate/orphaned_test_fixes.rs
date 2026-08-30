@@ -128,7 +128,9 @@ fn lines_inside_string_literals(lines: &[&str]) -> Vec<bool> {
         let line = lines[i];
 
         // Check for raw string opening: r#"  r##"  r###" etc.
-        if let Some(close_pattern) = homeboy_core::grammar::find_unclosed_raw_string_on_line(line) {
+        if let Some(close_pattern) =
+            homeboy_core::extension::grammar::find_unclosed_raw_string_on_line(line)
+        {
             // Mark subsequent lines as inside the string until we find the close.
             let mut j = i + 1;
             while j < lines.len() {
@@ -228,7 +230,9 @@ fn find_test_function_range(content: &str, fn_name: &str) -> Option<(usize, usiz
         }
 
         // Check if this line opens a raw string that isn't closed on the same line.
-        if let Some(close_pattern) = homeboy_core::grammar::find_unclosed_raw_string_on_line(line) {
+        if let Some(close_pattern) =
+            homeboy_core::extension::grammar::find_unclosed_raw_string_on_line(line)
+        {
             raw_string_close = Some(close_pattern);
             // Still count braces on this line BEFORE the raw string opens.
             // The opening line may have `let x = r#"` preceded by real braces.

@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use homeboy_core::trace as extension_trace;
+use homeboy_core::extension::trace as extension_trace;
 
 #[cfg(test)]
 pub(crate) fn render_aggregate_markdown(

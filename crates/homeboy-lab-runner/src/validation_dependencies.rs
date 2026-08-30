@@ -472,8 +472,8 @@ mod tests {
             // extension subsystem, which registers its runners at binary startup.
             // Register them explicitly here so this test does not depend on a
             // sibling test having populated the process-global runner slots.
-            homeboy_core::component_script::register_component_script_runner();
-            homeboy_core::build::register_component_build_runner();
+            homeboy_core::extension::component_script::register_component_script_runner();
+            homeboy_core::extension::build::register_component_build_runner();
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let dependency = workspace_parent.path().join("shared-runtime");
@@ -556,8 +556,8 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             // Register the extension runners this dependency lifecycle needs (see
             // the sibling test above) rather than relying on cross-test global state.
-            homeboy_core::component_script::register_component_script_runner();
-            homeboy_core::build::register_component_build_runner();
+            homeboy_core::extension::component_script::register_component_script_runner();
+            homeboy_core::extension::build::register_component_build_runner();
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let dependency = workspace_parent.path().join("shared-runtime");

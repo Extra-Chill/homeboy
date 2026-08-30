@@ -3,7 +3,10 @@
 use homeboy_core::extension;
 use std::path::Path;
 
-use homeboy_core::{self, grammar, grammar_items, ExtensionManifest, ParsedItem};
+use homeboy_core::{
+    self,
+    extension::{grammar, grammar_items, ExtensionManifest, ParsedItem},
+};
 
 /// Find a refactor-capable extension for a file based on its extension.
 pub(crate) fn find_refactor_extension(file_path: &str) -> Option<ExtensionManifest> {

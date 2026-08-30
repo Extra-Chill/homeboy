@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::bench::parsing::{self, BenchRunExecution};
-use crate::{resolve_execution_context, ExtensionCapability};
+use crate::extension::bench::parsing::{self, BenchRunExecution};
+use crate::extension::{resolve_execution_context, ExtensionCapability};
 use homeboy_core::component::Component;
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_core::engine::run_dir::{self, RunDir};
@@ -24,9 +24,11 @@ pub fn run_bench_list_workflow(
         preferred_workspace_path(component, &args).map(Path::to_path_buf);
     if component.has_script(ExtensionCapability::Bench) && args.extra_workloads.is_empty() {
         let list_env = bench_component_script_list_env(&args)?;
-        let source_path =
-            crate::component_script::source_path(component, args.path_override.as_deref());
-        let output = crate::component_script::run_component_scripts_with_run_dir(
+        let source_path = crate::extension::component_script::source_path(
+            component,
+            args.path_override.as_deref(),
+        );
+        let output = crate::extension::component_script::run_component_scripts_with_run_dir(
             component,
             ExtensionCapability::Bench,
             &source_path,
@@ -130,7 +132,7 @@ pub(crate) fn bench_list_result(
     results_file: PathBuf,
     scenario_ids: &[String],
     preferred_workspace_path: Option<&Path>,
-    rig_package: Option<crate::bench::parsing::RigPackageEvidence>,
+    rig_package: Option<crate::extension::bench::parsing::RigPackageEvidence>,
     profiles: Vec<super::types::BenchListProfile>,
 ) -> Result<BenchListWorkflowResult> {
     let mut parsed =
@@ -180,7 +182,7 @@ pub(crate) fn bench_component_script_list_env(
     ));
     env.push((
         "HOMEBOY_SETTINGS_JSON".to_string(),
-        crate::build_settings_json_from_manifest(
+        crate::extension::build_settings_json_from_manifest(
             &serde_json::json!({}),
             &[],
             &args.settings,

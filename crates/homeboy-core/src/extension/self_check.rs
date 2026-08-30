@@ -1,4 +1,4 @@
-use crate::ExtensionCapability;
+use crate::extension::ExtensionCapability;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, Result};

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::ExtensionExecutionContext;
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::error::{Error, Result};
 use homeboy_extension_contract::TraceDependencySpec;
 
@@ -182,7 +182,7 @@ fn trace_runner_capabilities(
         capabilities.extend(parsed);
     }
     if let Some(context) = execution_context {
-        let manifest = crate::load_extension(&context.extension_id)?;
+        let manifest = crate::extension_store::load_extension(&context.extension_id)?;
         capabilities.extend(manifest.trace_runner_capabilities().iter().cloned());
     }
     Ok(capabilities)

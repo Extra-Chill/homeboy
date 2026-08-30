@@ -5,8 +5,8 @@ use crate::test_support::with_isolated_home;
 
 use super::test_fixture::TRACE_FIXTURE_EXTENSION_ID;
 
-use homeboy_core::trace as extension_trace;
-use homeboy_core::trace::TraceCommandOutput;
+use homeboy_core::extension::trace as extension_trace;
+use homeboy_core::extension::trace::TraceCommandOutput;
 
 use super::test_fixture::{init_overlay_component, write_trace_extension};
 use super::{run, TraceArgs, TraceSchedule, TraceVariantMatrixMode};

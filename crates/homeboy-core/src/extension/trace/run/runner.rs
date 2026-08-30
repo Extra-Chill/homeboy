@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{
+use crate::extension::{
     build_scenario_runner, stderr_tail, ExtensionExecutionContext, RunnerOutput,
     ScenarioRunnerOptions,
 };

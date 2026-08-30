@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 
 use homeboy_engine_primitives::content_hash;
 
-use crate::bench::parsing::{
+use crate::extension::bench::parsing::{
     BenchResults, BenchRunMetadata, BenchRunnerMetadata, BenchScenario, BenchWorkloadMetadata,
 };
-use crate::bench::run::BenchRunWorkflowArgs;
-use crate::ExtensionExecutionContext;
+use crate::extension::bench::run::BenchRunWorkflowArgs;
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 
 pub(crate) fn stamp_run_metadata(
@@ -169,8 +169,8 @@ fn source_revision_at(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bench::parsing::{self, BenchRunExecution};
-    use crate::ExtensionCapability;
+    use crate::extension::bench::parsing::{self, BenchRunExecution};
+    use crate::extension::ExtensionCapability;
     use homeboy_core::engine::invocation::InvocationRequirements;
     use homeboy_engine_primitives::baseline::BaselineFlags;
 

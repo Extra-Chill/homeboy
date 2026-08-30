@@ -2,7 +2,7 @@ pub mod baseline;
 pub mod report;
 pub mod run;
 
-use crate::{ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
+use crate::extension::{ExtensionCapability, ExtensionExecutionContext, ExtensionRunner};
 use homeboy_core::component::Component;
 
 pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata};
@@ -37,7 +37,7 @@ pub struct LintRunnerRequest<'a> {
 pub fn resolve_lint_command(
     component: &Component,
 ) -> homeboy_core::error::Result<ExtensionExecutionContext> {
-    crate::resolve_execution_context(component, ExtensionCapability::Lint)
+    crate::extension_execution::resolve_execution_context(component, ExtensionCapability::Lint)
 }
 
 /// The manifest key for the lint findings structured sidecar.
@@ -65,10 +65,10 @@ pub fn declares_lint_findings_sidecar(component: &Component) -> bool {
     let Ok(context) = resolve_lint_command(component) else {
         return false;
     };
-    let Ok(manifest) = crate::load_extension(&context.extension_id) else {
+    let Ok(manifest) = crate::extension_store::load_extension(&context.extension_id) else {
         return false;
     };
-    crate::structured_sidecars(&manifest)
+    crate::extension::structured_sidecars(&manifest)
         .iter()
         .any(|declaration| declaration.name == LINT_FINDINGS_SIDECAR)
 }
