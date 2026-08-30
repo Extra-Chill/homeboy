@@ -148,6 +148,14 @@ pub struct DeployArgs {
     /// Resume a prior multi-project deploy run after exact identity validation
     #[arg(long, value_name = "RUN_ID")]
     pub resume: Option<String>,
+    /// Maximum number of project targets applied concurrently
+    #[arg(
+        long,
+        default_value_t = 4,
+        value_name = "COUNT",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub max_concurrency: u32,
     // Populated only by a validated release-set manifest.
     #[arg(skip)]
     exact_refs: BTreeMap<String, String>,
@@ -617,6 +625,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         prepared_artifact: None,
         prepared_projection: None,
         resume_run_id: args.resume.clone(),
+        max_concurrency: args.max_concurrency as usize,
         target: args.target.map(DeployTarget::from),
     }
 }
