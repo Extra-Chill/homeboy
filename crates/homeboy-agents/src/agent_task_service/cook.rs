@@ -7150,12 +7150,15 @@ fn validate_cook_workspace_with_adopted_candidate(
     let continuation = tracked_promotion_continuation(options)?;
     let source = options.workspace.source_worktree_path.as_deref();
     let target = if let Some(source) = source {
-        homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
-            &options.workspace.to_worktree,
-            homeboy_core::worktree_provider::WorktreeMutationContext::default(),
-        )?;
+        let native_target =
+            homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
+                &options.workspace.to_worktree,
+                homeboy_core::worktree_provider::WorktreeMutationContext::default(),
+            )?;
         if cook_uses_explicit_cwd_workspace(options) {
             source.to_path_buf()
+        } else if let Some(target) = native_target {
+            target.path
         } else {
             trusted_initial_cook_workspace(options, source)?.unwrap_or_else(|| source.to_path_buf())
         }
