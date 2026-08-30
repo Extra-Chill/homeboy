@@ -1568,7 +1568,7 @@ fn set_extension(
     json: &str,
     replace_fields: &[String],
 ) -> CmdResult<ExtensionOutput> {
-    match homeboy_core::extension::merge(extension_id, json, replace_fields)? {
+    match homeboy_core::extension_store::merge(extension_id, json, replace_fields)? {
         homeboy::core::MergeOutput::Single(result) => Ok((
             ExtensionOutput::Set {
                 extension_id: result.id,

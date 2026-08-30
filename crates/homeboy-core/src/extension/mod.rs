@@ -64,7 +64,7 @@ pub use fingerprint::{
 };
 pub use homeboy_core::extension_store::{
     available_extension_ids, discover_extensions, find_extension_for_file_ext, is_extension_linked,
-    load_all_extensions, load_extension, merge, save_manifest, DiscoveredExtension,
+    load_all_extensions, load_extension, save_manifest, DiscoveredExtension,
 };
 pub use homeboy_extension_contract::runner_contract::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, ExtensionPhaseTiming,
