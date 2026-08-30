@@ -63,9 +63,8 @@ pub use fingerprint::{
     ProjectionFieldFact, UnusedParam,
 };
 pub use homeboy_core::extension_store::{
-    available_extension_ids, discover_extensions, extension_path, find_extension_by_tool,
-    find_extension_for_file_ext, is_extension_linked, load_all_extensions, load_extension, merge,
-    save_manifest, DiscoveredExtension, ExtensionManifestFailure,
+    available_extension_ids, discover_extensions, find_extension_for_file_ext, is_extension_linked,
+    load_all_extensions, load_extension, merge, save_manifest, DiscoveredExtension,
 };
 pub use homeboy_extension_contract::runner_contract::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, ExtensionPhaseTiming,
