@@ -20,13 +20,13 @@ mod session_enums {
     // (dev_run, run_outcome_envelope, and the types that reference it) can name it
     // without a core -> runner edge. Re-exported so runner-internal call sites
     // resolve unchanged.
-    pub use homeboy_lab_runner_contract::RunnerLifecycleOwner;
+    pub use homeboy_runner_contract::RunnerLifecycleOwner;
 
     // Session data types (RunnerTunnelMode, RunnerSessionRole, RunnerSessionState,
     // RunnerSession) now live in homeboy-runner-contract so the core daemon can
     // build/persist sessions without a core -> runner edge. Re-exported so
     // runner-internal call sites resolve unchanged.
-    pub use homeboy_lab_runner_contract::{
+    pub use homeboy_runner_contract::{
         RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
         RunnerTunnelProcessStartIdentity,
     };
