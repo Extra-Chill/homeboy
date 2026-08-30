@@ -20,6 +20,7 @@ homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primi
 homeboy-source-snapshot-contract = { version = "0.1.0", path = "../contracts/homeboy-source-snapshot-contract" }
 homeboy-upgrade = { version = "0.1.0", path = "../homeboy-upgrade" }
 homeboy-rig = { version = "0.1.0", path = "../homeboy-rig" }
+homeboy-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-runner-contract" }
 homeboy-agents = { version = "0.1.0", path = "../homeboy-agents" }
 homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }

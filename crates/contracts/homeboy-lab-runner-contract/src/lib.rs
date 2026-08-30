@@ -27,23 +27,15 @@ pub use execution_placement::{
     ExecutionPlacementRequirement, ExecutionPlacementRunnerSelection, RunnerSelectionSource,
     CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
 };
-/// Compatibility export for established Lab runner consumers. Lifecycle
-/// ownership is canonical in `homeboy-runner-contract`.
-pub use homeboy_runner_contract::RunnerLifecycleOwner;
+/// Compatibility exports for established Lab runner consumers. Generic runner
+/// identity and lifecycle ownership are canonical in `homeboy-runner-contract`.
+pub use homeboy_runner_contract::{RunnerKind, RunnerLifecycleOwner};
 pub use placement::Placement;
 pub use provider_source_types::AgentTaskProviderRunnerSource;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-
-/// The kind of runner backing a homeboy runner definition.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerKind {
-    Local,
-    Ssh,
-}
 
 /// File + byte counts for a workspace sync.
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]

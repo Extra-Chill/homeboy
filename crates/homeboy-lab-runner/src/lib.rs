@@ -46,6 +46,8 @@ mod daemon_health;
 mod daemon_http_get;
 mod daemon_repair;
 pub use daemon_repair::codes as daemon_repair_codes;
+mod discovery;
+pub use discovery::RunnerDiscoveryService;
 pub mod direct_lab_handoff;
 mod evidence;
 mod execution;
