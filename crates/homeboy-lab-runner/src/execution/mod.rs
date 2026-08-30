@@ -201,9 +201,9 @@ pub(crate) fn resolve_provider_env_with_execution_context(
     cwd: &std::path::Path,
     env: &HashMap<String, String>,
     explicit_run_id: Option<&str>,
-) -> Result<Vec<homeboy_core::extension::EnvProviderContribution>> {
+) -> Result<Vec<homeboy_core::extension::invoke::EnvProviderContribution>> {
     let env = provider_resolution_env(env, explicit_run_id);
-    homeboy_core::extension::resolve_installed_env_providers(
+    homeboy_core::extension::invoke::resolve_installed_all(
         execution_context,
         provider_ids,
         cwd,
@@ -978,7 +978,7 @@ fn exec_with_status_snapshot_attempt(
         let provider_secret_names = options
             .extension_env_providers
             .iter()
-            .map(|id| homeboy_core::extension::env_provider_secret_names(id))
+            .map(|id| homeboy_core::extension::invoke::declared_secret_names(id))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()

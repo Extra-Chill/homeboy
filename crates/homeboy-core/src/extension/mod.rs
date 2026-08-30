@@ -4,11 +4,9 @@ pub mod audit_grammar_source_provider;
 pub mod audit_manifest_provider;
 pub mod bench;
 pub mod build;
-mod capability;
 pub mod catalog;
 mod compiler_warning_contract;
 pub mod component_script;
-mod env_provider;
 mod fingerprint;
 pub mod invoke;
 pub mod lifecycle;
@@ -27,19 +25,12 @@ pub mod test;
 pub mod trace;
 mod validation;
 
-pub use capability::{build_scenario_runner, ScenarioRunnerOptions};
 pub use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
 };
 pub(crate) use homeboy_core::extension::resolve::{extension_guidance_hints, stderr_tail};
 
-pub use env_provider::{
-    declared_secret_names as env_provider_secret_names,
-    resolve_installed as resolve_installed_env_provider,
-    resolve_installed_all as resolve_installed_env_providers, EnvProviderCommandPayload,
-    EnvProviderContribution, ENV_PROVIDER_COMMAND_PAYLOAD_ENV,
-};
 pub use fingerprint::run_fingerprint_script;
 pub(crate) use invoke::build_settings_json_from_manifest;
 pub use manifest::{
