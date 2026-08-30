@@ -3725,17 +3725,55 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
-    let retry_result = crate::agents::agent_task_service::retry_with_preflight(
-        &retry.run_id,
-        retry.new_run_id.as_deref(),
-        true,
-        retry.force,
-        validate_generic_lab_command_replay_workspace,
-    )?;
-    if !retry_result.run {
+    let acknowledgement =
+        homeboy::agents::orchestration::execute_retry_action_from_current_environment_with_preflight(
+            &retry.run_id,
+            &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+                idempotency_key: retry
+                    .idempotency_key
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                actor: "homeboy-cli-lab-route".to_string(),
+                expected_updated_at: None,
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: serde_json::json!({
+                        "new_run_id": retry.new_run_id,
+                        "force": retry.force,
+                    }),
+                },
+                confirmed: true,
+            },
+            validate_generic_lab_command_replay_workspace,
+        )?;
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Err(Error::validation_invalid_argument(
+            "retry",
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "retry action failed".to_string()),
+            Some(retry.run_id.clone()),
+            None,
+        ));
+    }
+    if !acknowledgement.result.data["runnable"]
+        .as_bool()
+        .unwrap_or(false)
+    {
         return Ok(None);
     }
-    let record = retry_result.record;
+    let record: agent_task_lifecycle::AgentTaskRunRecord =
+        serde_json::from_value(acknowledgement.result.data["record"].clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode retry action result for Lab handoff".to_string()),
+            )
+        })?;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     if let Some(replay) = generic_lab_command_replay(&plan)? {
         let primary_workspace = PathBuf::from(&replay.materialization.canonical_root);

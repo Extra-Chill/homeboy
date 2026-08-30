@@ -159,13 +159,56 @@ pub(super) fn intercept_local_cook_retry(
     let (retry_runs, retry_record) = match existing_retry {
         Some(record) => (true, record),
         None => {
-            let result = homeboy::agents::agent_task_service::retry(
+            let acknowledgement =
+                homeboy::agents::orchestration::execute_action_from_current_environment(
                 &retry.run_id,
-                retry.new_run_id.as_deref(),
-                true,
-                retry.force,
+                &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                        .to_string(),
+                    action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+                    idempotency_key: retry
+                        .idempotency_key
+                        .clone()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    actor: "homeboy-cli-local-detach".to_string(),
+                    expected_updated_at: None,
+                    parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                        schema:
+                            homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                                .to_string(),
+                        data: serde_json::json!({
+                            "new_run_id": retry.new_run_id,
+                            "force": retry.force,
+                        }),
+                    },
+                    confirmed: true,
+                },
             )?;
-            (result.run, result.record)
+            if acknowledgement.outcome
+                == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+            {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "retry",
+                    acknowledgement
+                        .message
+                        .unwrap_or_else(|| "retry action failed".to_string()),
+                    Some(retry.run_id.clone()),
+                    None,
+                ));
+            }
+            let record = serde_json::from_value(acknowledgement.result.data["record"].clone())
+                .map_err(|error| {
+                    homeboy::core::Error::internal_json(
+                        error.to_string(),
+                        Some("decode local detached retry action result".to_string()),
+                    )
+                })?;
+            (
+                acknowledgement.result.data["runnable"]
+                    .as_bool()
+                    .unwrap_or(false),
+                record,
+            )
         }
     };
     if !retry_runs || retry_record.state.is_terminal() {

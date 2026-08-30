@@ -27,7 +27,7 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 use super::super::CmdResult;
 use super::args::{
     CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs, QuarantineArgs, RearmArgs,
-    ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
+    ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
 use super::candidate::{classify_candidates, CandidateState};
 use crate::commands::utils::response::{
@@ -1034,10 +1034,43 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
 /// `agent-task reconcile <run-id>` addresses one exact record or the explicit
 /// parent/attempt group named by a logical Cook ID. It previews by default;
 /// `--apply` is the explicit operator authorization.
-pub(super) fn reconcile_run(run_id: &str, dry_run: bool) -> CmdResult<Value> {
-    let report = agent_task_service_direct::reconcile_run(run_id, dry_run)?;
-    let exit = if report.failed > 0 { 1 } else { 0 };
-    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
+pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
+    let run_id = args.run_id;
+    let (mut value, exit, acknowledgement) = if args.apply {
+        let acknowledgement =
+            homeboy::agents::orchestration::execute_action_from_current_environment(
+                &run_id,
+                &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                        .to_string(),
+                    action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
+                    idempotency_key: args
+                        .idempotency_key
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    actor: "homeboy-cli".to_string(),
+                    expected_updated_at: None,
+                    parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+                    confirmed: true,
+                },
+            )?;
+        let exit = i32::from(matches!(
+            acknowledgement.outcome,
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+        ));
+        (
+            acknowledgement.result.data.clone(),
+            exit,
+            Some(acknowledgement),
+        )
+    } else {
+        let report = agent_task_service_direct::reconcile_run(&run_id, true)?;
+        let exit = i32::from(report.failed > 0);
+        (
+            serde_json::to_value(report).unwrap_or(Value::Null),
+            exit,
+            None,
+        )
+    };
     if let Value::Object(object) = &mut value {
         object.insert("owner".to_string(), json!("durable_agent_tasks"));
         object.insert(
@@ -1046,12 +1079,22 @@ pub(super) fn reconcile_run(run_id: &str, dry_run: bool) -> CmdResult<Value> {
         );
         object.insert(
             "postcondition".to_string(),
-            json!(if dry_run {
+            json!(if !args.apply {
                 "reports the selected durable records against authoritative provider state without persisted mutation"
             } else {
                 "every selected durable record is reconciled to authoritative provider state"
             }),
         );
+        if let Some(acknowledgement) = acknowledgement {
+            object.insert(
+                "action_acknowledgement".to_string(),
+                json!(acknowledgement.acknowledgement),
+            );
+            object.insert(
+                "idempotency_key".to_string(),
+                json!(acknowledgement.idempotency_key),
+            );
+        }
     }
     Ok((value, exit))
 }
@@ -3255,8 +3298,8 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
 /// Cancellation is only partly synchronous, so `cancel` reports what actually
 /// happened rather than an unqualified success word.
 ///
-/// `agent_task_service::cancel` returns as soon as the cancellation *request* is
-/// durable. For a controller-owned staging job that is strictly an
+/// The canonical control-plane action returns as soon as the cancellation
+/// *request* is durable. For a controller-owned staging job that is strictly an
 /// acknowledgement — `controller_job_cancellation` is persisted with phase
 /// `requested` and the controller keeps tearing its provider down afterwards —
 /// and for a run whose provider tree is not reachable from this host the durable
@@ -3278,15 +3321,37 @@ const CANCEL_TERMINAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const CANCELLATION_SCHEMA: &str = "homeboy/agent-task-cancellation/v1";
 
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
-    let record = agent_task_service::cancel(&args.run_id, args.reason.as_deref())?;
-    if record.state.is_terminal() {
-        return Ok(cancel_output(
-            &args.run_id,
-            record,
-            CancelOutcome::Terminal {
-                waited: Duration::ZERO,
-                polls: 0,
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+        &args.run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+            idempotency_key,
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: json!({ "reason": args.reason }),
             },
+            confirmed: true,
+        },
+    )?;
+    let record = agent_task_lifecycle::status(acknowledgement.run.as_str())?;
+    if record.state.is_terminal() {
+        return Ok(attach_action_acknowledgement(
+            cancel_output(
+                &args.run_id,
+                record,
+                CancelOutcome::Terminal {
+                    waited: Duration::ZERO,
+                    polls: 0,
+                },
+            ),
+            &acknowledgement,
         ));
     }
     // A provider that reserved a terminal result before cancellation could apply
@@ -3298,13 +3363,36 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
         .get("cancellation_deferred_for_terminal_provider")
         .is_some()
     {
-        return Ok(cancel_output(
-            &args.run_id,
-            record,
-            CancelOutcome::DeferredForTerminalProvider,
+        return Ok(attach_action_acknowledgement(
+            cancel_output(
+                &args.run_id,
+                record,
+                CancelOutcome::DeferredForTerminalProvider,
+            ),
+            &acknowledgement,
         ));
     }
-    Ok(wait_for_cancellation_to_settle(&args.run_id, record))
+    Ok(attach_action_acknowledgement(
+        wait_for_cancellation_to_settle(&args.run_id, record),
+        &acknowledgement,
+    ))
+}
+
+fn attach_action_acknowledgement(
+    (mut value, exit_code): (Value, i32),
+    acknowledgement: &homeboy_control_plane_contract::ControlPlaneActionAcknowledgement,
+) -> (Value, i32) {
+    if let Some(cancellation) = value.get_mut("cancellation").and_then(Value::as_object_mut) {
+        cancellation.insert(
+            "acknowledgement".to_string(),
+            json!(acknowledgement.acknowledgement),
+        );
+        cancellation.insert(
+            "idempotency_key".to_string(),
+            json!(acknowledgement.idempotency_key),
+        );
+    }
+    (value, exit_code)
 }
 
 /// Poll the durable record of a run whose cancellation was accepted.

@@ -39,6 +39,7 @@ use homeboy::agents::agent_tasks::{
 use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
+use homeboy::core::Error;
 
 use super::super::CmdResult;
 use super::candidate::{canonical_candidate_projection, classify_candidates};
@@ -487,6 +488,16 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             None => None,
         },
     };
+    if source_run_id.is_none() && args.idempotency_key.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "idempotency_key",
+            "promotion idempotency requires a durable run source",
+            args.idempotency_key,
+            Some(vec![
+                "omit --idempotency-key when promoting a standalone aggregate file".to_string(),
+            ]),
+        ));
+    }
     let gates = resolve_promotion_gates(
         &mut args.gates,
         args.gates_from_cook_recipe,
@@ -538,10 +549,59 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         &to_worktree,
         promotion_request.gates.gate_heartbeat_interval(),
     );
-    let report = agent_task_service::execute_promotion_with_progress(
-        promotion_request,
-        Some(reporter.callback()),
-    );
+    let report = if let Some(run_id) = source_run_id.as_deref() {
+        let acknowledgement =
+            homeboy::agents::orchestration::execute_promotion_action_from_current_environment(
+                run_id,
+                &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                        .to_string(),
+                    action: homeboy_control_plane_contract::ControlPlaneAction::Promote,
+                    idempotency_key: args
+                        .idempotency_key
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    actor: "homeboy-cli".to_string(),
+                    expected_updated_at: None,
+                    parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                        schema:
+                            homeboy_control_plane_contract::CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA
+                                .to_string(),
+                        data: serde_json::to_value(&promotion_request).map_err(|error| {
+                            Error::internal_json(
+                                error.to_string(),
+                                Some("encode promotion action request".to_string()),
+                            )
+                        })?,
+                    },
+                    confirmed: true,
+                },
+                Some(reporter.callback()),
+            )?;
+        if acknowledgement.outcome
+            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+        {
+            Err(Error::validation_invalid_argument(
+                "promote",
+                acknowledgement
+                    .message
+                    .unwrap_or_else(|| "promotion action failed".to_string()),
+                Some(run_id.to_string()),
+                None,
+            ))
+        } else {
+            serde_json::from_value(acknowledgement.result.data).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("decode promotion action result".to_string()),
+                )
+            })
+        }
+    } else {
+        agent_task_service::execute_promotion_with_progress(
+            promotion_request,
+            Some(reporter.callback()),
+        )
+    };
     reporter.finish();
     let report = report?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {

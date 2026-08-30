@@ -23,6 +23,7 @@ pub enum ControlPlaneOperation {
     GetCapabilities,
     GetRun,
     GetRunEvents,
+    ExecuteRunAction,
 }
 
 /// A resource identity this build serves.
@@ -82,6 +83,7 @@ mod tests {
                 ControlPlaneOperation::GetCapabilities
                     | ControlPlaneOperation::GetRun
                     | ControlPlaneOperation::GetRunEvents
+                    | ControlPlaneOperation::ExecuteRunAction
             )),
             "capabilities must not advertise unwired mutations"
         );

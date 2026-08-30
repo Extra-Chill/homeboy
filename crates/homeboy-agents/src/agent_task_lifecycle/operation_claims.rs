@@ -81,10 +81,34 @@ pub fn claim_cook_operation_in_store(
     operation_key: &str,
     lease: Duration,
 ) -> Result<ClaimOutcome> {
+    claim_operation_in_store(lifecycle_store, run_id, operation_key, lease, None)
+}
+
+/// Claim a lifecycle-owned operation and atomically bind it to immutable
+/// caller intent. Reusing a key with different intent is a deterministic
+/// conflict; matching intent replays the existing lease or result.
+pub fn claim_operation_with_intent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+    lease: Duration,
+    intent: &Value,
+) -> Result<ClaimOutcome> {
+    claim_operation_in_store(lifecycle_store, run_id, operation_key, lease, Some(intent))
+}
+
+fn claim_operation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+    lease: Duration,
+    intent: Option<&Value>,
+) -> Result<ClaimOutcome> {
     let run_id = sanitize_run_id(run_id);
     let now = now_timestamp();
     let lease_deadline = timestamp_after(&now, lease);
     let mut outcome = ClaimOutcome::LeaseHeld;
+    let mut conflicting_intent = false;
     lifecycle_store.mutate_record(&run_id, |record| {
         let metadata = record.ensure_metadata_object();
         let claims = metadata
@@ -99,6 +123,10 @@ pub fn claim_cook_operation_in_store(
             .iter()
             .find(|claim| claim["operation_key"] == json!(operation_key))
         {
+            if intent.is_some() && existing.get("intent") != intent {
+                conflicting_intent = true;
+                return false;
+            }
             // A completed claim is immutable: return its recorded result.
             if existing["state"] == json!("completed") {
                 outcome = ClaimOutcome::AlreadyCompleted(
@@ -132,6 +160,7 @@ pub fn claim_cook_operation_in_store(
             "leased_at": now,
             "lease_deadline": lease_deadline,
             "owner_pid": std::process::id(),
+            "intent": intent,
         });
         // Replace an expired lease in place, or append a new one.
         if let Some(slot) = claims
@@ -146,6 +175,14 @@ pub fn claim_cook_operation_in_store(
         outcome = ClaimOutcome::Acquired;
         true
     })?;
+    if conflicting_intent {
+        return Err(Error::validation_invalid_argument(
+            "idempotency_key",
+            "idempotency key was already used with different action intent",
+            Some(operation_key.to_string()),
+            None,
+        ));
+    }
     Ok(outcome)
 }
 

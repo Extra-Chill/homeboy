@@ -615,8 +615,41 @@ pub(super) fn execute_retry_action(
     action: &AgentTaskLoopPolicyActionRecord,
     target_run_id: &str,
 ) -> Result<(Value, i32)> {
-    let retry = agent_task_service::retry(target_run_id, None, false, false)?;
-    let retry_run_id = retry.record.run_id.clone();
+    let acknowledgement = crate::orchestration::execute_action_from_current_environment(
+        target_run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+            idempotency_key: uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                format!("{}:{}:{target_run_id}", record.loop_id, action.action_id).as_bytes(),
+            )
+            .to_string(),
+            actor: "homeboy-controller".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({ "force": false }),
+            },
+            confirmed: true,
+        },
+    )?;
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Err(Error::validation_invalid_argument(
+            "retry",
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "retry action failed".to_string()),
+            Some(target_run_id.to_string()),
+            None,
+        ));
+    }
+    let retry_record: crate::agent_task_lifecycle::AgentTaskRunRecord =
+        serde_json::from_value(acknowledgement.result.data["record"].clone())
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let retry_run_id = retry_record.run_id.clone();
     if !record
         .task_lineage
         .iter()
@@ -648,9 +681,9 @@ pub(super) fn execute_retry_action(
         serde_json::json!({
             "mode": "retry",
             "target_run_id": target_run_id,
-            "retry_run_id": retry.record.run_id,
-            "record": retry.record,
-            "run": retry.run,
+            "retry_run_id": retry_record.run_id,
+            "record": retry_record,
+            "run": acknowledgement.result.data["runnable"],
         }),
         0,
     ))
@@ -809,16 +842,60 @@ where
         "resume" => {
             let run_id = required_string(request, "run_id")?;
             record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, request)?;
-            let run_result = agent_task_service::resume(run_id.clone(), executor)?;
-            record_controller_aggregate_evidence(record, entity_id, &run_id, &run_result.value)?;
-            let aggregate_value = serde_json::to_value(&run_result.value)
-                .map_err(|error| Error::internal_json(error.to_string(), None))?;
+            let idempotency_key = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                format!("{}:{}:{dedupe_key}", record.loop_id, action.action_id).as_bytes(),
+            )
+            .to_string();
+            let acknowledgement =
+                crate::orchestration::execute_resume_action_from_current_environment(
+                    &run_id,
+                    &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                            .to_string(),
+                        action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+                        idempotency_key,
+                        actor: "homeboy-controller".to_string(),
+                        expected_updated_at: None,
+                        parameters:
+                            homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+                        confirmed: true,
+                    },
+                    executor,
+                )?;
+            if acknowledgement.outcome
+                == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+            {
+                return Err(Error::validation_invalid_argument(
+                    "resume",
+                    acknowledgement
+                        .message
+                        .unwrap_or_else(|| "resume action failed".to_string()),
+                    Some(run_id),
+                    None,
+                ));
+            }
+            let aggregate_value = acknowledgement
+                .result
+                .data
+                .get("aggregate")
+                .cloned()
+                .unwrap_or_else(|| acknowledgement.result.data.clone());
+            if acknowledgement.result.data.get("aggregate").is_some() {
+                let aggregate = serde_json::from_value(aggregate_value.clone())
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+                record_controller_aggregate_evidence(record, entity_id, &run_id, &aggregate)?;
+            }
+            let exit_code = acknowledgement.result.data["exit_code"]
+                .as_i64()
+                .and_then(|code| i32::try_from(code).ok())
+                .unwrap_or_else(|| i32::from(acknowledgement.result.data["terminal"] == true) * 2);
             Ok((
                 execution_with_request_workflow_artifacts(
                     serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate_value }),
                     request,
                 ),
-                run_result.exit_code,
+                exit_code,
             ))
         }
         "run_next" => {

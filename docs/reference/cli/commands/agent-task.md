@@ -448,6 +448,7 @@ Reconcile one durable agent-task run or explicit Cook group. This is a preview b
 | --- | --- | --- |
 | `--dry-run` | flag | Preview the selected durable run/group without persisted mutation. This is the default when `--apply` is omitted |
 | `--apply` | flag | Apply the reviewed reconciliation to the selected durable run/group |
+| `--idempotency-key` | `<KEY>` | Stable caller key for safely replaying an applied reconciliation |
 
 ## `homeboy agent-task reconcile-records`
 
@@ -648,6 +649,7 @@ Mark a queued or stale-running durable run as cancelled
 | Option | Value | Description |
 | --- | --- | --- |
 | `--reason` | `<TEXT>` | Optional explanation recorded with the cancellation |
+| `--idempotency-key` | `<KEY>` | Stable caller key for safely replaying this cancellation request |
 
 ## `homeboy agent-task quarantine`
 
@@ -687,11 +689,12 @@ Resume a queued or stale-running durable run
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | Durable run or Cook ID to inspect |
+| `<RUN_ID>` | yes | Durable run or Cook ID to resume |
 
 | Option | Value | Description |
 | --- | --- | --- |
 | `--full` | flag | Return complete lifecycle details instead of the bounded summary |
+| `--idempotency-key` | `<KEY>` | Stable key used to replay this resume without executing it twice |
 
 ## `homeboy agent-task retry`
 
@@ -710,6 +713,7 @@ Submit a fresh durable run from an existing run's plan
 | `--new-run-id` | `<ID>` | Durable ID to assign to the new retry run |
 | `--run` | flag | Execute the retry immediately after creating it |
 | `--force` | flag | Permit a new retry after every prior retry in this lineage is terminal |
+| `--idempotency-key` | `<KEY>` | Stable caller key for safely replaying this retry reservation |
 
 ## `homeboy agent-task fanout`
 
@@ -982,6 +986,7 @@ Promote a completed generic patch artifact into a managed worktree
 | `--artifact-id` | `<ARTIFACT_ID>` | Restrict promotion to this artifact ID |
 | `--dry-run` | flag | Validate the promotion without applying it |
 | `--full` | flag | Include complete promotion and gate evidence |
+| `--idempotency-key` | `<KEY>` | Stable key used to replay this promotion without applying it twice |
 | `--gates-from-cook-recipe` | flag | Replay the exact gate policy from the source run's durable Cook recipe. Homeboy-generated review commands use this reference so private gate programs remain outside reviewer-facing command output |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |

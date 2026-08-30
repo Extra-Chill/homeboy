@@ -120,6 +120,69 @@ fn completed_operation_returns_immutable_result_without_release() {
 }
 
 #[test]
+fn action_intent_replays_completed_result_without_reacquiring() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-action-replay");
+        let intent = json!({"action":"cancel","actor":"cli","reason":"stop"});
+        let key = "control-plane-action:cancel:request-1";
+        assert_eq!(
+            claim_operation_with_intent_in_store(
+                &test_lifecycle_store(),
+                "op-claim-action-replay",
+                key,
+                LEASE,
+                &intent,
+            )
+            .expect("claim"),
+            ClaimOutcome::Acquired
+        );
+        complete_cook_operation_in_store(
+            &test_lifecycle_store(),
+            "op-claim-action-replay",
+            key,
+            json!({"acknowledgement":"ack-1"}),
+        )
+        .expect("complete");
+        assert_eq!(
+            claim_operation_with_intent_in_store(
+                &test_lifecycle_store(),
+                "op-claim-action-replay",
+                key,
+                LEASE,
+                &intent,
+            )
+            .expect("replay"),
+            ClaimOutcome::AlreadyCompleted(json!({"acknowledgement":"ack-1"}))
+        );
+    });
+}
+
+#[test]
+fn action_key_reuse_with_different_intent_is_rejected() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-action-conflict");
+        let key = "control-plane-action:cancel:request-2";
+        claim_operation_with_intent_in_store(
+            &test_lifecycle_store(),
+            "op-claim-action-conflict",
+            key,
+            LEASE,
+            &json!({"actor":"cli","reason":"first"}),
+        )
+        .expect("claim");
+        let error = claim_operation_with_intent_in_store(
+            &test_lifecycle_store(),
+            "op-claim-action-conflict",
+            key,
+            LEASE,
+            &json!({"actor":"cli","reason":"different"}),
+        )
+        .expect_err("conflicting intent");
+        assert!(error.message.contains("different action intent"));
+    });
+}
+
+#[test]
 fn completing_twice_keeps_the_first_result() {
     with_isolated_home(|_| {
         seed_run("op-claim-3");

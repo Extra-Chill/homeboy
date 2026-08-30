@@ -1,7 +1,7 @@
 //! Durable run lifecycle handlers: cook, run-plan, run, run-next, submit,
 //! resume, and retry.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
@@ -14,6 +14,7 @@ use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord;
 use homeboy::agents::agent_tasks::provider;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::scheduler::{
@@ -29,13 +30,13 @@ use homeboy::core::worktree_provider::{
     WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent, WorktreeProvisionPlan,
     WorktreeTaskAttachmentStatus,
 };
+use homeboy::core::Error;
 
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
-    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, LifecycleReadArgs,
-    PromotionProviderArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs,
-    ValidatePlanArgs,
+    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, PromotionProviderArgs,
+    ResumeArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs, ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 use super::gate_contract::validate_gate_contracts;
@@ -8435,59 +8436,11 @@ pub(super) fn validate_plan(args: ValidatePlanArgs) -> CmdResult<Value> {
     ))
 }
 
-pub(super) fn resume(args: LifecycleReadArgs) -> CmdResult<Value> {
-    if agent_task_lifecycle::exact_record(&args.run_id)
-        .ok()
-        .is_some_and(|record| {
-            record
-                .metadata
-                .get("unmaterialized_cook_admission")
-                .is_some_and(Value::is_object)
-        })
-    {
-        let before = agent_task_lifecycle::exact_record(&args.run_id)?;
-        if before.state.is_terminal() {
-            let terminal_error = before
-                .metadata
-                .get("cancel_reason")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| {
-                    before.metadata["unmaterialized_cook_admission"]["reason"]
-                        .as_str()
-                        .map(str::to_string)
-                });
-            return Ok((
-                serde_json::json!({
-                    "schema": "homeboy/unmaterialized-cook-resume/v1",
-                    "status": before.metadata["unmaterialized_cook_admission"]["state"],
-                    "run_id": args.run_id,
-                    "idempotent": true,
-                    "terminal": true,
-                    "terminal_state": before.state,
-                    "error": terminal_error,
-                }),
-                2,
-            ));
-        }
-        agent_task_lifecycle::rearm_unmaterialized_cook_admission(&args.run_id)?;
-        let reconciliation =
-            agent_task_service_direct::reconcile_unmaterialized_cook_admission(&args.run_id)?;
-        let record = agent_task_lifecycle::exact_record(&args.run_id)?;
-        return Ok((
-            serde_json::json!({
-                "schema": "homeboy/unmaterialized-cook-resume/v1",
-                "status": record.metadata["unmaterialized_cook_admission"]["state"],
-                "run_id": args.run_id,
-                "idempotent": true,
-                "reconciliation": reconciliation,
-            }),
-            0,
-        ));
-    }
+pub(super) fn resume(args: ResumeArgs) -> CmdResult<Value> {
     run_resume_with_executor(
         args.run_id,
         args.full,
+        args.idempotency_key,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
@@ -8495,24 +8448,64 @@ pub(super) fn resume(args: LifecycleReadArgs) -> CmdResult<Value> {
 pub(super) fn run_resume_with_executor(
     run_id: String,
     full: bool,
+    idempotency_key: Option<String>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
-    let needs_transport_recovery =
-        agent_task_service::terminal_transport_recovery_required(&run_id);
-    if needs_transport_recovery {
-        agent_task_service::recover_terminal_transport_proxy_evidence(&run_id)?;
+    let acknowledgement =
+        homeboy::agents::orchestration::execute_resume_action_from_current_environment(
+            &run_id,
+            &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+                idempotency_key: idempotency_key
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                actor: "homeboy-cli".to_string(),
+                expected_updated_at: None,
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            },
+            executor,
+        )?;
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Err(Error::validation_invalid_argument(
+            "resume",
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "resume action failed".to_string()),
+            Some(run_id),
+            None,
+        ));
     }
-    let result = agent_task_service::resume(run_id.clone(), executor)?;
-    if needs_transport_recovery {
-        agent_task_service::reconcile_terminal_artifact_projection(&run_id)?;
+    if acknowledgement.result.schema == "homeboy/unmaterialized-cook-resume/v1" {
+        let exit_code = if acknowledgement.result.data["terminal"] == true {
+            2
+        } else {
+            0
+        };
+        return Ok((acknowledgement.result.data, exit_code));
     }
+    let aggregate: AgentTaskAggregate = serde_json::from_value(
+        acknowledgement.result.data["aggregate"].clone(),
+    )
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("decode resume action result".to_string()),
+        )
+    })?;
+    let exit_code = acknowledgement.result.data["exit_code"]
+        .as_i64()
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or(0);
     Ok((
         if full {
-            aggregate_value_with_failure_reasons(&result.value)
+            aggregate_value_with_failure_reasons(&aggregate)
         } else {
-            super::status::compact_aggregate_summary(&result.value, Some(&run_id))
+            super::status::compact_aggregate_summary(&aggregate, Some(&run_id))
         },
-        result.exit_code,
+        exit_code,
     ))
 }
 
@@ -8536,17 +8529,54 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
-    let result = agent_task_service::retry(
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
-        args.new_run_id.as_deref(),
-        args.run,
-        args.force,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+            idempotency_key: args
+                .idempotency_key
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({
+                    "new_run_id": args.new_run_id,
+                    "force": args.force,
+                }),
+            },
+            confirmed: true,
+        },
     )?;
-    if result.run {
-        if result.record.metadata["cook_id"].is_string() {
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Err(Error::validation_invalid_argument(
+            "retry",
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "retry action failed".to_string()),
+            Some(args.run_id),
+            None,
+        ));
+    }
+    let record: AgentTaskRunRecord =
+        serde_json::from_value(acknowledgement.result.data["record"].clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode retry action result".to_string()),
+            )
+        })?;
+    let execute = args.run
+        && acknowledgement.result.data["runnable"]
+            .as_bool()
+            .unwrap_or(false);
+    if execute {
+        if record.metadata["cook_id"].is_string() {
             return continue_cook_with_queued_execution(
                 CookContinueArgs {
-                    cook_or_attempt_id: result.record.run_id,
+                    cook_or_attempt_id: record.run_id,
                     preflight: false,
                     rearm: false,
                     artifact_id: None,
@@ -8559,12 +8589,12 @@ where
                 true,
             );
         }
-        return run_submitted_with_executor(result.record.run_id, None, executor);
+        return run_submitted_with_executor(record.run_id, None, executor);
     }
-    Ok((
-        serde_json::to_value(result.record).unwrap_or(Value::Null),
-        0,
-    ))
+    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
+    value["action_acknowledgement"] = json!(acknowledgement.acknowledgement);
+    value["idempotency_key"] = json!(acknowledgement.idempotency_key);
+    Ok((value, 0))
 }
 
 #[cfg(test)]

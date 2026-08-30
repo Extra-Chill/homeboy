@@ -46,7 +46,7 @@ pub fn lifecycle_action_eligibility(
                 cancellation,
                 ControlPlaneActionConfirmation::Required,
                 Vec::new(),
-                false,
+                true,
                 "agent_task_run",
             ),
             action(
@@ -54,10 +54,7 @@ pub fn lifecycle_action_eligibility(
                 resume,
                 ControlPlaneActionConfirmation::None,
                 Vec::new(),
-                record
-                    .metadata
-                    .get("unmaterialized_cook_admission")
-                    .is_some_and(serde_json::Value::is_object),
+                true,
                 "agent_task_run",
             ),
             action(
@@ -65,7 +62,7 @@ pub fn lifecycle_action_eligibility(
                 retry,
                 ControlPlaneActionConfirmation::Required,
                 Vec::new(),
-                false,
+                true,
                 "agent_task_run",
             ),
             action(
@@ -81,7 +78,7 @@ pub fn lifecycle_action_eligibility(
                 promotion,
                 ControlPlaneActionConfirmation::Required,
                 vec!["to_worktree"],
-                false,
+                true,
                 "agent_task_promotion",
             ),
             action(

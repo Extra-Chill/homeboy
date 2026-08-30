@@ -55,6 +55,18 @@ pub struct LifecycleReadArgs {
     pub full: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct ResumeArgs {
+    /// Durable run or Cook ID to resume.
+    pub run_id: String,
+    /// Return complete lifecycle details instead of the bounded summary.
+    #[arg(long)]
+    pub full: bool,
+    /// Stable key used to replay this resume without executing it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
+}
+
 #[cfg_attr(test, derive(Default))]
 #[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
@@ -407,6 +419,8 @@ mod tests {
             "--to-worktree",
             "repo@task",
             "--full",
+            "--idempotency-key",
+            "promote-1",
         ])
         .expect("promote full parses");
         let Commands::AgentTask(agent_task) = cli.command else {
@@ -416,6 +430,7 @@ mod tests {
             panic!("promote")
         };
         assert!(args.full);
+        assert_eq!(args.idempotency_key.as_deref(), Some("promote-1"));
 
         let cli = Cli::try_parse_from([
             "homeboy",
@@ -456,6 +471,9 @@ pub struct RetryArgs {
     /// Permit a new retry after every prior retry in this lineage is terminal.
     #[arg(long, visible_alias = "allow-duplicate")]
     pub force: bool,
+    /// Stable caller key for safely replaying this retry reservation.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct CancelArgs {
@@ -464,6 +482,9 @@ pub struct CancelArgs {
     /// Optional explanation recorded with the cancellation.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// Stable caller key for safely replaying this cancellation request.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct QuarantineArgs {
@@ -542,6 +563,9 @@ pub struct PromoteArgs {
     /// Include complete promotion and gate evidence.
     #[arg(long)]
     pub full: bool,
+    /// Stable key used to replay this promotion without applying it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
     /// Replay the exact gate policy from the source run's durable Cook recipe.
     /// Homeboy-generated review commands use this reference so private gate
     /// programs remain outside reviewer-facing command output.
