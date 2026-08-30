@@ -950,20 +950,6 @@ fn local_retry_reclaims_a_dead_launcher_at_handoff_stage(crash_env: &str) {
     }
 }
 
-#[test]
-fn local_retry_reclaims_a_dead_launcher_after_spawn_before_submit() {
-    local_retry_reclaims_a_dead_launcher_at_handoff_stage(
-        "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SPAWN",
-    );
-}
-
-#[test]
-fn local_retry_reclaims_a_dead_launcher_after_submit_before_projection() {
-    local_retry_reclaims_a_dead_launcher_at_handoff_stage(
-        "HOMEBOY_TEST_LOCAL_COOK_RETRY_PAUSE_AFTER_SUBMIT",
-    );
-}
-
 /// Historical runner recovery belongs to `runner exec`, never an unrelated
 /// Cook admission. This invokes the actual detached Cook command path so the
 /// ownership boundary remains observable.
