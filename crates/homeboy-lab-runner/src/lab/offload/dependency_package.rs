@@ -34,10 +34,24 @@ pub(super) fn prepare_in_roots(
     workspace: &Path,
     plan: &[homeboy_core::deps::DependencyInstallPlanStep],
 ) -> Result<Option<DependencyPackage>> {
-    let outputs = output_paths(plan);
-    if outputs.is_empty() || outputs.iter().any(|path| !workspace.join(path).exists()) {
+    if plan.is_empty()
+        || plan.iter().any(|step| {
+            step.outputs.is_empty()
+                || step.outputs.iter().any(|output| {
+                    let path = workspace.join(&output.path);
+                    match output.kind {
+                        homeboy_core::deps::DependencyInstallOutputKind::Path => !path.exists(),
+                        homeboy_core::deps::DependencyInstallOutputKind::File => !path.is_file(),
+                        homeboy_core::deps::DependencyInstallOutputKind::Directory => {
+                            !path.is_dir()
+                        }
+                    }
+                })
+        })
+    {
         return Ok(None);
     }
+    let outputs = output_paths(plan);
     let lockfiles = lockfile_identity(workspace)?;
     let outputs_identity = output_identity(workspace, &outputs)?;
     let key = content_hash::sha256_hex(&serde_json::to_vec(&(SCHEMA, plan, lockfiles)).map_err(
@@ -331,6 +345,37 @@ mod tests {
     fn reports_missing_outputs_without_a_package() {
         let data_root = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
+        assert!(prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn refuses_partial_packages_when_any_provider_omits_outputs() {
+        let data_root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("deps")).unwrap();
+        fs::write(root.path().join("deps/a"), "ok").unwrap();
+        let mut plan = plan();
+        plan.push(DependencyInstallPlanStep {
+            provider_id: "outputless".to_string(),
+            invocation: DependencyInstallInvocation::Argv {
+                argv: vec!["test".to_string()],
+            },
+            outputs: Vec::new(),
+        });
+
+        assert!(prepare_in_roots(data_root.path(), root.path(), &plan)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn validates_declared_output_kind_before_packaging() {
+        let data_root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("deps"), "not a directory").unwrap();
+
         assert!(prepare_in_roots(data_root.path(), root.path(), &plan())
             .unwrap()
             .is_none());

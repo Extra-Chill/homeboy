@@ -192,7 +192,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
             std::path::Path::new(local_path),
             &plan,
         )? {
-            restore_controller_dependency_package(runner_id, remote_path, &package)?;
+            restore_controller_dependency_package(runner_id, remote_path, &package, &plan)?;
             return Ok(LabWorkspaceHydrationOutput {
                 schema: HYDRATION_SCHEMA,
                 status: "restored_controller_cache",
@@ -216,7 +216,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
     }
 
     let mut steps = Vec::new();
-    for (index, plan_step) in plan.into_iter().enumerate() {
+    for (index, plan_step) in plan.iter().enumerate() {
         let command = runner_hydration_command(&plan_step.invocation)?;
         let started = std::time::Instant::now();
         let options =
@@ -244,6 +244,14 @@ fn hydrate_lab_workspace_dependencies_with_policy(
         }
         steps.push(step);
     }
+    if !declared_outputs_are_ready(runner_id, remote_path, &plan)? {
+        return Err(Error::validation_invalid_argument(
+            "workspace_setup",
+            "dependency hydration completed without producing its declared outputs",
+            Some(remote_path.to_string()),
+            None,
+        ));
+    }
 
     Ok(LabWorkspaceHydrationOutput {
         schema: HYDRATION_SCHEMA,
@@ -259,6 +267,30 @@ fn restore_controller_dependency_package(
     runner_id: &str,
     remote_path: &str,
     package: &super::dependency_package::DependencyPackage,
+    plan: &[deps::DependencyInstallPlanStep],
+) -> Result<()> {
+    restore_controller_dependency_package_with_transfer(
+        runner_id,
+        remote_path,
+        package,
+        plan,
+        |runner, cache_dir, archive| {
+            let transfer = crate::RunnerFileTransfer::for_runner(
+                runner,
+                crate::status(runner_id).ok().as_ref(),
+            )?;
+            transfer.ensure_directory(cache_dir)?;
+            transfer.upload_file(&package.path.display().to_string(), archive)
+        },
+    )
+}
+
+fn restore_controller_dependency_package_with_transfer(
+    runner_id: &str,
+    remote_path: &str,
+    package: &super::dependency_package::DependencyPackage,
+    plan: &[deps::DependencyInstallPlanStep],
+    transfer_package: impl FnOnce(&crate::Runner, &str, &str) -> Result<()>,
 ) -> Result<()> {
     super::dependency_package::verify(&package.path, &package.sha256)?;
     let runner = crate::load(runner_id)?;
@@ -276,12 +308,10 @@ fn restore_controller_dependency_package(
         package.key
     );
     let archive = format!("{cache_dir}/package.zip");
-    let transfer =
-        crate::RunnerFileTransfer::for_runner(&runner, crate::status(runner_id).ok().as_ref())?;
-    transfer.ensure_directory(&cache_dir)?;
-    transfer.upload_file(&package.path.display().to_string(), &archive)?;
+    transfer_package(&runner, &cache_dir, &archive)?;
+    let output_checks = declared_output_checks(remote_path, plan).join(" && ");
     let verify_and_restore = format!(
-        "test \"$(wc -c < {archive})\" -le {max} && test \"$(shasum -a 256 {archive} | awk '{{print $1}}')\" = {sha} && unzip -oq {archive} -d {workspace}",
+        "test \"$(wc -c < {archive})\" -le {max} && test \"$(shasum -a 256 {archive} | awk '{{print $1}}')\" = {sha} && unzip -oq {archive} -d {workspace} && {output_checks}",
         archive = shell::quote_arg(&archive), max = super::dependency_package::MAX_PACKAGE_BYTES,
         sha = shell::quote_arg(&package.sha256), workspace = shell::quote_arg(remote_path),
     );
@@ -311,8 +341,44 @@ fn prepared_source_view_is_ready(
     remote_path: &str,
     plan: &[deps::DependencyInstallPlanStep],
 ) -> Result<bool> {
-    let output_tests = plan
-        .iter()
+    let Some(output_tests) = declared_output_checks_for_complete_plan(remote_path, plan) else {
+        return Ok(false);
+    };
+    let mut checks = vec![format!(
+        "test -f {}/.homeboy/prepared-source-ready",
+        shell::quote_arg(remote_path)
+    )];
+    checks.extend(output_tests);
+    remote_checks_succeed(runner_id, remote_path, checks)
+}
+
+fn declared_outputs_are_ready(
+    runner_id: &str,
+    remote_path: &str,
+    plan: &[deps::DependencyInstallPlanStep],
+) -> Result<bool> {
+    let checks = declared_output_checks(remote_path, plan);
+    if checks.is_empty() {
+        return Ok(true);
+    }
+    remote_checks_succeed(runner_id, remote_path, checks)
+}
+
+fn declared_output_checks_for_complete_plan(
+    remote_path: &str,
+    plan: &[deps::DependencyInstallPlanStep],
+) -> Option<Vec<String>> {
+    if plan.iter().any(|step| step.outputs.is_empty()) {
+        return None;
+    }
+    Some(declared_output_checks(remote_path, plan))
+}
+
+fn declared_output_checks(
+    remote_path: &str,
+    plan: &[deps::DependencyInstallPlanStep],
+) -> Vec<String> {
+    plan.iter()
         .flat_map(|step| &step.outputs)
         .map(|output| {
             let path = format!("{}/{}", remote_path.trim_end_matches('/'), output.path);
@@ -323,12 +389,10 @@ fn prepared_source_view_is_ready(
             };
             format!("test {predicate} {}", shell::quote_arg(&path))
         })
-        .collect::<Vec<_>>();
-    let mut checks = vec![format!(
-        "test -f {}/.homeboy/prepared-source-ready",
-        shell::quote_arg(remote_path)
-    )];
-    checks.extend(output_tests);
+        .collect()
+}
+
+fn remote_checks_succeed(runner_id: &str, remote_path: &str, checks: Vec<String>) -> Result<bool> {
     let (output, exit_code) = exec(
         runner_id,
         RunnerExecOptions::raw_command(vec![
@@ -666,6 +730,37 @@ mod tests {
         }
     }
 
+    fn write_detected_node_adapter(home: &std::path::Path) {
+        let root = home.join(".config/homeboy/extensions/dependency-adapters");
+        std::fs::create_dir_all(root.join("examples")).expect("adapter directory");
+        std::fs::write(
+            root.join("index.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-index/v1",
+                "manifests":[{"id":"nodejs-package-managers","ecosystem":"nodejs","path":"examples/nodejs.json"}]
+            }"#,
+        )
+        .expect("adapter index");
+        std::fs::write(
+            root.join("examples/nodejs.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                "id":"nodejs-package-managers",
+                "version":1,
+                "ecosystem":"nodejs",
+                "project_signals":{"root_files":["package.json"]},
+                "lockfile_priority":["package-lock.json"],
+                "package_managers":[{
+                    "id":"npm",
+                    "selection":{"priority":1,"files":["package-lock.json"],"default":true},
+                    "commands":{"install":{"command":"npm ci","requires_lockfile":true}},
+                    "outputs":[{"path":"node_modules","kind":"directory"}]
+                }]
+            }"#,
+        )
+        .expect("node adapter");
+    }
+
     /// `hydration_failure_error` classifies the failure as workspace setup and
     /// records the provider id, command, duration, and exit status so operators
     /// can distinguish a hydration (workspace setup) failure from a later
@@ -878,6 +973,113 @@ mod tests {
     }
 
     #[test]
+    fn detected_npm_hydrates_stale_marker_then_reuses_validated_outputs() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            write_detected_node_adapter(home.path());
+            let path_guard = FakeBinGuard::install(
+                "npm",
+                "#!/bin/sh\nmkdir -p node_modules\nprintf x >> npm-runs\n",
+            );
+            crate::create(&path_guard.local_runner_spec("lab-detected-npm"), false)
+                .expect("create local runner");
+            let project = tempfile::tempdir().expect("controller project");
+            std::fs::write(project.path().join("package.json"), "{}").expect("package manifest");
+            std::fs::write(project.path().join("package-lock.json"), "{}").expect("lockfile");
+            let remote = tempfile::tempdir().expect("runner workspace");
+            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
+            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
+                .expect("stale marker");
+
+            let first = hydrate_lab_workspace_dependencies(
+                "lab-detected-npm",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("missing node_modules triggers detected npm hydration");
+            assert_eq!(first.status, "hydrated");
+            assert_eq!(first.steps[0].provider_id, "npm");
+            assert_eq!(first.steps[0].command, ["sh", "-c", "npm ci"]);
+            assert!(remote.path().join("node_modules").is_dir());
+            assert_eq!(
+                std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm ran"),
+                "x"
+            );
+
+            let second = hydrate_lab_workspace_dependencies(
+                "lab-detected-npm",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("validated node_modules is reusable");
+            assert_eq!(second.status, "reused_prepared_cache");
+            assert_eq!(
+                std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm run count"),
+                "x"
+            );
+        });
+    }
+
+    #[test]
+    fn successful_live_hydration_requires_declared_output_kind() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let path_guard = FakeBinGuard::install(
+                "fixture-tool",
+                "#!/bin/sh\nprintf not-a-directory > node_modules\n",
+            );
+            crate::create(
+                &path_guard.local_runner_spec("lab-wrong-output-kind"),
+                false,
+            )
+            .expect("create local runner");
+            let project = tempfile::tempdir().expect("project");
+            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"}]}"#;
+            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let remote = tempfile::tempdir().expect("remote");
+
+            let error = hydrate_lab_workspace_dependencies(
+                "lab-wrong-output-kind",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect_err("a zero exit without the declared directory must fail");
+
+            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+            assert!(error.message.contains("declared outputs"));
+        });
+    }
+
+    #[test]
+    fn prepared_marker_cannot_reuse_an_outputless_provider_plan() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let path_guard = FakeBinGuard::install(
+                "fixture-tool",
+                "#!/bin/sh\nprintf hydrated > hydration-ran\n",
+            );
+            crate::create(&path_guard.local_runner_spec("lab-outputless"), false)
+                .expect("create local runner");
+            let project = tempfile::tempdir().expect("project");
+            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}}}"#;
+            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let remote = tempfile::tempdir().expect("remote");
+            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+                .expect("remote manifest");
+            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
+            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
+                .expect("marker");
+
+            let output = hydrate_lab_workspace_dependencies(
+                "lab-outputless",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("outputless plan hydrates instead of reusing marker");
+
+            assert_eq!(output.status, "hydrated");
+            assert!(remote.path().join("hydration-ran").is_file());
+        });
+    }
+
+    #[test]
     fn prepared_marker_missing_declared_build_output_hydrates() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
@@ -938,6 +1140,67 @@ mod tests {
             .expect("validated cache avoids install");
 
             assert_eq!(output.status, "reused_prepared_cache");
+        });
+    }
+
+    #[test]
+    fn detected_controller_dependencies_restore_through_restore_path() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            write_detected_node_adapter(home.path());
+            let project = tempfile::tempdir().expect("controller project");
+            std::fs::write(project.path().join("package.json"), "{}").expect("package manifest");
+            std::fs::write(project.path().join("package-lock.json"), "{}").expect("lockfile");
+            std::fs::create_dir_all(project.path().join("node_modules/tar")).expect("dependencies");
+            std::fs::write(
+                project.path().join("node_modules/tar/index.js"),
+                "module.exports = {};",
+            )
+            .expect("dependency file");
+
+            let remote = tempfile::tempdir().expect("restored workspace");
+            let runner_root = tempfile::tempdir().expect("runner root");
+            crate::create(
+                &serde_json::json!({
+                    "id": "lab-offline-restore",
+                    "kind": "local",
+                    "workspace_root": runner_root.path()
+                })
+                .to_string(),
+                false,
+            )
+            .expect("create local runner");
+            let plan = deps::dependency_install_plan(project.path()).expect("detected npm plan");
+            let data_root = tempfile::tempdir().expect("package data root");
+            let package = super::super::dependency_package::prepare_in_roots(
+                data_root.path(),
+                project.path(),
+                &plan,
+            )
+            .expect("seal dependencies")
+            .expect("declared dependencies are packageable");
+
+            restore_controller_dependency_package_with_transfer(
+                "lab-offline-restore",
+                &remote.path().display().to_string(),
+                &package,
+                &plan,
+                |_, cache_dir, archive| {
+                    std::fs::create_dir_all(cache_dir).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(cache_dir.to_string()))
+                    })?;
+                    std::fs::copy(&package.path, archive).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(archive.to_string()))
+                    })?;
+                    Ok(())
+                },
+            )
+            .expect("restore path installs the controller package");
+
+            assert_eq!(
+                std::fs::read_to_string(remote.path().join("node_modules/tar/index.js"))
+                    .expect("restored dependency"),
+                "module.exports = {};"
+            );
         });
     }
 

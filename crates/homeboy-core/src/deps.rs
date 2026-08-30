@@ -694,8 +694,8 @@ pub enum DependencyInstallInvocation {
 /// provide dependency support is equivalent to no provider for this optional
 /// planning surface; invalid explicit capability ownership still fails.
 /// Providers whose install cannot be expressed as a standalone shell command
-/// (component-script/extension providers) are omitted. Returns an empty vector
-/// when no provider detects the workspace.
+/// (component-script providers) are omitted. Returns an empty vector when no
+/// provider detects the workspace.
 ///
 /// The lockfile/manifest files are part of the synced snapshot (only built
 /// dependency trees like `vendor/`/`node_modules/` are excluded), so detecting
@@ -720,12 +720,11 @@ pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanS
         };
     let mut steps = Vec::new();
     for provider in providers {
-        let status = provider.status(&component, &resolved_path, None)?;
-        if let Some(command) = provider.install_command(&component, &resolved_path)? {
+        if let Some(plan) = provider.hydration_plan(&component, &resolved_path)? {
             steps.push(DependencyInstallPlanStep {
-                provider_id: status.package_manager,
-                invocation: dependency_install_invocation(command.argv())?,
-                outputs: provider.install_outputs()?,
+                provider_id: plan.provider_id,
+                invocation: dependency_install_invocation(plan.install.argv())?,
+                outputs: plan.outputs,
             });
         }
     }
@@ -924,6 +923,55 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
+    fn write_builtin_dependency_adapters(home: &Path) {
+        let root = home.join(".config/homeboy/extensions/dependency-adapters");
+        std::fs::create_dir_all(root.join("examples")).expect("adapter directory");
+        std::fs::write(
+            root.join("index.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-index/v1",
+                "manifests":[
+                    {"id":"nodejs-package-managers","ecosystem":"nodejs","path":"examples/nodejs.json"},
+                    {"id":"composer-package-manager","ecosystem":"php","path":"examples/composer.json"}
+                ]
+            }"#,
+        )
+        .expect("adapter index");
+        std::fs::write(
+            root.join("examples/nodejs.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                "id":"nodejs-package-managers",
+                "version":1,
+                "ecosystem":"nodejs",
+                "project_signals":{"root_files":["package.json"]},
+                "package_managers":[
+                    {"id":"pnpm","selection":{"priority":1,"files":["pnpm-lock.yaml"]},"commands":{"install":{"command":"pnpm install --frozen-lockfile"}},"outputs":[{"path":"node_modules","kind":"directory"}]},
+                    {"id":"yarn","selection":{"priority":2,"files":["yarn.lock"]},"commands":{"install":{"command":"yarn install --frozen-lockfile"}},"outputs":[{"path":"node_modules","kind":"directory"}]},
+                    {"id":"npm","selection":{"priority":3,"files":["package-lock.json"],"default":true},"commands":{"install":{"command":"npm ci"}},"outputs":[{"path":"node_modules","kind":"directory"}]}
+                ]
+            }"#,
+        )
+        .expect("node adapter");
+        std::fs::write(
+            root.join("examples/composer.json"),
+            r#"{
+                "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                "id":"composer-package-manager",
+                "version":1,
+                "ecosystem":"php",
+                "project_signals":{"root_files":["composer.json"]},
+                "package_managers":[{
+                    "id":"composer",
+                    "selection":{"priority":1,"default":true},
+                    "commands":{"install":{"command":"composer install"}},
+                    "outputs":[{"path":"vendor","kind":"directory"},{"path":"vendor/autoload.php","kind":"file"}]
+                }]
+            }"#,
+        )
+        .expect("composer adapter");
+    }
+
     #[test]
     fn extension_owned_install_path_becomes_portable_invocation() {
         crate::test_support::with_isolated_home(|home| {
@@ -1011,6 +1059,54 @@ mod tests {
                 .expect("unrelated linked extensions do not require dependency hydration");
 
             assert!(plan.is_empty());
+        });
+    }
+
+    #[test]
+    fn detected_builtin_adapters_declare_deterministic_outputs() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+
+            for (manager, lockfile) in [
+                ("pnpm", "pnpm-lock.yaml"),
+                ("yarn", "yarn.lock"),
+                ("npm", "package-lock.json"),
+            ] {
+                let project = tempfile::tempdir().expect("node project");
+                std::fs::write(project.path().join("package.json"), "{}").expect("package");
+                std::fs::write(project.path().join(lockfile), "").expect("lockfile");
+
+                let plan = dependency_install_plan(project.path()).expect("detected node plan");
+
+                assert_eq!(plan.len(), 1);
+                assert_eq!(plan[0].provider_id, manager);
+                assert_eq!(
+                    plan[0].outputs,
+                    vec![DependencyInstallOutput {
+                        path: "node_modules".to_string(),
+                        kind: DependencyInstallOutputKind::Directory,
+                    }]
+                );
+            }
+
+            let project = tempfile::tempdir().expect("composer project");
+            std::fs::write(project.path().join("composer.json"), "{}").expect("manifest");
+            let plan = dependency_install_plan(project.path()).expect("detected composer plan");
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].provider_id, "composer");
+            assert_eq!(
+                plan[0].outputs,
+                vec![
+                    DependencyInstallOutput {
+                        path: "vendor".to_string(),
+                        kind: DependencyInstallOutputKind::Directory,
+                    },
+                    DependencyInstallOutput {
+                        path: "vendor/autoload.php".to_string(),
+                        kind: DependencyInstallOutputKind::File,
+                    },
+                ]
+            );
         });
     }
 
