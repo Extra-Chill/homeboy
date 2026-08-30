@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_PATH}/../.." && pwd)/homeboy}"
-CORE_RUNTIME_DIR="${HOMEBOY_CORE_DIR}/crates/homeboy-extension/src/runtime"
+CORE_RUNTIME_DIR="${HOMEBOY_CORE_DIR}/crates/homeboy-core/src/extension/runtime"
 HOST_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/test-managed-dependency-order-host"
 DEP_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/managed-dependency-order-dep"
 ARTIFACTS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-managed-dependency-order.XXXXXX")"

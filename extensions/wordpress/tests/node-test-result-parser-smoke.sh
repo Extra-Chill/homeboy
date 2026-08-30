@@ -3,7 +3,7 @@ set -euo pipefail
 
 WORDPRESS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOSITORY_ROOT="$(cd "${WORDPRESS_ROOT}/.." && pwd)"
-CORE_RUNTIME_DIR="${HOMEBOY_CORE_DIR:-$(cd "${REPOSITORY_ROOT}/.." && pwd)/homeboy}/crates/homeboy-extension/src/runtime"
+CORE_RUNTIME_DIR="${HOMEBOY_CORE_DIR:-$(cd "${REPOSITORY_ROOT}/.." && pwd)/homeboy}/crates/homeboy-core/src/extension/runtime"
 FIXTURE="${WORDPRESS_ROOT}/tests/fixtures/node-test-results/nested-tap-package-summary.txt"
 RESULTS="$(mktemp "${TMPDIR:-/tmp}/homeboy-node-test-results.XXXXXX")"
 trap 'rm -f "$RESULTS"' EXIT

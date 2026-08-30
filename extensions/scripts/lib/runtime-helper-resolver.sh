@@ -7,7 +7,7 @@ homeboy_runtime_helper() {
     local helper_name="$3"
     local override="${!override_variable:-}"
     local core_dir="${HOMEBOY_CORE_DIR:-${extensions_root%/}/../homeboy}"
-    local candidate="${core_dir%/}/crates/homeboy-extension/src/runtime/${helper_name}"
+    local candidate="${core_dir%/}/crates/homeboy-core/src/extension/runtime/${helper_name}"
 
     if [ -n "$override" ]; then
         if [ -f "$override" ]; then
