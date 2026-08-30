@@ -159,36 +159,7 @@ pub(crate) fn snapshot_identity(
 /// snapshot traversal. A malformed Git pathspec is deliberately left to Git to
 /// reject so callers that validate provenance fail closed.
 pub(crate) fn snapshot_git_exclude_pathspecs(excludes: &[String]) -> Vec<String> {
-    let mut pathspecs = Vec::new();
-    for exclude in excludes {
-        let root_anchored = exclude.starts_with("./");
-        let pattern = exclude
-            .trim_start_matches("./")
-            .trim_end_matches('/')
-            .trim();
-        if pattern.is_empty() {
-            continue;
-        }
-        let pattern = if root_anchored || pattern.contains('/') {
-            pattern.to_string()
-        } else {
-            format!("**/{pattern}")
-        };
-        let pathspec = format!(":(exclude,top,glob){pattern}");
-        if !pathspecs.contains(&pathspec) {
-            pathspecs.push(pathspec);
-        }
-        // Snapshot traversal skips an excluded directory before visiting its
-        // children. Add its descendants explicitly because Git status reports
-        // files rather than the excluded directory entry itself.
-        if !pattern.contains('*') {
-            let descendants = format!(":(exclude,top,glob){pattern}/**");
-            if !pathspecs.contains(&descendants) {
-                pathspecs.push(descendants);
-            }
-        }
-    }
-    pathspecs
+    homeboy_core::source_snapshot::git_exclude_pathspecs(excludes)
 }
 
 pub(crate) fn snapshot_git_output(

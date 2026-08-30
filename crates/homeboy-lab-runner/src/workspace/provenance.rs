@@ -1768,6 +1768,162 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_git_cook_harvest_ignores_excluded_tracked_context_but_fails_closed_on_drift() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            crate::register_lab_workspace_provenance_provider();
+            let source = tempfile::tempdir().expect("source");
+            let runner_root = tempfile::tempdir().expect("runner root");
+            std::fs::write(source.path().join("file.txt"), "baseline\n").expect("source file");
+            std::fs::write(source.path().join("AGENTS.md"), "injected context\n")
+                .expect("tracked context file");
+            std::fs::create_dir_all(source.path().join(".claude")).expect("claude dir");
+            std::fs::write(source.path().join(".claude/settings.json"), "{}\n")
+                .expect("claude context");
+            std::fs::create_dir_all(source.path().join(".datamachine")).expect("datamachine dir");
+            std::fs::write(source.path().join(".datamachine/context.json"), "{}\n")
+                .expect("datamachine context");
+            git(source.path(), &["init", "--quiet", "-b", "main"]).expect("init");
+            git(
+                source.path(),
+                &["config", "user.email", "test@homeboy.invalid"],
+            )
+            .expect("email");
+            git(source.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
+            git(source.path(), &["add", "."]).expect("stage");
+            git(source.path(), &["commit", "--quiet", "-m", "baseline"]).expect("commit");
+            assert!(
+                git(source.path(), &["status", "--porcelain"])
+                    .expect("source status")
+                    .is_empty(),
+                "controller source must be clean"
+            );
+
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-excluded-context","kind":"local","workspace_root":"{}","policy":{{"snapshot_excludes":["AGENTS.md",".claude",".claude/**",".datamachine",".datamachine/**"]}}}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let (synced, _) = crate::workspace::sync_workspace(
+                "lab-excluded-context",
+                crate::workspace::RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: crate::workspace::RunnerWorkspaceSyncMode::SnapshotGit,
+                    ..Default::default()
+                },
+            )
+            .expect("materialize exclusion-aware snapshot-git");
+            let remote = PathBuf::from(&synced.remote_path);
+            assert!(remote.join("file.txt").is_file());
+            assert!(!remote.join("AGENTS.md").exists());
+            assert!(!remote.join(".claude").exists());
+            assert!(!remote.join(".datamachine").exists());
+
+            let mut snapshot = homeboy_core::source_snapshot::collect_local(
+                "lab-excluded-context",
+                source.path(),
+                Some(&synced.remote_path),
+                LAB_SOURCE_SNAPSHOT_SYNC_MODE,
+            );
+            assert!(!snapshot.dirty, "controller records the source as clean");
+            snapshot.sync_excludes = synced.excludes.clone();
+            snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
+            let content_hash = super::super::snapshot::workspace_content_hash(
+                source.path(),
+                &snapshot.sync_excludes,
+            )
+            .expect("source content hash");
+            let lab = serde_json::json!({
+                "runner_id": "lab-excluded-context",
+                "remote_workspace": synced.remote_path.clone(),
+                "sync_mode": synced.materialization_plan.actual_materialization_mode,
+                "status": "offloaded",
+                "source_snapshot": snapshot,
+                "workspace_cleanliness": { "allow_dirty_lab_workspace": false },
+                "workspace_verification": {
+                    "schema": "homeboy/lab-workspace-verification/v2",
+                    "identity": synced.snapshot_identity.clone(),
+                    "content_hash_algorithm": super::super::snapshot::workspace_content_hash_algorithm(
+                        WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                    ).expect("content hash algorithm"),
+                    "permission_policy": WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                    "content_hash": content_hash,
+                    "sync_excludes": snapshot.sync_excludes,
+                    "source_snapshot": snapshot.clone(),
+                    "primary_workspace": {
+                        "identity": synced.snapshot_identity.clone(),
+                        "remote_path": synced.remote_path.clone(),
+                    },
+                },
+            });
+            assert_eq!(
+                snapshot.workspace_snapshot_identity.as_deref(),
+                Some(synced.snapshot_identity.as_str()),
+                "controller and runner must report one snapshot identity"
+            );
+
+            let dispatched = Arc::new(AtomicBool::new(false));
+            let scheduler = AgentTaskScheduler::new(Arc::new(FilesystemSnapshotProvider {
+                change_workspace: true,
+                dispatched: Arc::clone(&dispatched),
+            }))
+            .with_harvest_context(
+                HarvestExecutionContext::from_lab_transport(snapshot.clone(), lab.clone())
+                    .expect("paired Lab transport"),
+            );
+            let aggregate = scheduler.run(AgentTaskPlan::new(
+                "excluded-context-cook",
+                vec![filesystem_snapshot_request(&remote)],
+            ));
+            assert!(
+                dispatched.load(Ordering::SeqCst),
+                "clean exclusion-aware Lab snapshot must reach the provider: {aggregate:?}"
+            );
+            assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
+            assert_eq!(
+                aggregate.outcomes[0]
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.kind == "patch")
+                    .expect("harvested patch")
+                    .metadata["source_provenance"]["workspace_snapshot_identity"],
+                synced.snapshot_identity,
+            );
+
+            std::fs::write(remote.join("file.txt"), "drift\n").expect("tracked drift");
+            let drifted = Arc::new(AtomicBool::new(false));
+            let failed = AgentTaskScheduler::new(Arc::new(FilesystemSnapshotProvider {
+                change_workspace: true,
+                dispatched: Arc::clone(&drifted),
+            }))
+            .with_harvest_context(
+                HarvestExecutionContext::from_lab_transport(snapshot, lab)
+                    .expect("paired Lab transport"),
+            )
+            .run(AgentTaskPlan::new(
+                "excluded-context-drift",
+                vec![filesystem_snapshot_request(&remote)],
+            ));
+            assert!(
+                !drifted.load(Ordering::SeqCst),
+                "real tracked drift must fail before provider execution"
+            );
+            assert_eq!(failed.totals.failed, 1, "{failed:?}");
+            assert!(
+                failed.outcomes[0].diagnostics.iter().any(|diagnostic| {
+                    diagnostic.class == "agent_task.committed_harvest_git_failed"
+                        || diagnostic.class == "agent_task.committed_harvest_dirty_workspace"
+                        || diagnostic.class == "agent_task.workspace_snapshot_invalidated"
+                }),
+                "real drift must fail closed: {:?}",
+                failed.outcomes[0].diagnostics
+            );
+        });
+    }
+
+    #[test]
     fn verified_snapshot_baseline_replay_reuses_only_the_matching_baseline() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");

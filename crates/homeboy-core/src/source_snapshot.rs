@@ -137,6 +137,42 @@ pub(crate) fn existing_remote_with_policy(
     }
 }
 
+/// Git exclusion pathspecs with the same root and glob semantics as snapshot
+/// traversal. A malformed Git pathspec is left for Git to reject so callers
+/// that validate provenance fail closed.
+pub fn git_exclude_pathspecs(excludes: &[String]) -> Vec<String> {
+    let mut pathspecs = Vec::new();
+    for exclude in excludes {
+        let root_anchored = exclude.starts_with("./");
+        let pattern = exclude
+            .trim_start_matches("./")
+            .trim_end_matches('/')
+            .trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        let pattern = if root_anchored || pattern.contains('/') {
+            pattern.to_string()
+        } else {
+            format!("**/{pattern}")
+        };
+        let pathspec = format!(":(exclude,top,glob){pattern}");
+        if !pathspecs.contains(&pathspec) {
+            pathspecs.push(pathspec);
+        }
+        // Snapshot traversal skips an excluded directory before visiting its
+        // children. Add its descendants explicitly because Git status reports
+        // files rather than the excluded directory entry itself.
+        if !pattern.contains('*') {
+            let descendants = format!(":(exclude,top,glob){pattern}/**");
+            if !pathspecs.contains(&descendants) {
+                pathspecs.push(descendants);
+            }
+        }
+    }
+    pathspecs
+}
+
 pub fn declared_sync_excludes_for_path(path: &Path) -> Vec<String> {
     let mut excludes = Vec::new();
     append_unique(&mut excludes, component_extension_sync_excludes(path));
@@ -297,6 +333,21 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::process::Command;
+
+    #[test]
+    fn git_exclude_pathspecs_match_root_files_and_directory_trees() {
+        let pathspecs = git_exclude_pathspecs(&[
+            "AGENTS.md".to_string(),
+            ".claude".to_string(),
+            ".claude/**".to_string(),
+            "./.datamachine".to_string(),
+        ]);
+        assert!(pathspecs.contains(&":(exclude,top,glob)**/AGENTS.md".to_string()));
+        assert!(pathspecs.contains(&":(exclude,top,glob)**/.claude".to_string()));
+        assert!(pathspecs.contains(&":(exclude,top,glob).claude/**".to_string()));
+        assert!(pathspecs.contains(&":(exclude,top,glob).datamachine".to_string()));
+        assert!(pathspecs.contains(&":(exclude,top,glob).datamachine/**".to_string()));
+    }
 
     #[test]
     fn test_default_sync_excludes() {
