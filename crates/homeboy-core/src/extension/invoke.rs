@@ -22,6 +22,7 @@ mod runner;
 mod runtime_helper;
 mod scope;
 mod settings;
+mod tool;
 
 use super::env_provider;
 use crate::extension::catalog::load_extension;
@@ -48,6 +49,7 @@ pub use runtime_helper::{
 };
 use settings::serialize_settings;
 pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
+pub use tool::exec_tool;
 
 /// Result of executing a extension.
 pub struct ExtensionRunResult {

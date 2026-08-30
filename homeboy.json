@@ -652,7 +652,7 @@
             "\\bextension_scope\\b",
             "\\bextension::execution\\b",
             "\\bextension::(?:runner|runtime_helper)::",
-            "\\bextension::(?:ExtensionRunner|RunnerOutput|STRICT_VALIDATION_DEPENDENCIES_ENV|declared_helper_env_names|helper_path|provision_declared_helpers|RuntimeHelperProvision|BASH_PREFLIGHT_ENV|COMMAND_CAPTURE_ENV|RUNNER_PRELUDE_ENV|RUNNER_STEPS_ENV|RUNTIME_SETTINGS_HELPER_ENV|RUNTIME_SETTINGS_HELPER_ID)\\b",
+            "\\bextension::(?:exec_tool|ExtensionRunner|RunnerOutput|STRICT_VALIDATION_DEPENDENCIES_ENV|declared_helper_env_names|helper_path|provision_declared_helpers|RuntimeHelperProvision|BASH_PREFLIGHT_ENV|COMMAND_CAPTURE_ENV|RUNNER_PRELUDE_ENV|RUNNER_STEPS_ENV|RUNTIME_SETTINGS_HELPER_ENV|RUNTIME_SETTINGS_HELPER_ID)\\b",
             "\\bextension::(execute_action|run_action|run_deployment_provider|run_extension|run_setup|ExtensionExecutionMode|ExtensionRunResult|ExtensionSetupResult|ExtensionStepFilter)\\b"
           ]
         },
@@ -681,7 +681,7 @@
           "glob": "crates/**",
           "patterns": [
             "\\b(?:homeboy_core|crate)::extension_update_check::",
-            "\\bextension::update_check\\b"
+            "\\bextension::(?:maintenance|update_all|update_check)\\b"
           ]
         },
         "name": "extensions-use-canonical-lifecycle-source-api"

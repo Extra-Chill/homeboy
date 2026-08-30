@@ -1,9 +1,8 @@
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::Result;
 use std::collections::HashMap;
 
-use super::lifecycle::{update, update_linked_group};
+use super::{update, update_linked_group, UpdateResult};
 use homeboy_core::extension::catalog::{available_extension_ids, load_extension};
-use homeboy_extension_contract::exec_context;
 use homeboy_extension_contract::update_output::{
     SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry, UpdateSkippedEntry,
 };
@@ -36,8 +35,7 @@ pub fn update_all(force: bool) -> UpdateAllResult {
             }
         }
     }
-    let mut grouped_results: HashMap<String, Result<super::lifecycle::UpdateResult>> =
-        HashMap::new();
+    let mut grouped_results: HashMap<String, Result<UpdateResult>> = HashMap::new();
 
     for id in &extension_ids {
         let old_version = load_extension(id).ok().map(|m| m.version.clone());
@@ -111,8 +109,8 @@ fn linked_group_result(
     id: &str,
     force: bool,
     groups: &HashMap<String, Vec<String>>,
-    results: &mut HashMap<String, Result<super::lifecycle::UpdateResult>>,
-) -> Option<Result<super::lifecycle::UpdateResult>> {
+    results: &mut HashMap<String, Result<UpdateResult>>,
+) -> Option<Result<UpdateResult>> {
     let path = homeboy_core::paths::extension(id).ok()?;
     let source = std::fs::canonicalize(path).ok()?;
     let root = homeboy_core::git::get_git_root(&source.to_string_lossy()).ok()?;
@@ -132,50 +130,6 @@ fn linked_group_result(
         }
     }
     results.get(id).cloned()
-}
-
-/// Execute a tool from an extension's vendor directory.
-///
-/// Sets up PATH with the extension's vendor/bin and node_modules/.bin,
-/// resolves the working directory from an optional component, and runs
-/// the command interactively.
-pub fn exec_tool(extension_id: &str, component_id: Option<&str>, args: &[String]) -> Result<i32> {
-    use homeboy_core::server::execute_local_command_interactive;
-
-    let extension = load_extension(extension_id)?;
-    let ext_path = extension
-        .extension_path
-        .as_deref()
-        .ok_or_else(|| Error::config_missing_key("extension_path", Some(extension_id.into())))?;
-
-    // Resolve working directory
-    let working_dir = if let Some(cid) = component_id {
-        let comp = homeboy_core::component::load(cid)?;
-        comp.local_path.clone()
-    } else {
-        std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string())
-    };
-
-    // Build PATH with extension vendor directories prepended
-    let vendor_bin = format!("{}/vendor/bin", ext_path);
-    let node_bin = format!("{}/node_modules/.bin", ext_path);
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let enriched_path = format!("{}:{}:{}", vendor_bin, node_bin, current_path);
-
-    let env = vec![
-        ("PATH", enriched_path.as_str()),
-        (exec_context::EXTENSION_PATH, ext_path),
-        (exec_context::EXTENSION_ID, extension_id),
-    ];
-
-    let command = args.join(" ");
-    Ok(execute_local_command_interactive(
-        &command,
-        Some(&working_dir),
-        Some(&env),
-    ))
 }
 
 #[cfg(test)]
