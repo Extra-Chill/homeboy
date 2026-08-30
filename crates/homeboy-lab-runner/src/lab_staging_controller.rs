@@ -3584,6 +3584,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         let mut public_env = request.recipe.job_override_env.clone();
         public_env.extend(runtime_env);
         public_env.extend(crate::lab_env::build_lab_offload_env(&lab_metadata));
+        public_env.extend(durable_runtime_rig_registry_env(&runtime.payload.output));
         let mut secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
             &request.recipe.command.secret_env_sources,
             &request.recipe.normalized_args,
@@ -3909,6 +3910,14 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         }
         Ok(())
     }
+}
+
+fn durable_runtime_rig_registry_env(output: &Value) -> HashMap<String, String> {
+    let root = output
+        .get("rig_registry_root")
+        .and_then(Value::as_str)
+        .filter(|root| !root.trim().is_empty());
+    crate::lab::offload::lab_rig_registry_env(root)
 }
 
 /// Executes the durable phase machine. It owns lifecycle mechanics only: the
@@ -4401,8 +4410,12 @@ impl ControllerJobDriver for LabStagingDispatchDriver {
     }
     fn public_error(&self, error: &Error) -> ControllerJobPublicError {
         ControllerJobPublicError {
-            message: "Lab staging and dispatch failed".to_string(),
-            data: json!({ "classification": "lab_staging", "code": format!("{:?}", error.code) }),
+            message: error.message.clone(),
+            data: json!({
+                "classification": "lab_staging",
+                "code": error.code.as_str(),
+                "details": error.details,
+            }),
         }
     }
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
@@ -7845,6 +7858,40 @@ mod tests {
             assert_eq!(recipe.secret_env_names, ["AGENT_TOKEN"]);
             assert!(!routing_ready());
         });
+    }
+
+    #[test]
+    fn durable_dispatch_reasserts_materialized_rig_registry() {
+        let env = durable_runtime_rig_registry_env(&json!({
+            "rig_registry_root": "/runner/job-artifacts/rig-registry"
+        }));
+
+        assert_eq!(
+            env.get(homeboy_core::paths::RIG_REGISTRY_ROOT_ENV),
+            Some(&"/runner/job-artifacts/rig-registry".to_string())
+        );
+        assert!(durable_runtime_rig_registry_env(&json!({
+            "rig_registry_root": null
+        }))
+        .is_empty());
+    }
+
+    #[test]
+    fn staging_public_error_preserves_safe_typed_cause() {
+        let error = Error::validation_invalid_argument(
+            "rig",
+            "runner dispatch cannot materialize selected rig package",
+            Some("fixture-rig".to_string()),
+            None,
+        );
+        let projected = LabStagingDispatchDriver.public_error(&error);
+
+        assert_eq!(
+            projected.message,
+            "Invalid argument 'rig': runner dispatch cannot materialize selected rig package"
+        );
+        assert_eq!(projected.data["code"], "validation.invalid_argument");
+        assert_eq!(projected.data["details"]["field"], "rig");
     }
 
     #[test]
