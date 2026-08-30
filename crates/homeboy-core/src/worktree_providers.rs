@@ -1855,10 +1855,15 @@ fn plan_apply_enabled_worktree_provider_from_config_with_id(
 /// remediation leads with the command that creates the destination now and
 /// follows with the command that enables auto-creation for later runs.
 fn missing_ensure_provider_remediation(intent: &WorktreeProviderCreateIntent) -> Vec<String> {
+    let task_argument = intent
+        .task_url
+        .as_deref()
+        .map(|task_url| format!(" --task-url {task_url}"))
+        .unwrap_or_default();
     let mut actions = vec![
         format!(
-            "Create it now with: homeboy worktree create {} --branch {} --from {} --task-url {}",
-            intent.repo, intent.head, intent.base, intent.task_url
+            "Create it now with: homeboy worktree create {} --branch {} --from {}{}",
+            intent.repo, intent.head, intent.base, task_argument
         ),
         format!(
             "Then rerun with: --to-worktree {}",
@@ -2139,6 +2144,21 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
     let resolution =
         resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)
             .map_err(mark_bootstrap_postcondition_failure)?;
+    if intent.task_url.as_deref().is_some_and(|expected| {
+        resolution
+            .worktree
+            .task_url
+            .as_deref()
+            .map(normalize_task_url)
+            != Some(normalize_task_url(expected))
+    }) {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "provider postcondition did not preserve tracker ownership",
+            Some(intent.handle.clone()),
+            None,
+        ));
+    }
     if lifecycle_provider.as_deref() != Some(resolution.provider_id.as_str())
         && lifecycle_provider.is_some()
     {
@@ -2292,7 +2312,7 @@ fn expand_ensure_command(
                 .replace("{repo}", &intent.repo)
                 .replace("{base}", &intent.base)
                 .replace("{head}", &intent.head)
-                .replace("{task_url}", &intent.task_url)
+                .replace("{task_url}", intent.task_url.as_deref().unwrap_or_default())
                 .replace("{idempotency_key}", idempotency_key)
         })
         .collect()
@@ -4762,7 +4782,7 @@ mod tests {
             repo: "blocks-engine".to_string(),
             base: "origin/trunk".to_string(),
             head: "fix/12252".to_string(),
-            task_url: "https://example.test/issues/12252".to_string(),
+            task_url: Some("https://example.test/issues/12252".to_string()),
         };
         let lifecycle = WorktreeProviderLifecycleIntent {
             purpose: "agent_task_cook".to_string(),
@@ -4853,7 +4873,7 @@ mod tests {
             repo: "fixture".to_string(),
             base: "main".to_string(),
             head: head.to_string(),
-            task_url: "https://example.test/issues/1".to_string(),
+            task_url: Some("https://example.test/issues/1".to_string()),
         };
 
         let existing = plan_apply_enabled_worktree_provider_from_config(
@@ -4934,7 +4954,7 @@ mod tests {
             repo: "fixture".to_string(),
             base: "main".to_string(),
             head: "fix/placeholder".to_string(),
-            task_url: "https://example.test/issues/13349".to_string(),
+            task_url: Some("https://example.test/issues/13349".to_string()),
         };
 
         let error = plan_apply_enabled_worktree_provider_from_config(&intent, &config)
@@ -4959,7 +4979,7 @@ mod tests {
             repo: "https://example.invalid/repo.git".to_string(),
             base: "main".to_string(),
             head: "0123456789abcdef".to_string(),
-            task_url: "release/run-1".to_string(),
+            task_url: None,
         };
         let lifecycle = WorktreeProviderLifecycleIntent {
             purpose: "release_staging".to_string(),
@@ -4973,6 +4993,7 @@ mod tests {
                 "{purpose}".to_string(),
                 "{owner_run_ref}".to_string(),
                 "{cleanup_policy}".to_string(),
+                "{task_url}".to_string(),
             ],
             &intent,
             &lifecycle,
@@ -4985,7 +5006,8 @@ mod tests {
                 "fixture@release",
                 "release_staging",
                 "release/run-1",
-                "remove_on_success"
+                "remove_on_success",
+                ""
             ]
         );
 
@@ -5051,7 +5073,7 @@ mod tests {
                 repo: "repo".to_string(),
                 base: "main".to_string(),
                 head: "abc".to_string(),
-                task_url: "task".to_string(),
+                task_url: Some("task".to_string()),
             },
             &config_with_provider(provider),
         )
@@ -5126,7 +5148,7 @@ mod tests {
             repo: "homeboy".to_string(),
             base: "main".to_string(),
             head: "fix/12124".to_string(),
-            task_url: "https://github.com/Extra-Chill/homeboy/issues/12124".to_string(),
+            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/12124".to_string()),
         };
         let lifecycle = WorktreeProviderLifecycleIntent {
             purpose: "agent_task_cook".to_string(),
@@ -5301,7 +5323,7 @@ mod tests {
                 repo: "homeboy".to_string(),
                 base: "main".to_string(),
                 head: "fix/11168-wire-compiler-warning-provider".to_string(),
-                task_url: "https://github.com/Extra-Chill/homeboy/issues/11168".to_string(),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/11168".to_string()),
             },
             &config,
         )
@@ -5346,7 +5368,7 @@ mod tests {
                 repo: "homeboy".to_string(),
                 base: "main".to_string(),
                 head: "fix/11168-wire-compiler-warning-provider".to_string(),
-                task_url: "https://github.com/Extra-Chill/homeboy/issues/11168".to_string(),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/11168".to_string()),
             },
             &config,
         )
@@ -5378,7 +5400,7 @@ mod tests {
                 repo: "homeboy".to_string(),
                 base: "main".to_string(),
                 head: "fix/11168".to_string(),
-                task_url: "https://github.com/Extra-Chill/homeboy/issues/11168".to_string(),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/11168".to_string()),
             },
             &config,
         )
@@ -5416,7 +5438,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  sleep 2\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" > '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"task_url\":\"https://github.com/Extra-Chill/homeboy/issues/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  sleep 2\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" > '{}'\nfi\n",
                 state.display(),
                 workspace.display(),
                 workspace.display(),
@@ -5464,7 +5486,7 @@ mod tests {
                     dirty: "$.safety.dirty".to_string(),
                     unpushed: "$.safety.unpushed".to_string(),
                     primary: "$.safety.primary".to_string(),
-                    task_url: None,
+                    task_url: Some("$.task_url".to_string()),
                 }),
             },
         );
@@ -5475,7 +5497,7 @@ mod tests {
                 repo: "homeboy".to_string(),
                 base: "main".to_string(),
                 head: "fix/9908".to_string(),
-                task_url: "https://github.com/Extra-Chill/homeboy/issues/9908".to_string(),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/9908".to_string()),
             },
             &config,
         )
@@ -5488,6 +5510,160 @@ mod tests {
             fs::read_to_string(state).expect("creation intent"),
             "homeboy@fix-9908|homeboy|main|fix/9908|https://github.com/Extra-Chill/homeboy/issues/9908|homeboy@fix-9908:homeboy:main:fix/9908"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_tracker_survives_provider_ensure_and_resolve() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("destination");
+        let state = temp.path().join("state");
+        let script = temp.path().join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{state}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@release-staging\",\"path\":\"{workspace}\",\"branch\":\"release-staging\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  git init -b release-staging '{workspace}' >/dev/null\n  printf '%s' \"$6\" > '{state}'\nfi\n",
+                state = state.display(),
+                workspace = workspace.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    resolve_not_found_exit_codes: vec![1],
+                    ensure: Some(vec![
+                        script.display().to_string(),
+                        "create".to_string(),
+                        "{handle}".to_string(),
+                        "{repo}".to_string(),
+                        "{base}".to_string(),
+                        "{head}".to_string(),
+                        "{task_url}".to_string(),
+                        "{idempotency_key}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            },
+        );
+
+        let provision = provision_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "homeboy@release-staging".to_string(),
+                repo: "homeboy".to_string(),
+                base: "main".to_string(),
+                head: "release-staging".to_string(),
+                task_url: None,
+            },
+            &config,
+        )
+        .expect("ensure without a tracker remains valid");
+
+        assert_eq!(provision.action, "ensured");
+        assert!(provision.resolution.worktree.task_url.is_none());
+        assert_eq!(fs::read_to_string(state).expect("expanded task_url"), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reported_tracker_url_is_verified_and_mismatches_fail_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("destination");
+        let state = temp.path().join("state");
+        let script = temp.path().join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{state}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-13788\",\"path\":\"{workspace}\",\"branch\":\"fix/13788\",\"task_url\":\"https://example.test/issues/13788\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  git init -b fix/13788 '{workspace}' >/dev/null\n  touch '{state}'\nfi\n",
+                state = state.display(),
+                workspace = workspace.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+        let mapping = WorktreeProviderListResultMapping {
+            task_url: Some("$.task_url".to_string()),
+            ..worktrees_mapping()
+        };
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                mutation_timeout_ms: 30_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    resolve_not_found_exit_codes: vec![1],
+                    ensure: Some(vec![script.display().to_string(), "create".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(mapping),
+            },
+        );
+
+        let matched = provision_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "homeboy@fix-13788".to_string(),
+                repo: "homeboy".to_string(),
+                base: "main".to_string(),
+                head: "fix/13788".to_string(),
+                task_url: Some("https://example.test/issues/13788".to_string()),
+            },
+            &config,
+        )
+        .expect("matching tracker remains verified");
+        assert_eq!(
+            matched.resolution.worktree.task_url.as_deref(),
+            Some("https://example.test/issues/13788")
+        );
+
+        fs::remove_file(&state).expect("reset destination");
+        fs::remove_dir_all(&workspace).expect("reset workspace");
+        let error = provision_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "homeboy@fix-13788".to_string(),
+                repo: "homeboy".to_string(),
+                base: "main".to_string(),
+                head: "fix/13788".to_string(),
+                task_url: Some("https://example.test/issues/other".to_string()),
+            },
+            &config,
+        )
+        .expect_err("mismatched tracker must fail closed");
+        assert!(error
+            .message
+            .contains("provider postcondition did not preserve tracker ownership"));
     }
 
     #[cfg(unix)]
@@ -5564,7 +5740,7 @@ mod tests {
             repo: "homeboy".to_string(),
             base: "main".to_string(),
             head: "fix/9908".to_string(),
-            task_url: "https://github.com/Extra-Chill/homeboy/issues/9908".to_string(),
+            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/9908".to_string()),
         };
         let barrier = Arc::new(Barrier::new(2));
         let mut joins = Vec::new();
@@ -5643,7 +5819,7 @@ mod tests {
                     repo: "homeboy".to_string(),
                     base: "main".to_string(),
                     head: "fix/9908".to_string(),
-                    task_url: "https://example.test/9908".to_string(),
+                    task_url: Some("https://example.test/9908".to_string()),
                 },
                 &config,
             )
@@ -7242,7 +7418,7 @@ mod tests {
                 repo: "homeboy".to_string(),
                 base: "main".to_string(),
                 head: "fix/9908".to_string(),
-                task_url: "https://example.test/9908".to_string(),
+                task_url: Some("https://example.test/9908".to_string()),
             },
             &config,
         )

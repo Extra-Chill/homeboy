@@ -1509,7 +1509,7 @@ mod preview_tests {
                 repo: "fixture".to_string(),
                 base: "main".to_string(),
                 head: "fix/issue-12890-repo".to_string(),
-                task_url: "https://example.test/owner/repo/issues/12890".to_string(),
+                task_url: Some("https://example.test/owner/repo/issues/12890".to_string()),
             };
             let lifecycle = WorktreeProviderLifecycleIntent {
                 purpose: "agent_task_cook".to_string(),
@@ -3740,12 +3740,12 @@ fn cook_workspace_create_intent(
                     .to_string(),
             ])
         })?,
-        task_url: args.dispatch.task_url.clone().ok_or_else(|| {
+        task_url: Some(args.dispatch.task_url.clone().ok_or_else(|| {
             homeboy::core::Error::validation_missing_argument(vec![
                 "--task-url <url> is required to create a missing --to-worktree destination"
                     .to_string(),
             ])
-        })?,
+        })?),
     })
 }
 

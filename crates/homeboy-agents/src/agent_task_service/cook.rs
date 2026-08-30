@@ -8806,7 +8806,7 @@ fn provision_pending_cook_workspace(
         repo: required("repo")?.to_string(),
         base: required("base")?.to_string(),
         head: required("head")?.to_string(),
-        task_url: required("task_url")?.to_string(),
+        task_url: Some(required("task_url")?.to_string()),
     };
     let Some(lifecycle) = options
         .initial_plan

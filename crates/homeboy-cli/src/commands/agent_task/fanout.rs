@@ -3468,10 +3468,11 @@ fn with_workspace_owner_repair_commands(
             repo: provision_repo.clone(),
             base: cook_batch_from(args).to_string(),
             head: row.branch.clone(),
-            task_url: cook
-                .task_url
-                .clone()
-                .expect("generated cooks have task URLs"),
+            task_url: Some(
+                cook.task_url
+                    .clone()
+                    .expect("generated cooks have task URLs"),
+            ),
         };
         let lifecycle = homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
             purpose: "agent_task_cook".to_string(),
