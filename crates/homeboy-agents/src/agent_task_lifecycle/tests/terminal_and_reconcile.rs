@@ -30,6 +30,48 @@ struct ServiceRunnerFixture {
     commands: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
+struct IdleRunnerFixture;
+
+impl RunnerContinuationProvider for IdleRunnerFixture {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        Err(Error::internal_unexpected("not used by idle fixture"))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+        RunnerAuthority::Configured
+    }
+
+    fn runner_live_job_authority(&self, _runner_id: &str) -> RunnerLiveJobAuthority {
+        RunnerLiveJobAuthority::Idle
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        Err(Error::internal_unexpected("not used by idle fixture"))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        Err(Error::internal_unexpected("not used by idle fixture"))
+    }
+}
+
 static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn with_strict_config_lock(test: impl FnOnce()) {
@@ -1516,6 +1558,8 @@ fn accepted_runner_cancellation_fails_closed_when_daemon_cannot_be_reached() {
         },
     )
     .expect("accepted runner handoff");
+
+    let _runner = RunnerContinuationTestGuard::install(Box::new(IdleRunnerFixture));
 
     let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
         |_runner_id, _runner_job_id, _durable_run_id| {
