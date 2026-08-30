@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -141,6 +143,10 @@ for (const file of exampleFiles) {
 }
 
 const nodeManifest = JSON.parse(fs.readFileSync(path.join(exampleDir, 'nodejs.json'), 'utf8'));
+const packagedNodeManifest = JSON.parse(
+	fs.readFileSync(path.join(repoRoot, 'nodejs', 'dependency-adapters', 'examples', 'nodejs.json'), 'utf8')
+);
+assert.deepEqual(packagedNodeManifest, nodeManifest, 'packaged Node.js adapter matches the canonical manifest');
 assert.deepEqual(nodeManifest.lockfile_priority, ['pnpm-lock.yaml', 'yarn.lock', 'npm-shrinkwrap.json', 'package-lock.json']);
 assert.deepEqual(
 	nodeManifest.package_managers.map((manager) => manager.id),
@@ -152,6 +158,35 @@ assert.deepEqual(
 	['npm-shrinkwrap.json', 'package-lock.json'],
 	'npm recognizes both authoritative lockfile names'
 );
+
+const npmStatusCommand = nodeManifest.package_managers.find((manager) => manager.id === 'npm').commands.status.command;
+assert.equal(npmStatusCommand, 'npm ci --dry-run --ignore-scripts');
+
+const npmFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-npm-status-'));
+try {
+	fs.writeFileSync(
+		path.join(npmFixture, 'package.json'),
+		JSON.stringify({
+			name: 'npm-status-fixture',
+			version: '1.0.0',
+			scripts: { prepare: "node -e \"require('./node_modules/uninstalled-build-tool')\"" },
+		})
+	);
+	fs.writeFileSync(
+		path.join(npmFixture, 'package-lock.json'),
+		JSON.stringify({
+			name: 'npm-status-fixture',
+			version: '1.0.0',
+			lockfileVersion: 3,
+			requires: true,
+			packages: { '': { name: 'npm-status-fixture', version: '1.0.0', hasInstallScript: true } },
+		})
+	);
+	const npmStatus = spawnSync(npmStatusCommand, { cwd: npmFixture, encoding: 'utf8', shell: true });
+	assert.equal(npmStatus.status, 0, `npm status skips lifecycle scripts: ${npmStatus.stderr}`);
+} finally {
+	fs.rmSync(npmFixture, { recursive: true, force: true });
+}
 
 const composerManifest = JSON.parse(fs.readFileSync(path.join(exampleDir, 'composer.json'), 'utf8'));
 assert.deepEqual(composerManifest.lockfile_priority, ['composer.lock']);
