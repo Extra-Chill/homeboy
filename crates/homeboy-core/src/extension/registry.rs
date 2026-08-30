@@ -1,4 +1,4 @@
-//! Extension agent-runtime provider-discovery validation hook.
+//! Extension provider registration and discovery validation.
 //!
 //! When an extension is installed or repaired, core verifies that every
 //! agent-runtime executor provider the extension declares is actually

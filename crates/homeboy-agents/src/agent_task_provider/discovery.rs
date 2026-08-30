@@ -265,7 +265,7 @@ fn expected_agent_runtime_provider_refs(
 /// Agent-task implementation of core's extension provider-discovery validator.
 struct ExtensionProviderDiscoveryValidatorImpl;
 
-impl homeboy_core::extension_provider_discovery::ExtensionProviderDiscoveryValidator
+impl homeboy_core::extension::registry::ExtensionProviderDiscoveryValidator
     for ExtensionProviderDiscoveryValidatorImpl
 {
     fn validate_installed_extension_provider_discovery(&self, extension_id: &str) -> Result<()> {
@@ -277,9 +277,9 @@ impl homeboy_core::extension_provider_discovery::ExtensionProviderDiscoveryValid
 /// install/repair can verify declared agent-runtime providers are discoverable
 /// without depending on the agent-task subsystem.
 pub fn register() {
-    homeboy_core::extension_provider_discovery::register_extension_provider_discovery_validator(
-        Box::new(ExtensionProviderDiscoveryValidatorImpl),
-    );
+    homeboy_core::extension::registry::register_extension_provider_discovery_validator(Box::new(
+        ExtensionProviderDiscoveryValidatorImpl,
+    ));
 }
 
 #[cfg(test)]

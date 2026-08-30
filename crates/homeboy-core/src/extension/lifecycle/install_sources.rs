@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use homeboy_core::config::{self, from_str};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension_provider_discovery::validate_installed_extension_provider_discovery;
+use homeboy_core::extension::registry::validate_installed_extension_provider_discovery;
 use homeboy_core::git;
 use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;

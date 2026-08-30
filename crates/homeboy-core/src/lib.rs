@@ -102,7 +102,6 @@ pub mod execution;
 pub mod execution_contract;
 pub mod expand;
 pub mod extension;
-pub mod extension_provider_discovery;
 pub mod extension_update_check;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.
