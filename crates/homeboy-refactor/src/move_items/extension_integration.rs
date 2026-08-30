@@ -5,8 +5,9 @@ use std::path::Path;
 
 use homeboy_core::{
     self,
-    extension::{grammar, grammar_items, ExtensionManifest, ParsedItem},
+    extension::{ExtensionManifest, ParsedItem},
 };
+use homeboy_engine_primitives::grammar::{self, items as grammar_items};
 
 /// Find a refactor-capable extension for a file based on its extension.
 pub(crate) fn find_refactor_extension(file_path: &str) -> Option<ExtensionManifest> {

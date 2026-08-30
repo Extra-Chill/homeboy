@@ -6,10 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use homeboy_core::Result;
-use homeboy_core::{
-    self,
-    extension::{grammar, grammar_items, ParsedItem},
-};
+use homeboy_core::{self, extension::ParsedItem};
+use homeboy_engine_primitives::grammar::{self, items as grammar_items};
 
 use super::move_items::{MoveOptions, MoveResult};
 
