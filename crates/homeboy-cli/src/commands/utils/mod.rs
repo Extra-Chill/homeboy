@@ -5,7 +5,5 @@ pub mod output;
 pub mod resolve;
 pub mod resource_policy;
 pub mod response;
-#[cfg(test)]
-mod scope_boundary_tests;
 pub mod tty;
 pub mod watch;
