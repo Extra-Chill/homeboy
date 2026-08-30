@@ -12,7 +12,13 @@ pub(crate) fn lab_offload_command_prefix(
     _source_path: &Path,
     homeboy_path: &str,
 ) -> LabOffloadCommandPrefix {
-    let argv = vec![homeboy_path.to_string()];
+    // The runner already owns this execution. Keep nested agent-task and other
+    // hot commands from applying controller resource policy and offloading again.
+    let argv = vec![
+        homeboy_path.to_string(),
+        "--placement".to_string(),
+        "local".to_string(),
+    ];
     let required_tools = required_tools_for_command_prefix(&argv);
 
     LabOffloadCommandPrefix {
@@ -49,7 +55,14 @@ mod tests {
 
         let prefix = lab_offload_command_prefix(dir.path(), "/usr/local/bin/homeboy");
 
-        assert_eq!(prefix.argv, vec!["/usr/local/bin/homeboy".to_string()]);
+        assert_eq!(
+            prefix.argv,
+            vec![
+                "/usr/local/bin/homeboy".to_string(),
+                "--placement".to_string(),
+                "local".to_string(),
+            ]
+        );
         assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
     }
 
@@ -59,7 +72,14 @@ mod tests {
 
         let prefix = lab_offload_command_prefix(dir.path(), "homeboy");
 
-        assert_eq!(prefix.argv, vec!["homeboy".to_string()]);
+        assert_eq!(
+            prefix.argv,
+            vec![
+                "homeboy".to_string(),
+                "--placement".to_string(),
+                "local".to_string(),
+            ]
+        );
         assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
     }
 }

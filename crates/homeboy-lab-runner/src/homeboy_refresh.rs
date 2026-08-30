@@ -773,6 +773,7 @@ pub fn refresh_homeboy_binary(
     phase_summary.push(refresh_phase("identity_verification", true, 0));
     phase_summary.push(refresh_phase("bootstrap_promotion", true, 0));
     phase_summary.push(refresh_phase("configuration_promotion", true, 0));
+    super::runner_probe_gate::invalidate_runner_probes(&plan.runner_id);
     let identity = bootstrap.identity.clone();
     let updated_fields = bootstrap.updated_fields.clone();
     let rollback = bootstrap.rollback.clone();

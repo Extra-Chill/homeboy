@@ -1243,12 +1243,40 @@ esac
         )
         .expect("enable local runner");
 
+        crate::runner_probe_gate::invalidate_runner_probes("local-runner");
+        let probes = Arc::new(AtomicUsize::new(0));
+        let stale_probes = Arc::clone(&probes);
+        let cached: String = crate::runner_probe_gate::deduplicated_probe(
+            "local-runner",
+            "connect-invalidation",
+            "same-runtime-probe",
+            move || {
+                stale_probes.fetch_add(1, Ordering::SeqCst);
+                Ok("missing".to_string())
+            },
+        )
+        .expect("cache pre-connect capability answer");
+        assert_eq!(cached, "missing");
+
         let (report, exit_code) =
             connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
                 .expect("connect result");
 
         assert_eq!(exit_code, 0);
         assert!(report.connected);
+        let fresh_probes = Arc::clone(&probes);
+        let refreshed: String = crate::runner_probe_gate::deduplicated_probe(
+            "local-runner",
+            "connect-invalidation",
+            "same-runtime-probe",
+            move || {
+                fresh_probes.fetch_add(1, Ordering::SeqCst);
+                Ok("present".to_string())
+            },
+        )
+        .expect("probe post-connect capability answer");
+        assert_eq!(refreshed, "present");
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
         assert_eq!(
             report.remote_daemon_address.as_deref(),
             Some(expected_address.as_str())
