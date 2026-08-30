@@ -208,6 +208,16 @@ pub(crate) fn render_activity_summary(payload: &serde_json::Value) -> Option<Str
             truncate(kind, 18),
             updated
         ));
+        if let Some(failure) = item.get("failure") {
+            let code = failure
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(|code| format!(" [{code}]"))
+                .unwrap_or_default();
+            if let Some(message) = failure.get("message").and_then(serde_json::Value::as_str) {
+                lines.push(format!("  failure{code}: {message}"));
+            }
+        }
         if let Some(actions) = item
             .get("next_actions")
             .and_then(serde_json::Value::as_array)
@@ -706,6 +716,7 @@ mod tests {
                 label: "show".to_string(),
                 command: "homeboy activity show run-1".to_string(),
             }],
+            failure: None,
         }
     }
 
@@ -782,6 +793,36 @@ mod tests {
                 .contains("activity: total=3 executing=0 (running=0 queued=0) open_resources=3"),
             "summary line: {zero_executing}"
         );
+    }
+
+    #[test]
+    fn summary_presents_controller_job_failure_cause() {
+        let rendered = render_activity_summary(&json!({
+            "counts": {
+                "total": 1,
+                "active": 0,
+                "running": 0,
+                "queued": 0,
+                "failed": 1,
+                "stale": 0,
+                "open_resources": 0
+            },
+            "items": [{
+                "id": "job-1",
+                "state": "failed",
+                "kind": "controller.lab.staging-dispatch",
+                "created_at": "2026-08-30T00:00:00Z",
+                "failure": {
+                    "message": "runner dispatch cannot materialize the selected rig",
+                    "code": "validation.invalid_argument"
+                }
+            }]
+        }))
+        .expect("summary");
+
+        assert!(rendered.contains(
+            "failure [validation.invalid_argument]: runner dispatch cannot materialize the selected rig"
+        ));
     }
 
     #[test]

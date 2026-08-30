@@ -72,6 +72,7 @@ fn item_from_workspace(workspace: WorktreeProviderWorkspace) -> ActivityItem {
         source_projections: Vec::new(),
         state_conflicts: Vec::new(),
         next_actions: Vec::new(),
+        failure: None,
     }
 }
 

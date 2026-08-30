@@ -1429,8 +1429,26 @@ fn lab_offload_rig_ids(args: &[String]) -> Vec<String> {
         }
         if arg == "rig" && iter.peek().map(|value| value.as_str()) == Some("check") {
             iter.next();
-            if let Some(rig_id) = iter.next().filter(|value| !value.starts_with('-')) {
-                push_unique(&mut rig_ids, rig_id.to_string());
+            let target = iter.next().filter(|value| !value.starts_with('-'));
+            let mut remaining = iter.clone();
+            let mut selected_id = None;
+            while let Some(value) = remaining.next() {
+                if value == "--" {
+                    break;
+                }
+                if value == "--id" {
+                    selected_id = remaining.next().cloned();
+                    break;
+                }
+                if let Some(value) = value.strip_prefix("--id=") {
+                    if !value.is_empty() {
+                        selected_id = Some(value.to_string());
+                    }
+                    break;
+                }
+            }
+            if let Some(rig_id) = selected_id.or_else(|| target.cloned()) {
+                push_unique(&mut rig_ids, rig_id);
             }
             continue;
         }
@@ -2989,6 +3007,34 @@ mod tests {
         assert_eq!(
             lab_offload_rig_ids(&args),
             vec!["static-site-fixture-matrix".to_string()]
+        );
+    }
+
+    #[test]
+    fn lab_offload_rig_ids_uses_selected_id_for_rig_check_package_target() {
+        let args = vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "check".to_string(),
+            "/controller/source-package".to_string(),
+            "--id".to_string(),
+            "mdi-native".to_string(),
+            "--path".to_string(),
+            "/controller/checkout".to_string(),
+        ];
+
+        assert_eq!(lab_offload_rig_ids(&args), vec!["mdi-native".to_string()]);
+
+        let equals_args = vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "check".to_string(),
+            "/controller/source-package".to_string(),
+            "--id=mdi-sqlite".to_string(),
+        ];
+        assert_eq!(
+            lab_offload_rig_ids(&equals_args),
+            vec!["mdi-sqlite".to_string()]
         );
     }
 
