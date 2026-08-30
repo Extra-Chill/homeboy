@@ -24,7 +24,7 @@ fn run_snapshot_fence_test_hook() {
 
 use super::harvest::{
     git_is_repository, git_output_raw, git_output_with_env, git_status_ignoring_runner_metadata,
-    RUNNER_METADATA_EXCLUDE_PATHSPECS,
+    git_status_ignoring_snapshot_excludes, RUNNER_METADATA_EXCLUDE_PATHSPECS,
 };
 use super::*;
 
@@ -114,6 +114,13 @@ impl HarvestExecutionContext {
 
     pub fn snapshot_signaled(&self) -> bool {
         self.source_snapshot.is_some() || self.lab_offload.is_some()
+    }
+
+    fn snapshot_sync_excludes(&self) -> &[String] {
+        self.source_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.sync_excludes.as_slice())
+            .unwrap_or(&[])
     }
 
     fn source_snapshot(
@@ -359,7 +366,7 @@ pub(super) fn prepare_committed_harvest(
             message: "Git top-level does not exactly match the managed workspace root".to_string(),
         });
     }
-    let status = git_status_ignoring_runner_metadata(root)?;
+    let status = git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
     let candidate_baseline = if status.trim().is_empty() {
         None
     } else if let Some(baseline) = verified_initial_cook_candidate_baseline(root, request)? {
@@ -376,7 +383,8 @@ pub(super) fn prepare_committed_harvest(
     // observation is only a candidate baseline, never authorization to create
     // the provider attempt worktree.
     let source_head = git_output(root, &["rev-parse", "HEAD"])?;
-    let snapshot_status = git_status_ignoring_runner_metadata(root)?;
+    let snapshot_status =
+        git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
     let base_sha =
         pinned_cook_workspace_base_snapshot(request, root, &source_head, &snapshot_status)?
             .unwrap_or(source_head);
@@ -651,7 +659,7 @@ fn validate_derived_cook_baseline(
             "derived baseline capability does not bind this workspace and task".to_string(),
         ));
     }
-    let status = git_status_ignoring_runner_metadata(root)?;
+    let status = git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
     if !status.is_empty() {
         return Err(HarvestError::DirtyWorkspace { status });
     }
@@ -1157,6 +1165,53 @@ mod tests {
         assert!(
             status.contains("user-output.txt"),
             "unrelated untracked files must still fail the cleanliness check: {status}"
+        );
+    }
+
+    #[test]
+    fn excluded_tracked_context_is_clean_but_real_drift_is_not() {
+        let workspace = tempfile::tempdir().expect("workspace repository");
+        git(workspace.path(), &["init", "-b", "main"]);
+        fs::write(workspace.path().join("tracked.txt"), "base").expect("base file");
+        fs::write(workspace.path().join("AGENTS.md"), "injected").expect("context file");
+        git(workspace.path(), &["add", "tracked.txt", "AGENTS.md"]);
+        git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        fs::remove_file(workspace.path().join("AGENTS.md")).expect("omit excluded context");
+        let excludes = vec!["AGENTS.md".to_string()];
+        assert!(
+            git_status_ignoring_snapshot_excludes(workspace.path(), &excludes)
+                .expect("excluded context status")
+                .is_empty(),
+            "omitted tracked context must not dirty an exclusion-aware snapshot"
+        );
+
+        fs::write(workspace.path().join("tracked.txt"), "changed").expect("tracked drift");
+        let status = git_status_ignoring_snapshot_excludes(workspace.path(), &excludes)
+            .expect("tracked drift status");
+        assert!(
+            status.contains("tracked.txt"),
+            "tracked source drift must still fail closed: {status}"
+        );
+        git(workspace.path(), &["checkout", "--", "tracked.txt"]);
+
+        fs::write(workspace.path().join("provider-output.txt"), "unexpected")
+            .expect("untracked drift");
+        let status = git_status_ignoring_snapshot_excludes(workspace.path(), &excludes)
+            .expect("untracked drift status");
+        assert!(
+            status.contains("provider-output.txt"),
+            "untracked source drift must still fail closed: {status}"
         );
     }
 
