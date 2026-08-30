@@ -1430,7 +1430,7 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
     );
     assert_eq!(
         supervised.metadata["detached_cook_handoff"]["reattach_command"],
-        format!("homeboy agent-task status {handoff_cook_id} --full")
+        format!("homeboy agent-task status {handoff_cook_id}")
     );
     // A supervised admission is live without consulting the process table, so
     // the predicates are decided by the record alone.
@@ -2333,7 +2333,7 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
         attempt_run_id
     );
     assert_eq!(
-        persisted_status_in_store(&seeded, cook_id)
+        status_in_store(&seeded, cook_id)
             .expect("persisted status")
             .run_id,
         attempt_run_id
@@ -2431,7 +2431,7 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
         resolve_run_id_in_store(&empty, cook_id).expect("unresolvable alias echoes the id"),
         cook_id
     );
-    assert!(persisted_status_in_store(&empty, cook_id).is_err());
+    assert!(status_in_store(&empty, cook_id).is_err());
     assert!(durable_local_read_in_store(&empty, cook_id).is_err());
     assert!(exact_durable_local_read_in_store(&empty, attempt_run_id).is_err());
     assert!(load_plan_in_store(&empty, cook_id).is_err());

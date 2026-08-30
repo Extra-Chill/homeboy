@@ -14,9 +14,7 @@ use crate::agent_task::{
     AgentTaskFailureClassification, AgentTaskOutcomeStatus, AgentTaskRequest,
     AgentTaskWorkspaceMode,
 };
-use crate::agent_task_lifecycle::{
-    self, AgentTaskRunArtifacts, AgentTaskRunRecord, AgentTaskRunStatus,
-};
+use crate::agent_task_lifecycle::{self, AgentTaskRunArtifacts, AgentTaskRunRecord};
 use crate::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
 };
@@ -986,7 +984,7 @@ fn continuation_skip(
     });
     AgentTaskRunNextSkip {
         remediation: format!(
-            "inspect retained diagnostics with: homeboy agent-task status <run-id> --exact --full"
+            "inspect retained diagnostics with: homeboy agent-task diagnose <run-id> --full"
         ),
         run_id,
         submitted_at,
@@ -1456,7 +1454,7 @@ fn apply_cook_timeout_override(
             "timed-out provider or its deferred cleanup still owns the execution; wait for durable terminal ownership before retrying",
             Some(source.run_id.clone()),
             Some(vec![format!(
-                "homeboy agent-task status {} --exact --full",
+                "homeboy agent-task diagnose {} --full",
                 source.run_id
             )]),
         ));
@@ -1469,7 +1467,7 @@ fn apply_cook_timeout_override(
             "timed-out provider still owns deferred cleanup; wait for its cleanup receipt before retrying",
             Some(source.run_id.clone()),
             Some(vec![format!(
-                "homeboy agent-task status {} --exact --full",
+                "homeboy agent-task diagnose {} --full",
                 source.run_id
             )]),
         ));
@@ -2275,11 +2273,8 @@ pub struct AgentTaskRetryServiceResult {
     pub created: bool,
 }
 
-pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    agent_task_lifecycle::reconcile_status(run_id)
-}
-
-/// [`status`] with explicit control over whether the read may reach the runner.
+/// Reconcile status with explicit control over whether the operation may reach
+/// the runner.
 ///
 /// Read-only inspection must stay answerable while the Lab is wedged (#10418).
 pub fn reconcile_status_with_options(
@@ -2289,9 +2284,9 @@ pub fn reconcile_status_with_options(
     agent_task_lifecycle::reconcile_status_with_options(run_id, options)
 }
 
-/// Return the controller's durable record without runner liveness enrichment.
-pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    agent_task_lifecycle::persisted_status(run_id)
+/// Return the canonical non-reconciling control-plane run resource.
+pub fn control_plane_run(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneRun> {
+    crate::orchestration::run_from_current_environment(run_id)
 }
 
 /// Resolve the durable substantive candidate for a logical Cook reader.
@@ -2299,13 +2294,6 @@ pub fn select_cook_candidate(
     cook_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskCookCandidateSelection> {
     agent_task_lifecycle::select_cook_candidate(cook_id)
-}
-
-pub fn run_status(
-    run_id: &str,
-    cursor: Option<homeboy_control_plane_contract::EventCursor>,
-) -> Result<AgentTaskRunStatus> {
-    agent_task_lifecycle::run_status(run_id, cursor)
 }
 
 pub fn logs(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {

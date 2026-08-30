@@ -50,27 +50,9 @@ pub struct ValidatePlanArgs {
 pub struct LifecycleReadArgs {
     /// Durable run or Cook ID to inspect.
     pub run_id: String,
-    /// Inspect this exact lifecycle record instead of resolving a Cook ID to its
-    /// current attempt.
-    #[arg(long, conflicts_with = "bridge")]
-    pub exact: bool,
-    /// Read through the runner bridge instead of controller-only state.
-    #[arg(long)]
-    pub bridge: bool,
-    /// Resume bridged events after this cursor.
-    #[arg(long, value_name = "CURSOR", requires = "bridge")]
-    pub since_cursor: Option<String>,
     /// Return complete lifecycle details instead of the bounded summary.
-    #[arg(long, conflicts_with = "bridge")]
+    #[arg(long)]
     pub full: bool,
-    /// Answer from durable controller state only, without reaching the runner.
-    ///
-    /// Read-only inspection must stay usable while a Lab runner is wedged
-    /// (#10418). A controller-local run is always answered locally; this flag
-    /// extends that to runner-backed runs, returning a partial result labelled
-    /// with `runner_probe.skipped_reason` instead of blocking on the runner.
-    #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
-    pub no_runner_probe: bool,
 }
 
 #[cfg_attr(test, derive(Default))]
@@ -79,30 +61,15 @@ pub struct StatusArgs {
     /// Durable run or Cook ID whose status to inspect.
     pub run_id: String,
     /// Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt.
-    #[arg(long, conflicts_with = "bridge")]
-    pub exact: bool,
-    /// Return canonical bridged events beside the durable run projection.
     #[arg(long)]
-    pub bridge: bool,
-    /// Resume canonical bridged events after this cursor.
-    #[arg(long, value_name = "CURSOR", requires = "bridge")]
-    pub since_cursor: Option<String>,
-    /// Return complete status details instead of the bounded summary.
-    #[arg(long, conflicts_with = "bridge")]
-    pub full: bool,
-    /// Present `--full` as a bounded, outcome-first summary with drill-down refs.
-    #[arg(long, requires = "full", conflicts_with = "bridge")]
-    pub bounded: bool,
+    pub exact: bool,
     /// Exit nonzero when the inspected Cook needs follow-up action.
     ///
     /// Normal status reads report their own success independently from the
     /// subject lifecycle state. This preserves the former exit-code behavior
     /// for scripts that deliberately gate on an actionable Cook.
-    #[arg(long, conflicts_with = "bridge")]
+    #[arg(long)]
     pub strict_subject_exit: bool,
-    /// Answer from durable controller state only, without reaching the runner.
-    #[arg(long = "no-runner-probe", conflicts_with = "bridge")]
-    pub no_runner_probe: bool,
     /// Follow this durable status until it reaches a terminal state or the timeout expires.
     #[arg(long)]
     pub watch: bool,
@@ -124,18 +91,6 @@ pub struct StatusArgs {
     pub timeout: String,
 }
 
-impl From<StatusArgs> for LifecycleReadArgs {
-    fn from(args: StatusArgs) -> Self {
-        Self {
-            run_id: args.run_id,
-            exact: args.exact,
-            bridge: args.bridge,
-            since_cursor: args.since_cursor,
-            full: args.full,
-            no_runner_probe: args.no_runner_probe,
-        }
-    }
-}
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     /// Durable run or Cook ID whose logs to retrieve.
@@ -341,24 +296,29 @@ mod tests {
     }
 
     #[test]
-    fn bridge_status_accepts_a_positional_attempt_without_exact() {
-        let cli = Cli::try_parse_from([
+    fn status_rejects_the_removed_bridge_flag() {
+        assert!(Cli::try_parse_from([
             "homeboy",
             "agent-task",
             "status",
             "cook-attempt-2",
             "--bridge",
         ])
-        .expect("bridge status with positional attempt parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Status(args) = agent_task.command else {
-            panic!("expected status command");
-        };
-        assert_eq!(args.run_id, "cook-attempt-2");
-        assert!(args.bridge);
-        assert!(!args.exact);
+        .is_err());
+    }
+
+    #[test]
+    fn status_rejects_removed_projection_flags() {
+        for flag in ["--full", "--bounded", "--no-runner-probe", "--since-cursor"] {
+            let mut argv = vec!["homeboy", "agent-task", "status", "run-a", flag];
+            if flag == "--since-cursor" {
+                argv.push("1");
+            }
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "accepted removed {flag}"
+            );
+        }
     }
 
     #[test]

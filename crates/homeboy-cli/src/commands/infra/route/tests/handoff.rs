@@ -1205,7 +1205,7 @@ fn every_generated_next_action_command_round_trips_to_the_record_owner() {
     // these strings is emitted verbatim by a diagnosis/status projection.
     let inferred = connected_default_lab_runner();
     for generated in [
-        format!("homeboy agent-task status {OWNER_LOCAL_RUN_ID} --full"),
+        format!("homeboy agent-task status {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task logs {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID} --full"),

@@ -45,7 +45,7 @@ fn event_page_in_store(
 ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
     // Logs are terminal inspection, not runner reconciliation. The durable
     // record remains readable when a runner is unavailable or wedged.
-    let record = persisted_status_in_store(lifecycle_store, run_id)?;
+    let record = status_in_store(lifecycle_store, run_id)?;
     let run_id = record.run_id.clone();
     // `run_id` is already the resolved identity, so this is the store's own
     // exact aggregate read rather than the alias-resolving lifecycle_ops one.

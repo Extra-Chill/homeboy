@@ -392,7 +392,7 @@ fn status_diagnostics_surface_failed_child_run_root_cause() {
         );
         assert_eq!(
             failed.next_command,
-            "homeboy agent-task status agent-task-child-1 --full"
+            "homeboy agent-task status agent-task-child-1"
         );
     });
 }

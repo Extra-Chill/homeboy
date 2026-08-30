@@ -750,8 +750,7 @@ fn child_workload_placement(fanout_id: &str) -> Option<ChildWorkloadPlacement> {
         .child_runs
         .iter()
         .filter_map(|child| {
-            let run =
-                homeboy::agents::agent_tasks::lifecycle::persisted_status(&child.run_id).ok()?;
+            let run = homeboy::agents::agent_tasks::lifecycle::status(&child.run_id).ok()?;
             Some(ChildPlacement {
                 task_id: child.task_id.clone(),
                 run_id: child.run_id.clone(),

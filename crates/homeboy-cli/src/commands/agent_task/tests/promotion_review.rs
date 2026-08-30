@@ -329,11 +329,11 @@ fn full_review_excludes_unrelated_worktree_cleanup_inventory() {
         );
         assert_eq!(
             review_value["cleanup_evidence"][0]["command"],
-            format!("homeboy agent-task status {run_id} --full")
+            format!("homeboy agent-task status {run_id}")
         );
         assert_eq!(
             review_value["cleanup_evidence"][0]["export_command"],
-            format!("homeboy agent-task status {run_id} --full --output <path>")
+            format!("homeboy agent-task status {run_id} --output <path>")
         );
         assert!(!review_value.to_string().contains("unrelated-worktree-58"));
         let persisted =
@@ -530,30 +530,24 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             "{all_evidence_value:#}"
         );
 
-        let (bridge_value, _) = status(StatusArgs {
+        let (canonical_value, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            bridge: true,
-            since_cursor: Some("0".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
-        .expect("Cook bridge status selects the candidate");
-        assert_eq!(bridge_value["schema"], "homeboy/agent-task-run-status/v3");
-        assert_eq!(bridge_value["control_plane_run"]["run"], candidate_run_id);
-        assert_eq!(
-            bridge_value["candidate_selection"]["run_id"],
-            candidate_run_id
-        );
+        .expect("Cook status selects the candidate");
+        assert_eq!(canonical_value["run"], candidate_run_id);
 
         let (attempt_status, _) = status(StatusArgs {
             run_id: retry_run_id.to_string(),
+            exact: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
         .expect("exact attempt remains directly addressable");
-        assert_eq!(attempt_status["run_id"], retry_run_id);
+        assert_eq!(attempt_status["run"], retry_run_id);
     });
 }
 

@@ -2986,8 +2986,7 @@ mod tests {
         let (store, lifecycle_store) = rooted_stores(&context);
         let (recipe, _) = persist_recipe_run(&store, &lifecycle_store);
         let mut record =
-            crate::agent_task_lifecycle::persisted_status_in_store(&lifecycle_store, "run")
-                .unwrap();
+            crate::agent_task_lifecycle::status_in_store(&lifecycle_store, "run").unwrap();
         record.ensure_metadata_object().remove("cook_id");
 
         // `validate_recipe_attempt_record` is exactly this call with the
@@ -3026,9 +3025,7 @@ mod tests {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let (store, lifecycle_store) = rooted_stores(&context);
         let (mut recipe, _) = persist_recipe_run(&store, &lifecycle_store);
-        let record =
-            crate::agent_task_lifecycle::persisted_status_in_store(&lifecycle_store, "run")
-                .unwrap();
+        let record = crate::agent_task_lifecycle::status_in_store(&lifecycle_store, "run").unwrap();
         recipe.attempts[0].plan.tasks[0].workspace.base_ref = Some("other-base".to_string());
 
         let error = validate_recipe_attempt_record_with_controller_plan(

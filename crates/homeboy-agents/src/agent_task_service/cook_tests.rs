@@ -722,7 +722,7 @@ fn run_next_redacts_poisoned_recipe_dispatcher_kind() {
         );
         assert!(!rendered.contains(POISONED_KIND));
         assert!(rendered.contains("cook_continuation_unsupported_dispatcher"));
-        assert!(rendered.contains("agent-task status <run-id> --exact --full"));
+        assert!(rendered.contains("agent-task diagnose <run-id> --full"));
     });
 }
 
@@ -2099,7 +2099,7 @@ fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
 }
 
 #[test]
-fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
+fn candidate_selection_uses_the_winner_for_review_form() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -2188,33 +2188,6 @@ fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
         selected_candidate_task_id_in_store(&lifecycle_store, run_id).unwrap(),
         Some("winner".to_string())
     );
-    let status = agent_task_lifecycle::run_status_in_store(&lifecycle_store, run_id, None).unwrap();
-    let candidate = status
-        .candidate
-        .as_ref()
-        .expect("candidate status projection");
-    assert_eq!(candidate.policy, plan.options.candidate_completion);
-    assert_eq!(candidate.selected_task_id.as_deref(), Some("winner"));
-    assert_eq!(candidate.candidates.len(), 2);
-    assert_eq!(
-        candidate.cancellation_supervision,
-        "scheduler_deferred_cleanup"
-    );
-    assert_eq!(
-        candidate.promotion_action.as_deref(),
-        Some("promote_selected_candidate_only")
-    );
-    let serialized = serde_json::to_value(&status).unwrap();
-    assert_eq!(serialized["candidate"]["policy"], "first_green");
-    assert_eq!(serialized["candidate"]["deadline_timeout_ms"], Value::Null);
-    let mut legacy_json = serialized;
-    legacy_json
-        .as_object_mut()
-        .expect("status object")
-        .remove("candidate");
-    let legacy: crate::agent_task_lifecycle::AgentTaskRunStatus =
-        serde_json::from_value(legacy_json).unwrap();
-    assert!(legacy.candidate.is_none());
 }
 
 #[test]
@@ -21699,7 +21672,7 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
             assert_eq!(
                 context["legal_actions"],
                 serde_json::json!([
-                    { "action": "status", "command": format!("homeboy agent-task status {} --full", options.identity.initial_run_id) },
+                    { "action": "status", "command": format!("homeboy agent-task status {}", options.identity.initial_run_id) },
                     { "action": "diagnose", "command": format!("homeboy agent-task diagnose {}", options.identity.initial_run_id) },
                     { "action": "resume", "command": format!("homeboy agent-task cook-continue {}", options.identity.initial_run_id) },
                 ]),

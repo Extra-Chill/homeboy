@@ -829,7 +829,7 @@ pub fn fanout_dependency_graph_with_finalization_statuses_in_store(
     refresh_dependency_graph_with_finalization_statuses(
         &mut batch,
         Some(statuses),
-        &mut agent_task_lifecycle::persisted_status,
+        &mut agent_task_lifecycle::status,
     )
 }
 
@@ -1092,7 +1092,7 @@ fn artifacts_in_store(
     let report = reconcile_status_in_store(
         store,
         batch_id,
-        |run_id| agent_task_lifecycle::persisted_status_in_store(lifecycle_store, run_id),
+        |run_id| agent_task_lifecycle::status_in_store(lifecycle_store, run_id),
         |run_id| {
             agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
                 lifecycle_store,
@@ -1475,7 +1475,7 @@ impl AgentTaskBatchStore {
     pub fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         self.status_with(
             batch_id,
-            agent_task_lifecycle::persisted_status,
+            agent_task_lifecycle::status,
             agent_task_lifecycle::terminal_artifact_projection_readiness_bounded,
             agent_task_lifecycle::run_record_exists_readonly,
         )

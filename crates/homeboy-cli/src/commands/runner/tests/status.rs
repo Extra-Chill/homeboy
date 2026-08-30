@@ -592,7 +592,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
 
     let commands = runner_status_operator_commands(&report);
     let serialized = serde_json::to_string(&commands).expect("serialize orphan commands");
-    assert!(serialized.contains("homeboy agent-task status run-123 --full"));
+    assert!(serialized.contains("homeboy agent-task status run-123"));
     assert!(serialized.contains("homeboy agent-task retry run-123"));
     assert!(!serialized.contains("runner job logs"));
 }
