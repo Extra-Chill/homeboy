@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.365.0] - 2026-08-30
+
+### Added
+- add plan-bound worktree retention
+
+### Changed
+- Add native worktree import and finalization commands
+- Remove extension merge re-export
+- Remove unused extension store re-exports
+- Remove extension execution-context re-exports
+- remove dead work error projections
+- delete legacy cook work drivers
+- Return canonical event pages from logs
+
 ## [0.364.21] - 2026-08-30
 
 ### Changed
