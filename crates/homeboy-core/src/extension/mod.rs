@@ -1,6 +1,3 @@
-pub use homeboy_core::extension_update_check::{
-    check_update_available, is_git_url, UpdateAvailable,
-};
 pub mod audit_compiler_warning_provider;
 pub mod audit_fingerprint_script_provider;
 pub mod audit_grammar_source_provider;
