@@ -201,7 +201,7 @@ fn manifest_parses_declared_structured_sidecars() {
     }))
     .unwrap();
 
-    let sidecars = super::manifest::structured_sidecars(&manifest);
+    let sidecars = super::catalog::structured_sidecars(&manifest);
     assert_eq!(sidecars.len(), 7);
     assert_eq!(sidecars[0].name, "findings");
     assert_eq!(sidecars[0].path, "findings.json");
@@ -308,7 +308,7 @@ fn shipped_manifests_do_not_yet_declare_every_exported_sidecar() {
     ] {
         let manifest: ExtensionManifest = serde_json::from_str(raw)
             .unwrap_or_else(|err| panic!("{fixture_id} manifest should parse: {err}"));
-        let declared: Vec<String> = super::manifest::structured_sidecars(&manifest)
+        let declared: Vec<String> = super::catalog::structured_sidecars(&manifest)
             .into_iter()
             .map(|declaration| declaration.name)
             .collect();
@@ -384,15 +384,15 @@ fn structured_sidecar_schema_versions_come_from_top_level_contract() {
     .unwrap();
 
     assert_eq!(
-        super::manifest::structured_sidecar_schema_version(&manifest, "findings"),
+        super::catalog::structured_sidecar_schema_version(&manifest, "findings"),
         Some("2")
     );
     assert_eq!(
-        super::manifest::structured_sidecar_schema_version(&manifest, "lint.findings"),
+        super::catalog::structured_sidecar_schema_version(&manifest, "lint.findings"),
         Some("v1")
     );
     assert_eq!(
-        super::manifest::structured_sidecar_schema_version(&manifest, "test.failures"),
+        super::catalog::structured_sidecar_schema_version(&manifest, "test.failures"),
         None
     );
 }
@@ -407,7 +407,7 @@ fn missing_sidecar_declarations_have_no_structured_contract() {
     }))
     .unwrap();
 
-    assert!(super::manifest::structured_sidecars(&manifest).is_empty());
+    assert!(super::catalog::structured_sidecars(&manifest).is_empty());
 }
 
 #[test]

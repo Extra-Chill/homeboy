@@ -463,7 +463,7 @@ impl ExtensionRunner {
         &self,
     ) -> Vec<homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration> {
         crate::extension::catalog::load_extension(&self.execution_context.extension_id)
-            .map(|manifest| crate::extension::structured_sidecars(&manifest))
+            .map(|manifest| crate::extension::catalog::structured_sidecars(&manifest))
             .unwrap_or_default()
     }
 

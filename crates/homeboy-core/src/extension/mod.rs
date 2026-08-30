@@ -11,7 +11,6 @@ mod fingerprint;
 pub mod invoke;
 pub mod lifecycle;
 pub mod lint;
-mod manifest;
 mod manifest_sidecar;
 pub mod readiness;
 pub mod recipe_run;
@@ -20,7 +19,6 @@ pub mod registry;
 pub mod resolve;
 pub mod self_check;
 mod setup_env;
-mod summary;
 pub mod test;
 pub mod trace;
 mod validation;
@@ -33,10 +31,6 @@ pub(crate) use homeboy_core::extension::resolve::{extension_guidance_hints, stde
 
 pub use fingerprint::run_fingerprint_script;
 pub(crate) use invoke::build_settings_json_from_manifest;
-pub use manifest::{
-    deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
-    structured_sidecars,
-};
 pub use recipe_run::{
     recipe_run_provider_inventory, render_recipe_run_command, resolve_recipe_run_provider,
     RecipeRunProviderInventoryEntry, RecipeRunProviderValidation, RecipeRunRequest,
@@ -46,7 +40,6 @@ pub use refactor_protocol::{
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
     RewrittenImport,
 };
-pub use summary::{list_summaries, list_summaries_with, ActionSummary, ExtensionSummary};
 pub use validation::{
     extension_provides_build, validate_extension_requirements, validate_required_extensions,
 };
