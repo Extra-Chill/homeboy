@@ -124,6 +124,7 @@
     "test:wp-codebox-fuzz-plan-recipe-builder": "node tests/wp-codebox-fuzz-plan-recipe-builder-smoke.js",
     "test:wp-codebox-canonical-cli-adapters": "node tests/wp-codebox-canonical-cli-adapters-smoke.mjs",
     "test:wp-codebox-bench-selection": "node tests/wp-codebox-bench-selection-smoke.mjs",
+    "test:wp-codebox-bench-runtime-diagnostics": "node tests/wp-codebox-bench-runtime-diagnostics-smoke.mjs",
     "test:wp-codebox-phpunit-bounded-output": "node tests/wp-codebox-phpunit-bounded-output-smoke.mjs",
     "test:wp-codebox-phpunit-evidence": "node tests/wp-codebox-phpunit-evidence-smoke.mjs",
     "test:wp-codebox-phpunit-aggregate": "node tests/wp-codebox-phpunit-aggregate-smoke.mjs",

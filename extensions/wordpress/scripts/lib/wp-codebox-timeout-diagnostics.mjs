@@ -115,7 +115,7 @@ function isByteMap(value) {
   return entries.length > 0 && entries.every(([key, entry]) => /^\d+$/.test(key) && Number.isInteger(entry) && entry >= 0 && entry <= 255);
 }
 
-function boundedText(value, maxBytes, secretValues) {
+export function boundedText(value, maxBytes, secretValues = secretValuesFromEnvironment(process.env)) {
   if (typeof value !== 'string' || value === '') {
     return '';
   }
