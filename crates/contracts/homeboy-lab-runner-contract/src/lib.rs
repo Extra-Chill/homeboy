@@ -37,6 +37,11 @@ pub use homeboy_runner_contract::{
     RunnerCapabilityPreflight, RunnerKind, RunnerLifecycleOwner, RunnerRequiredTool,
     RunnerToolCapabilityRequirement, RunnerToolchainReadinessProbe,
 };
+/// Compatibility exports for established Lab runner consumers. Generic runner
+/// resource telemetry is canonical in `homeboy-runner-contract`.
+pub use homeboy_runner_contract::{
+    RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+};
 pub use placement::Placement;
 pub use provider_source_types::AgentTaskProviderRunnerSource;
 
@@ -219,64 +224,6 @@ pub enum LabRunnerGateDecision {
         reason: String,
         remediation: Vec<String>,
     },
-}
-
-/// Resource-usage metrics captured while a runner child process ran. Pure serde
-/// data (no runner behavior) so it can live in the contract and be embedded in
-/// core job records (`api_jobs`) without a core -> runner edge.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerResourceMetrics {
-    pub duration_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_user_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_system_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peak_rss_bytes: Option<u64>,
-    pub sample_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_process_count_peak: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_guard: Option<RunnerResourceGuardLimits>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guard_violation: Option<RunnerResourceGuardViolation>,
-    pub source: String,
-}
-
-/// The resource-guard limits in force for a runner child process.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerResourceGuardLimits {
-    pub rss_limit_bytes: u64,
-    pub process_count_limit: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_count_limit_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_process_count_limit: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_count_limit_ceiling: Option<u64>,
-    pub concurrency: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_capacity_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_headroom_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aggregate_rss_budget_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_rss_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aggregate_rss_bytes: Option<u64>,
-    pub rss_limit_source: String,
-}
-
-/// A resource-guard violation that terminated or flagged a runner child.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerResourceGuardViolation {
-    pub reason: String,
-    pub message: String,
-    pub rss_bytes: u64,
-    pub rss_limit_bytes: u64,
-    pub process_count: u64,
-    pub process_count_limit: u64,
 }
 
 /// How a runner session is tunneled. Pure serde data (with small label helpers)

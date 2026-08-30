@@ -8,6 +8,7 @@ mod artifact;
 mod capability;
 mod discovery;
 mod lifecycle;
+mod resource;
 
 pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
 pub use capability::{
@@ -20,6 +21,9 @@ pub use discovery::{
     RUNNER_READINESS_SCHEMA,
 };
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
+pub use resource::{
+    RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
