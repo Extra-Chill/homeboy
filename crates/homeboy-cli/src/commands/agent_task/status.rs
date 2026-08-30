@@ -3035,6 +3035,7 @@ struct DiagnosedFailure {
     phase: Option<String>,
     provider_boundary_exists: bool,
     controller_runtime_recovery_available: bool,
+    provider_budget_consumed: bool,
 }
 
 /// Collect the distinct failure classifications a run actually recorded, first
@@ -3074,6 +3075,7 @@ fn diagnosed_failures(
                 .iter()
                 .any(|evidence| evidence.kind == "executor-input"),
             controller_runtime_recovery_available: controller_runtime_recovery_available(record),
+            provider_budget_consumed: outcome.metadata["provider_budget_consumed"] == true,
         });
     }
     failures
@@ -3278,6 +3280,34 @@ fn classification_next_actions(
             )
             .with_kind(CommandNextActionKind::Show),
         );
+        return actions;
+    }
+
+    if failure.phase.as_deref() == Some("interrupted_owner") {
+        let budget_label = if failure.provider_budget_consumed {
+            "provider budget was consumed and in-flight work may be duplicated"
+        } else {
+            "provider budget was not consumed"
+        };
+        let mut actions = vec![
+            failure_evidence,
+            CommandNextAction::new(
+                format!(
+                    "show the interrupted-owner stop reason and candidate harvest evidence; {budget_label}"
+                ),
+                format!("homeboy agent-task status {run} --full"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        ];
+        if let Some(retry) = retry {
+            actions.push(
+                CommandNextAction::new(
+                    format!("retry this Cook; {budget_label}"),
+                    retry.command.clone(),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+        }
         return actions;
     }
 
@@ -4113,6 +4143,7 @@ mod diagnose_actionable_tests {
             phase: None,
             provider_boundary_exists: true,
             controller_runtime_recovery_available: false,
+            provider_budget_consumed: false,
         }
     }
 
@@ -4299,6 +4330,7 @@ mod diagnose_actionable_tests {
             phase: None,
             provider_boundary_exists: false,
             controller_runtime_recovery_available: false,
+            provider_budget_consumed: false,
         };
 
         let (actions, basis) =
@@ -4319,6 +4351,7 @@ mod diagnose_actionable_tests {
             phase: Some("controller_admission".to_string()),
             provider_boundary_exists: false,
             controller_runtime_recovery_available: true,
+            provider_budget_consumed: false,
         };
 
         let (actions, basis) = diagnose_next_actions("run-1", &[failure], &[], None, None, false);
@@ -4441,6 +4474,7 @@ mod diagnose_actionable_tests {
                 phase: None,
                 provider_boundary_exists: true,
                 controller_runtime_recovery_available: false,
+                provider_budget_consumed: false,
             }],
             &[],
             None,
@@ -5625,6 +5659,7 @@ fn aggregate_failure_diagnostics(aggregate: &AgentTaskAggregate) -> Vec<Collecte
                 | AgentTaskOutcomeStatus::ProviderError
                 | AgentTaskOutcomeStatus::Timeout
                 | AgentTaskOutcomeStatus::UnableToRemediate
+                | AgentTaskOutcomeStatus::Cancelled
         )
     });
     let scan: Vec<&homeboy::agents::agent_tasks::AgentTaskOutcome> = failed_first.collect();
@@ -6581,6 +6616,19 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                     "field": cause.get("field"),
                 })
             }),
+        });
+    }
+    if let Some(failure) = record.metadata.get("interrupted_owner") {
+        return Some(CollectedDiagnostic {
+            task_id: "controller".to_string(),
+            class: "interrupted_owner".to_string(),
+            message: failure
+                .get("stop_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("local Cook observer was interrupted during provider execution")
+                .to_string(),
+            source: "interrupted_owner".to_string(),
+            data: failure.clone(),
         });
     }
     if let Some(failure) = record.metadata.get("pre_execution_failure") {

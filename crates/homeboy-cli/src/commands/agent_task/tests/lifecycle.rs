@@ -3491,6 +3491,68 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
 }
 
 #[test]
+#[cfg(unix)]
+fn diagnose_interrupted_local_owner_names_budget_and_duplication_instead_of_generic_retry() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-interrupted-owner";
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+        agent_task_lifecycle::mark_running(run_id).expect("running");
+        let mut owner = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start cook observer");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"] = json!([{
+                "key": "task-a:1",
+                "task_id": "task-a",
+                "attempt": 1,
+                "backend": "test",
+                "state": "running",
+                "owner_pid": owner.id(),
+                "owner_linux_starttime_ticks": null,
+                "owner_identity": format!("{run_id}:task-a:1"),
+            }]);
+            record.metadata["provider_executions_consumed"] = json!(1);
+        })
+        .expect("observer fixture");
+        owner.kill().expect("kill cook observer");
+        owner.wait().expect("reap cook observer");
+
+        let record = lifecycle_status(run_id).expect("reconcile interrupted owner");
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            record.metadata["stop_reason"],
+            "local Cook observer was interrupted during provider execution"
+        );
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose interrupted owner");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["root_cause"]["class"], "interrupted_owner");
+        assert_eq!(value["next_action_basis"], "diagnosis");
+        assert_ne!(value["next_action_basis"], "generic_fallback");
+        let commands: Vec<&str> = value["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .map(|action| action["label"].as_str().unwrap_or_default())
+            .collect();
+        assert!(
+            commands.iter().any(|label| {
+                label.contains("provider budget was consumed")
+                    && label.contains("may be duplicated")
+            }),
+            "{commands:?}"
+        );
+    });
+}
+
+#[test]
 fn diagnose_falls_back_to_the_generic_set_for_an_unclassified_failure() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-actionable-unknown";

@@ -4100,19 +4100,31 @@ pub fn inject_raw_record_metadata_for_corruption_test(
     store::inject_raw_record_metadata_for_corruption_test(&sanitize_run_id(run_id), inject)
 }
 
-/// Reconcile the ownership captured at the local provider boundary. A local
-/// provider has no opaque remote handle, so its reserving process is the only
-/// durable authority that can prove the reservation is still executing.
-fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
+#[derive(Debug, Clone)]
+pub(crate) enum LocalProviderOwnerDecision {
+    StayRunning,
+    NotApplicable,
+    Interrupted {
+        has_succeeded: bool,
+        has_failed: bool,
+        recovery_identity: Vec<Value>,
+    },
+}
+
+/// Annotate persisted local-provider owner identity without terminalizing.
+/// Terminalization must persist an aggregate first.
+pub(crate) fn annotate_local_provider_ownership(
+    record: &mut AgentTaskRunRecord,
+) -> LocalProviderOwnerDecision {
     if record.state != AgentTaskRunState::Running || record.is_runner_backed() {
-        return false;
+        return LocalProviderOwnerDecision::NotApplicable;
     }
     let Some(executions) = record
         .metadata
         .get_mut("provider_executions")
         .and_then(Value::as_array_mut)
     else {
-        return false;
+        return LocalProviderOwnerDecision::NotApplicable;
     };
 
     let mut has_reconcilable_execution = false;
@@ -4164,82 +4176,34 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
             _ => {}
         }
     }
-    // Older records predate per-provider ownership, and non-Linux hosts can be
-    // unable to verify a persisted identity. Neither alone is proof that the
-    // owner died, so retain a joinable run unless its provider already recorded
-    // a terminal failure.
-    // A terminal provider failure is already conclusive evidence that this
-    // execution cannot make progress. It must not retain `Running` solely
-    // because the foreground wrapper was interrupted before aggregate harvest.
     if has_live_owner || (has_unverifiable_owner && !has_failed) {
-        return true;
+        return LocalProviderOwnerDecision::StayRunning;
     }
     if !has_reconcilable_execution {
-        return false;
+        return LocalProviderOwnerDecision::NotApplicable;
     }
+    LocalProviderOwnerDecision::Interrupted {
+        has_succeeded,
+        has_failed,
+        recovery_identity,
+    }
+}
 
-    let now = now_timestamp();
-    let metadata = record.ensure_metadata_object();
-    metadata.insert(
-        "local_provider_ownership".to_string(),
-        json!({
-            "state": "owner_dead",
-            "recovery_identity": recovery_identity,
-            "reconciled_at": now,
-        }),
-    );
-    if has_succeeded {
-        // The provider reported completion before the foreground owner died,
-        // but the aggregate was not yet persisted. Preserve that fact and the
-        // workspace as a recoverable candidate instead of erasing it.
-        record.updated_at = Some(now);
-        set_run_state(record, AgentTaskRunState::CandidateRecoverable);
-        for task in &mut record.tasks {
-            if task.state == AgentTaskState::Running {
-                task.state = AgentTaskState::CandidateRecoverable;
-            }
+/// Reconcile the ownership captured at the local provider boundary. A local
+/// provider has no opaque remote handle, so its reserving process is the only
+/// durable authority that can prove the reservation is still executing.
+fn reconcile_local_provider_ownership(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<bool> {
+    match annotate_local_provider_ownership(record) {
+        LocalProviderOwnerDecision::StayRunning => Ok(true),
+        LocalProviderOwnerDecision::NotApplicable => Ok(false),
+        LocalProviderOwnerDecision::Interrupted { .. } => {
+            *record = record_interrupted_local_owner_in_store(lifecycle_store, &record.run_id)?;
+            Ok(false)
         }
-    } else if has_failed {
-        record.updated_at = Some(now.clone());
-        set_run_state(record, AgentTaskRunState::Failed);
-        for task in &mut record.tasks {
-            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-                task.state = AgentTaskState::Failed;
-            }
-        }
-        record.ensure_metadata_object().insert(
-            "local_provider_ownership".to_string(),
-            json!({
-                "state": "provider_failed",
-                "recovery_identity": recovery_identity,
-                "reconciled_at": now,
-            }),
-        );
-    } else {
-        let executions = record
-            .ensure_metadata_object()
-            .get_mut("provider_executions")
-            .and_then(Value::as_array_mut)
-            .expect("provider executions were checked above");
-        for execution in executions.iter_mut() {
-            if execution["state"] == json!("running") {
-                execution["state"] = json!("cancelled");
-                execution["finished_at"] = json!(now.clone());
-            }
-        }
-        record.updated_at = Some(now.clone());
-        set_run_state(record, AgentTaskRunState::Cancelled);
-        for task in &mut record.tasks {
-            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-                task.state = AgentTaskState::Cancelled;
-            }
-        }
-        record.ensure_metadata_object().insert(
-            "cancel_reason".to_string(),
-            json!("local provider owner process is not running"),
-        );
     }
-    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5076,7 +5040,7 @@ pub fn status_in_store(
             }
         }
     }
-    if reconcile_local_provider_ownership(&mut record) {
+    if reconcile_local_provider_ownership(lifecycle_store, &mut record)? {
         lifecycle_store.write_record(&record)?;
     }
     // The only genuinely-remote step in this read. Skipping it for a
