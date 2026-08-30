@@ -667,6 +667,61 @@ fn prepared_source_cache_uses_one_lock_for_views_and_pruning() {
 }
 
 #[test]
+#[cfg(unix)]
+fn prepared_source_cache_rechecks_for_a_concurrent_publisher_after_locking() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
+    let root = tempfile::tempdir().expect("cache root");
+    let cache_root = root.path().join("_lab_prepared_sources");
+    let cache = cache_root.join("shared-revision");
+    let source = root.path().join("source");
+    fs::create_dir_all(&source).expect("source");
+    fs::write(source.join("marker"), "contender\n").expect("source marker");
+
+    let tools = tempfile::tempdir().expect("tool shims");
+    let mkdir = tools.path().join("mkdir");
+    fs::write(
+        &mkdir,
+        "#!/bin/sh\ncase \"$1\" in\n  *.lock)\n    /bin/mkdir -p \"$HOMEBOY_RACE_CACHE/.homeboy\"\n    printf 'winner\\n' > \"$HOMEBOY_RACE_CACHE/marker\"\n    : > \"$HOMEBOY_RACE_CACHE/.homeboy/prepared-source-ready\"\n    /bin/chmod -R a-w \"$HOMEBOY_RACE_CACHE\"\n    ;;\nesac\nexec /bin/mkdir \"$@\"\n",
+    )
+    .expect("mkdir shim");
+    fs::set_permissions(&mkdir, fs::Permissions::from_mode(0o755)).expect("mkdir shim permissions");
+
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            &prepared_source_cache_command(
+                cache.to_str().unwrap(),
+                cache_root.to_str().unwrap(),
+                source.to_str().unwrap(),
+            ),
+        ])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                tools.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HOMEBOY_RACE_CACHE", &cache)
+        .output()
+        .expect("run publication contender");
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("event=hit"));
+    assert_eq!(
+        fs::read_to_string(cache.join("marker")).unwrap(),
+        "winner\n"
+    );
+    make_cache_fixture_writable(&cache_root);
+}
+
+#[test]
 fn incremental_snapshots_reuse_unchanged_content_and_reconcile_deltas() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
