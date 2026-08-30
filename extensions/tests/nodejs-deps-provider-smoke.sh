@@ -66,6 +66,22 @@ if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci" ]; then
 fi
 
 rm "$PROJECT_DIR/package-lock.json"
+cat >"$PROJECT_DIR/npm-shrinkwrap.json" <<'JSON'
+{
+  "name": "fixture-node-project",
+  "lockfileVersion": 3,
+  "packages": {}
+}
+JSON
+command_json="$("$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" install-command)"
+COMMAND_JSON="$command_json" node <<'NODE'
+const plan = JSON.parse(process.env.COMMAND_JSON);
+if (JSON.stringify(plan.command) !== JSON.stringify(['npm', 'ci'])) {
+  throw new Error(`expected npm ci for npm-shrinkwrap.json, got ${JSON.stringify(plan.command)}`);
+}
+NODE
+
+rm "$PROJECT_DIR/npm-shrinkwrap.json"
 status_json="$($ROOT_DIR/nodejs/scripts/deps/deps-runner.sh status)"
 STATUS_JSON="$status_json" node <<'NODE'
 const status = JSON.parse(process.env.STATUS_JSON);

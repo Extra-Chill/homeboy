@@ -6,9 +6,9 @@
   "description": "Declarative Node.js package manager selection and dependency materialization outputs.",
   "project_signals": {
     "root_files": ["package.json"],
-    "optional_files": ["pnpm-workspace.yaml", "pnpm-lock.yaml", "yarn.lock", "package-lock.json"]
+    "optional_files": ["pnpm-workspace.yaml", "pnpm-lock.yaml", "yarn.lock", "npm-shrinkwrap.json", "package-lock.json"]
   },
-  "lockfile_priority": ["pnpm-lock.yaml", "yarn.lock", "package-lock.json"],
+  "lockfile_priority": ["pnpm-lock.yaml", "yarn.lock", "npm-shrinkwrap.json", "package-lock.json"],
   "capabilities": {
     "discover_project_root": true,
     "select_package_manager": true,
@@ -106,7 +106,7 @@
         "priority": 3,
         "search": "project-root",
         "default": true,
-        "files": ["package-lock.json"]
+        "files": ["npm-shrinkwrap.json", "package-lock.json"]
       },
       "install": {
         "intent": "locked-or-refresh",
