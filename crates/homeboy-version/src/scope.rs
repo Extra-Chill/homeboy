@@ -18,6 +18,7 @@ impl ReleaseScope {
             .unwrap_or_else(|_| component.local_path.clone());
         let detected_prefix = git::get_component_path_prefix(&component.local_path);
         let mut path_prefixes = release_scope_prefixes(component);
+        let configured_prefix = release_scope_namespace_prefix(component);
 
         if let Some(prefix) = detected_prefix.as_ref() {
             for scoped_prefix in &mut path_prefixes {
@@ -37,9 +38,7 @@ impl ReleaseScope {
         path_prefixes.sort();
         path_prefixes.dedup();
 
-        let path_prefix = detected_prefix
-            .or_else(|| path_prefixes.first().cloned())
-            .unwrap_or_default();
+        let path_prefix = detected_prefix.or(configured_prefix).unwrap_or_default();
         let tag_prefix = (!path_prefix.is_empty()).then(|| component_id.to_string());
 
         Ok(Self {
@@ -100,6 +99,45 @@ fn release_scope_prefixes(component: &Component) -> Vec<String> {
     prefixes.sort();
     prefixes.dedup();
     prefixes
+}
+
+fn release_scope_namespace_prefix(component: &Component) -> Option<String> {
+    let scope = resolve_component_scope(component, ScopeCommand::Release);
+    let prefixes: Vec<String> = scope
+        .include
+        .iter()
+        .filter_map(|path| normalize_release_scope_path(path))
+        .collect();
+
+    if prefixes.is_empty() {
+        return infer_common_release_prefix(component);
+    }
+
+    common_scope_prefix(&prefixes)
+}
+
+fn common_scope_prefix(paths: &[String]) -> Option<String> {
+    if paths.iter().any(|path| !path.contains('/')) {
+        return None;
+    }
+
+    let mut iter = paths.iter();
+    let first = iter.next()?;
+    let mut prefix: Vec<&str> = first.split('/').collect();
+
+    for path in iter {
+        let keep = prefix
+            .iter()
+            .zip(path.split('/'))
+            .take_while(|(left, right)| **left == *right)
+            .count();
+        prefix.truncate(keep);
+        if prefix.is_empty() {
+            return None;
+        }
+    }
+
+    Some(prefix.join("/"))
 }
 
 fn infer_common_release_prefix(component: &Component) -> Option<String> {
@@ -328,6 +366,48 @@ mod tests {
         assert_eq!(latest_tag.as_deref(), Some("blocks-engine-v0.2.2"));
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "fix: update blocks engine package");
+    }
+
+    #[test]
+    fn repo_root_component_with_disjoint_release_files_keeps_plain_tag_namespace() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "plugin.php", "Version: 1.8.3", "release: v1.8.3");
+        run_git(dir, &["tag", "v1.8.3"]);
+        commit_file(
+            dir,
+            "includes/runtime.php",
+            "runtime",
+            "fix: update runtime",
+        );
+
+        let component = Component {
+            id: "static-site-importer".to_string(),
+            local_path: dir.to_string_lossy().to_string(),
+            scopes: Some(ScopeConfig {
+                release: Some(CommandScopeConfig {
+                    include: vec![
+                        "runtime-package-manifest.json".to_string(),
+                        "plugin.php".to_string(),
+                        "blocks/".to_string(),
+                        "includes/".to_string(),
+                    ],
+                    exclude: vec![],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let scope =
+            ReleaseScope::resolve(&component, "static-site-importer").expect("release scope");
+        let (latest_tag, commits) = scope.commits_since_latest_tag().expect("commits");
+
+        assert_eq!(scope.path_prefix, "");
+        assert_eq!(scope.tag_name("1.8.4"), "v1.8.4");
+        assert_eq!(latest_tag.as_deref(), Some("v1.8.3"));
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "fix: update runtime");
     }
 
     #[test]
