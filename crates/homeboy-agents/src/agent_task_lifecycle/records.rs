@@ -915,7 +915,7 @@ impl AgentTaskRunRecord {
                 self.metadata
                     .pointer("/cook_progress/phase")
                     .and_then(Value::as_str),
-                Some("worktree_provider_lookup" | "worktree_provider_ensure")
+                Some("worktree_provider_lookup" | "worktree_provider_ensure" | "provider_start")
             )
     }
 

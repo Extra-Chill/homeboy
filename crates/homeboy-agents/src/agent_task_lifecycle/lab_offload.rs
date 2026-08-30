@@ -884,46 +884,50 @@ fn record_lab_offload_proxy_in_store(
     if record.state.is_terminal() {
         return Ok(record);
     }
-    let metadata = record.ensure_metadata_object();
-    metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
-    // This record is the controller's durable projection of a runner handoff.
-    // It remains controller-owned until a runner-local record is independently
-    // discovered, so controller-generated commands must keep resolving here.
-    metadata.insert("lifecycle_store_owner".to_string(), json!("controller"));
-    metadata.insert("runner_id".to_string(), json!(runner_id));
-    if !durable_plan
-        .map(|plan| plan.services.is_empty())
-        .unwrap_or(true)
     {
+        let metadata = record.ensure_metadata_object();
+        metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
+        // This record is the controller's durable projection of a runner handoff.
+        // It remains controller-owned until a runner-local record is independently
+        // discovered, so controller-generated commands must keep resolving here.
+        metadata.insert("lifecycle_store_owner".to_string(), json!("controller"));
+        metadata.insert("runner_id".to_string(), json!(runner_id));
+        if !durable_plan
+            .map(|plan| plan.services.is_empty())
+            .unwrap_or(true)
+        {
+            metadata.insert(
+                "managed_service_supervisor".to_string(),
+                json!({
+                    "runner_id": runner_id,
+                    "remote_workspace": remote_workspace,
+                    "state_ref": format!("homeboy://runner/{runner_id}/agent-task-runs/{run_id}/service-supervisor/state"),
+                    "operations": ["status", "stop", "reconcile"],
+                }),
+            );
+        }
+        if remote_workspace != "pending" {
+            metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
+        }
+        if !remote_command.is_empty() {
+            metadata.insert("remote_command".to_string(), json!(remote_command));
+        }
+        metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
+        metadata.remove(METADATA_KEY_STALE_RUNNING);
+        metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
         metadata.insert(
-            "managed_service_supervisor".to_string(),
-            json!({
-                "runner_id": runner_id,
-                "remote_workspace": remote_workspace,
-                "state_ref": format!("homeboy://runner/{runner_id}/agent-task-runs/{run_id}/service-supervisor/state"),
-                "operations": ["status", "stop", "reconcile"],
-            }),
+            "runner_execution_record".to_string(),
+            serde_json::to_value(
+                homeboy_core::runner_execution_envelope::RunnerExecutionRecord::planned(
+                    &run_id, runner_id, "daemon",
+                )
+                .with_agent_task_run_id(&run_id),
+            )
+            .unwrap_or(Value::Null),
         );
     }
-    if remote_workspace != "pending" {
-        metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
-    }
-    if !remote_command.is_empty() {
-        metadata.insert("remote_command".to_string(), json!(remote_command));
-    }
-    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
-    metadata.remove(METADATA_KEY_STALE_RUNNING);
-    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
-    metadata.insert(
-        "runner_execution_record".to_string(),
-        serde_json::to_value(
-            homeboy_core::runner_execution_envelope::RunnerExecutionRecord::planned(
-                &run_id, runner_id, "daemon",
-            )
-            .with_agent_task_run_id(&run_id),
-        )
-        .unwrap_or(Value::Null),
-    );
+    record.updated_at = Some(now_timestamp());
+    update_lifecycle_heartbeat(&mut record);
     lifecycle_store.write_record(&record)?;
     Ok(record)
 }

@@ -1244,6 +1244,78 @@ mod tests {
     }
 
     #[test]
+    fn planned_lab_proxy_at_provider_start_survives_initiating_client_exit() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-lab-planned-provider-start";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::record_cook_progress_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                "provider_start",
+                1,
+                None,
+            )
+            .expect("provider_start");
+            let remote_command = [
+                "homeboy".to_string(),
+                "--placement".to_string(),
+                "local".to_string(),
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+            ];
+            agent_task_lifecycle::record_lab_offload_planned(
+                agent_task_lifecycle::LabOffloadProxyPlan {
+                    run_id,
+                    runner_id: "homeboy-lab",
+                    remote_workspace: "/runner/workspace/homeboy",
+                    remote_command: &remote_command,
+                    durable_plan: Some(&plan),
+                },
+            )
+            .expect("planned Lab proxy");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+            })
+            .expect("initiating client ended");
+
+            let live = agent_task_lifecycle::status(run_id).expect("planned proxy");
+            assert!(
+                live.has_fresh_controller_pre_provider_heartbeat()
+                    || (live.has_planned_runner_execution() && live.has_fresh_update()),
+                "{live:?}"
+            );
+            assert!(
+                live.updated_at.is_some(),
+                "planned proxy must stamp a heartbeat"
+            );
+            assert_eq!(
+                live.metadata["runner_execution_record"]["status"],
+                "planned"
+            );
+            assert!(live.metadata.get("stale_running").is_none());
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("tick after initiating client exit");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let retained = agent_task_lifecycle::status(run_id).expect("retained run");
+            assert!(
+                !retained.state.is_terminal(),
+                "Lab proxy must survive initiating-client exit: {:?}",
+                retained.state
+            );
+            assert!(retained.metadata.get("cancel_reason").is_none());
+            assert_eq!(retained.runner_id(), Some("homeboy-lab"));
+            assert!(retained.runner_job_id().is_none());
+        });
+    }
+
+    #[test]
     fn controller_heartbeat_keeps_queued_pre_provider_materialization_out_of_runner_pid_watchdog() {
         with_isolated_home(|_| {
             register_orchestration_driver();
