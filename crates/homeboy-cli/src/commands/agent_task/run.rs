@@ -3002,7 +3002,7 @@ where
     )? {
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
         | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
-            let record = agent_task_lifecycle::status_in_store(
+            let record = agent_task_lifecycle::reconcile_status_in_store(
                 &lifecycle_store,
                 run_id,
                 agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -3440,7 +3440,7 @@ fn cook_terminal_continuation_status(
             "continuation_in_progress",
             serde_json::json!({
                 "action": "await_claimed_continuation",
-                "command": format!("homeboy agent-task status {run_id} --full"),
+                "command": format!("homeboy agent-task status {run_id}"),
             }),
         ),
         agent_task_service::CookContinuationState::Failed => (
@@ -3454,7 +3454,7 @@ fn cook_terminal_continuation_status(
             "continuation_completed",
             serde_json::json!({
                 "action": "inspect_completed_cook",
-                "command": format!("homeboy agent-task status {run_id} --full"),
+                "command": format!("homeboy agent-task status {run_id}"),
             }),
         ),
         agent_task_service::CookContinuationState::Absent => (
@@ -4500,6 +4500,7 @@ fn preview_provider_plan_timeout(config: &defaults::HomeboyConfig, provider_id: 
 pub(super) struct CookRepositoryIdentity {
     repository_name: String,
     slug: String,
+    component_registered: bool,
     aliases: Vec<String>,
     remote_identity: String,
     workspace_path: PathBuf,
@@ -4585,14 +4586,19 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
         validate_cook_repository_component_selection(repo, component)?;
     }
     args.dispatch.repo = Some(selected.repository_name.clone());
-    args.component = Some(selected.slug.clone());
-    let component_cwd = homeboy::core::component::registered_by_id(&selected.slug)?
-        .map(|component| durable_component_cwd(&component, &selected.repository_name))
-        .transpose()?;
+    let component_id = selected.component_registered.then(|| selected.slug.clone());
+    args.component = component_id.clone();
+    let component_cwd = match component_id.as_deref() {
+        Some(component_id) => homeboy::core::component::registered_by_id(component_id)?
+            .map(|component| durable_component_cwd(&component, &selected.repository_name))
+            .transpose()?,
+        None => None,
+    };
     args.repository_identity = Some(serde_json::json!({
         "slug": selected.slug,
         "repository_name": selected.repository_name,
-        "component_id": selected.slug,
+        "component_id": component_id,
+        "component_registered": selected.component_registered,
         "component_cwd": component_cwd,
         "remote_identity": selected.remote_identity,
         "workspace_path": selected.workspace_path,
@@ -4926,7 +4932,7 @@ fn require_explicit_cook_repo(args: &AgentTaskCookArgs, reason: &str) -> homeboy
     }
     Err(homeboy::core::Error::validation_missing_argument(vec![
         format!(
-            "--repo <repo> is required because {reason}; provide --repo <configured-component>"
+            "--repo <repo> is required because {reason}; provide --repo <repository-or-configured-component>"
         ),
     ]))
 }
@@ -4972,7 +4978,7 @@ pub(super) fn cook_repository_identities_for_workspace(
                 matches
             }
         }
-        None => homeboy::core::component::registered()?,
+        None => homeboy::core::component::inventory::registered_base()?,
     };
     let mut identities = Vec::new();
     for (remote_name, remote_url) in remotes {
@@ -4991,6 +4997,7 @@ pub(super) fn cook_repository_identities_for_workspace(
                 identities.push(CookRepositoryIdentity {
                     repository_name: normalize_repository_name(&remote_url),
                     slug: component.id.clone(),
+                    component_registered: true,
                     aliases: component.aliases.clone(),
                     remote_identity: remote_identity.clone(),
                     workspace_path: git_root.clone(),
@@ -5007,6 +5014,7 @@ pub(super) fn cook_repository_identities_for_workspace(
             identities.push(CookRepositoryIdentity {
                 repository_name: repository_name.clone(),
                 slug: repository_name,
+                component_registered: false,
                 aliases: Vec::new(),
                 remote_identity,
                 workspace_path: git_root.clone(),
@@ -5532,10 +5540,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         .and_then(|task| task.workspace.root.as_ref())
         .map(std::path::PathBuf::from);
     let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
-    let title = args
-        .title
-        .clone()
-        .unwrap_or_else(|| default_loop_title(&args));
+    let title = default_loop_title(&args, source_worktree_path.as_deref());
     let commit_message = args
         .commit_message
         .clone()
@@ -8220,14 +8225,62 @@ fn git_head_sha(path: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn default_loop_title(args: &AgentTaskCookArgs) -> String {
+fn default_loop_title(args: &AgentTaskCookArgs, source_worktree_path: Option<&Path>) -> String {
+    if let Some(title) = &args.title {
+        return title.clone();
+    }
+    if let Some(title) = args.goal.as_deref().and_then(bounded_cook_title) {
+        return title;
+    }
+    if let Some(title) = source_worktree_path
+        .zip(
+            args.base_resolution
+                .as_ref()
+                .and_then(|resolution| resolution.get("sha"))
+                .and_then(Value::as_str),
+        )
+        .and_then(|(path, base_sha)| existing_candidate_title(path, base_sha))
+    {
+        return title;
+    }
     let target = args
         .dispatch
         .repo
         .as_deref()
         .or(args.dispatch.task_url.as_deref())
         .unwrap_or("agent task");
-    format!("Cook {target}")
+    bounded_cook_title(&format!("Cook {target}")).unwrap_or_else(|| "Cook agent task".to_string())
+}
+
+fn existing_candidate_title(path: &Path, base_sha: &str) -> Option<String> {
+    let head_sha = git_head_sha(path)?;
+    if head_sha == base_sha
+        || !Command::new("git")
+            .args(["merge-base", "--is-ancestor", base_sha, &head_sha])
+            .current_dir(path)
+            .status()
+            .ok()?
+            .success()
+    {
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["show", "-s", "--format=%s", &head_sha])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .and_then(|subject| bounded_cook_title(&subject))
+}
+
+fn bounded_cook_title(value: &str) -> Option<String> {
+    const MAX_PR_TITLE_CHARS: usize = 256;
+
+    let title = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then(|| title.chars().take(MAX_PR_TITLE_CHARS).collect())
 }
 
 fn default_loop_commit_message(args: &AgentTaskCookArgs) -> String {
@@ -8378,8 +8431,7 @@ pub(super) fn validate_plan(args: ValidatePlanArgs) -> CmdResult<Value> {
     ))
 }
 
-pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
-    let args = args.into();
+pub(super) fn resume(args: LifecycleReadArgs) -> CmdResult<Value> {
     if agent_task_lifecycle::exact_record(&args.run_id)
         .ok()
         .is_some_and(|record| {
@@ -8429,41 +8481,26 @@ pub(super) fn resume(args: impl Into<LifecycleReadArgs>) -> CmdResult<Value> {
             0,
         ));
     }
-    run_resume_with_executor_and_bridge(
+    run_resume_with_executor(
         args.run_id,
-        args.bridge,
-        args.since_cursor,
         args.full,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
 }
 
-pub(super) fn run_resume_with_executor_and_bridge(
+pub(super) fn run_resume_with_executor(
     run_id: String,
-    bridge: bool,
-    since_cursor: Option<String>,
     full: bool,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
     let needs_transport_recovery =
-        bridge && agent_task_service::terminal_transport_recovery_required(&run_id);
+        agent_task_service::terminal_transport_recovery_required(&run_id);
     if needs_transport_recovery {
-        // Recover the authenticated terminal runner snapshot before `resume`
-        // can short-circuit on a previously persisted lossy aggregate.
         agent_task_service::recover_terminal_transport_proxy_evidence(&run_id)?;
     }
     let result = agent_task_service::resume(run_id.clone(), executor)?;
-    if bridge {
-        // Resume first imports authoritative terminal runner evidence when the
-        // local aggregate is absent. Reproject only after that shared recovery
-        // contract has persisted the aggregate and identity.
+    if needs_transport_recovery {
         agent_task_service::reconcile_terminal_artifact_projection(&run_id)?;
-        let cursor = super::status::parse_event_cursor(since_cursor.as_deref(), "since_cursor")?;
-        let status = agent_task_service::run_status(&run_id, cursor)?;
-        return Ok((
-            serde_json::to_value(status).unwrap_or(Value::Null),
-            result.exit_code,
-        ));
     }
     Ok((
         if full {
@@ -8529,13 +8566,98 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        cook_attached_local_placement_disclosure, cook_continuation_status,
+        bounded_cook_title, cook_attached_local_placement_disclosure, cook_continuation_status,
         cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
-        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
-        project_preview_dirty_admission,
+        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure, default_loop_title,
+        detached_cook_route_less_warning, durable_cook_identity_lines, existing_candidate_title,
+        preflight_continue_cook, project_preview_dirty_admission,
     };
+    use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
+    use crate::commands::agent_task::AgentTaskCommand;
+    use clap::Parser;
+
+    fn title_cook_args(extra: &[&str]) -> super::AgentTaskCookArgs {
+        let mut argv = vec![
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "fixture",
+            "--cwd",
+            ".",
+            "--no-finalize",
+        ];
+        argv.extend_from_slice(extra);
+        let Commands::AgentTask(command) = Cli::parse_from(argv).command else {
+            panic!("agent-task command");
+        };
+        let AgentTaskCommand::Cook(args) = command.command else {
+            panic!("cook command");
+        };
+        *args
+    }
+
+    #[test]
+    fn cook_title_precedence_keeps_explicit_goal_candidate_and_fallback_semantics() {
+        let explicit = title_cook_args(&["--title", "Explicit title", "--goal", "Goal title"]);
+        assert_eq!(default_loop_title(&explicit, None), "Explicit title");
+
+        let goal = title_cook_args(&["--goal", "  Restore\n cold\t reconstruction  "]);
+        assert_eq!(
+            default_loop_title(&goal, None),
+            "Restore cold reconstruction"
+        );
+
+        let fallback = title_cook_args(&["--repo", "fixture-repository"]);
+        assert_eq!(
+            default_loop_title(&fallback, None),
+            "Cook fixture-repository"
+        );
+    }
+
+    #[test]
+    fn cook_title_semantics_are_bounded_and_candidate_aware() {
+        assert_eq!(
+            bounded_cook_title("  Restore\n cold\t reconstruction  ").as_deref(),
+            Some("Restore cold reconstruction")
+        );
+        assert_eq!(
+            bounded_cook_title(&"x".repeat(300))
+                .expect("bounded title")
+                .chars()
+                .count(),
+            256
+        );
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "agent@example.test"]);
+        git(&["config", "user.name", "Agent"]);
+        std::fs::write(workspace.path().join("candidate.txt"), "base\n").expect("write base");
+        git(&["add", "candidate.txt"]);
+        git(&["commit", "-m", "base"]);
+        let base = super::git_head_sha(workspace.path()).expect("base sha");
+        assert_eq!(existing_candidate_title(workspace.path(), &base), None);
+
+        std::fs::write(workspace.path().join("candidate.txt"), "candidate\n")
+            .expect("write candidate");
+        git(&["commit", "-am", "fix: restore schema\n\nuntrusted body"]);
+        let mut candidate = title_cook_args(&["--repo", "fixture-repository"]);
+        candidate.base_resolution = Some(serde_json::json!({ "sha": base }));
+        assert_eq!(
+            default_loop_title(&candidate, Some(workspace.path())),
+            "fix: restore schema"
+        );
+    }
 
     #[test]
     fn preview_projects_each_dirty_admission_state() {

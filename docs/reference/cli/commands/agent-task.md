@@ -364,12 +364,7 @@ Read durable run status
 | Option | Value | Description |
 | --- | --- | --- |
 | `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | Read status through the runner bridge |
-| `--since-cursor` | `<CURSOR>` | Resume bridged status events after this cursor |
-| `--full` | flag | Return complete status details instead of the bounded summary |
-| `--bounded` | flag | Present `--full` as a bounded, outcome-first summary with drill-down refs |
 | `--strict-subject-exit` | flag | Exit nonzero when the inspected Cook needs follow-up action |
-| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 | `--watch` | flag | Follow this durable status until it reaches a terminal state or the timeout expires |
 | `--interval` | `<DURATION>` | Delay between status reads while following. Accepts ms, s, m, h, or d |
 | `--timeout` | `<DURATION>` | Total time to follow before returning the latest partial status. Accepts ms, s, m, h, or d |
@@ -382,7 +377,7 @@ homeboy agent-task watch [OPTIONS] <ID>
 
 Poll a run until it reaches a terminal state.
 
-This is an alias for `homeboy activity watch` — the same command the cook completion notification already points at — so a cook id, durable run id, observation run id, or runner job id all resolve here, including records still resident on a Lab runner. Unlike `agent-task status`, the underlying read does not reconcile.
+This is an alias for `homeboy activity watch` — the same command the cook completion notification already points at — so a cook id, durable run id, observation run id, or runner job id all resolve here, including records still resident on a Lab runner. Like `agent-task status`, the underlying read does not reconcile.
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -484,9 +479,7 @@ Show the latest durable run
 homeboy agent-task logs [OPTIONS] <RUN_ID>
 ```
 
-Read the canonical durable event stream for a run.
-
-`--raw` additionally emits transport frames for diagnostics.
+Read the canonical durable event stream for a run
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -494,7 +487,7 @@ Read the canonical durable event stream for a run.
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--raw` | flag | Include unprojected runner transport frames under `raw_events` for diagnostics |
+| `--cursor` | `<CURSOR>` | Resume events after this opaque cursor |
 
 ## `homeboy agent-task artifacts`
 
@@ -510,11 +503,7 @@ List artifacts and evidence refs recorded for a completed run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | Read through the runner bridge instead of controller-only state |
-| `--since-cursor` | `<CURSOR>` | Resume bridged events after this cursor |
 | `--full` | flag | Return complete lifecycle details instead of the bounded summary |
-| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 
 ## `homeboy agent-task retained-artifacts`
 
@@ -702,11 +691,7 @@ Resume a queued or stale-running durable run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | Read through the runner bridge instead of controller-only state |
-| `--since-cursor` | `<CURSOR>` | Resume bridged events after this cursor |
 | `--full` | flag | Return complete lifecycle details instead of the bounded summary |
-| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 
 ## `homeboy agent-task retry`
 

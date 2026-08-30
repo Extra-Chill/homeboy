@@ -115,14 +115,130 @@ fn explicit_unregistered_repo_is_proven_by_the_workspace_remote() {
             "https://github.com/example/fixture.git",
         );
 
-        let identities = super::super::run::cook_repository_identities_for_workspace(
-            "--cwd",
-            checkout.path().to_str().expect("UTF-8 checkout path"),
-            Some("fixture"),
-        )
+        let resolved = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "fixture".to_string(),
+            "--cwd".to_string(),
+            checkout.path().display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
         .expect("resolve explicit repository identity from its remote");
 
-        assert_eq!(identities.len(), 1);
+        assert_eq!(resolved.dispatch.repo.as_deref(), Some("fixture"));
+        assert_eq!(resolved.component, None);
+        let identity = resolved.repository_identity.expect("repository identity");
+        assert_eq!(
+            identity["remote_identity"],
+            "git://github.com/example/fixture"
+        );
+        assert_eq!(identity["component_registered"], false);
+
+        let stale_component =
+            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "fixture".to_string(),
+                "--component".to_string(),
+                "removed-component".to_string(),
+                "--cwd".to_string(),
+                checkout.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect_err("an explicit stale component remains invalid");
+        assert!(
+            stale_component
+                .details
+                .to_string()
+                .contains("does not match the supplied workspace repository"),
+            "stale-component diagnostic: {}",
+            stale_component.details
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn cwd_only_unregistered_repo_fails_without_hydrating_unrelated_components() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("checkout");
+        init_runtime_component_checkout(checkout.path());
+        add_remote(
+            checkout.path(),
+            "origin",
+            "https://github.com/example/unregistered.git",
+        );
+
+        let stale = tempfile::tempdir().expect("stale checkout");
+        std::fs::write(stale.path().join("homeboy.json"), r#"{"id":"stale"}"#)
+            .expect("write portable config");
+        register_component(
+            "stale",
+            stale.path(),
+            "https://github.com/example/stale.git",
+        );
+
+        let bin = tempfile::tempdir().expect("fake git bin");
+        let git = bin.path().join("git");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
+        )
+        .expect("write fake git");
+        let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+        let _stale_checkout = homeboy::core::test_support::EnvVarGuard::set(
+            "HOMEBOY_STALE_CHECKOUT",
+            std::fs::canonicalize(stale.path())
+                .expect("canonical stale checkout")
+                .display()
+                .to_string(),
+        );
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var_os("PATH")
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        );
+
+        let started = std::time::Instant::now();
+        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--cwd".to_string(),
+            checkout.path().display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("unregistered cwd requires an explicit repository identity");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            error
+                .details
+                .to_string()
+                .contains("--repo <repo> is required"),
+            "missing-argument recovery: {}",
+            error.details
+        );
     });
 }
 

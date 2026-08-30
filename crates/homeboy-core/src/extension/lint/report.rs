@@ -3,15 +3,15 @@
 //! Mirrors `core/extension/test/report.rs` — the command layer calls a single
 //! builder function to convert a workflow result into the command output tuple.
 
-use crate::extension::{
-    phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
-    PhaseFailureCategory, PhaseReport, VerificationPhase,
-};
 use homeboy_core::ci_profile::CiContext;
 use homeboy_core::finding::FindingProducerSummary;
 #[cfg(test)]
 use homeboy_core::finding::HomeboyFinding;
 pub use homeboy_extension_contract::LintCommandOutput;
+use homeboy_extension_contract::{
+    phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
+    PhaseFailureCategory, PhaseReport, VerificationPhase,
+};
 use homeboy_refactor_contract::AppliedRefactor;
 use homeboy_refactor_contract::LintFixInput;
 
@@ -96,7 +96,7 @@ fn lint_phase_report(
     PhaseReport {
         phase: VerificationPhase::Lint,
         status: if infrastructure_failure {
-            crate::extension::PhaseStatus::Error
+            homeboy_extension_contract::PhaseStatus::Error
         } else {
             phase_status_from_exit_code(exit_code)
         },
@@ -347,7 +347,10 @@ mod tests {
         let (output, exit_code) = from_main_workflow(result);
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.phase.status, crate::extension::PhaseStatus::Passed);
+        assert_eq!(
+            output.phase.status,
+            homeboy_extension_contract::PhaseStatus::Passed
+        );
         assert_eq!(
             output.phase.summary,
             "lint phase passed with 1 advisory finding(s) across phpcs passed: 1"
@@ -449,7 +452,10 @@ mod tests {
 
         assert_eq!(exit_code, 1);
         assert_eq!(output.status, "error");
-        assert_eq!(output.phase.status, crate::extension::PhaseStatus::Error);
+        assert_eq!(
+            output.phase.status,
+            homeboy_extension_contract::PhaseStatus::Error
+        );
         assert_eq!(
             output.phase.summary,
             "lint phase infrastructure failure (exit 1)"

@@ -2,8 +2,8 @@ use std::io;
 use std::path::{Component as PathComponent, Path, PathBuf};
 use std::time::Duration;
 
-use crate::extension::{ExtensionCapability, ExtensionPhaseTiming, TestSecretEnvProjection};
 use crate::extension_execution::ExtensionExecutionContext;
+use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_core::component::Component;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use homeboy_core::engine::resource::{self, ExtensionChildResourceSummary};
@@ -11,6 +11,7 @@ use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server::CommandOutput;
 use homeboy_engine_primitives::shell;
+use homeboy_extension_contract::{ExtensionCapability, TestSecretEnvProjection};
 use serde_json::json;
 
 /// Env var that makes a validation runner fail closed when a resolved
@@ -454,7 +455,9 @@ impl ExtensionRunner {
     /// loading that manifest, so a failure here means it became unreadable
     /// mid-run, and losing the seed is a strictly better outcome than failing
     /// the run inside sidecar bookkeeping.
-    fn declared_structured_sidecars(&self) -> Vec<crate::extension::StructuredSidecarDeclaration> {
+    fn declared_structured_sidecars(
+        &self,
+    ) -> Vec<homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration> {
         crate::extension_store::load_extension(&self.execution_context.extension_id)
             .map(|manifest| crate::extension::structured_sidecars(&manifest))
             .unwrap_or_default()
@@ -755,7 +758,7 @@ fn write_structured_failure_sidecar(
 /// `seed_on_start` are written here.
 fn initialize_structured_sidecars(
     run_dir_path: &Path,
-    declared: &[crate::extension::StructuredSidecarDeclaration],
+    declared: &[homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration],
 ) -> Result<()> {
     for declaration in declared {
         if !homeboy_core::structured_sidecar::seeds_on_start(&declaration.name) {
@@ -777,7 +780,7 @@ fn initialize_structured_sidecars(
 /// captured output; this sidecar contains only individual failure records.
 fn normalize_declared_test_failures(
     run_dir_path: &Path,
-    declared: &[crate::extension::StructuredSidecarDeclaration],
+    declared: &[homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration],
 ) -> Result<()> {
     let Some(declaration) = declared
         .iter()
@@ -822,7 +825,7 @@ fn normalize_declared_test_failures(
 ///   failure sidecars written over it and a real failure to report.
 fn validate_declared_structured_sidecars(
     run_dir_path: &Path,
-    declared: &[crate::extension::StructuredSidecarDeclaration],
+    declared: &[homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration],
 ) -> Result<()> {
     for declaration in declared {
         let Some(path) = run_dir_relative_sidecar_path(run_dir_path, &declaration.path) else {
@@ -1032,11 +1035,11 @@ fn stale_validation_dependency_message(stdout: &str, stderr: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::ExtensionCapability;
     use homeboy_core::component::Component;
     use homeboy_core::engine::run_dir::RunDir;
     use homeboy_core::server::CommandObservation;
     use homeboy_core::test_support::with_isolated_home;
+    use homeboy_extension_contract::ExtensionCapability;
 
     fn context() -> ExtensionExecutionContext {
         ExtensionExecutionContext {
@@ -1232,8 +1235,10 @@ mod tests {
         run_dir.cleanup();
     }
 
-    fn declaration(name: &str) -> crate::extension::StructuredSidecarDeclaration {
-        crate::extension::StructuredSidecarDeclaration {
+    fn declaration(
+        name: &str,
+    ) -> homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration {
+        homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration {
             name: name.to_string(),
             path: homeboy_core::structured_sidecar::default_path(name)
                 .unwrap_or(name)

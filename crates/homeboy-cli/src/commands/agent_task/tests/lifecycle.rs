@@ -77,7 +77,7 @@ fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
         )
         .expect("persist controller admission hash failure");
 
-        let record = agent_task_lifecycle::status(run_id).expect("load failed run");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("load failed run");
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             "controller_admission"
@@ -117,7 +117,7 @@ fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
 }
 
 #[test]
-fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() {
+fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
     with_temp_home(|| {
         let run_id = "run-cli-lab-preacceptance-io";
         let plan = test_plan();
@@ -151,7 +151,7 @@ fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() 
         )
         .expect("persist Lab transport failure");
 
-        let record = agent_task_lifecycle::status(run_id).expect("durable failed record");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("durable failed record");
         let aggregate = test_lifecycle_store()
             .read_aggregate(run_id)
             .expect("durable aggregate");
@@ -171,15 +171,6 @@ fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() 
             "broken_pipe"
         );
 
-        let status_args = |full| StatusArgs {
-            run_id: run_id.to_string(),
-            full,
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
-        };
-        let (compact_status, _) = status(status_args(false)).expect("compact status");
-        let (full_status, _) = status(status_args(true)).expect("full status");
         let (compact_diagnosis, _) = diagnose(DiagnoseArgs {
             run_id: run_id.to_string(),
             full: false,
@@ -192,8 +183,6 @@ fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() 
         .expect("full diagnosis");
 
         for receipt in [
-            &compact_status["lab_transport_failure"]["receipt"],
-            &full_status["outcome"]["lab_transport_failure"]["receipt"],
             &compact_diagnosis["lab_transport_failure"]["receipt"],
             &full_diagnosis["lab_transport_failure"]["receipt"],
         ] {
@@ -210,7 +199,7 @@ fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() 
             compact_diagnosis["root_cause"]["class"],
             "runner.lab_transport_failure"
         );
-        for output in [&compact_status, &compact_diagnosis] {
+        for output in [&compact_diagnosis] {
             let actions = output["_homeboy_actionable"]["next_actions"]
                 .as_array()
                 .expect("one actionable remediation");
@@ -220,21 +209,13 @@ fn lab_preacceptance_io_is_structured_in_status_diagnose_and_durable_evidence() 
                 "homeboy runner doctor homeboy-lab --scope lab-offload --repair"
             );
         }
-        for action in [
-            &full_status["outcome"]["next_action"],
-            &full_diagnosis["next_action"],
-        ] {
+        for action in [&full_diagnosis["next_action"]] {
             assert_eq!(
                 action["command"],
                 "homeboy runner doctor homeboy-lab --scope lab-offload --repair"
             );
         }
-        for output in [
-            &compact_status,
-            &full_status,
-            &compact_diagnosis,
-            &full_diagnosis,
-        ] {
+        for output in [&compact_diagnosis, &full_diagnosis] {
             assert!(!serde_json::to_string(output)
                 .expect("serialize command output")
                 .contains("status-fixture-secret"));
@@ -273,25 +254,13 @@ fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLif
 }
 
 #[test]
-fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
+fn canonical_status_refs_hydrate_through_the_agent_task_resolver() {
     with_isolated_home(|_| {
         let run_id = "bounded-status-ref";
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
-        let (bounded, _) = status(StatusArgs {
-            run_id: run_id.to_string(),
-            full: true,
-            bounded: true,
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
-        })
-        .expect("bounded status");
         let evidence = AgentTaskEvidenceRef {
             kind: "status".to_string(),
-            uri: bounded["details"]["status"]["ref"]
-                .as_str()
-                .expect("status ref")
-                .to_string(),
+            uri: format!("homeboy://agent-task/run/{run_id}/status"),
             label: None,
         };
         let hydrated = homeboy::agents::agent_task_service::hydrate_evidence_ref(
@@ -299,7 +268,7 @@ fn bounded_full_status_refs_hydrate_through_the_agent_task_resolver() {
         );
 
         assert_eq!(hydrated.status, "ok");
-        assert_eq!(hydrated.content["run_id"], run_id);
+        assert_eq!(hydrated.content["run"], run_id);
     });
 }
 
@@ -403,47 +372,17 @@ fn status_scope_keeps_the_historical_finalized_candidate_for_a_cancelled_retry()
         })
         .expect("cancel retry");
 
-        let status_args = |full: bool, bridge: bool| StatusArgs {
+        let status_args = || StatusArgs {
             run_id: retry_run_id.to_string(),
-            // `--bridge` and `--exact` conflict in Clap. A positional attempt
-            // still resolves its Cook identity and candidate selection.
-            exact: !bridge,
-            bridge,
-            since_cursor: None,
-            full,
-            bounded: false,
-            no_runner_probe: false,
+            exact: true,
             strict_subject_exit: false,
             watch: false,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
         };
-        for value in [
-            status(status_args(false, false)).expect("compact status").0,
-            status(status_args(true, false)).expect("full status").0,
-            status(status_args(false, true)).expect("bridge status").0,
-        ] {
-            assert_eq!(
-                value["status_scope"]["queried_attempt"]["state"],
-                "cancelled"
-            );
-            assert_eq!(
-                value["status_scope"]["cook"]["selection"]["status"],
-                "selected"
-            );
-            assert_eq!(
-                value["status_scope"]["cook"]["selection"]["run_id"],
-                source_run_id
-            );
-            assert_eq!(
-                value["status_scope"]["cook"]["selection"]["candidate"]["state"],
-                "finalized"
-            );
-            assert_eq!(
-                value["status_scope"]["cook"]["finalization"]["pr_url"],
-                "https://example.test/pull/12971"
-            );
-        }
+        let value = status(status_args()).expect("canonical status").0;
+        assert_eq!(value["run"], retry_run_id);
+        assert_eq!(value["state"], "cancelled");
     });
 }
 
@@ -471,57 +410,17 @@ fn status_scope_reports_a_bounded_cook_selection_as_unavailable() {
         })
         .expect("cancel retry");
 
-        for value in [
-            status(StatusArgs {
-                run_id: retry_run_id.clone(),
-                exact: true,
-                interval: "5s".to_string(),
-                timeout: "30m".to_string(),
-                ..Default::default()
-            })
-            .expect("compact status")
-            .0,
-            status(StatusArgs {
-                run_id: retry_run_id.clone(),
-                exact: true,
-                full: true,
-                interval: "5s".to_string(),
-                timeout: "30m".to_string(),
-                ..Default::default()
-            })
-            .expect("full status")
-            .0,
-            status(StatusArgs {
-                run_id: retry_run_id.clone(),
-                // Bridge resolution starts from the supplied attempt ID; Clap
-                // rejects pairing `--bridge` with `--exact`.
-                exact: false,
-                bridge: true,
-                since_cursor: None,
-                full: false,
-                bounded: false,
-                no_runner_probe: false,
-                strict_subject_exit: false,
-                watch: false,
-                interval: "5s".to_string(),
-                timeout: "30m".to_string(),
-            })
-            .expect("bridge status")
-            .0,
-        ] {
-            assert_eq!(
-                value["status_scope"]["queried_attempt"]["state"],
-                "cancelled"
-            );
-            assert_eq!(
-                value["status_scope"]["cook"]["selection"]["status"],
-                "unavailable"
-            );
-            assert_eq!(
-                value["status_scope"]["cook"]["selection"]["diagnostics"][0]["code"],
-                "selection_incomplete"
-            );
-        }
+        let value = status(StatusArgs {
+            run_id: retry_run_id.clone(),
+            exact: true,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+            ..Default::default()
+        })
+        .expect("canonical status")
+        .0;
+        assert_eq!(value["run"], retry_run_id.as_str());
+        assert_eq!(value["state"], "cancelled");
     });
 }
 
@@ -539,12 +438,13 @@ fn status_omits_scope_for_an_ordinary_non_cook_attempt() {
         })
         .expect("status");
 
-        assert!(value.get("status_scope").is_none());
+        assert_eq!(value["run"], run_id);
+        assert_eq!(value["state"], "queued");
     });
 }
 
 #[test]
-fn full_status_bounds_unrelated_high_cardinality_cleanup_inventory() {
+fn canonical_status_omits_unrelated_high_cardinality_cleanup_inventory() {
     with_isolated_home(|_| {
         let run_id = "status-scoped-cleanup";
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submitted");
@@ -562,28 +462,17 @@ fn full_status_bounds_unrelated_high_cardinality_cleanup_inventory() {
 
         let (value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
-            full: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
-        .expect("full status");
+        .expect("canonical status");
 
-        assert_eq!(value["schema"], "homeboy/agent-task-status-full/v2");
-        assert_eq!(value["evidence_graph"].as_array().map(Vec::len), Some(8));
-        assert_eq!(
-            value["evidence_graph"][0]["ref"],
-            format!("homeboy://agent-task/run/{run_id}/aggregate")
-        );
-        assert!(value["evidence_graph"]
-            .as_array()
-            .expect("stable graph")
-            .iter()
-            .all(|entry| entry["export_command"].as_str().is_some()));
+        assert_eq!(value["run"], run_id);
         assert!(!value.to_string().contains("/workspace/unrelated-9999"));
         assert!(value.to_string().len() < 16 * 1024);
 
-        let persisted = agent_task_lifecycle::status(run_id).expect("persisted record");
+        let persisted = agent_task_lifecycle::reconcile_status(run_id).expect("persisted record");
         assert_eq!(
             persisted.metadata["automatic_artifact_retention"]["worktrees"]
                 .as_array()
@@ -1059,14 +948,13 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
         assert_eq!(failed["status"], "pre_execution_failure");
         let (status_value, status_exit) = status(StatusArgs {
             run_id: "cook-cli-preflight-recovery".to_string(),
-            full: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
         .expect("cook status resolves through its public alias");
         assert_eq!(status_exit, 0);
-        assert_eq!(status_value["outcome"]["state"], "failed");
+        assert_eq!(status_value["state"], "failed");
     });
 }
 
@@ -1159,7 +1047,6 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
             .expect("persist recipe without lifecycle record");
         let (status_value, status_exit) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            full: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
@@ -2076,8 +1963,9 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
         .unwrap();
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
         assert_eq!(
-            agent_task_lifecycle::status(run_id).unwrap().metadata["cook_continue_route"]
-                ["artifact_id"],
+            agent_task_lifecycle::reconcile_status(run_id)
+                .unwrap()
+                .metadata["cook_continue_route"]["artifact_id"],
             "selected"
         );
     });
@@ -2392,6 +2280,28 @@ fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
 }
 
 #[test]
+fn logs_exposes_only_the_canonical_cursor_surface() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "logs",
+        "run-1",
+        "--cursor",
+        "event-page-2",
+    ])
+    .expect("canonical cursor parses");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Logs(args) = agent_task.command else {
+        panic!("expected logs command");
+    };
+    assert_eq!(args.run_id, "run-1");
+    assert_eq!(args.cursor.as_deref(), Some("event-page-2"));
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "logs", "run-1", "--raw"]).is_err());
+}
+
+#[test]
 fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
     with_temp_home(|| {
         let command = vec![
@@ -2412,7 +2322,6 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: "run-cli-controller-proxy".to_string(),
-            full: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
@@ -2421,14 +2330,13 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
         let (logs_value, logs_exit) = logs(LogsArgs {
             run_id: "run-cli-controller-proxy".to_string(),
             cursor: None,
-            raw: false,
         })
         .expect("controller logs resolve");
 
         assert_eq!(status_exit, 0);
         assert_eq!(logs_exit, 0);
-        assert_eq!(status_value["outcome"]["state"], "queued");
-        assert_eq!(logs_value["events"]["run"], "run-cli-controller-proxy");
+        assert_eq!(status_value["state"], "queued");
+        assert_eq!(logs_value["run"], "run-cli-controller-proxy");
     });
 }
 
@@ -2468,8 +2376,8 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
             .expect("executor lock")
             .is_none());
 
-        let record =
-            agent_task_lifecycle::status("run-cli-transport-proxy").expect("proxy state preserved");
+        let record = agent_task_lifecycle::reconcile_status("run-cli-transport-proxy")
+            .expect("proxy state preserved");
         assert_eq!(record.state, AgentTaskRunState::Queued);
         assert_eq!(record.metadata["retryable"], true);
         assert_eq!(record.metadata["transport_recovery"], "required");
@@ -2527,10 +2435,8 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
         .expect("controller proxy persisted");
         let executor = Arc::new(CapturingExecutor::default());
 
-        let error = run_resume_with_executor_and_bridge(
+        let error = run_resume_with_executor(
             "run-cli-resume-transport-proxy".to_string(),
-            false,
-            None,
             false,
             executor.clone(),
         )
@@ -2545,7 +2451,7 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
             .expect("executor lock")
             .is_none());
         assert_eq!(
-            agent_task_lifecycle::status("run-cli-resume-transport-proxy")
+            agent_task_lifecycle::reconcile_status("run-cli-resume-transport-proxy")
                 .expect("proxy state preserved")
                 .state,
             AgentTaskRunState::Queued
@@ -2626,7 +2532,7 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
             .expect("executor lock")
             .is_none());
         assert_eq!(
-            agent_task_lifecycle::status("run-cli-queued-proxy")
+            agent_task_lifecycle::reconcile_status("run-cli-queued-proxy")
                 .expect("proxy status")
                 .state,
             AgentTaskRunState::Queued
@@ -2687,43 +2593,23 @@ fn submit_run_status_reports_terminal_state() {
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
-            full: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
         .expect("status loaded");
-        let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
-            run_id: "run-cli-terminal".to_string(),
-            bridge: true,
-            since_cursor: Some("0".to_string()),
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
-        })
-        .expect("bridge status loaded");
         assert_eq!(
-            status_json["control_plane_run"]["action_eligibility"]["schema"],
+            status_json["action_eligibility"]["schema"],
             "homeboy/control-plane-action-eligibility/v1"
         );
         assert_eq!(run_exit_code, 1);
         assert_eq!(status_exit_code, 0);
-        assert_eq!(bridge_status_exit_code, 0);
-        assert_eq!(
-            bridge_status_json["schema"],
-            "homeboy/agent-task-run-status/v3"
-        );
-        assert!(bridge_status_json["events"]["events"].is_array());
-        assert_eq!(
-            bridge_status_json["control_plane_run"]["action_eligibility"]["schema"],
-            "homeboy/control-plane-action-eligibility/v1"
-        );
-        assert_eq!(status_json["outcome"]["state"], "failed");
+        assert_eq!(status_json["state"], "failed");
     });
 }
 
 #[test]
-fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
+fn logs_return_canonical_events_while_diagnostics_stay_on_diagnose_and_review() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnostic-summary";
         run_loaded_plan(
@@ -2743,9 +2629,13 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         let (logs_value, _) = logs(LogsArgs {
             run_id: run_id.to_string(),
             cursor: None,
-            raw: false,
         })
         .expect("logs loaded");
+        let (diagnose_value, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnosis loaded");
         let (review_value, _) = review::review(ReviewArgs {
             run_id: run_id.to_string(),
             full: true,
@@ -2755,14 +2645,22 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         })
         .expect("review loaded");
 
-        for value in [&status_value, &logs_value, &review_value] {
-            assert_eq!(
-                value["diagnostic_summary"]["message"],
-                "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
-            );
-            assert_eq!(value["diagnostic_summary"]["class"], "provider_discovery");
-            assert_eq!(value["diagnostic_summary"]["task_id"], "task-a");
-        }
+        assert_eq!(
+            diagnose_value["root_cause"]["message"],
+            "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
+        );
+        assert_eq!(diagnose_value["root_cause"]["class"], "provider_discovery");
+        assert_eq!(diagnose_value["root_cause"]["task_id"], "task-a");
+        assert_eq!(
+            review_value["diagnostic_summary"]["message"],
+            diagnose_value["root_cause"]["message"]
+        );
+        assert_eq!(
+            logs_value["schema"],
+            homeboy_control_plane_contract::CONTROL_PLANE_EVENT_PAGE_SCHEMA
+        );
+        assert!(logs_value.get("diagnostic_summary").is_none());
+        assert!(status_value.get("diagnostic_summary").is_none());
     });
 }
 
@@ -2884,25 +2782,7 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             .contains("[REDACTED]"));
         assert_eq!(
             value["next_commands"][0],
-            "homeboy --placement local agent-task status run-cli-diagnose-evidence --full"
-        );
-
-        let (status_value, status_exit_code) = status(StatusArgs {
-            run_id: "run-cli-diagnose-evidence".to_string(),
-            full: true,
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
-        })
-        .expect("status loaded");
-        assert_eq!(status_exit_code, 0);
-        assert_eq!(
-            status_value["outcome"]["blocker"]["class"],
-            "agent_runtime.task_run_failed"
-        );
-        assert_eq!(
-            status_value["outcome"]["blocker"]["message"],
-            "RecipeValidationError: configured provider runtime path does not exist"
+            "homeboy --placement local agent-task status run-cli-diagnose-evidence"
         );
     });
 }
@@ -3196,33 +3076,6 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
             "agent_tool.command_denied"
         );
         assert_ne!(value["root_cause"]["class"], "provider.process_exit");
-
-        let (status_value, status_exit_code) = status(StatusArgs {
-            run_id: run_id.to_string(),
-            full: true,
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
-        })
-        .expect("status loaded");
-
-        assert_eq!(status_exit_code, 0);
-        assert_eq!(
-            status_value["outcome"]["blocker"]["class"],
-            "agent_tool.command_denied"
-        );
-        assert_eq!(
-            status_value["outcome"]["blocker"]["details"]["tool"],
-            "grep"
-        );
-        assert_eq!(
-            status_value["outcome"]["blocker"]["details"]["permission"],
-            "external_directory_read"
-        );
-        assert_eq!(
-            status_value["outcome"]["blocker"]["details"]["canonical_path"],
-            "/Users/chubes/Developer/homeboy@fix-11827-diagnose-policy-root-cause"
-        );
     });
 }
 
@@ -3289,23 +3142,6 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
             .expect("process streams")
             .iter()
             .any(|stream| stream["excerpt"] == "token=[REDACTED]"));
-
-        let (status_value, _) = status(StatusArgs {
-            run_id: run_id.to_string(),
-            full: true,
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
-        })
-        .expect("status loaded");
-        assert_eq!(
-            status_value["outcome"]["blocker"]["class"],
-            "provider.runtime_unavailable"
-        );
-        assert_eq!(
-            status_value["outcome"]["blocker"]["source"],
-            "hydrated_process_stream"
-        );
     });
 }
 
@@ -3451,7 +3287,7 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
         assert_eq!(
             value["next_commands"],
             json!([
-                format!("homeboy --placement local agent-task status {run_id} --full"),
+                format!("homeboy --placement local agent-task status {run_id}"),
                 format!("homeboy --placement local agent-task artifacts {run_id}"),
                 format!("homeboy --placement local agent-task review {run_id}"),
             ])
@@ -3464,7 +3300,7 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
         assert_eq!(actionable["run"]["location"], "local");
         assert_eq!(
             actionable["run"]["status_command"],
-            format!("homeboy agent-task status {run_id} --full")
+            format!("homeboy agent-task status {run_id}")
         );
         assert_eq!(actionable["refs"]["agent_tasks"][0]["id"], run_id);
         assert!(actionable["evidence"]
@@ -3584,7 +3420,7 @@ fn diagnose_falls_back_to_the_generic_set_for_an_unclassified_failure() {
         assert_eq!(
             commands,
             vec![
-                format!("homeboy agent-task status {run_id} --full"),
+                format!("homeboy agent-task status {run_id}"),
                 format!("homeboy agent-task artifacts {run_id}"),
                 format!("homeboy agent-task review {run_id}"),
             ]
@@ -3819,20 +3655,6 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
         assert_eq!(
             diagnose_value["missing_artifacts"][0]["missing"],
             json!(["answer_packet"])
-        );
-
-        let (status_value, status_exit_code) = status(StatusArgs {
-            run_id: run_id.to_string(),
-            full: true,
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
-        })
-        .expect("status loaded");
-        assert_eq!(status_exit_code, 0);
-        assert_eq!(
-            status_value["outcome"]["blocker"]["class"],
-            "runtime.import_failed"
         );
     });
 }
@@ -4809,7 +4631,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
         }
 
         assert_eq!(RETRY_RUN_DISPATCHES.load(Ordering::SeqCst), 1);
-        let record = agent_task_lifecycle::status(&replacement.record.run_id)
+        let record = agent_task_lifecycle::reconcile_status(&replacement.record.run_id)
             .expect("read replacement record");
         assert_eq!(record.metadata["retry_of"], source_run_id);
         assert_eq!(record.metadata["cook_id"], cook_id);
@@ -4941,10 +4763,8 @@ fn resume_command_executes_existing_run() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-resume-cli")).expect("submitted");
         let observed_status = Arc::new(Mutex::new(None));
 
-        let (_value, exit_code) = run_resume_with_executor_and_bridge(
+        let (_value, exit_code) = run_resume_with_executor(
             "run-resume-cli".to_string(),
-            false,
-            None,
             false,
             Arc::new(InspectingExecutor {
                 run_id: "run-resume-cli".to_string(),
@@ -5029,24 +4849,15 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             .expect("artifacts before bridge")
             .is_empty());
 
-        let (value, exit_code) = resume(StatusArgs {
+        let (value, exit_code) = resume(LifecycleReadArgs {
             run_id: run_id.to_string(),
-            bridge: true,
-            since_cursor: Some("1".to_string()),
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
+            full: true,
         })
-        .expect("bridge resume reconciles terminal projection");
+        .expect("resume reconciles terminal projection");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(value["schema"], "homeboy/agent-task-run-status/v3");
-        assert_eq!(value["control_plane_run"]["run"], run_id);
-        assert_eq!(value["control_plane_run"]["state"], "succeeded");
-        assert_eq!(value["events"]["next_cursor"], "2");
-        assert_eq!(value["events"]["events"].as_array().map(Vec::len), Some(1));
-        assert_eq!(value["events"]["events"][0]["kind"], "task.state_changed");
-        assert_eq!(value["events"]["events"][0]["data"]["state"], "succeeded");
+        assert_eq!(value["schema"], "homeboy/agent-task-aggregate/v1");
+        assert_eq!(value["status"], "succeeded");
         let artifacts = store.list_artifacts(run_id).expect("projected artifacts");
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_type, "file");
@@ -5060,15 +4871,11 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             Some(std::path::PathBuf::from(&artifacts[0].path))
         );
 
-        resume(StatusArgs {
+        resume(LifecycleReadArgs {
             run_id: run_id.to_string(),
-            bridge: true,
-            since_cursor: Some("1".to_string()),
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
+            full: true,
         })
-        .expect("bridge reconciliation is idempotent");
+        .expect("automatic reconciliation is idempotent");
         assert_eq!(
             store
                 .list_artifacts(run_id)
@@ -5080,7 +4887,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
 }
 
 #[test]
-fn non_bridge_resume_keeps_aggregate_output_shape() {
+fn ordinary_resume_keeps_aggregate_output_shape() {
     with_temp_home(|| {
         let run_id = "run-cli-resume-ordinary";
         let plan = test_plan();
@@ -5100,11 +4907,9 @@ fn non_bridge_resume_keeps_aggregate_output_shape() {
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
             .expect("persist terminal aggregate");
 
-        let (value, exit_code) = resume(StatusArgs {
+        let (value, exit_code) = resume(LifecycleReadArgs {
             run_id: run_id.to_string(),
-            interval: "5s".to_string(),
-            timeout: "30m".to_string(),
-            ..Default::default()
+            full: true,
         })
         .expect("ordinary resume returns terminal aggregate");
 

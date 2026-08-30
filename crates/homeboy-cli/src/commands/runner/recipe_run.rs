@@ -110,7 +110,7 @@ mod tests {
             .to_string(),
         )
         .expect("manifest");
-        homeboy_core::extension::install(&source.path().display().to_string(), Some(id))
+        homeboy_core::extension::lifecycle::install(&source.path().display().to_string(), Some(id))
             .expect("install extension");
         // Installed extensions are linked to their source. Keep the fixture
         // alive until discovery and execution complete.

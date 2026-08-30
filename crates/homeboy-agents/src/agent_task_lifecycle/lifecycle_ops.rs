@@ -362,6 +362,57 @@ fn aggregate_totals(total_tasks: usize, outcomes: &[AgentTaskOutcome]) -> AgentT
     totals
 }
 
+/// Restore the terminal aggregate only when one persisted executor outcome maps
+/// exactly to the run's one planned task.
+pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    outcome: AgentTaskOutcome,
+) -> Result<PathBuf> {
+    let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+    if plan.tasks.len() != 1
+        || record.tasks.len() != 1
+        || plan.tasks[0].task_id != outcome.task_id
+        || record.tasks[0].task_id != outcome.task_id
+    {
+        return Err(Error::new(
+            ErrorCode::ValidationInvalidArgument,
+            "executor outcome cannot reconstruct an unambiguous aggregate",
+            json!({
+                "run_id": record.run_id,
+                "outcome_task_id": outcome.task_id,
+                "plan_task_ids": plan.tasks.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>(),
+                "record_task_ids": record.tasks.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>(),
+            }),
+        ));
+    }
+
+    let outcomes = vec![outcome];
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: aggregate_status(&outcomes),
+        totals: aggregate_totals(plan.tasks.len(), &outcomes),
+        events: events_for_outcomes(&outcomes),
+        outcomes,
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: AgentTaskQueueStatus {
+            max_concurrency: plan.options.max_concurrency,
+            completed: 1,
+            ..AgentTaskQueueStatus::default()
+        },
+    };
+    let mut recovered_record = record.clone();
+    let aggregate_path = lifecycle_store
+        .aggregate_path(&record.run_id)
+        .display()
+        .to_string();
+    apply_aggregate_to_record(&mut recovered_record, &plan, &aggregate, aggregate_path);
+    lifecycle_store.write_aggregate_and_record(&recovered_record, &aggregate)
+}
+
 pub fn submit_plan(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
@@ -1179,7 +1230,7 @@ pub fn record_detached_cook_supervisor_in_store(
         record.metadata["detached_cook_handoff"]["supervisor_job_id"] = json!(job_id);
         record.metadata["detached_cook_handoff"]["admission_state"] = json!("supervising");
         record.metadata["detached_cook_handoff"]["reattach_command"] =
-            json!(format!("homeboy agent-task status {cook_id} --full"));
+            json!(format!("homeboy agent-task status {cook_id}"));
         true
     })?;
     Ok(())
@@ -1213,8 +1264,7 @@ pub fn record_local_cook_retry_supervisor_in_store(
         supervisor["job_id"] = json!(job_id);
         supervisor["job_type"] = json!(crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE);
         supervisor["pinned_run_id"] = json!(run_id);
-        supervisor["reattach_command"] =
-            json!(format!("homeboy agent-task status {run_id} --full"));
+        supervisor["reattach_command"] = json!(format!("homeboy agent-task status {run_id}"));
         true
     })?;
     if updated.is_none() {
@@ -4418,7 +4468,7 @@ pub(crate) fn trusted_dispatcher_kind(kind: &str) -> Option<String> {
 }
 
 fn queue_quarantine_remediation() -> &'static str {
-    "inspect retained diagnostics with: homeboy agent-task status <run-id> --exact --full"
+    "inspect retained diagnostics with: homeboy agent-task diagnose <run-id> --full"
 }
 
 /// Retain the redacted admission diagnostic on the record inside the store the
@@ -4719,7 +4769,7 @@ pub fn is_controller_local(record: &AgentTaskRunRecord) -> bool {
     record.runner_id().is_none() && record.runner_job_id().is_none() && record.lab_handoff.is_none()
 }
 
-/// Whether a read-side `status()` may reach the runner.
+/// Whether explicit status reconciliation may reach the runner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentTaskRunnerProbe {
     /// Reach the runner only when the record is genuinely runner-backed and
@@ -4732,7 +4782,7 @@ pub enum AgentTaskRunnerProbe {
     Never,
 }
 
-/// Read-side options for [`status_with_options`].
+/// Options for [`reconcile_status_with_options`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AgentTaskStatusOptions {
     pub runner_probe: AgentTaskRunnerProbe,
@@ -4852,20 +4902,24 @@ pub fn runner_probe_plan(
     }
 }
 
-/// A durable run record plus the read-side runner-probe decision that produced
-/// it.
+/// A durable run record plus the runner-probe decision that produced it.
 #[derive(Debug, Clone)]
 pub struct AgentTaskStatusOutcome {
     pub record: AgentTaskRunRecord,
     pub runner_probe: AgentTaskRunnerProbePlan,
 }
 
-/// Read the durable run record with live reconciliation applied (deferred
-/// candidate, runtime admission, and runner/daemon status projection) so callers
-/// see the current, joinable controller record.
+/// Read the bounded controller-owned lifecycle record without reconciliation.
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    Ok(status_in_store(
+    status_in_store(&lifecycle_store, run_id)
+}
+
+/// Apply deferred-candidate, runtime-admission, and runner/daemon projections,
+/// persisting the resulting current, joinable controller record.
+pub fn reconcile_status(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    Ok(reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -4874,24 +4928,25 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     .record)
 }
 
-/// [`status`] with explicit control over whether the read may reach the runner.
+/// [`reconcile_status`] with explicit control over whether reconciliation may
+/// reach the runner.
 ///
 /// A controller-local record is always answered locally, regardless of options.
-pub fn status_with_options(
+pub fn reconcile_status_with_options(
     run_id: &str,
     options: AgentTaskStatusOptions,
 ) -> Result<AgentTaskStatusOutcome> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    status_in_store(&lifecycle_store, run_id, options, false)
+    reconcile_status_in_store(&lifecycle_store, run_id, options, false)
 }
 
 // The ambient `exact_status()` shim that used to sit here is
 // gone; the reconciler was its only caller and now reads exactly through the store it resolved once (#7505).
 
-/// The shared, store-rooted body of [`status`], [`status_with_options`], and
-/// [`exact_status`].
+/// The shared, store-rooted body of [`reconcile_status`],
+/// [`reconcile_status_with_options`], and [`exact_status`].
 ///
-/// `status` is not a read. It takes two advisory locks and has roughly twenty
+/// Status reconciliation takes two advisory locks and has roughly twenty
 /// durable write sites, so every step below has to name the installation the
 /// caller injected — a status that decided from one home and committed into
 /// another would be silently wrong in exactly the way #7505 exists to stop.
@@ -4950,7 +5005,7 @@ pub fn status_with_options(
 /// `validate_recipe_attempt_record_with_controller_plan` with a plan read from
 /// the injected lifecycle store, so the recipe half and the plan half cannot
 /// come from different homes.
-pub fn status_in_store(
+pub fn reconcile_status_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     options: AgentTaskStatusOptions,
@@ -5258,18 +5313,8 @@ pub fn status_in_store(
     })
 }
 
-/// Read the controller-owned lifecycle record without contacting its runner.
-///
-/// This is deliberately separate from [`status`]: runner reconciliation is
-/// authoritative when an operator explicitly asks to refresh liveness, but a
-/// wedged runner must never hide state already persisted by the controller.
-pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    persisted_status_in_store(&lifecycle_store, run_id)
-}
-
-/// [`persisted_status`] against explicitly injected durable lifecycle roots.
-pub fn persisted_status_in_store(
+/// [`status`] against explicitly injected durable lifecycle roots.
+pub fn status_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
@@ -5277,140 +5322,17 @@ pub fn persisted_status_in_store(
     lifecycle_store.read_record_bounded(&resolved_run_id)
 }
 
-/// Refresh accepted runner handoffs and expire unbound controller handoffs before
-/// a read model (such as activity) projects lifecycle state. A controller wait
-/// expiry is not terminal after a runner job is recorded: the runner daemon
-/// remains the authority until it reports a terminal job result.
-pub fn run_status(
-    run_id: &str,
-    cursor: Option<homeboy_control_plane_contract::EventCursor>,
-) -> Result<AgentTaskRunStatus> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    run_status_in_store(&lifecycle_store, run_id, cursor)
-}
-
-/// [`run_status`] against explicitly injected durable lifecycle roots.
-///
-/// The reconciliation underneath this projection writes — it is
-/// [`status_in_store`] — so the aggregate and plan it then reads have to come
-/// from the same installation those writes landed in. Projecting a bridge view
-/// from one home's aggregate over another home's freshly reconciled record
-/// would report progress events for a run that never produced them (#7505).
-pub fn run_status_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    cursor: Option<homeboy_control_plane_contract::EventCursor>,
-) -> Result<AgentTaskRunStatus> {
-    let record = status_in_store(
-        lifecycle_store,
-        run_id,
-        AgentTaskStatusOptions::default(),
-        false,
-    )?
-    .record;
-    let aggregate = lifecycle_store.read_aggregate(&record.run_id).ok();
-    let (events, artifact_refs) = match aggregate.as_ref() {
-        Some(aggregate) => {
-            let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
-            (aggregate.events.clone(), refs)
-        }
-        None => {
-            // Surface a local cook's durable running provider execution so the
-            // live bridge status advances past "task submitted" too (#8396).
-            let mut events = queued_events(&record.tasks);
-            events.extend(local_provider_execution_events(&record));
-            (events, record.artifact_refs.clone())
-        }
-    };
-    let plan = load_plan_for_execution_in_store(lifecycle_store, &record.run_id).ok();
-    let candidate = plan.as_ref().and_then(|plan| {
-        (plan.tasks.len() > 1).then(|| {
-            let selected = aggregate
-                .as_ref()
-                .and_then(|value| value.selected_outcome());
-            AgentTaskCandidateStatus {
-                policy: plan.options.candidate_completion,
-                selected_task_id: selected.map(|outcome| outcome.task_id.clone()),
-                candidates: aggregate
-                    .as_ref()
-                    .map(|value| tasks_for_aggregate(&plan, value))
-                    .unwrap_or_else(|| record.tasks.clone()),
-                deadline_timeout_ms: plan.options.timeout_ms,
-                cancellation_supervision: if selected.is_some() {
-                    "scheduler_deferred_cleanup".to_string()
-                } else {
-                    "controller_owned".to_string()
-                },
-                promotion_action: selected.and_then(|outcome| {
-                    outcome.metadata["candidate_selection"]["promotion_action"]
-                        .as_str()
-                        .map(str::to_string)
-                }),
-            }
-        })
-    });
-    let events = normalize_progress_events(&record, &events, &artifact_refs)?;
-    let events = control_plane_event_page(&record, events, cursor.as_ref())?;
-    let control_plane_run =
-        crate::orchestration::project_record(&record, plan.as_ref()).map_err(|error| {
-            Error::validation_invalid_argument(
-                "run_id",
-                error.message,
-                Some(record.run_id.clone()),
-                None,
-            )
-        })?;
-
-    Ok(AgentTaskRunStatus {
-        schema: schemas::RUN_STATUS.to_string(),
-        control_plane_run,
-        plan_id: record.plan_id,
-        totals: record
-            .totals
-            .unwrap_or_else(|| totals_for_tasks(&record.tasks)),
-        events,
-        candidate,
-    })
-}
-
 pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     list_records_in_store(&lifecycle_store)
 }
 
-/// [`list_records`] against explicitly injected durable lifecycle roots.
-///
-/// The snapshot enumeration and the per-record refresh must name the same
-/// installation: this refreshes through [`status_in_store`], which writes, so
-/// enumerating one home's records and reconciling them against another's would
-/// terminalize, expire, and reproject runs that do not exist in the home the
-/// caller asked about (#7505).
+/// [`list_records`] against explicitly injected durable lifecycle roots. This is
+/// a sorted durable snapshot; explicit reconciliation owns all lifecycle repair.
 pub fn list_records_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<Vec<AgentTaskRunRecord>> {
-    let mut records = Vec::new();
-    for record in lifecycle_store.read_records()? {
-        if let Ok(record) = status_in_store(
-            lifecycle_store,
-            &record.run_id,
-            AgentTaskStatusOptions::default(),
-            false,
-        ) {
-            records.push(record.record);
-            // Discovery health owns malformed-record reporting. A transient
-            // status refresh failure must not reintroduce stderr-only state.
-        }
-    }
-    records.sort_by(|left, right| {
-        right
-            .updated_at
-            .as_ref()
-            .unwrap_or(&right.submitted_at)
-            .cmp(left.updated_at.as_ref().unwrap_or(&left.submitted_at))
-            .then_with(|| right.submitted_at.cmp(&left.submitted_at))
-            .then_with(|| right.run_id.cmp(&left.run_id))
-    });
-    Ok(records)
+    Ok(read_all_records_with_health_in_store(lifecycle_store)?.0)
 }
 
 // The ambient `list_records_with_health()` shim that used to sit here is gone.
@@ -5420,35 +5342,12 @@ pub fn list_records_in_store(
 /// [`list_records_with_health`] against explicitly injected durable lifecycle
 /// roots.
 ///
-/// The health summary and the refreshed records are two views of one
-/// installation. Reporting discovery health for one home beside records
-/// reconciled in another would attribute malformed-record findings to runs the
-/// caller can read back perfectly well (#7505).
+/// The health summary and records are one non-reconciling durable snapshot from
+/// the same installation.
 pub fn list_records_with_health_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
-    let (records, health) = read_records_with_health_in_store(lifecycle_store)?;
-    let mut refreshed = Vec::new();
-    for record in records {
-        if let Ok(record) = status_in_store(
-            lifecycle_store,
-            &record.run_id,
-            AgentTaskStatusOptions::default(),
-            false,
-        ) {
-            refreshed.push(record.record);
-        }
-    }
-    refreshed.sort_by(|left, right| {
-        right
-            .updated_at
-            .as_ref()
-            .unwrap_or(&right.submitted_at)
-            .cmp(left.updated_at.as_ref().unwrap_or(&left.submitted_at))
-            .then_with(|| right.submitted_at.cmp(&left.submitted_at))
-            .then_with(|| right.run_id.cmp(&left.run_id))
-    });
-    Ok((refreshed, health))
+    read_all_records_with_health_in_store(lifecycle_store)
 }
 
 /// Read the durable registry snapshot without runner reconciliation. Bounded
@@ -6320,7 +6219,7 @@ pub fn durable_local_read_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskDurableLocalRead> {
-    let record = persisted_status_in_store(lifecycle_store, run_id)?;
+    let record = status_in_store(lifecycle_store, run_id)?;
     durable_local_read_record_in_store(lifecycle_store, record)
 }
 
@@ -6410,7 +6309,7 @@ pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
 /// [`aggregate_source`] against explicitly injected durable lifecycle roots.
 ///
 /// This reads like an accessor and is not one. Candidate selection consults the
-/// Cook index, and the `status_in_store` below it is the full reconciliation —
+/// Cook index, and the `reconcile_status_in_store` below it is the full reconciliation —
 /// two advisory locks and roughly twenty durable write sites. Selecting an
 /// attempt from one home's Cook index, reconciling it into another, and then
 /// serializing a third home's aggregate would answer with bytes no single
@@ -6433,7 +6332,7 @@ pub fn aggregate_source_in_store(
         Ok(selection) if !selection.run_id.is_empty() => selection.run_id,
         _ => run_id.to_string(),
     };
-    let record = status_in_store(
+    let record = reconcile_status_in_store(
         lifecycle_store,
         &selected_run_id,
         AgentTaskStatusOptions::default(),
@@ -6543,7 +6442,7 @@ pub(crate) fn record_cook_attempt_locked_in_store(
                     "local_cook_supervisor".to_string(),
                     json!({
                         "job_id": supervisor,
-                        "reattach_command": format!("homeboy agent-task status {cook_id} --full"),
+                        "reattach_command": format!("homeboy agent-task status {cook_id}"),
                     }),
                 );
             }
@@ -7183,7 +7082,7 @@ pub fn reconcile_scope_run_ids_in_store(
 /// This is a **pure read**: `store::read_cook_index` is a single
 /// `fs::read_to_string` of `agent-task-cooks/<id>/index.json` and writes
 /// nothing. Read models that must not mutate persisted state (`activity`,
-/// #10308) may use it; `status()` may not, because it reconciles.
+/// #10308) may use it; reconciliation may not.
 pub(crate) fn resolve_run_id(run_id: &str) -> Result<String> {
     let run_id = sanitize_run_id(run_id);
     match store::read_cook_index(&run_id) {

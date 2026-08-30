@@ -511,6 +511,7 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
                     available_runner_ids: vec!["admitted-lab".to_string()],
                     reasons: Vec::new(),
                     remediation_commands: Vec::new(),
+                    repair_admitted_runner_ids: Vec::new(),
                 },
             ),
             homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
@@ -1204,7 +1205,7 @@ fn every_generated_next_action_command_round_trips_to_the_record_owner() {
     // these strings is emitted verbatim by a diagnosis/status projection.
     let inferred = connected_default_lab_runner();
     for generated in [
-        format!("homeboy agent-task status {OWNER_LOCAL_RUN_ID} --full"),
+        format!("homeboy agent-task status {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task logs {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID} --full"),

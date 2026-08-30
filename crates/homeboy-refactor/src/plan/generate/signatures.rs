@@ -135,7 +135,8 @@ pub(crate) fn parse_items_for_dedup(
         }
     }
 
-    let manifest = homeboy_core::extension::find_extension_for_file_ext(file_ext, "refactor")?;
+    let manifest =
+        homeboy_core::extension_store::find_extension_for_file_ext(file_ext, "refactor")?;
     let parse_cmd = serde_json::json!({
         "command": "parse_items",
         "file_path": file_path,

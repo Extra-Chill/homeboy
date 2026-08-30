@@ -404,13 +404,9 @@ pub struct ActivityReport {
     pub zero_executing_work: bool,
     /// Whether this surface reconciled while reading.
     ///
-    /// `activity` is a deliberately **non**-reconciling read model, so this is
-    /// always `false` here — while `agent-task status` is "a reconciling read
-    /// that writes" and `runs watch` reconciles on purpose. The two surfaces can
-    /// therefore legitimately report different states for the same run at the
-    /// same instant, *and calling one changes what the other returns*. Emitting
-    /// the flag lets a consumer tell which kind of answer it is holding instead
-    /// of inferring it from the command name (#W3-15).
+    /// `activity` and `agent-task status` are deliberately non-reconciling read
+    /// models, so this is always `false`. Explicit reconciliation returns its
+    /// mutation result separately (#W3-15).
     #[serde(default)]
     pub reconciled: bool,
     /// `true` when at least one activity source could not be fully read, so

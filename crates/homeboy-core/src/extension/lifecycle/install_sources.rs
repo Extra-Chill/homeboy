@@ -16,11 +16,11 @@ use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;
 
 use super::super::execution::run_setup;
-use super::super::manifest::ExtensionManifest;
 use super::{
     derive_id_from_url, manifest_path_for_extension, slugify_id, write_source_metadata,
     InstallResult,
 };
+use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Deserialize)]
 struct ExtensionRootManifest {

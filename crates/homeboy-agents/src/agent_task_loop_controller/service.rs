@@ -334,7 +334,7 @@ fn failed_child_action_diagnostic(
     let child_run_id = action_referenced_run_id(action, record);
     let child_run = child_run_id
         .as_deref()
-        .and_then(|run_id| agent_task_lifecycle::status(run_id).ok());
+        .and_then(|run_id| agent_task_lifecycle::reconcile_status(run_id).ok());
     let child_run_status = child_run
         .as_ref()
         .map(|run| format!("{:?}", run.state).to_ascii_lowercase());
@@ -378,7 +378,7 @@ fn failed_child_action_diagnostic(
     let repeated_failure = repeated_failure_diagnostic(record, &failure_signature);
     let next_command = child_run_id
         .as_ref()
-        .map(|run_id| format!("homeboy agent-task status {run_id} --full"))
+        .map(|run_id| format!("homeboy agent-task status {run_id}"))
         .unwrap_or_else(|| {
             format!(
                 "homeboy agent-task controller run {} --action-id {}",

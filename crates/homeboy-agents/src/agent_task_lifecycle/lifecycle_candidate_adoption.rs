@@ -19,7 +19,7 @@ use super::*;
 /// the caller held explicit roots, this would have reported a parent adoption
 /// assembled from another home's attempts (#7505).
 ///
-/// There is no ambient wrapper: `status_in_store` is the only caller, and the
+/// There is no ambient wrapper: `reconcile_status_in_store` is the only caller, and the
 /// store it hands down is the one its own caller injected.
 pub(crate) fn project_cook_alias_adoption_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -278,9 +278,8 @@ pub(crate) fn checkpoint_candidate_adoption_remediation_in_store(
     attempt.updated_at = now.clone();
     attempt.heartbeat_at = now;
     attempt.remediation_run_id = Some(remediation_run_id.to_string());
-    attempt.remediation_status_command = Some(format!(
-        "homeboy agent-task status {remediation_run_id} --full"
-    ));
+    attempt.remediation_status_command =
+        Some(format!("homeboy agent-task status {remediation_run_id}"));
     lifecycle_store.write_record(&record)?;
     Ok(())
 }

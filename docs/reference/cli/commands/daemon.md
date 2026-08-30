@@ -90,8 +90,6 @@ Explicitly replace one proven-dead daemon lease and reconcile its durable jobs
 | Option | Value | Description |
 | --- | --- | --- |
 | `--lease-id` | `<LEASE_ID>` | Exact lease ID reported by `homeboy daemon status` |
-| `--confirm-pid-dead` | flag | Deprecated no-op retained for one release; adoption already proves the recorded PID dead under the daemon lifecycle lock |
-| `--recover-missing-child-identity` | flag | Accepted migration alias for legacy child recovery. It never mutates jobs |
 | `--confirm-untracked-child-dead` | `<CONFIRM_UNTRACKED_CHILD_DEAD>` | Confirm the one expired PID-less reservation to terminalize before replacement |
 | `--addr` | `<ADDR>` | _no help text_ |
 
@@ -107,7 +105,6 @@ Reconcile an exact PID-less job set after one proven unexpected daemon exit
 | --- | --- | --- |
 | `--lease-id` | `<LEASE_ID>` | _no help text_ |
 | `--job-id` | `<JOB_IDS>` | Exact, complete active durable-job set to terminalize. The store recomputes the active set and refuses any mismatch, so this is a compare-and-swap over the destructive scope, not a fact assertion |
-| `--confirm-pid-dead` | flag | Deprecated no-op retained for one release; recovery already requires persisted unexpected-termination evidence and re-proves the PID dead |
 | `--confirm-workload-processes-absent` | flag | Required. Attests that the workload processes for --job-id were inspected and are absent. Unverifiable by design: this command exists because the daemon died before persisting any child identity, so the store holds no PID to check. Persisted as durable job provenance |
 | `--addr` | `<ADDR>` | _no help text_ |
 
@@ -138,7 +135,6 @@ Explicitly reconcile active jobs after proving a missing-lease store has no daem
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--confirm-no-daemon-owner` | flag | _no help text_ |
 | `--addr` | `<ADDR>` | _no help text_ |
 | `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for a replacement operation |
 
@@ -170,8 +166,6 @@ Recover one exact lease after its daemon state record was lost
 | `--lease-id` | `<LEASE_ID>` | Exact lease ID captured before the daemon state record was lost |
 | `--recorded-pid` | `<RECORDED_PID>` | Recorded daemon PID captured with the lease ID |
 | `--recorded-endpoint` | `<RECORDED_ENDPOINT>` | Recorded concrete loopback endpoint captured with the lease ID |
-| `--confirm-pid-dead` | flag | Deprecated no-op retained for one release; recovery already refuses a running recorded PID |
-| `--confirm-control-plane-lost` | flag | Deprecated no-op retained for one release; recovery already requires an absent state record, a `lease_missing` freshness code, an unreachable daemon, and a failed probe of the recorded endpoint |
 | `--addr` | `<ADDR>` | _no help text_ |
 | `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for a replacement operation |
 

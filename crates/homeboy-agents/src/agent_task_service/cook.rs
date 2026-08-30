@@ -2957,7 +2957,7 @@ fn claim_disposition(
 /// unreadable record is also `None` — the coordinator's job is to run work, and
 /// a transient read failure must not be turned into a silent skip.
 fn durably_terminal_child_state(cook_id: &str) -> Option<agent_task_lifecycle::AgentTaskRunState> {
-    let record = agent_task_lifecycle::status(cook_id).ok()?;
+    let record = agent_task_lifecycle::reconcile_status(cook_id).ok()?;
     record.state.is_terminal().then_some(record.state)
 }
 
@@ -4041,7 +4041,7 @@ fn make_provider_timeout_actionable(
         if deferred_cleanup_pending {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),
-                command: format!("homeboy agent-task status {run_id} --exact --full"),
+                command: format!("homeboy agent-task diagnose {run_id} --full"),
             });
         }
         if let Some(command) = command {
@@ -4185,7 +4185,7 @@ fn make_review_form_timeout_actionable(
         if deferred_cleanup_pending {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),
-                command: format!("homeboy agent-task status {run_id} --exact --full"),
+                command: format!("homeboy agent-task diagnose {run_id} --full"),
             });
         }
         if let Some(command) = command {
@@ -4234,12 +4234,13 @@ pub fn preflight_cook_continuation_admission(options: &CookRequest) -> Result<()
     let mut options = options.clone();
     canonicalize_cook_provider_workspace(&mut options)?;
     let options = &options;
-    let moving_base_continuation = agent_task_lifecycle::status(&options.identity.initial_run_id)
-        .ok()
-        .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
-        .is_some();
+    let moving_base_continuation =
+        agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
+            .ok()
+            .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
+            .is_some();
     let verification_pending_continuation =
-        agent_task_lifecycle::status(&options.identity.initial_run_id)
+        agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .ok()
             .is_some_and(|record| {
                 record
@@ -4248,7 +4249,7 @@ pub fn preflight_cook_continuation_admission(options: &CookRequest) -> Result<()
                     .and_then(Value::as_str)
                     == Some("verification_pending")
             });
-    let record = agent_task_lifecycle::status(&options.identity.initial_run_id).ok();
+    let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id).ok();
     let review_form_continuation = record.as_ref().is_some_and(|record| {
         review_form_attempt_is_ready_for_cook_continuation(&options.identity.initial_plan, record)
             .unwrap_or(false)
@@ -4811,7 +4812,7 @@ fn durable_cook_error_report_with_store(
     // The attempt record is presentation only — a missing one degrades to an
     // empty attempts list, exactly as the ambient read's `.ok()` already did.
     let attempt_record = |run_id: &str| match lifecycle_store {
-        Some(lifecycle_store) => agent_task_lifecycle::status_in_store(
+        Some(lifecycle_store) => agent_task_lifecycle::reconcile_status_in_store(
             lifecycle_store,
             run_id,
             agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -4819,7 +4820,7 @@ fn durable_cook_error_report_with_store(
         )
         .ok()
         .map(|outcome| outcome.record),
-        None => agent_task_lifecycle::status(run_id).ok(),
+        None => agent_task_lifecycle::reconcile_status(run_id).ok(),
     };
     if store.recipe_exists(&options.identity.cook_id) {
         let attempts = store
@@ -4895,7 +4896,7 @@ fn durable_cook_error_report_with_store(
     Err(error)
 }
 
-/// [`agent_task_lifecycle::status`] against an explicitly injected lifecycle
+/// [`agent_task_lifecycle::reconcile_status`] against an explicitly injected lifecycle
 /// root.
 ///
 /// The ambient `status()` is exactly this call with a store resolved from the
@@ -4903,17 +4904,17 @@ fn durable_cook_error_report_with_store(
 /// installation they read — which is the only difference that matters on a
 /// spine whose caller chose its own roots.
 ///
-/// One asymmetry is worth naming rather than hiding: `status_in_store` derives
+/// One asymmetry is worth naming rather than hiding: `reconcile_status_in_store` derives
 /// its recipe store from `lifecycle_store.data_root()`, so a caller that passes
 /// a recipe store rooted somewhere else still gets a recipe view derived from
 /// the lifecycle root. That is not made worse here — the ambient form derived it
 /// from the ambient root, which agreed with neither — and closing it means
-/// giving `status_in_store` both roots, which is its own change.
+/// giving `reconcile_status_in_store` both roots, which is its own change.
 fn rooted_status(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    Ok(agent_task_lifecycle::status_in_store(
+    Ok(agent_task_lifecycle::reconcile_status_in_store(
         lifecycle_store,
         run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -7099,7 +7100,7 @@ fn bind_dispatch_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> 
 }
 
 fn cook_attempt_needs_execution(run_id: &str) -> bool {
-    agent_task_lifecycle::status(run_id)
+    agent_task_lifecycle::reconcile_status(run_id)
         .map(|record| cook_run_record_needs_execution(&record))
         .unwrap_or(true)
 }
@@ -8408,7 +8409,12 @@ fn bind_materialized_cook_component_workspace(
         .pointer("/cook_repository_identity/provenance")
         .and_then(Value::as_str)
         == Some("--repo:requested-repository");
-    if requested_repository {
+    let component_registered = plan
+        .metadata
+        .pointer("/cook_repository_identity/component_registered")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if requested_repository || !component_registered {
         return Ok(());
     }
     let Some(component) = homeboy_core::component::registered_by_id(&component_id)? else {
@@ -9001,7 +9007,7 @@ fn authenticated_historical_review_form_workspace_with_trace(
         return Ok(false);
     }
     trace.pass("run_record");
-    let record = agent_task_lifecycle::status(&options.identity.initial_run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)?;
     match terminal_review_form_continuation_is_eligible(&options.identity.initial_plan, &record) {
         Ok(true) => trace.pass("terminal_review_form_eligibility"),
         Ok(false) => {
@@ -9221,7 +9227,7 @@ fn tracked_promotion_continuation(
         .any(|pointer| promotion.provenance.pointer(pointer) == Some(&Value::Bool(true)));
     let authenticated_legacy_review =
         if promotion.status == AgentTaskPromotionStatus::Applied && !has_post_apply_checkpoint {
-            let record = agent_task_lifecycle::status(&options.identity.initial_run_id)?;
+            let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)?;
             terminal_review_form_continuation_is_eligible(&options.identity.initial_plan, &record)?
         } else {
             false

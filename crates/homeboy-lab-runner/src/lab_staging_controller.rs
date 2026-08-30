@@ -1878,7 +1878,7 @@ pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
             None,
         ));
     }
-    let record = homeboy_agents::agent_task_lifecycle::status(run_id)?;
+    let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)?;
     if record.run_id != recipe.run_id {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -4256,7 +4256,7 @@ pub struct LabStagingDispatchDriver;
 /// controller lifecycle is closed, so the dispatch job must terminalize with
 /// it instead of admitting new work that could escape the controller.
 fn ensure_linked_attempt_not_terminal(run_id: &str) -> Result<()> {
-    let Ok(record) = homeboy_agents::agent_task_lifecycle::status(run_id) else {
+    let Ok(record) = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id) else {
         // The durable recipe and plan attachments remain the staging
         // authority; a missing run record is handled by their validation.
         return Ok(());
@@ -6453,8 +6453,9 @@ mod tests {
             record_checkpointed_lifecycle_phase(&request, &checkpoint)
                 .expect("project checkpointed runtime stage");
 
-            let record = homeboy_agents::agent_task_lifecycle::status(&request.recipe.run_id)
-                .expect("persisted parent run");
+            let record =
+                homeboy_agents::agent_task_lifecycle::reconcile_status(&request.recipe.run_id)
+                    .expect("persisted parent run");
             assert_eq!(record.metadata["phase"], "runtime_staging");
             assert_eq!(record.metadata["phase_activity"], "Homeboy runtime_staging");
             assert_eq!(
@@ -7763,7 +7764,8 @@ mod tests {
                 .prepare(serde_json::to_value(envelope).expect("serialize envelope"))
                 .expect_err("missing recipe must fail before staging");
 
-            let record = homeboy_agents::agent_task_lifecycle::status(run_id).expect("parent");
+            let record =
+                homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("parent");
             assert!(matches!(
                 record.state,
                 homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Failed
@@ -7816,7 +7818,8 @@ mod tests {
             let public_checkpoint = LabStagingDispatchDriver
                 .public_progress(&serde_json::to_value(&checkpoint).expect("checkpoint"))
                 .expect("public checkpoint");
-            let record = homeboy_agents::agent_task_lifecycle::status(run_id).expect("record");
+            let record =
+                homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("record");
             let recipe_bytes = std::fs::read(
                 homeboy_core::paths::homeboy_data()
                     .expect("data root")
@@ -7854,7 +7857,8 @@ mod tests {
             let request = recipe_request(Some(recipe_command()), &args, HashMap::new());
             persist_lab_staging_recipe(run_id, "lab-1", &request).expect("persist");
             assert!(persist_lab_staging_recipe(run_id, "lab-2", &request).is_err());
-            let record = homeboy_agents::agent_task_lifecycle::status(run_id).expect("record");
+            let record =
+                homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("record");
             std::fs::remove_file(record.plan_path).expect("remove durable plan");
             assert!(load_lab_staging_recipe(run_id).is_err());
         });

@@ -4,7 +4,7 @@ use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::project;
 use homeboy::core::scope::{self, Scope};
 use homeboy_core::extension::build;
-use homeboy_core::extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 use crate::commands::utils::args::{ChangedSinceArgs, ScopeArgs};
 use crate::commands::utils::resolve::resolve_project_components;

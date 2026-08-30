@@ -31,7 +31,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `active [--limit <n>] [--cursor <n>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
 | `reconcile <run-id> [--dry-run\|--apply]` | Preview or reconcile one durable run after refreshing its authoritative provider state. |
 | `latest [--limit <n>]` | Show the latest durable run. |
-| `logs <run-id> [--raw]` | Read the canonical durable event stream; `--raw` adds transport frames for diagnostics. |
+| `logs <run-id> [--cursor <cursor>]` | Read or resume the canonical durable event stream. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
@@ -43,18 +43,9 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 `agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `list` and `active` default to 20 newest rows and return `next_cursor` when another page exists; continue active discovery with `agent-task active --limit <n> --cursor <next_cursor>`. `agent-task list --latest` searches complete durable history and returns the newest record matching the same `--task-url`, `--repo`, `--worktree`, `--submitted-after`, `--state`, `--run-placement`, and `--parent-id` filters; the existing `agent-task latest` remains available for unfiltered compatibility. Active discovery emits at most eight prioritized `next_actions`: fleet reconciliation when stale records exist, page continuation when truncated, and focused per-run inspection actions. `list --full` and `active --full` return every matching row. `list --latest` rejects `--limit`, `--cursor`, and `--full` because a one-record result cannot continue, expand, or cap a page. `agent-task reconcile <run-id>` is the recovery path emitted by status and activity: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the fleet-wide candidate set. Its `--limit`, `--cursor`, and `--full` selectors are rejected so discovery pagination cannot imply a reconciliation scope.
 
-`agent-task status <run-id> --watch` follows the same durable status abstraction used by one-shot status reads, including `--bridge` runner reconciliation. Every material state change is emitted immediately as one bounded `homeboy/agent-task-status-watch-event/v2` JSONL event on stderr. Its `change.change_basis` contains the same state, task, progress, and liveness fields that caused the event, including a complete task-state digest beyond the compact task page. Stdout is the bounded `homeboy/agent-task-status-watch/v2` final envelope: it retains at most 12 changed records, reports omissions and continuation commands, and has one total size budget covering changes and fixed sections. `latest` is always the final observed compact status; terminal conclusions additionally include `terminal_summary`, while timeout/nonterminal conclusions leave it null. `--full` supplies bounded change records with stable `full_status_ref`/continuation commands for durable retrieval rather than expanding the live stream. This is an explicit v2 migration from the former v1 `latest` snapshot contract. Polls default to every `5s` and stop after `30m`; `--interval <duration>` and `--timeout <duration>` require `--watch`. The shared watcher caps each sleep to the remaining timeout, so its wall-clock bound is not extended by the polling interval. A terminal failure exits nonzero; a timeout returns the latest partial status and exits `124`.
+`agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource. It is a bounded, non-reconciling read; use `agent-task logs <run-id> [--cursor <cursor>]` for canonical event pages, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
 
-Status keeps established top-level machine fields for compatibility and adds
-`status_scope` with schema `homeboy/agent-task-status-scope/v1`. Its
-`queried_attempt` describes the exact attempt's state, counts, artifacts, and
-candidate classification. Its `cook` section describes the Cook-wide selected
-candidate identity/classification, completion, and finalization. The selection
-state is explicitly `selected`, `none`, or `unavailable`; unavailable includes
-diagnostics so a bounded or degraded scan is never reported as proof of no
-candidate. The human `Candidate:` line identifies Cook-wide selected context and
-prints the queried-attempt candidate separately. Legacy records without this
-envelope are qualified as `legacy canonical`.
+`agent-task status <run-id> --watch` polls the same canonical resource. Every material resource change is emitted immediately as one bounded `homeboy/agent-task-status-watch-event/v2` JSONL event on stderr. Stdout is the bounded `homeboy/agent-task-status-watch/v2` final envelope. Polls default to every `5s` and stop after `30m`; `--interval <duration>` and `--timeout <duration>` require `--watch`. A terminal failure exits nonzero; a timeout returns the latest partial status and exits `124`.
 
 ### Resource Behavior
 
@@ -1174,24 +1165,9 @@ resource policy; use `homeboy runner exec <runner> -- homeboy agent-task status
 <run-id>` when the durable state lives on a Lab runner host. `agent-task review`
 hydrates aggregate evidence and remains resource-managed.
 
-### Controller-local status never requires the runner
+### Status never requires the runner
 
-`agent-task status` always reports a `runner_probe` object describing whether the
-read reconciled against a runner:
-
-```json
-{ "performed": false, "skipped_reason": "controller_local_record", "controller_local": true, "note": "..." }
-```
-
-A **controller-local** run (no runner id, no runner job id, no Lab handoff) is
-answered entirely from durable controller state and never contacts a runner, so
-inspection stays available while a Lab runner is wedged. Pass
-`--no-runner-probe` to extend that to a runner-backed run: the answer is
-returned immediately from controller state and labelled
-`skipped_reason: "caller_opted_out"`, meaning runner-side job state may be
-stale. Without the flag, a runner-backed *running* record still reconciles
-against its runner, but every remote probe on that path is bounded (see
-`docs/commands/runner.md`).
+`agent-task status` assembles `ControlPlaneRun` from durable controller state and never contacts or reconciles a runner. This keeps inspection available while a Lab runner is unavailable. Use `agent-task reconcile` when the caller explicitly wants to refresh authoritative provider state.
 
 ## Deterministic Smoke Gate
 

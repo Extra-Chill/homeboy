@@ -136,8 +136,14 @@ pub(crate) fn validate_runner_capability_preflight(
         .filter(|command| !capabilities.has_command(command))
         .cloned()
         .collect::<Vec<_>>();
-    let missing_tool_capabilities = preflight
+    let missing_tool_requirements = preflight
         .required_tool_capabilities
+        .iter()
+        .filter(|requirement| {
+            missing_tool_capability(requirement, capabilities, request_env).is_some()
+        })
+        .collect::<Vec<_>>();
+    let missing_tool_capabilities = missing_tool_requirements
         .iter()
         .filter_map(|requirement| missing_tool_capability(requirement, capabilities, request_env))
         .collect::<Vec<_>>();
@@ -245,7 +251,7 @@ pub(crate) fn validate_runner_capability_preflight(
             .to_string(),
     );
 
-    Err(Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "runner_capabilities",
         format!(
             "Runner '{runner_id}' is missing required capability parity for `{command}`: {}.",
@@ -253,7 +259,35 @@ pub(crate) fn validate_runner_capability_preflight(
         ),
         Some(runner_id.to_string()),
         Some(remediation),
-    ))
+    );
+    error.details["runner_capability_failure"] = serde_json::json!({
+        "schema": "homeboy/runner-capability-failure/v1",
+        "runner_id": runner_id,
+        "command": command,
+        "predicates": missing_tool_requirements.iter().map(|requirement| serde_json::json!({
+            "kind": "runner_tool_capability",
+            "tool": requirement.tool,
+            "command": requirement.command,
+            "env": requirement.env,
+            "capabilities": requirement.capabilities,
+            "satisfied": false,
+        })).chain(failed_toolchain_probes.iter().map(|failure| serde_json::json!({
+            "kind": "extension_toolchain_readiness",
+            "id": failure.split(':').next().unwrap_or(failure),
+            "detail": failure,
+            "satisfied": false,
+        }))).collect::<Vec<_>>(),
+        "recovery_actions": preflight.required_toolchain_probes.iter().filter(|probe| {
+            failed_toolchain_probes.iter().any(|failed| failed.starts_with(&format!("{}:", probe.id)))
+        }).filter_map(|probe| probe.repair_command.as_ref().map(|command| serde_json::json!({
+            "schema": "homeboy/runner-readiness-recovery-action/v1",
+            "kind": "extension_setup",
+            "extension_id": probe.extension_id,
+            "restores_predicate": probe.id,
+            "command": command,
+        }))).collect::<Vec<_>>(),
+    });
+    Err(error)
 }
 
 /// Run arbitrary extension-owned readiness probes during controller admission,
@@ -1603,6 +1637,16 @@ mod tests {
             .expect("remediation")
             .iter()
             .any(|hint| hint.as_str() == Some("repair-fixture-toolchain")));
+        let failure = &error.details["runner_capability_failure"];
+        assert_eq!(failure["schema"], "homeboy/runner-capability-failure/v1");
+        assert_eq!(
+            failure["recovery_actions"][0]["command"],
+            "repair-fixture-toolchain"
+        );
+        assert_eq!(
+            failure["recovery_actions"][0]["restores_predicate"],
+            "fixture:usable-toolchain"
+        );
     }
 
     #[test]

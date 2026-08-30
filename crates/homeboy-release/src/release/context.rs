@@ -1,7 +1,7 @@
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, ErrorCode, Result};
-use homeboy_core::extension;
-use homeboy_core::{self, extension::ExtensionManifest};
+use homeboy_core::{self};
+use homeboy_extension_contract::ExtensionManifest;
 
 use super::types::{ReleaseOptions, ReleaseReadinessProvenance};
 
@@ -17,11 +17,12 @@ pub(super) fn resolve_extensions(component: &Component) -> Result<Vec<ExtensionM
     if let Some(configured) = component.extensions.as_ref() {
         let mut extension_ids: Vec<String> = configured.keys().cloned().collect();
         extension_ids.sort();
-        let suggestions = extension::available_extension_ids();
+        let suggestions = homeboy_core::extension_store::available_extension_ids();
         for extension_id in extension_ids {
-            let manifest = extension::load_extension(&extension_id).map_err(|_| {
-                Error::extension_not_found(extension_id.to_string(), suggestions.clone())
-            })?;
+            let manifest =
+                homeboy_core::extension_store::load_extension(&extension_id).map_err(|_| {
+                    Error::extension_not_found(extension_id.to_string(), suggestions.clone())
+                })?;
             extensions.push(manifest);
         }
     }

@@ -1,16 +1,10 @@
 //! Generates the CLI reference under `docs/reference/cli/commands/` from the
 //! clap command tree.
 //!
-//! # Why reflective, and not `--help` scraping
+//! # Why reflective
 //!
-//! Rendered `--help` is a *wire protocol* in this repository:
-//! `homeboy-lab-runner`'s `negotiate_leaseless_recovery_contract` parses a
-//! remote binary's rendered `Options:` block to negotiate a capability
-//! handshake. Generating docs by shelling out to `--help` would couple doc
-//! generation to that rendering, and would also require a built binary. Walking
-//! `clap::Command` reflectively reads the same source of truth without touching
-//! the rendered surface at all: this module only *reads* `Command`/`Arg`
-//! accessors, so it can never change what `--help` prints.
+//! Generating docs by shelling out to `--help` would require a built binary.
+//! Walking `clap::Command` reflectively reads the source of truth directly.
 //!
 //! # Why checked in, and not generated at build time
 //!

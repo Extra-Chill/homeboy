@@ -293,8 +293,8 @@ impl AgentTaskCookBatchJob {
     /// # Why this reads one file and no lifecycle records
     ///
     /// The obvious implementation — walk `child_runs` and ask
-    /// `agent_task_lifecycle::status` about each — is the wrong thing to do at
-    /// supervision frequency. That read is not a read: it reconciles deferred
+    /// `agent_task_lifecycle::reconcile_status` about each — is the wrong thing
+    /// to do at supervision frequency. Reconciliation projects deferred
     /// candidates, projects runner events, rewrites the record, and for a child
     /// that is not controller-local it *probes the runner*. A ten-child wave
     /// would issue ten reconciling reads, and up to ten remote probes, every
@@ -548,7 +548,7 @@ impl AgentTaskCookBatchJob {
 /// has not been proven finished, and treating an IO failure as completion would
 /// leave a running child un-cancelled.
 fn child_run_is_terminal(run_id: &str) -> bool {
-    agent_task_lifecycle::status(run_id)
+    agent_task_lifecycle::reconcile_status(run_id)
         .map(|record| record.state.is_terminal())
         .unwrap_or(false)
 }

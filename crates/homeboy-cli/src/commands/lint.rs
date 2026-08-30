@@ -6,7 +6,7 @@ use homeboy_core::extension::lint::{
     report, run_main_lint_workflow, run_self_check_lint_workflow_with_progress, LintCommandOutput,
     LintRunWorkflowArgs,
 };
-use homeboy_core::extension::ExtensionCapability;
+use homeboy_extension_contract::ExtensionCapability;
 
 /// Build the slim `LintFixInput` the core lint report consumes from a full
 /// refactor source-run, so core does not depend on the refactor engine's

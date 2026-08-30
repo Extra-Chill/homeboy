@@ -318,7 +318,9 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     if let Some(selection) = target.selection {
         let latest_attempt_run_id = selection["latest_attempt_run_id"].as_str();
         if latest_attempt_run_id.is_some_and(|latest| latest != record.run_id) {
-            if let Ok(latest) = agent_task_lifecycle::status(latest_attempt_run_id.unwrap()) {
+            if let Ok(latest) =
+                agent_task_lifecycle::reconcile_status(latest_attempt_run_id.unwrap())
+            {
                 let review_form = super::status::completed_run_aggregate(&latest.run_id)
                     .transpose()?
                     .and_then(|aggregate| {
@@ -478,7 +480,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             .map(|reference| reference.artifact_id.clone()),
     )?;
     let (raw, source_path) = read_promotion_source(source_spec)?;
-    let source_run_id = match agent_task_lifecycle::status(source_spec) {
+    let source_run_id = match agent_task_lifecycle::reconcile_status(source_spec) {
         Ok(record) => Some(record.run_id),
         Err(_) => match source_path.as_deref() {
             Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
@@ -550,11 +552,11 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
     value["handoff"] = promotion_handoff(&report, &to_worktree);
     if let Some(run_id) = source_run_id.filter(|_| !args.dry_run) {
-        let record = agent_task_lifecycle::status(&run_id)?;
+        let record = agent_task_lifecycle::reconcile_status(&run_id)?;
         value["recorded_on_run"] = serde_json::json!({
             "run_id": record.run_id,
             "metadata_key": "latest_promotion",
-            "status_command": format!("homeboy agent-task status {} --full", run_id)
+            "status_command": format!("homeboy agent-task status {}", run_id)
         });
     }
 
@@ -732,7 +734,7 @@ impl PromotionProgressReporter {
     fn new(run_id: Option<&str>, to_worktree: &str, interval: std::time::Duration) -> Self {
         let source = run_id.unwrap_or("unrecorded-promotion");
         promotion_progress_line(&format!(
-            "promotion: durable source run `{source}`; status -> homeboy agent-task status {source} --full"
+            "promotion: durable source run `{source}`; status -> homeboy agent-task status {source}"
         ));
         promotion_progress_line(&format!(
             "promotion: resume -> homeboy agent-task promote {source} --to-worktree {to_worktree}"
@@ -1137,7 +1139,7 @@ pub(crate) fn verify_replacement(mut args: VerifyReplacementArgs) -> CmdResult<V
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
     value["handoff"] = serde_json::json!({
         "next_command": format!("homeboy agent-task finalize-pr --recover {run_id}"),
-        "status_command": format!("homeboy agent-task status {run_id} --full"),
+        "status_command": format!("homeboy agent-task status {run_id}"),
     });
     Ok((value, 0))
 }
@@ -3333,7 +3335,7 @@ mod tests {
                             message.contains("AI disclosure requires a concrete model identifier")
                         })
                 }));
-            assert!(agent_task_lifecycle::status("manual-invalid-model").is_err());
+            assert!(agent_task_lifecycle::reconcile_status("manual-invalid-model").is_err());
         });
     }
 
@@ -5089,7 +5091,7 @@ mod tests {
                     .contains("requires a committed clean candidate"),
                 "unexpected error: {error:?}"
             );
-            assert!(agent_task_lifecycle::status("manual-cli-dirty-12706").is_err());
+            assert!(agent_task_lifecycle::reconcile_status("manual-cli-dirty-12706").is_err());
             run_git(
                 &checkout,
                 &[
@@ -5141,10 +5143,12 @@ mod tests {
             assert!(error
                 .message
                 .contains("push the candidate branch and rerun preflight"));
-            assert!(agent_task_lifecycle::status("manual-cli-unpushed-13053")
-                .expect("manual identity was reserved")
-                .metadata["manual_finalization_intent"]
-                .is_null());
+            assert!(
+                agent_task_lifecycle::reconcile_status("manual-cli-unpushed-13053")
+                    .expect("manual identity was reserved")
+                    .metadata["manual_finalization_intent"]
+                    .is_null()
+            );
             run_git(&checkout, &["push", "-u", "origin", "feature"]);
             let failed_gate = dispatch_agent_task_error(&[
                 "homeboy",
@@ -5195,7 +5199,9 @@ mod tests {
                 "Authorization: Bearer [REDACTED]"
             );
             assert!(!failed_gate.to_string().contains("manual-secret"));
-            assert!(agent_task_lifecycle::status("manual-cli-failed-gate-13077").is_err());
+            assert!(
+                agent_task_lifecycle::reconcile_status("manual-cli-failed-gate-13077").is_err()
+            );
             let changed_checkout = dispatch_agent_task_error(&[
                 "homeboy",
                 "agent-task",
@@ -5231,7 +5237,9 @@ mod tests {
                 changed_checkout.details["command_evidence"][0]["candidate_unchanged"],
                 false
             );
-            assert!(agent_task_lifecycle::status("manual-cli-mutating-gate-13447").is_err());
+            assert!(
+                agent_task_lifecycle::reconcile_status("manual-cli-mutating-gate-13447").is_err()
+            );
             let race_gate = format!(
                 "printf 'mutated\\n' > '{}'",
                 checkout.join("feature.txt").display()
@@ -5564,7 +5572,7 @@ esac
 
             assert!(error.message.contains("--base must name a branch"));
             assert!(error.message.contains("--verified-base-sha"));
-            assert!(agent_task_lifecycle::status(run_id).is_err());
+            assert!(agent_task_lifecycle::reconcile_status(run_id).is_err());
         });
     }
 

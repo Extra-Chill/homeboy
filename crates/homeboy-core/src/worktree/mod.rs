@@ -27,14 +27,15 @@ pub use types::{
     WorktreeBranchCleanupReport, WorktreeCleanupCandidate, WorktreeCleanupCounts,
     WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupSkipped, WorktreeCreateAction,
     WorktreeCreateEvidence, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeCreateReconciliation, WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization,
-    WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence, WorktreeInventoryOptions,
-    WorktreeInventoryOutput, WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListOutput,
-    WorktreeLivenessAuthority, WorktreeOwnershipProbe, WorktreeQueueCreateFailure,
-    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeQueueCreateRequest,
-    WorktreeQueueCreateRow, WorktreeQueueCreateStatus, WorktreeQueueLockHolder,
-    WorktreeReconciliationAction, WorktreeReconciliationAuthority, WorktreeReconciliationResult,
-    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+    WorktreeCreateReconciliation, WorktreeImportOptions, WorktreeImportOutput,
+    WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization, WorktreeInventoryCrossTab,
+    WorktreeInventoryLocalEvidence, WorktreeInventoryOptions, WorktreeInventoryOutput,
+    WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListOutput, WorktreeLivenessAuthority,
+    WorktreeOwnershipProbe, WorktreeQueueCreateFailure, WorktreeQueueCreateOptions,
+    WorktreeQueueCreateOutput, WorktreeQueueCreateRequest, WorktreeQueueCreateRow,
+    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeReconciliationAction,
+    WorktreeReconciliationAuthority, WorktreeReconciliationResult, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
     TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
@@ -53,6 +54,10 @@ pub fn create(options: WorktreeCreateOptions) -> Result<WorktreeCreateOutput> {
 
 pub fn adopt(options: WorktreeAdoptOptions) -> Result<WorktreeAdoptOutput> {
     adopt_with_store(options, &adopted_metadata_dir()?)
+}
+
+pub fn import(options: WorktreeImportOptions) -> Result<WorktreeImportOutput> {
+    import_with_store(options, &metadata_dir()?)
 }
 
 pub fn list() -> Result<WorktreeListOutput> {

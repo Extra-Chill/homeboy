@@ -500,7 +500,7 @@ fn accepted_daemon_context_keeps_a_pidless_runner_submission_live() {
         .write_record(&record)
         .expect("persist runner-local record");
 
-    let status = status_in_store(
+    let status = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -1430,7 +1430,7 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
     );
     assert_eq!(
         supervised.metadata["detached_cook_handoff"]["reattach_command"],
-        format!("homeboy agent-task status {handoff_cook_id} --full")
+        format!("homeboy agent-task status {handoff_cook_id}")
     );
     // A supervised admission is live without consulting the process table, so
     // the predicates are decided by the record alone.
@@ -2333,7 +2333,7 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
         attempt_run_id
     );
     assert_eq!(
-        persisted_status_in_store(&seeded, cook_id)
+        status_in_store(&seeded, cook_id)
             .expect("persisted status")
             .run_id,
         attempt_run_id
@@ -2431,7 +2431,7 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
         resolve_run_id_in_store(&empty, cook_id).expect("unresolvable alias echoes the id"),
         cook_id
     );
-    assert!(persisted_status_in_store(&empty, cook_id).is_err());
+    assert!(status_in_store(&empty, cook_id).is_err());
     assert!(durable_local_read_in_store(&empty, cook_id).is_err());
     assert!(exact_durable_local_read_in_store(&empty, attempt_run_id).is_err());
     assert!(load_plan_in_store(&empty, cook_id).is_err());
@@ -2673,7 +2673,7 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
                 });
             })
             .expect("project v1 legacy pin");
-            let before = status(&record.run_id).expect("record before migration");
+            let before = reconcile_status(&record.run_id).expect("record before migration");
 
             let error =
                 validate_controller_runtime_in_store(&test_lifecycle_store(), &record.run_id)
@@ -2685,7 +2685,7 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
                 error.message
             );
             assert_eq!(
-                status(&record.run_id).expect("record after migration"),
+                reconcile_status(&record.run_id).expect("record after migration"),
                 before
             );
         }
@@ -2725,7 +2725,6 @@ fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
     let log =
         logs_in_store(&lifecycle_store, run_id).expect("logs resolve for a running local cook");
     let messages: Vec<&str> = log
-        .events
         .events
         .iter()
         .filter_map(|event| event.data["message"].as_str())
@@ -2778,7 +2777,6 @@ fn cancelled_local_provider_retains_runtime_evidence_in_terminal_logs() {
 
     let log = logs_in_store(&lifecycle_store, run_id).expect("terminal logs");
     let terminal = log
-        .events
         .events
         .iter()
         .find(|event| {
@@ -2848,7 +2846,7 @@ fn terminal_provider_execution_is_inactive_while_cleanup_timing_remains_durable(
             .expect("terminal provider execution"),
         "controller artifact cleanup must not keep provider liveness active"
     );
-    let record = status_in_store(
+    let record = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -2888,7 +2886,7 @@ fn submit_plan_persists_owner_only_plan_file_before_observation() {
         0o600
     );
     assert_eq!(
-        status_in_store(
+        reconcile_status_in_store(
             &lifecycle_store,
             &record.run_id,
             AgentTaskStatusOptions::default(),
@@ -2935,7 +2933,7 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
     )
     .expect("detached run-plan is bound to the controller run");
 
-    let status = status_in_store(
+    let status = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -2948,7 +2946,7 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
         .expect("controller identity resolves artifacts");
     assert_eq!(status.run_id, run_id);
     assert_eq!(status.metadata["runner_job_id"], "job-8341");
-    assert!(!logs.events.events.is_empty());
+    assert!(!logs.events.is_empty());
     assert!(artifacts.artifacts.is_empty());
 
     let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
@@ -3070,7 +3068,7 @@ fn accepted_lab_runner_execution_preserves_controller_runtime_pin_across_host_id
         |_| Ok(runner_runtime.clone()),
     )
     .expect("runner records its execution identity without replacing the controller pin");
-    let mirrored = status_in_store(
+    let mirrored = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -3217,7 +3215,7 @@ fn planned_lab_runner_execution_preserves_controller_runtime_pin_before_acceptan
     )
     .expect("runner preserves controller-seat runtime before acceptance");
 
-    let record = status_in_store(
+    let record = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -3418,7 +3416,7 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
         })
         .expect("expire acceptance deadline");
 
-        let expired = status("expired-handoff-late-acceptance")
+        let expired = reconcile_status("expired-handoff-late-acceptance")
             .expect("status reconciles the expired controller proxy");
         assert_eq!(expired.state, AgentTaskRunState::Cancelled);
         assert_eq!(expired.metadata["handoff_acceptance"]["state"], "expired");
@@ -3503,7 +3501,7 @@ fn status_repairs_runner_plan_projection_and_missing_controller_plan_fails_close
     .expect("runner transport path projected");
 
     assert_eq!(
-        status_in_store(
+        reconcile_status_in_store(
             &lifecycle_store,
             &record.run_id,
             AgentTaskStatusOptions::default(),
@@ -3523,7 +3521,7 @@ fn status_repairs_runner_plan_projection_and_missing_controller_plan_fails_close
     );
 
     std::fs::remove_file(&record.plan_path).expect("remove controller plan");
-    let error = status_in_store(
+    let error = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -3581,7 +3579,7 @@ fn slow_materialization_remains_discoverable_with_source_identity_and_is_idempot
     std::thread::sleep(std::time::Duration::from_millis(20));
     assert!(started.elapsed() > std::time::Duration::from_millis(1));
 
-    let visible = status_in_store(
+    let visible = reconcile_status_in_store(
         &lifecycle_store,
         "slow-materialization",
         AgentTaskStatusOptions::default(),
@@ -3654,7 +3652,7 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
         &stub_lab_offload_submission,
     )
     .expect("running proxy");
-    let mut record = status_in_store(
+    let mut record = reconcile_status_in_store(
         &lifecycle_store,
         "agent-task-disconnected-child",
         AgentTaskStatusOptions::default(),
@@ -3763,7 +3761,7 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
     .expect("terminal transport awaits aggregate synchronization");
     assert_eq!(record.state, AgentTaskRunState::Running);
     assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
-    let before_delayed_provider_terminal = status_in_store(
+    let before_delayed_provider_terminal = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -3801,7 +3799,7 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
             .expect("aggregate persisted"),
         aggregate
     );
-    let after_delayed_provider_terminal = status_in_store(
+    let after_delayed_provider_terminal = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -3897,7 +3895,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             AgentTaskRunState::Succeeded
         );
         let (status_record, log, artifacts) = std::thread::scope(|scope| {
-            let status_reader = scope.spawn(|| status("agent-task-disconnected-child"));
+            let status_reader = scope.spawn(|| reconcile_status("agent-task-disconnected-child"));
             let log_reader = scope.spawn(|| logs("agent-task-disconnected-child"));
             let artifact_reader = scope.spawn(|| artifacts("agent-task-disconnected-child"));
             (
@@ -3916,7 +3914,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             )
         });
         assert_eq!(status_record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events.events[0].data["state"], "succeeded");
+        assert_eq!(log.events[0].data["state"], "succeeded");
         assert!(artifacts.artifacts.is_empty());
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
@@ -4357,7 +4355,7 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
             })
             .expect("pre-dispatch failure recorded");
 
-        let loaded = status("cook-lab-predispatch").expect("status loaded");
+        let loaded = reconcile_status("cook-lab-predispatch").expect("status loaded");
         let log = logs("cook-lab-predispatch").expect("logs loaded");
         let artifact_report = artifacts("cook-lab-predispatch").expect("artifacts loaded");
         let legacy_status_path = homeboy_core::paths::homeboy_data()
@@ -4381,8 +4379,8 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
         assert_eq!(loaded.state, AgentTaskRunState::Failed);
         assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
         assert!(loaded.provider_handles.is_empty());
-        assert_eq!(log.events.events[1].data["state"], "failed");
-        assert_eq!(mirrored_log.events.events[1].data["state"], "failed");
+        assert_eq!(log.events[1].data["state"], "failed");
+        assert_eq!(mirrored_log.events[1].data["state"], "failed");
         assert_eq!(loaded.metadata["provider_run_ids"], serde_json::json!([]));
         assert_eq!(
             loaded.artifact_refs[0].kind,
@@ -4473,7 +4471,7 @@ fn record_completed_run_exposes_logs_and_artifacts() {
         let artifacts = artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
 
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events.events[0].data["state"], "succeeded");
+        assert_eq!(log.events[0].data["state"], "succeeded");
         assert_eq!(artifacts.artifacts[0].id, "patch");
         assert_eq!(artifacts.evidence_refs[0].kind, "transcript");
     }
@@ -4503,7 +4501,7 @@ fn submitted_run_can_be_loaded_marked_running_and_completed() {
             &aggregate,
         )
         .expect("completed");
-        let durable_status = status_in_store(
+        let durable_status = reconcile_status_in_store(
             &lifecycle_store,
             "run-execute",
             AgentTaskStatusOptions::default(),
@@ -4610,7 +4608,7 @@ fn status_recovers_terminal_state_from_durable_aggregate() {
         store::write_aggregate_in_store(&lifecycle_store, "run-stale-status", &aggregate)
             .expect("aggregate written");
 
-        let recovered = status_in_store(
+        let recovered = reconcile_status_in_store(
             &lifecycle_store,
             "run-stale-status",
             AgentTaskStatusOptions::default(),
@@ -4734,7 +4732,7 @@ fn record_health_recovers_after_interrupted_migration_without_changing_terminal_
         let applied = reconcile_record_health_in_store(&test_lifecycle_store(), false)
             .expect("retry migration");
         assert_eq!(applied.migrated, 1);
-        let repaired = status("interrupted-terminal").expect("repaired");
+        let repaired = reconcile_status("interrupted-terminal").expect("repaired");
         assert_eq!(repaired.state, AgentTaskRunState::Succeeded);
         assert_eq!(
             repaired.lifecycle.execution.finished_at.as_deref(),

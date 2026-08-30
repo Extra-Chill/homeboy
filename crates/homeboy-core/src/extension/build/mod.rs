@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::extension::{exec_context, ExtensionCapability, ExtensionPhaseTiming};
 use crate::extension_execution::{self, ExtensionExecutionContext};
+use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_core::artifact_inputs::{self, ResolvedArtifactInput};
 use homeboy_core::component::{self, Component};
 use homeboy_core::config::{is_json_input, parse_bulk_ids};
@@ -16,6 +16,8 @@ use homeboy_core::paths;
 use homeboy_core::server::execute_local_command_in_dir;
 use homeboy_engine_primitives::command::CapturedOutput;
 use homeboy_engine_primitives::shell;
+use homeboy_extension_contract::exec_context;
+use homeboy_extension_contract::ExtensionCapability;
 
 mod local_permissions;
 
@@ -76,7 +78,7 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
         extension_execution::resolve_execution_context(component, ExtensionCapability::Build)
     {
         let extension_id = context.extension_id.clone();
-        let extension = extension::load_extension(&extension_id)?;
+        let extension = crate::extension_store::load_extension(&extension_id)?;
         if let Some(build) = &extension.build {
             // Priority 1: Extension's bundled build script
             let bundled = build
@@ -565,7 +567,7 @@ fn execute_build_component(
         crate::extension::component_script::run_component_scripts_with_run_dir_and_timeout(
             comp,
             crate::extension::component_script::ComponentScriptRunRequest {
-                capability: extension::ExtensionCapability::Build,
+                capability: ExtensionCapability::Build,
                 source_path: &validated_path,
                 run_dir: &run_dir,
                 passthrough: false,
@@ -591,10 +593,8 @@ fn execute_build_component(
         }
         runner.run()?
     } else {
-        let context = extension_execution::resolve_execution_context(
-            comp,
-            extension::ExtensionCapability::Build,
-        )?;
+        let context =
+            extension_execution::resolve_execution_context(comp, ExtensionCapability::Build)?;
         let mut runner = extension::ExtensionRunner::for_context(context)
             .component(comp.clone())
             .working_dir(&local_path_str)
@@ -679,7 +679,7 @@ fn resolve_changed_scope(
         )));
     };
 
-    let extension = extension::load_extension(&context.extension_id)?;
+    let extension = crate::extension_store::load_extension(&context.extension_id)?;
     let changed_scope_script = extension
         .build
         .as_ref()
@@ -852,7 +852,7 @@ fn run_pre_build_scripts(
         return Ok(None);
     };
 
-    let extension = extension::load_extension(&build_context.extension_id)?;
+    let extension = crate::extension_store::load_extension(&build_context.extension_id)?;
     let build_config = match &extension.build {
         Some(b) => b,
         None => return Ok(None),

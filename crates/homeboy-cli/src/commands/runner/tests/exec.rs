@@ -114,8 +114,11 @@ fn synced_node_workload_receives_runner_extension_environment() {
             )
             .expect("provider executable");
         }
-        homeboy_core::extension::install(&extension.path().display().to_string(), Some("fixture"))
-            .expect("install fixture extension");
+        homeboy_core::extension::lifecycle::install(
+            &extension.path().display().to_string(),
+            Some("fixture"),
+        )
+        .expect("install fixture extension");
         runner::create(
             &format!(
                 r#"{{"id":"lab-node","kind":"local","workspace_root":"{}"}}"#,

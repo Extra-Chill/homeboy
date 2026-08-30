@@ -2089,8 +2089,8 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
             record.lifecycle.provider_runtime.clear();
         })
         .expect("obsolete record persisted");
-        let before =
-            crate::agent_task_lifecycle::status(&record.run_id).expect("obsolete record loads");
+        let before = crate::agent_task_lifecycle::reconcile_status(&record.run_id)
+            .expect("obsolete record loads");
         assert!(before.lifecycle.provider_runtime.is_empty());
 
         let mut backend = MockBackend {
@@ -2104,7 +2104,7 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
 
         let error = finalize_pr_with_backend(finalization_options, &mut backend)
             .expect_err("model-less terminal record is rejected");
-        let after = crate::agent_task_lifecycle::status(&record.run_id)
+        let after = crate::agent_task_lifecycle::reconcile_status(&record.run_id)
             .expect("obsolete record remains readable");
 
         assert_eq!(
@@ -3134,7 +3134,7 @@ fn changed_files_mismatch_error_reports_missing_and_unexpected_paths() {
         "{message}"
     );
     assert!(
-        message.contains("homeboy agent-task status agent-task-1 --full"),
+        message.contains("homeboy agent-task diagnose agent-task-1 --full"),
         "{message}"
     );
 }

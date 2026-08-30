@@ -1,4 +1,3 @@
-use homeboy_core::extension;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -19,10 +18,9 @@ use homeboy::fuzz::{
     FUZZ_RESULTS_FILE_PRODUCER_CONTRACT,
 };
 use homeboy::rig::{self, FuzzPrepareReport, RigSpec};
-use homeboy_core::{
-    self,
-    extension::{ExtensionCapability, ExtensionRunner, FuzzConfig},
-};
+use homeboy_core::{self, extension::ExtensionRunner};
+use homeboy_extension_contract::fuzz_config::FuzzConfig;
+use homeboy_extension_contract::ExtensionCapability;
 use uuid::Uuid;
 
 use super::inspect::fuzz_failure_diagnostic;
@@ -75,7 +73,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let extension_id = ctx.extension_id.clone();
     let fuzz_config = extension_id
         .as_deref()
-        .and_then(|extension_id| extension::load_extension(extension_id).ok())
+        .and_then(|extension_id| homeboy_core::extension_store::load_extension(extension_id).ok())
         .and_then(|manifest| manifest.fuzz);
     let workloads = fuzz_workloads(
         &ctx.component,
@@ -1457,7 +1455,7 @@ fn run_fuzz_extension_script(
     run_dir: &RunDir,
     execution_request_path: &Path,
     sequence_plan_path: Option<&Path>,
-    runtime_helpers: &[homeboy_core::extension::RuntimeHelperRequirement],
+    runtime_helpers: &[homeboy_extension_contract::RuntimeHelperRequirement],
 ) -> homeboy::core::Result<homeboy_core::extension::RunnerOutput> {
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let env = fuzz_runner_env(

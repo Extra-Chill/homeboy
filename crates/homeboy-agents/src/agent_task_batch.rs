@@ -632,7 +632,7 @@ fn stalled_admission_recovery_command_with(
         })
 }
 
-fn status_in_store<S, P, E>(
+fn reconcile_status_in_store<S, P, E>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     mut child_status: S,
@@ -829,7 +829,7 @@ pub fn fanout_dependency_graph_with_finalization_statuses_in_store(
     refresh_dependency_graph_with_finalization_statuses(
         &mut batch,
         Some(statuses),
-        &mut agent_task_lifecycle::persisted_status,
+        &mut agent_task_lifecycle::status,
     )
 }
 
@@ -1089,10 +1089,10 @@ fn artifacts_in_store(
     // projection-readiness probes are the ambient `persisted_status` and
     // `terminal_artifact_projection_readiness_bounded`. Naming their rooted
     // siblings here is what keeps the whole report in one home.
-    let report = status_in_store(
+    let report = reconcile_status_in_store(
         store,
         batch_id,
-        |run_id| agent_task_lifecycle::persisted_status_in_store(lifecycle_store, run_id),
+        |run_id| agent_task_lifecycle::status_in_store(lifecycle_store, run_id),
         |run_id| {
             agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
                 lifecycle_store,
@@ -1475,7 +1475,7 @@ impl AgentTaskBatchStore {
     pub fn status(&self, batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         self.status_with(
             batch_id,
-            agent_task_lifecycle::persisted_status,
+            agent_task_lifecycle::status,
             agent_task_lifecycle::terminal_artifact_projection_readiness_bounded,
             agent_task_lifecycle::run_record_exists_readonly,
         )
@@ -1502,7 +1502,7 @@ impl AgentTaskBatchStore {
         P: FnMut(&str) -> Result<Option<String>>,
         E: FnMut(&str) -> Result<bool>,
     {
-        status_in_store(
+        reconcile_status_in_store(
             self,
             batch_id,
             child_status,

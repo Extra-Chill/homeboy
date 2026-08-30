@@ -9,14 +9,14 @@ use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::shell;
 use homeboy_core::engine::template::{render_map, TemplateVars};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::{
-    load_all_extensions, DeployArchiveInstallPolicy, DeployOverride, DeployVerification,
-    ExtensionManifest,
-};
 use homeboy_core::paths as base_path;
 use homeboy_core::project::Project;
 use homeboy_core::server::SshClient;
+use homeboy_extension_contract::manifest_toolchain_config::DeployOverride;
 use homeboy_extension_contract::HookEvent;
+use homeboy_extension_contract::{
+    DeployArchiveInstallPolicy, DeployVerification, ExtensionManifest,
+};
 use homeboy_version::version;
 
 use super::lifecycle::DeployObservation;
@@ -405,7 +405,7 @@ fn parse_component_version(content: &str, pattern: Option<&str>, filename: &str)
 
 /// Find deploy verification config from extensions.
 pub(super) fn find_deploy_verification(target_path: &str) -> Option<DeployVerification> {
-    for extension in load_all_extensions().unwrap_or_default() {
+    for extension in homeboy_core::extension_store::load_all_extensions().unwrap_or_default() {
         for verification in extension.deploy_verifications() {
             if target_path.contains(&verification.path_pattern) {
                 return Some(verification.clone());
@@ -424,7 +424,7 @@ pub(super) fn find_deploy_verification(target_path: &str) -> Option<DeployVerifi
 pub(super) fn find_deploy_override(
     target_path: &str,
 ) -> Option<(DeployOverride, ExtensionManifest)> {
-    for extension in load_all_extensions().unwrap_or_default() {
+    for extension in homeboy_core::extension_store::load_all_extensions().unwrap_or_default() {
         for override_config in extension.deploy_overrides() {
             if target_path.contains(&override_config.path_pattern) {
                 return Some((override_config.clone(), extension));
@@ -841,11 +841,11 @@ pub(super) fn run_post_deploy_hooks(
 mod tests {
     use super::*;
     use homeboy_core::component::VersionTarget;
-    use homeboy_core::extension::{
-        DeployArchiveInstallPolicy, DeployOverride, DeployRequiredHeader, DeployVerification,
-        ExtensionManifest,
-    };
     use homeboy_core::server::SshClient;
+    use homeboy_extension_contract::manifest_toolchain_config::DeployOverride;
+    use homeboy_extension_contract::{
+        DeployArchiveInstallPolicy, DeployRequiredHeader, DeployVerification, ExtensionManifest,
+    };
     use std::collections::HashMap;
     use std::fs;
     use std::io::Write;

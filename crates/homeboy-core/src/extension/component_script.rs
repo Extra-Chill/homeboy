@@ -3,12 +3,15 @@ use std::time::Duration;
 
 use super::runner::ExtensionRunner;
 use crate::extension::env_provider;
-use crate::extension::{exec_context, load_extension, ExtensionCapability, RunnerOutput};
+use crate::extension::RunnerOutput;
+use crate::extension_store::load_extension;
 use homeboy_core::component::Component;
 pub use homeboy_core::component_script_provider::ComponentScriptOutput;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, Result};
+use homeboy_extension_contract::exec_context;
+use homeboy_extension_contract::ExtensionCapability;
 
 impl From<RunnerOutput> for ComponentScriptOutput {
     fn from(output: RunnerOutput) -> Self {

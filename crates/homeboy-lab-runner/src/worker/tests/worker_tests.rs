@@ -814,8 +814,11 @@ fn reverse_worker_injects_lifecycle_run_id_into_claimed_job_env() {
             std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
                 .expect("provider executable");
         }
-        homeboy_core::extension::install(&extension.path().display().to_string(), Some("fixture"))
-            .expect("install provider fixture");
+        homeboy_core::extension::lifecycle::install(
+            &extension.path().display().to_string(),
+            Some("fixture"),
+        )
+        .expect("install provider fixture");
         let store = JobStore::default();
         let mut request = run_id_echo_request();
         request.extension_env_providers = vec!["fixture".to_string()];

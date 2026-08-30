@@ -295,27 +295,6 @@ pub(crate) fn queued_events(tasks: &[AgentTaskRunTask]) -> Vec<AgentTaskProgress
         .collect()
 }
 
-pub(crate) fn totals_for_tasks(tasks: &[AgentTaskRunTask]) -> AgentTaskAggregateTotals {
-    let mut totals = AgentTaskAggregateTotals::default();
-    for task in tasks {
-        match task.state {
-            AgentTaskState::Queued => totals.queued += 1,
-            AgentTaskState::Running => totals.running += 1,
-            AgentTaskState::Blocked => totals.blocked += 1,
-            AgentTaskState::Skipped => totals.skipped += 1,
-            AgentTaskState::Succeeded => totals.succeeded += 1,
-            AgentTaskState::CandidateRecoverable => {
-                totals.candidate_recoverable += 1;
-                totals.recoverable_candidates += 1;
-            }
-            AgentTaskState::Failed => totals.failed += 1,
-            AgentTaskState::Cancelled => totals.cancelled += 1,
-            AgentTaskState::TimedOut => totals.timed_out += 1,
-        }
-    }
-    totals
-}
-
 pub(crate) fn normalize_progress_events(
     record: &AgentTaskRunRecord,
     events: &[AgentTaskProgressEvent],

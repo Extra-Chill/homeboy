@@ -1,10 +1,10 @@
 //! Tests for the lint run workflow, grouped by concern.
 
 use super::types::{LintRunWorkflowArgs, LintSniffFilters};
-use crate::extension::LintChangedFileRoute;
 use homeboy_core::component::Component;
 use homeboy_core::finding::HomeboyFinding;
 use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_extension_contract::LintChangedFileRoute;
 
 mod exit_code;
 mod findings;

@@ -10,12 +10,13 @@ use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
-use homeboy_core::extension::{
-    is_extension_linked, load_extension, run_setup, ExtensionSummary, UpdateEntry,
-};
+use homeboy_core::extension::{run_setup, ExtensionSummary};
 use homeboy_core::extension_readiness::{
     extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
+use homeboy_core::extension_store::{is_extension_linked, load_extension};
+use homeboy_extension_contract as extension_contract;
+use homeboy_extension_contract::update_output::UpdateEntry;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
@@ -326,6 +327,10 @@ impl ExtensionArgs {
         )
     }
 
+    pub(crate) fn is_readiness_repair_command(&self) -> bool {
+        matches!(self.command, ExtensionCommand::Setup { .. })
+    }
+
     pub(crate) fn update_command_label(&self) -> &'static str {
         match self.command {
             ExtensionCommand::Refresh { .. } => "extension refresh",
@@ -366,6 +371,7 @@ pub enum ExtensionOutput {
     #[serde(rename = "extension.setup")]
     Setup {
         extension_id: String,
+        before_runtime_diagnostics: ExtensionRuntimeDiagnostics,
         runtime_diagnostics: ExtensionRuntimeDiagnostics,
     },
     #[serde(rename = "extension.install")]
@@ -419,13 +425,14 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         git_root: Option<String>,
         #[serde(flatten)]
-        source_update: homeboy_core::extension::ExtensionSourceUpdate,
+        source_update: extension_contract::update_output::ExtensionSourceUpdate,
         #[serde(skip_serializing_if = "Option::is_none")]
         old_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         new_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        repaired_source_metadata: Option<homeboy_core::extension::SourceMetadataRepair>,
+        repaired_source_metadata:
+            Option<extension_contract::source_metadata_repair::SourceMetadataRepair>,
     },
     #[serde(rename = "extension.update_all")]
     UpdateAll {
@@ -437,7 +444,7 @@ pub enum ExtensionOutput {
         controller_version: String,
         compatibility: Vec<ExtensionConvergenceCompatibility>,
         updated: Vec<UpdateEntry>,
-        skipped: Vec<homeboy_core::extension::UpdateSkippedEntry>,
+        skipped: Vec<extension_contract::update_output::UpdateSkippedEntry>,
         revision_evidence: Vec<ExtensionRevisionEvidence>,
         provider_catalog_before: ProviderCatalogEvidence,
         provider_catalog_after: ProviderCatalogEvidence,
@@ -478,7 +485,7 @@ pub enum ExtensionOutput {
 #[derive(Serialize)]
 pub struct ExtensionConvergenceCompatibility {
     pub extension_id: String,
-    pub core_compatibility: homeboy_core::extension::CoreCompatibilityReport,
+    pub core_compatibility: extension_contract::core_compat::CoreCompatibilityReport,
 }
 
 #[derive(Serialize)]
@@ -516,9 +523,10 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     pub runtime: String,
-    pub core_compatibility: homeboy_core::extension::CoreCompatibilityReport,
+    pub core_compatibility: extension_contract::core_compat::CoreCompatibilityReport,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_requirements: Option<homeboy_core::extension::RuntimeRequirementsConfig>,
+    pub runtime_requirements:
+        Option<extension_contract::manifest_capability_config::RuntimeRequirementsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -547,20 +555,23 @@ pub struct ExtensionDetail {
     pub actions: Vec<ActionDetail>,
     /// Installed transport IDs and schemas, without executable argv.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub notification_transports: Vec<homeboy_core::extension::NotificationTransportDescriptor>,
+    pub notification_transports:
+        Vec<extension_contract::notification_transport_config::NotificationTransportDescriptor>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<homeboy_core::extension::InputConfig>,
+    pub inputs: Vec<extension_contract::manifest_action_config::InputConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub settings: Vec<homeboy_core::extension::SettingConfig>,
+    pub settings: Vec<extension_contract::manifest_action_config::SettingConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub structured_sidecars: Vec<homeboy_core::extension::StructuredSidecarDeclaration>,
+    pub structured_sidecars: Vec<extension_contract::sidecar_config::StructuredSidecarDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ci_cache: Option<homeboy_core::extension::CiCacheSpec>,
+    pub ci_cache: Option<extension_contract::ci_config::CiCacheSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub materialization_source:
-        Option<homeboy_core::extension::ExtensionMaterializationSourceContract>,
+    pub materialization_source: Option<
+        extension_contract::extension_contract_producer::ExtensionMaterializationSourceContract,
+    >,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub contract_producers: Vec<homeboy_core::extension::ExtensionContractProducer>,
+    pub contract_producers:
+        Vec<extension_contract::extension_contract_producer::ExtensionContractProducer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequiresDetail>,
 }
@@ -588,11 +599,11 @@ pub struct ActionDetail {
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
-    pub action_type: homeboy_core::extension::ActionType,
+    pub action_type: extension_contract::action_types::ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<homeboy_core::extension::HttpMethod>,
+    pub method: Option<extension_contract::action_types::HttpMethod>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
@@ -995,7 +1006,7 @@ fn show_extension(
     });
 
     let source_revision = homeboy_core::extension_update_check::read_source_revision(&extension.id);
-    let core_compatibility = homeboy_core::extension::evaluate_core_compatibility(
+    let core_compatibility = extension_contract::core_compat::evaluate_core_compatibility(
         extension
             .requires
             .as_ref()
@@ -1101,7 +1112,7 @@ fn install_extension(
     replace: bool,
 ) -> CmdResult<ExtensionOutput> {
     if replace {
-        let result = homeboy_core::extension::replace_with_revision(
+        let result = homeboy_core::extension::lifecycle::replace_with_revision(
             source,
             id.as_deref(),
             revision.as_deref(),
@@ -1120,8 +1131,11 @@ fn install_extension(
         ));
     }
 
-    let result =
-        homeboy_core::extension::install_with_revision(source, id.as_deref(), revision.as_deref())?;
+    let result = homeboy_core::extension::lifecycle::install_with_revision(
+        source,
+        id.as_deref(),
+        revision.as_deref(),
+    )?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1142,7 +1156,7 @@ fn refresh_extension(
     id: Option<&str>,
     revision: Option<&str>,
 ) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::extension::refresh(source, id, revision)?;
+    let result = homeboy_core::extension::lifecycle::refresh(source, id, revision)?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1164,7 +1178,7 @@ fn refresh_extension(
 }
 
 fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::extension::relink(extension_id, source)?;
+    let result = homeboy_core::extension::lifecycle::relink(extension_id, source)?;
 
     Ok((
         ExtensionOutput::Replace {
@@ -1194,7 +1208,7 @@ fn dev_run_extension(
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy_core::extension::install_for_component(&component, source)?;
+    let result = homeboy_core::extension::lifecycle::install_for_component(&component, source)?;
 
     let installed = result
         .installed
@@ -1258,7 +1272,7 @@ fn update_extension(
     // Capture version before update
     let old_version = load_extension(extension_id).ok().map(|m| m.version.clone());
 
-    let result = extension::update(extension_id, force)?;
+    let result = extension::lifecycle::update(extension_id, force)?;
 
     // Capture version after update
     let new_version = load_extension(&result.extension_id)
@@ -1301,13 +1315,13 @@ fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
 /// Extension-only convergence intentionally has no controller-upgrade admission
 /// or runtime-promotion lease: it never replaces the controller binary.
 fn converge_extensions() -> CmdResult<ExtensionOutput> {
-    let extension_ids = extension::available_extension_ids();
+    let extension_ids = homeboy_core::extension_store::available_extension_ids();
     let compatibility = extension_ids
         .iter()
         .map(|id| {
-            let manifest = extension::load_extension(id)?;
+            let manifest = homeboy_core::extension_store::load_extension(id)?;
             let source_revision = homeboy_core::extension_update_check::read_source_revision(id);
-            let report = extension::evaluate_core_compatibility(
+            let report = extension_contract::core_compat::evaluate_core_compatibility(
                 manifest
                     .requires
                     .as_ref()
@@ -1315,7 +1329,11 @@ fn converge_extensions() -> CmdResult<ExtensionOutput> {
                 source_revision,
             )?;
             if report.status == "incompatible" {
-                return Err(extension::core_incompatible_error("extension", id, report));
+                return Err(extension_contract::core_compat::core_incompatible_error(
+                    "extension",
+                    id,
+                    report,
+                ));
             }
             Ok(ExtensionConvergenceCompatibility {
                 extension_id: id.clone(),
@@ -1334,7 +1352,7 @@ fn converge_extensions() -> CmdResult<ExtensionOutput> {
 
     Ok((
         ExtensionOutput::Converge {
-            controller_version: extension::installed_homeboy_version(),
+            controller_version: extension_contract::core_compat::installed_homeboy_version(),
             compatibility,
             updated: result.updated,
             skipped: result.skipped_details,
@@ -1417,7 +1435,7 @@ fn bounded_diagnostic(message: &str) -> String {
 
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     let was_linked = is_extension_linked(extension_id);
-    let path = homeboy_core::extension::uninstall(extension_id)?;
+    let path = homeboy_core::extension::lifecycle::uninstall(extension_id)?;
 
     Ok((
         ExtensionOutput::Uninstall {
@@ -1430,11 +1448,13 @@ fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
 }
 
 fn setup_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
+    let before_runtime_diagnostics = extension_runtime_diagnostics(extension_id, None);
     let result = run_setup(extension_id)?;
 
     Ok((
         ExtensionOutput::Setup {
             extension_id: extension_id.to_string(),
+            before_runtime_diagnostics,
             runtime_diagnostics: extension_runtime_diagnostics(extension_id, None),
         },
         result.exit_code,
@@ -1568,7 +1588,7 @@ fn set_extension(
     json: &str,
     replace_fields: &[String],
 ) -> CmdResult<ExtensionOutput> {
-    match homeboy_core::extension::merge(extension_id, json, replace_fields)? {
+    match homeboy_core::extension_store::merge(extension_id, json, replace_fields)? {
         homeboy::core::MergeOutput::Single(result) => Ok((
             ExtensionOutput::Set {
                 extension_id: result.id,
@@ -1603,7 +1623,7 @@ fn exec_extension_tool(
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
-    use homeboy_core::extension::{ExtensionSourceUpdate, UpdateEntry};
+    use homeboy_extension_contract::update_output::{ExtensionSourceUpdate, UpdateEntry};
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -2077,7 +2097,7 @@ mod tests {
 
             assert_eq!(
                 source.source_kind,
-                homeboy_core::extension::ExtensionMaterializationSourceKind::Git
+                extension_contract::extension_contract_producer::ExtensionMaterializationSourceKind::Git
             );
             assert_eq!(source.revision.as_deref(), Some("abc1234"));
             assert_eq!(
@@ -2124,7 +2144,7 @@ mod tests {
             assert_eq!(extension.notification_transports[0].id, "example.completed");
             assert_eq!(
                 extension.notification_transports[0].schema,
-                homeboy_core::extension::NOTIFICATION_TRANSPORT_SCHEMA
+                extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA
             );
             assert!(
                 serde_json::to_value(&extension)
@@ -2188,11 +2208,11 @@ mod tests {
             assert_eq!(extension.contract_producers[0].id, "handoff-envelope");
             assert_eq!(
                 extension.contract_producers[0].phase,
-                homeboy_core::extension::ExtensionContractProducerPhase::Handoff
+                extension_contract::extension_contract_producer::ExtensionContractProducerPhase::Handoff
             );
             assert_eq!(
                 extension.contract_producers[0].produces[0].kind,
-                homeboy_core::extension::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
+                extension_contract::extension_contract_producer::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
             );
         });
     }
@@ -2238,7 +2258,7 @@ mod tests {
             assert_eq!(cache.paths.len(), 3);
             assert_eq!(
                 cache.paths[1].root,
-                homeboy_core::extension::CiCachePathRoot::HomeboyData
+                extension_contract::ci_config::CiCachePathRoot::HomeboyData
             );
             assert_eq!(cache.paths[1].path, "build-targets");
             assert_eq!(cache.paths[2].env.as_deref(), Some("BUILD_TARGET_DIR"));
@@ -2314,7 +2334,8 @@ mod tests {
             description: String::new(),
             runtime: "platform".to_string(),
             compatible: true,
-            core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(None),
+            core_compatibility:
+                extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
             readiness: ExtensionReadinessState::Ready,
             ready: Some(true),
             ready_reason: None,
@@ -2378,9 +2399,8 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
-                core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(
-                    None,
-                ),
+                core_compatibility:
+                    extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
                 readiness: ExtensionReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
@@ -2433,9 +2453,8 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
-                core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(
-                    None,
-                ),
+                core_compatibility:
+                    extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
                 readiness: ExtensionReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,

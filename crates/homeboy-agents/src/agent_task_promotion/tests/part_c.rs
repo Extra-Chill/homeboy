@@ -73,7 +73,8 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
             )
             .expect("bridge preserves aggregate while surfacing recoverable projection");
 
-            let record = crate::agent_task_lifecycle::status(run_id).expect("lifecycle status");
+            let record =
+                crate::agent_task_lifecycle::reconcile_status(run_id).expect("lifecycle status");
             assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
             assert_eq!(
                 record.metadata["artifact_projection"]["recovery_action"]["kind"],

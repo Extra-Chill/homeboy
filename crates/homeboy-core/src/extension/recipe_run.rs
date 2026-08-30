@@ -2,12 +2,12 @@
 
 use homeboy_core::error::{Error, Result};
 
-use crate::extension::manifest::ExtensionManifest;
 use crate::extension_store::DiscoveredExtension;
+use homeboy_extension_contract::{
+    ExtensionManifest, RecipeRunProviderDeclaration, RecipeRunProviderDescriptor,
+};
 
 const AVAILABLE_ID_LIMIT: usize = 20;
-
-pub use homeboy_extension_contract::{RecipeRunProviderDeclaration, RecipeRunProviderDescriptor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeRunRequest {
@@ -296,8 +296,11 @@ mod tests {
                 .to_string(),
             )
             .expect("manifest");
-            crate::extension::install(&source.path().display().to_string(), Some("fixture"))
-                .expect("install extension");
+            crate::extension::lifecycle::install(
+                &source.path().display().to_string(),
+                Some("fixture"),
+            )
+            .expect("install extension");
 
             let provider = resolve_recipe_run_provider("fixture.recipe-run").expect("discover");
             assert_eq!(provider.version, "1.0.0");
@@ -347,8 +350,11 @@ mod tests {
                 .to_string(),
             )
             .expect("manifest");
-            crate::extension::install(&source.path().display().to_string(), Some("fixture"))
-                .expect("a malformed provider must not make the manifest unreadable");
+            crate::extension::lifecycle::install(
+                &source.path().display().to_string(),
+                Some("fixture"),
+            )
+            .expect("a malformed provider must not make the manifest unreadable");
 
             let inventory = recipe_run_provider_inventory();
             assert_eq!(inventory.len(), 2, "both declarations must be surfaced");
@@ -392,8 +398,11 @@ mod tests {
                 .to_string(),
             )
             .expect("manifest");
-            crate::extension::install(&source.path().display().to_string(), Some("fixture"))
-                .expect("install");
+            crate::extension::lifecycle::install(
+                &source.path().display().to_string(),
+                Some("fixture"),
+            )
+            .expect("install");
             let duplicate_source = tempfile::tempdir().expect("duplicate extension source");
             std::fs::write(
                 duplicate_source.path().join("duplicate.json"),
@@ -404,7 +413,7 @@ mod tests {
                 .to_string(),
             )
             .expect("duplicate manifest");
-            crate::extension::install(
+            crate::extension::lifecycle::install(
                 &duplicate_source.path().display().to_string(),
                 Some("duplicate"),
             )

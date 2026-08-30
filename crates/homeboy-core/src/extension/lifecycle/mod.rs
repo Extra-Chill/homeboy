@@ -5,7 +5,7 @@ use homeboy_engine_primitives::identifier;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::load_extension;
+use crate::extension_store::load_extension;
 
 pub(crate) const EXTENSION_SOURCE_PREPARE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -34,11 +34,15 @@ pub struct UpdateResult {
     pub linked: bool,
     pub source_path: Option<PathBuf>,
     pub git_root: Option<PathBuf>,
-    pub source_update: super::ExtensionSourceUpdate,
-    pub repaired_source_metadata: Option<source_metadata::SourceMetadataRepair>,
+    pub source_update: homeboy_extension_contract::update_output::ExtensionSourceUpdate,
+    pub repaired_source_metadata:
+        Option<homeboy_extension_contract::source_metadata_repair::SourceMetadataRepair>,
 }
 
+mod repair;
 pub mod source_metadata;
+
+pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 
 pub fn slugify_id(value: &str) -> Result<String> {
     identifier::slugify_id(value, "extension_id")
@@ -167,7 +171,7 @@ pub fn refresh(
     let extension_dir = paths::extension(&extension_id)?;
     let uninstalled_previous = std::fs::symlink_metadata(&extension_dir).is_ok();
     let installed = if uninstalled_previous {
-        let replaced = crate::extension::repair::replace_with_revision(
+        let replaced = repair::replace_with_revision(
             &install_source,
             Some(&extension_id),
             effective_revision,

@@ -8,16 +8,17 @@ use homeboy::core::cleanup::{
 };
 use homeboy::core::worktree::{
     self, CleanupPolicy, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions, WorktreeAdoptOutput,
-    WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeInventoryOptions,
-    WorktreeInventoryOutput, WorktreeListOutput, WorktreeOwnershipProbe,
-    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
-    WorktreeRemoveOutput, WorktreeStatusOutput,
+    WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeImportOptions,
+    WorktreeImportOutput, WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeListOutput,
+    WorktreeOwnershipProbe, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
+    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 use homeboy::core::worktree_provider::{
     self, ConfiguredWorktreeCleanupOutput as WorktreeProviderCleanupOutput,
     ConfiguredWorktreeCreateEvidence, WorktreeCleanupRequest, WorktreeCleanupScope,
-    WorktreeProviderCreateOutput, WorktreeProviderIdentity, WorktreeProviderSafety,
-    WorktreeProviderWorkspace, WorktreeStatusEvidence,
+    WorktreeFinalization, WorktreeFinalizationLookup, WorktreeProviderCreateOutput,
+    WorktreeProviderIdentity, WorktreeProviderSafety, WorktreeProviderWorkspace,
+    WorktreeProvisionLifecycle, WorktreeStatusEvidence, WorktreeTerminalDisposition,
 };
 
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
@@ -64,6 +65,32 @@ enum WorktreeCommand {
         /// Cleanup policy for lifecycle cleanup
         #[arg(long, value_enum)]
         cleanup_policy: Option<CliCleanupPolicy>,
+    },
+    /// Import an existing exact Git worktree into the built-in lifecycle registry
+    Import {
+        component_id: String,
+        handle: String,
+        path: String,
+        #[arg(long)]
+        branch: String,
+        #[arg(long)]
+        base_ref: String,
+        #[arg(long)]
+        task_url: Option<String>,
+        #[arg(long)]
+        owner_run_ref: Option<String>,
+        #[arg(long, value_enum)]
+        cleanup_policy: CliCleanupPolicy,
+        #[arg(long)]
+        created_at: Option<String>,
+    },
+    /// Record a terminal worktree disposition without performing cleanup
+    Finalize {
+        handle: String,
+        #[arg(long)]
+        owner_run_ref: String,
+        #[arg(long, value_enum)]
+        disposition: CliTerminalDisposition,
     },
     /// Adopt an existing local workspace path for @workspace:<handle> refs
     Adopt {
@@ -190,6 +217,27 @@ enum CliCleanupPolicy {
     PreserveOnFailure,
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+enum CliTerminalDisposition {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Interrupted,
+}
+
+impl From<CliTerminalDisposition> for WorktreeTerminalDisposition {
+    fn from(value: CliTerminalDisposition) -> Self {
+        match value {
+            CliTerminalDisposition::Succeeded => Self::Succeeded,
+            CliTerminalDisposition::Failed => Self::Failed,
+            CliTerminalDisposition::Cancelled => Self::Cancelled,
+            CliTerminalDisposition::TimedOut => Self::TimedOut,
+            CliTerminalDisposition::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
 impl From<CliCleanupPolicy> for CleanupPolicy {
     fn from(value: CliCleanupPolicy) -> Self {
         match value {
@@ -203,6 +251,8 @@ impl From<CliCleanupPolicy> for CleanupPolicy {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WorktreeOutput {
     Create(WorktreeCreateCommandOutput),
+    Import(WorktreeImportOutput),
+    Finalize(WorktreeFinalization),
     Adopt(WorktreeAdoptOutput),
     QueueCreate(WorktreeQueueCreateOutput),
     List(WorktreeListCommandOutput),
@@ -480,6 +530,63 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             })?
             .into(),
         ),
+        WorktreeCommand::Import {
+            component_id,
+            handle,
+            path,
+            branch,
+            base_ref,
+            task_url,
+            owner_run_ref,
+            cleanup_policy,
+            created_at,
+        } => WorktreeOutput::Import(worktree::import(WorktreeImportOptions {
+            component_id,
+            handle,
+            path,
+            branch,
+            base_ref,
+            task_url,
+            owner_run_ref,
+            cleanup_policy: cleanup_policy.into(),
+            created_at,
+        })?),
+        WorktreeCommand::Finalize {
+            handle,
+            owner_run_ref,
+            disposition,
+        } => {
+            let lifecycle = WorktreeProvisionLifecycle {
+                purpose: "operator_terminal_finalization".to_string(),
+                owner_run_ref,
+                cleanup_policy:
+                    homeboy::core::worktree_provider::WorktreeCleanupPolicy::PreserveOnFailure,
+            };
+            match worktree_provider::finalize_worktree_from_config(
+                &handle,
+                &lifecycle,
+                disposition.into(),
+                &homeboy::core::defaults::load_config(),
+            )? {
+                WorktreeFinalizationLookup::Finalized(output) => WorktreeOutput::Finalize(output),
+                WorktreeFinalizationLookup::Unsupported => {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "handle",
+                        "selected worktree provider does not support terminal finalization",
+                        Some(handle),
+                        None,
+                    ));
+                }
+                WorktreeFinalizationLookup::NotFound => {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "handle",
+                        "worktree handle was not found",
+                        Some(handle),
+                        None,
+                    ));
+                }
+            }
+        }
         WorktreeCommand::Adopt {
             handle,
             path,
@@ -709,7 +816,7 @@ mod tests {
     use homeboy::core::worktree::{
         CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState, WorktreeCreateAction,
         WorktreeCreateEvidence, WorktreeCreateOutput, WorktreeCreateReconciliation,
-        WorktreeListOutput,
+        WorktreeImportOutput, WorktreeListOutput,
     };
 
     use crate::cli_surface::{Cli, Commands};
@@ -791,6 +898,65 @@ mod tests {
         assert!(existing.get("reconciliation").is_none());
         assert_eq!(restored["action"], "create");
         assert_eq!(restored["reconciliation"]["action"], "restored");
+    }
+
+    #[test]
+    fn worktree_import_and_finalize_are_public_typed_cli_commands() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "worktree",
+            "import",
+            "fixture",
+            "fixture@branch",
+            "/tmp/fixture@branch",
+            "--branch",
+            "branch",
+            "--base-ref",
+            "main",
+            "--owner-run-ref",
+            "run-1",
+            "--cleanup-policy",
+            "preserve-on-failure",
+            "--created-at",
+            "2026-01-02T03:04:05Z",
+        ]);
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Import {
+            owner_run_ref,
+            created_at,
+            ..
+        } = args.command
+        else {
+            panic!("expected import command");
+        };
+        assert_eq!(owner_run_ref.as_deref(), Some("run-1"));
+        assert_eq!(created_at.as_deref(), Some("2026-01-02T03:04:05Z"));
+
+        let record = create_output(None).record;
+        let imported = serde_json::to_value(WorktreeOutput::Import(WorktreeImportOutput {
+            record,
+            imported: true,
+        }))
+        .expect("serialize import");
+        let finalized = serde_json::to_value(WorktreeOutput::Finalize(
+            homeboy::core::worktree_provider::WorktreeFinalization {
+                provider_id: "builtin".to_string(),
+                handle: "fixture@branch".to_string(),
+                disposition:
+                    homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded,
+                owner_outcome: "success".to_string(),
+                lifecycle_state: "completed".to_string(),
+                inspection_path: "/tmp/fixture@branch".to_string(),
+            },
+        ))
+        .expect("serialize finalization");
+
+        assert_eq!(imported["action"], "import");
+        assert_eq!(imported["imported"], true);
+        assert_eq!(finalized["action"], "finalize");
+        assert_eq!(finalized["disposition"], "succeeded");
     }
 
     #[test]

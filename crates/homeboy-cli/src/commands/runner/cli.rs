@@ -251,10 +251,6 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         adopt_orphan_lease: Option<String>,
 
-        /// Deprecated no-op retained for one release; the runner proves the recorded PID dead itself
-        #[arg(long)]
-        confirm_pid_dead: bool,
-
         /// Operator-confirm a live lease/PID/build adoption within the trusted remote SSH UID boundary; never stops or replaces a daemon
         #[arg(long)]
         adopt_live_lease: Option<String>,
@@ -275,10 +271,6 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         reconcile_unleased_candidates: bool,
 
-        /// Deprecated no-op retained for one release; the runner fails closed on owner-lock, process, and listener probes
-        #[arg(long)]
-        confirm_no_daemon_owner: bool,
-
         /// Recover this exact lease after the remote daemon state record was lost
         #[arg(long)]
         recover_missing_lease_state: Option<String>,
@@ -290,10 +282,6 @@ pub(super) enum RunnerCommand {
         /// Recorded concrete remote daemon endpoint paired with --recover-missing-lease-state
         #[arg(long)]
         recorded_endpoint: Option<String>,
-
-        /// Deprecated no-op retained for one release; the runner probes its own state record and endpoint
-        #[arg(long)]
-        confirm_control_plane_lost: bool,
     },
     /// Show persisted runner tunnel status
     Status {

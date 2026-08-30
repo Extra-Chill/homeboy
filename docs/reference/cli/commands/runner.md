@@ -244,17 +244,14 @@ Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
 | `--reverse-runner` | `<REVERSE_RUNNER>` | Runner ID initiating the reverse connection |
 | `--broker-url` | `<BROKER_URL>` | Broker/controller URL observed by the reverse runner |
 | `--adopt-orphan-lease` | `<ADOPT_ORPHAN_LEASE>` | Explicitly adopt this exact remote daemon lease after confirming its PID is dead |
-| `--confirm-pid-dead` | flag | Deprecated no-op retained for one release; the runner proves the recorded PID dead itself |
 | `--adopt-live-lease` | `<ADOPT_LIVE_LEASE>` | Operator-confirm a live lease/PID/build adoption within the trusted remote SSH UID boundary; never stops or replaces a daemon |
 | `--expected-live-pid` | `<EXPECTED_LIVE_PID>` | Current remote daemon PID paired with --adopt-live-lease |
 | `--confirm-untracked-child-dead` | `<CONFIRM_UNTRACKED_CHILD_DEAD>` | Confirm one exact unresolved job has no live untracked child; repeat for each job |
 | `--reconcile-leaseless-orphans` | flag | Explicitly reconcile active jobs after proving the missing-lease remote store has no daemon owner |
 | `--reconcile-unleased-candidates` | flag | Explicitly apply the bounded remote daemon-candidate reconciliation |
-| `--confirm-no-daemon-owner` | flag | Deprecated no-op retained for one release; the runner fails closed on owner-lock, process, and listener probes |
 | `--recover-missing-lease-state` | `<RECOVER_MISSING_LEASE_STATE>` | Recover this exact lease after the remote daemon state record was lost |
 | `--recorded-pid` | `<RECORDED_PID>` | Recorded remote daemon PID paired with --recover-missing-lease-state |
 | `--recorded-endpoint` | `<RECORDED_ENDPOINT>` | Recorded concrete remote daemon endpoint paired with --recover-missing-lease-state |
-| `--confirm-control-plane-lost` | flag | Deprecated no-op retained for one release; the runner probes its own state record and endpoint |
 
 ## `homeboy runner status`
 
@@ -531,6 +528,7 @@ Show or follow durable runner daemon job events
 | `--follow` | flag | Poll until the remote job reaches a terminal state, printing new events to stderr |
 | `--poll-ms` | `<POLL_MS>` | Poll interval in milliseconds when --follow is set |
 | `--cursor` | `<CURSOR>` | Resume after this previously displayed event sequence |
+| `--json` | flag | Emit one structured document without human event rendering |
 | `--compact` | flag | Return only lifecycle events, exit code, and a bounded stdout/stderr tail |
 | `--tail` | `<KB>` | Bound embedded stdout/stderr to the last N kilobytes, surfaced as a tail |
 

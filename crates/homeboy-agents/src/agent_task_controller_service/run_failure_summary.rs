@@ -294,7 +294,7 @@ fn collect_evidence_refs(
                 &mut refs,
                 AgentTaskEvidenceRef {
                     kind: "run_evidence".to_string(),
-                    uri: format!("homeboy agent-task status {run_id} --full"),
+                    uri: format!("homeboy agent-task diagnose {run_id} --full"),
                     label: Some(format!("agent-task run {run_id} evidence")),
                 },
             );

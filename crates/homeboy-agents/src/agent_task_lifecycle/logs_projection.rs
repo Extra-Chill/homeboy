@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::*;
 
-pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
+pub fn logs(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     logs_in_store(&lifecycle_store, run_id)
 }
@@ -15,39 +15,17 @@ pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
 pub fn logs_from_cursor(
     run_id: &str,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
-    include_raw: bool,
-) -> Result<AgentTaskRunLog> {
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    event_log_in_store(&lifecycle_store, run_id, include_raw, cursor)
+    event_page_in_store(&lifecycle_store, run_id, cursor)
 }
 
 /// [`logs`] against explicitly injected durable lifecycle roots.
 pub fn logs_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-) -> Result<AgentTaskRunLog> {
-    event_log_in_store(lifecycle_store, run_id, false, None)
-}
-
-pub(crate) fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    event_log_in_store(&lifecycle_store, run_id, include_raw, None)
-}
-
-/// [`logs_with_raw`] against explicitly injected durable lifecycle roots.
-///
-/// This projection is a genuine read: the Cook-alias resolution, the record
-/// read, and the aggregate read are the only durable touches, and every event
-/// helper below it works from the record and aggregate already in hand. Both
-/// reads have to name the same installation anyway — resolving the record in
-/// one home and its aggregate in another would report the event stream of a run
-/// that never produced it, and would do so without failing (#7505).
-pub fn logs_with_raw_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    include_raw: bool,
-) -> Result<AgentTaskRunLog> {
-    event_log_in_store(lifecycle_store, run_id, include_raw, None)
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
+    event_page_in_store(lifecycle_store, run_id, None)
 }
 
 pub fn control_plane_events_in_store(
@@ -55,18 +33,19 @@ pub fn control_plane_events_in_store(
     run_id: &str,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
 ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
-    Ok(event_log_in_store(lifecycle_store, run_id, false, cursor)?.events)
+    event_page_in_store(lifecycle_store, run_id, cursor)
 }
 
-fn event_log_in_store(
+/// One non-reconciling read from the durable record and aggregate. Raw runner
+/// transport is retained only inside the bounded canonical event data.
+fn event_page_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    include_raw: bool,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
-) -> Result<AgentTaskRunLog> {
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
     // Logs are terminal inspection, not runner reconciliation. The durable
     // record remains readable when a runner is unavailable or wedged.
-    let record = persisted_status_in_store(lifecycle_store, run_id)?;
+    let record = status_in_store(lifecycle_store, run_id)?;
     let run_id = record.run_id.clone();
     // `run_id` is already the resolved identity, so this is the store's own
     // exact aggregate read rather than the alias-resolving lifecycle_ops one.
@@ -96,16 +75,7 @@ fn event_log_in_store(
     } else {
         normalize_runner_job_events(&raw_events, &record, &artifact_refs)?
     };
-    let events = control_plane_event_page(&record, events, cursor)?;
-    Ok(AgentTaskRunLog {
-        schema: schemas::RUN_LOG.to_string(),
-        events,
-        raw_events: if include_raw {
-            raw_events
-        } else {
-            Default::default()
-        },
-    })
+    control_plane_event_page(&record, events, cursor)
 }
 
 fn local_provider_execution_artifact_refs(

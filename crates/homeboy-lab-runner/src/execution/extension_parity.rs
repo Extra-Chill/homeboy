@@ -564,15 +564,16 @@ fn runner_extension_materialization_request(
     let local_revision = homeboy_core::extension_update_check::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty())
         .ok_or_else(|| parity_error.clone())?;
-    let source = extension::resolve_source_url(extension_id).map_err(|err| {
-        controller_extension_metadata_required_error(
-            runner_id,
-            homeboy_path,
-            extension_id,
-            &local_revision,
-            err,
-        )
-    })?;
+    let source =
+        extension::lifecycle::source_metadata::resolve_source_url(extension_id).map_err(|err| {
+            controller_extension_metadata_required_error(
+                runner_id,
+                homeboy_path,
+                extension_id,
+                &local_revision,
+                err,
+            )
+        })?;
     let materialization_source =
         if let Some(local_source_path) = controller_local_source_path(&source.url) {
             RunnerExtensionMaterializationSource::ControllerSnapshot {

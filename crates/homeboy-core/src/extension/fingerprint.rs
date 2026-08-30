@@ -1,18 +1,6 @@
-use super::manifest::ExtensionManifest;
+use homeboy_audit_contract::FingerprintOutput;
 use homeboy_engine_primitives::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
-
-// The fingerprint output schema moved to the homeboy-audit-contract crate
-// (#8425) — it's audit's data model, not extension behavior. Re-exported here
-// so `extension::fingerprint::*` (and extension's own `pub use`) keep resolving;
-// this module retains only `run_fingerprint_script`, which produces them.
-pub use homeboy_audit_contract::fingerprint::{
-    AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, FingerprintOutput,
-    HookRef, UnusedParam,
-};
-pub use homeboy_audit_contract::policy_flow::{
-    AggregateDefinitionFact, AggregateFieldFact, AggregateProjectionFact, DecisionBranchFact,
-    FactLocation, FieldAccessFact, FieldAccessKind, MethodCallFact, ProjectionFieldFact,
-};
+use homeboy_extension_contract::ExtensionManifest;
 
 /// Run a extension's fingerprint script on file content.
 ///

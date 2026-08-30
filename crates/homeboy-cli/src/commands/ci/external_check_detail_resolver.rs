@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 
 use homeboy::core::process::{force_terminate_process_tree_bounded, ProcessContainment};
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy::extension::{
-    load_all_extensions, ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig,
-    ExternalCheckDetailResponse, EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA,
-    EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
-};
+use homeboy_core::extension_store::load_all_extensions;
 #[cfg(not(windows))]
 use homeboy_engine_primitives::command::terminate_process_tree_and_reap;
 use homeboy_engine_primitives::command::{terminate_remaining_process_group, ControllerChildGuard};
+use homeboy_extension_contract::external_check_detail_resolver::{
+    ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig, ExternalCheckDetailResponse,
+    EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
+};
 use serde::Serialize;
 use tempfile::NamedTempFile;
 
@@ -561,7 +561,7 @@ fn bound(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(super) fn test_cross_platform_fixture() {
     const FIXTURE_MODE_ENV: &str = "HOMEBOY_EXTERNAL_CHECK_FIXTURE_MODE";
 
@@ -673,7 +673,7 @@ pub(super) fn test_cross_platform_fixture() {
     });
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     let root = homeboy::core::paths::homeboy().unwrap();
     let extension = root.join("extensions").join("fixture-external-check");
@@ -703,7 +703,7 @@ fn install_fixture_extension(mode: &str, fixture_mode_env: &str) {
     std::env::set_var(fixture_mode_env, mode);
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn timeout_fixture_command(extension: &Path) -> Vec<String> {
     let name = if cfg!(windows) {
         "fixture-resolver.exe"
@@ -723,7 +723,7 @@ fn timeout_fixture_command(extension: &Path) -> Vec<String> {
     ]
 }
 
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(feature = "test-support", unix))]
 fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     use std::os::unix::fs::PermissionsExt;
 
@@ -740,7 +740,7 @@ fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     name.into()
 }
 
-#[cfg(all(any(test, feature = "test-support"), windows))]
+#[cfg(all(feature = "test-support", windows))]
 fn fixture_program(extension: &Path, fixture_mode_env: &str) -> String {
     let name = "fixture-resolver.cmd";
     let path = extension.join(name);
@@ -1038,7 +1038,7 @@ mod tests {
         let outside = tempfile::NamedTempFile::new().unwrap();
         symlink(outside.path(), extension.path().join("resolve")).unwrap();
         let config = ExternalCheckDetailResolverConfig {
-            schema: homeboy::extension::EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA.into(),
+            schema: homeboy_extension_contract::external_check_detail_resolver::EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA.into(),
             provider: "fixture".into(),
             command: vec!["resolve".into()],
             public_env: vec![],

@@ -126,7 +126,7 @@ mod tests {
     struct StoreManifestProvider;
 
     fn project_manifest(
-        manifest: &homeboy_core::extension::ExtensionManifest,
+        manifest: &homeboy_extension_contract::ExtensionManifest,
     ) -> AuditExtensionManifest {
         AuditExtensionManifest {
             id: manifest.id.clone(),
@@ -140,7 +140,7 @@ mod tests {
 
     impl AuditExtensionManifestProvider for StoreManifestProvider {
         fn load_all(&self) -> Vec<AuditExtensionManifest> {
-            homeboy_core::extension::load_all_extensions()
+            homeboy_core::extension_store::load_all_extensions()
                 .unwrap_or_default()
                 .iter()
                 .map(project_manifest)
@@ -148,7 +148,7 @@ mod tests {
         }
 
         fn load(&self, id: &str) -> Option<AuditExtensionManifest> {
-            homeboy_core::extension::load_extension(id)
+            homeboy_core::extension_store::load_extension(id)
                 .ok()
                 .map(|m| project_manifest(&m))
         }
@@ -243,7 +243,7 @@ mod tests {
         // no-op provider is used and no saved manifest is ever seen.
         register_store_manifest_provider();
         homeboy_core::test_support::with_isolated_home(|home| {
-            let mut manifest: homeboy_core::extension::ExtensionManifest =
+            let mut manifest: homeboy_extension_contract::ExtensionManifest =
                 serde_json::from_value(serde_json::json!({
                     "name": "Fixture",
                     "version": "0.0.0",
@@ -255,7 +255,8 @@ mod tests {
                 }))
                 .expect("manifest");
             manifest.id = "fixture".to_string();
-            homeboy_core::extension::save_manifest(&manifest).expect("save fixture extension");
+            homeboy_core::extension_store::save_manifest(&manifest)
+                .expect("save fixture extension");
 
             let config = audit_config_for(
                 "component-without-extension",

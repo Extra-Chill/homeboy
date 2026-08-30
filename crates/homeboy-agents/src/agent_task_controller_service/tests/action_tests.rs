@@ -197,8 +197,8 @@ fn retry_action_queues_durable_retry_and_records_parent_lineage() {
             .and_then(Value::as_str)
             .expect("retry run id returned")
             .to_string();
-        let retry_record =
-            crate::agent_task_lifecycle::status(&retry_run_id).expect("retry record exists");
+        let retry_record = crate::agent_task_lifecycle::reconcile_status(&retry_run_id)
+            .expect("retry record exists");
         assert_eq!(retry_record.metadata["retry_of"], json!("retry-source-run"));
 
         let loaded = controller::load_controller("loop-service-retry").expect("controller");

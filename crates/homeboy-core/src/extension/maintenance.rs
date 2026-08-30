@@ -1,12 +1,12 @@
 use homeboy_core::error::{Error, Result};
 use std::collections::HashMap;
 
-use super::exec_context;
 use super::lifecycle::{update, update_linked_group};
-use super::update_output::{
+use homeboy_core::extension_store::{available_extension_ids, load_extension};
+use homeboy_extension_contract::exec_context;
+use homeboy_extension_contract::update_output::{
     SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry, UpdateSkippedEntry,
 };
-use homeboy_core::extension_store::{available_extension_ids, load_extension};
 
 /// Update all installed extensions through the same path used by single-extension updates.
 pub fn update_all(force: bool) -> UpdateAllResult {
@@ -36,7 +36,8 @@ pub fn update_all(force: bool) -> UpdateAllResult {
             }
         }
     }
-    let mut grouped_results: HashMap<String, Result<super::UpdateResult>> = HashMap::new();
+    let mut grouped_results: HashMap<String, Result<super::lifecycle::UpdateResult>> =
+        HashMap::new();
 
     for id in &extension_ids {
         let old_version = load_extension(id).ok().map(|m| m.version.clone());
@@ -110,8 +111,8 @@ fn linked_group_result(
     id: &str,
     force: bool,
     groups: &HashMap<String, Vec<String>>,
-    results: &mut HashMap<String, Result<super::UpdateResult>>,
-) -> Option<Result<super::UpdateResult>> {
+    results: &mut HashMap<String, Result<super::lifecycle::UpdateResult>>,
+) -> Option<Result<super::lifecycle::UpdateResult>> {
     let path = homeboy_core::paths::extension(id).ok()?;
     let source = std::fs::canonicalize(path).ok()?;
     let root = homeboy_core::git::get_git_root(&source.to_string_lossy()).ok()?;

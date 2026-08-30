@@ -21,14 +21,15 @@ use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
-use homeboy::extension::{
-    list_summaries_with, load_all_extensions, CliConfig,
-    ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
-};
+use homeboy::extension::{list_summaries_with, ExtensionSummary};
 use homeboy_agents::agent_task_service::cook_continue_command;
 use homeboy_core::extension_readiness::ExtensionReadinessMode;
 #[cfg(test)]
 use homeboy_core::extension_readiness::READY_CHECK_SKIPPED_REASON;
+use homeboy_core::extension_store::load_all_extensions;
+use homeboy_extension_contract::{
+    CliConfig, ExtensionCapability, ExtensionManifest as InstalledExtensionManifest,
+};
 use homeboy_upgrade::upgrade;
 
 /// A typed command package installed by a product composition root.
@@ -1299,7 +1300,9 @@ impl CliRuntime {
                     resource_admission_evidence:
                         crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable,
                     resource_policy: None,
-                    lab_readiness: lab_readiness.as_ref().map(resource_policy::lab_readiness_snapshot),
+                    lab_readiness: lab_readiness
+                        .as_ref()
+                        .map(|readiness| parsed_lab_readiness_snapshot(&cli, readiness)),
                     selected_runner_id: selected_runner_id.clone(),
                     generic_route: generic_route_policy_snapshot(&cli, selected_runner_id.clone()),
                     deferred_pressure_refusal: false,
@@ -1867,15 +1870,18 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(args.run_id.clone()),
             crate::commands::agent_task::AgentTaskCommand::Resume(args)
-                if args.bridge
-                    && crate::agents::agent_tasks::service::terminal_transport_recovery_required(
-                        &args.run_id,
-                    ) =>
+                if crate::agents::agent_tasks::service::terminal_transport_recovery_required(
+                    &args.run_id,
+                ) =>
             {
                 None
             }
-            crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(args.run_id.clone()),
-            crate::commands::agent_task::AgentTaskCommand::Accept(args) => Some(args.run_id.clone()),
+            crate::commands::agent_task::AgentTaskCommand::Resume(args) => {
+                Some(args.run_id.clone())
+            }
+            crate::commands::agent_task::AgentTaskCommand::Accept(args) => {
+                Some(args.run_id.clone())
+            }
             // Promotion mutates the durable source run (checkpointing apply and
             // final reports) and must therefore execute under the controller
             // runtime that admitted that run. Without this branch a promoted
@@ -1883,15 +1889,24 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
             // and any live stderr progress would be stranded behind a later
             // routing boundary.
             crate::commands::agent_task::AgentTaskCommand::Promote(args) => {
-                crate::agents::agent_tasks::lifecycle::status(&args.source)
-                    .ok()
-                    .map(|record| record.run_id)
+                let record = crate::agents::agent_tasks::lifecycle::status(&args.source).ok();
+                if let Some(record) = record.as_ref() {
+                    // Repair immutable evidence before handing mutation back to
+                    // the historical controller that admitted this run.
+                    crate::agents::agent_tasks::service::recover_missing_promotion_aggregate(
+                        &record.run_id,
+                    )?;
+                }
+                record.map(|record| record.run_id)
             }
             crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
                 if matches!(cli.placement, crate::cli_surface::Placement::Local) {
                     return Ok(None);
                 }
-                return delegate_cook_continue_to_pinned_runtime(&args.cook_or_attempt_id, normalized_args);
+                return delegate_cook_continue_to_pinned_runtime(
+                    &args.cook_or_attempt_id,
+                    normalized_args,
+                );
             }
             _ => None,
         },
@@ -2014,7 +2029,7 @@ fn current_runtime_owns_terminal_cook_continuation(run_id: &str) -> homeboy::cor
     let Some(recipe) = crate::agents::agent_tasks::service::load_recipe_for_attempt(run_id)? else {
         return Ok(false);
     };
-    let record = crate::agents::agent_tasks::service::persisted_status(run_id)?;
+    let record = crate::agents::agent_tasks::lifecycle::status(run_id)?;
     if !matches!(
         record.state,
         crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded
@@ -2713,6 +2728,7 @@ fn resolve_composed_capability_preflight(
             available_runner_ids: context.runner_selection.available_runner_ids.clone(),
             reasons: context.runner_selection.readiness_reasons.clone(),
             remediation_commands: context.runner_selection.remediation_commands.clone(),
+            repair_admitted_runner_ids: Vec::new(),
         })
         .or_else(|| {
             (options.placement != crate::cli_surface::Placement::Local)
@@ -2960,7 +2976,7 @@ fn preflight_hot_command_with_input(
                         resource_policy: Some(resource_policy_context),
                         lab_readiness: lab_readiness
                             .as_ref()
-                            .map(resource_policy::lab_readiness_snapshot),
+                            .map(|readiness| parsed_lab_readiness_snapshot(cli, readiness)),
                         selected_runner_id: selected_runner_id.clone(),
                         generic_route: generic_route_policy_snapshot(
                             cli,
@@ -3024,6 +3040,21 @@ fn preflight_hot_command_with_input(
     None
 }
 
+fn parsed_lab_readiness_snapshot(
+    cli: &Cli,
+    readiness: &crate::runner::runners::LabRunnerReadiness,
+) -> crate::core::parsed_command_preflight::LabReadinessSnapshot {
+    let mut snapshot = resource_policy::lab_readiness_snapshot(readiness);
+    if let (Some(runner_id), Commands::Extension(args)) = (&cli.runner, &cli.command) {
+        if args.is_readiness_repair_command()
+            && crate::runner::runners::runner_readiness_repair_admitted(runner_id).unwrap_or(false)
+        {
+            snapshot.repair_admitted_runner_ids.push(runner_id.clone());
+        }
+    }
+    snapshot
+}
+
 #[cfg(test)]
 pub(crate) fn placement_directive(
     cli: &Cli,
@@ -3046,6 +3077,7 @@ pub(crate) fn placement_directive(
                     available_runner_ids: vec![runner_id.to_string()],
                     reasons: Vec::new(),
                     remediation_commands: Vec::new(),
+                    repair_admitted_runner_ids: Vec::new(),
                 }
             }),
             selected_runner_id: selected_runner_id.map(str::to_string),
@@ -3129,9 +3161,7 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.args,
     );
     if args.should_use_self_check_dispatch(&passthrough_args)
-        && source
-            .component
-            .has_script(homeboy_core::extension::ExtensionCapability::Test)
+        && source.component.has_script(ExtensionCapability::Test)
     {
         return Ok(());
     }
@@ -3140,12 +3170,12 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         &args.comp,
         &args.setting_args,
         &args.extension_override,
-        Some(homeboy_core::extension::ExtensionCapability::Test),
+        Some(ExtensionCapability::Test),
     )
 	.and_then(|context| {
 		homeboy::core::extension_execution::resolve_execution_context(
 			&context.component,
-			homeboy_core::extension::ExtensionCapability::Test,
+            ExtensionCapability::Test,
 		)
 		.map(|_| ())
 	})

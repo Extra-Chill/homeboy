@@ -57,13 +57,9 @@ pub struct AgentTaskDiscoveryReport {
     pub filter: &'static str,
     /// Whether this surface reconciled while reading.
     ///
-    /// Discovery is a pure read over the durable records — always `false`.
-    /// `agent_task_lifecycle::status()` is by contrast a reconciling read that
-    /// *writes*, so it and this list can legitimately report different states
-    /// for the same run at the same instant, and calling that one changes what
-    /// this one returns next. Emitting the flag lets a consumer tell which kind
-    /// of answer it is holding rather than inferring it from the command name
-    /// (#W3-15).
+    /// Discovery and status are pure reads over durable records, so this is
+    /// always `false`. Explicit reconciliation reports its mutation separately
+    /// instead of changing a read as a side effect (#W3-15).
     pub reconciled: bool,
     pub count: usize,
     /// Total matching runs before any `--limit` cap was applied. Equals `count`

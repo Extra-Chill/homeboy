@@ -329,14 +329,15 @@ fn full_review_excludes_unrelated_worktree_cleanup_inventory() {
         );
         assert_eq!(
             review_value["cleanup_evidence"][0]["command"],
-            format!("homeboy agent-task status {run_id} --full")
+            format!("homeboy agent-task status {run_id}")
         );
         assert_eq!(
             review_value["cleanup_evidence"][0]["export_command"],
-            format!("homeboy agent-task status {run_id} --full --output <path>")
+            format!("homeboy agent-task status {run_id} --output <path>")
         );
         assert!(!review_value.to_string().contains("unrelated-worktree-58"));
-        let persisted = agent_task_lifecycle::status(run_id).expect("cleanup evidence persists");
+        let persisted =
+            agent_task_lifecycle::reconcile_status(run_id).expect("cleanup evidence persists");
         assert_eq!(
             persisted.metadata["automatic_artifact_retention"]["worktrees"]
                 .as_array()
@@ -529,30 +530,24 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             "{all_evidence_value:#}"
         );
 
-        let (bridge_value, _) = status(StatusArgs {
+        let (canonical_value, _) = status(StatusArgs {
             run_id: cook_id.to_string(),
-            bridge: true,
-            since_cursor: Some("0".to_string()),
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
-        .expect("Cook bridge status selects the candidate");
-        assert_eq!(bridge_value["schema"], "homeboy/agent-task-run-status/v3");
-        assert_eq!(bridge_value["control_plane_run"]["run"], candidate_run_id);
-        assert_eq!(
-            bridge_value["candidate_selection"]["run_id"],
-            candidate_run_id
-        );
+        .expect("Cook status selects the candidate");
+        assert_eq!(canonical_value["run"], candidate_run_id);
 
         let (attempt_status, _) = status(StatusArgs {
             run_id: retry_run_id.to_string(),
+            exact: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
         })
         .expect("exact attempt remains directly addressable");
-        assert_eq!(attempt_status["run_id"], retry_run_id);
+        assert_eq!(attempt_status["run"], retry_run_id);
     });
 }
 
@@ -802,6 +797,26 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         homeboy::core::defaults::save_config(&config).expect("save worktree provider config");
         std::fs::write(source.join("pre-existing-candidate.txt"), "preserve me\n")
             .expect("write pre-existing candidate");
+        std::fs::write(target.join("candidate-commit.txt"), "existing candidate\n")
+            .expect("write candidate commit");
+        let status = Command::new("git")
+            .args(["add", "candidate-commit.txt"])
+            .current_dir(&target)
+            .status()
+            .expect("stage candidate commit");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "commit",
+                "-m",
+                "fix: preserve existing candidate title",
+                "-m",
+                "commit body must not become the pull request title",
+            ])
+            .current_dir(&target)
+            .status()
+            .expect("commit existing candidate");
+        assert!(status.success());
         let expected_patch = temp.path().join("expected.patch");
         let promotion_request = temp.path().join("promotion-request.json");
         std::fs::write(
@@ -928,6 +943,12 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         assert!(prepared.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["status"], "green_no_finalize");
+        let recipe = homeboy::agents::agent_task_service::load_recipe("cook-committed-work")
+            .expect("load persisted Cook recipe");
+        assert_eq!(
+            recipe.finalization["title"],
+            "fix: preserve existing candidate title"
+        );
         assert_eq!(
             value["attempts"][0]["feedback"]["status"],
             "green_completed"

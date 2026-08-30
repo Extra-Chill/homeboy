@@ -5,14 +5,14 @@
 //! envelope and builder functions that assemble results into command-ready output.
 
 use crate::extension::test::TestCounts;
-use crate::extension::{
-    phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
-    PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
-};
 use homeboy_core::ci_profile::CiContext;
 #[cfg(test)]
 use homeboy_core::finding::HomeboyFinding;
 pub use homeboy_extension_contract::test_results::TestCommandOutput;
+use homeboy_extension_contract::{
+    phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
+    PhaseFailureCategory, PhaseReport, PhaseStatus, VerificationPhase,
+};
 
 use super::run::{test_timeout, TestRunWorkflowResult};
 use super::workflow::{AutoFixDriftWorkflowResult, DriftWorkflowResult};
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn serializes_extension_phase_timings_as_opaque_metadata() {
         let mut result = workflow_result(None);
-        result.extension_phase_timings = vec![crate::extension::ExtensionPhaseTiming {
+        result.extension_phase_timings = vec![homeboy_audit_contract::ExtensionPhaseTiming {
             name: "opaque-provider-phase".to_string(),
             duration_ms: 4321,
             status: Some("waiting".to_string()),
