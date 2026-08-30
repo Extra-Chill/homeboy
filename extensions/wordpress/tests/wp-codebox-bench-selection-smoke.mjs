@@ -24,4 +24,25 @@ assert.deepEqual(inputs.mounts, [{
   mode: 'readonly',
 }]);
 
+const componentRoot = path.join(path.sep, 'tmp', 'markdown-database-integration');
+const componentInputs = rigWorkloadInputs(
+  path.join(componentRoot, 'tests', 'bench', 'boot-timing.php'),
+  ['boot-timing'],
+  'markdown-database-integration',
+  componentRoot,
+);
+
+assert.deepEqual(componentInputs.workloads, [{
+  id: 'boot-timing',
+  source: 'rig',
+  overridesDiscovered: true,
+  run: [{ type: 'php', file: 'tests/bench/boot-timing.php' }],
+}]);
+assert.deepEqual(componentInputs.mounts, [{
+  source: path.join(componentRoot, 'tests', 'bench', 'boot-timing.php'),
+  target: '/wordpress/wp-content/plugins/markdown-database-integration/tests/bench/boot-timing.php',
+  type: 'file',
+  mode: 'readonly',
+}]);
+
 console.log('wp-codebox bench selection smoke ok');
