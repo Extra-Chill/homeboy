@@ -12,7 +12,8 @@ use crate::extension::trace::generic_runner::{
 };
 use crate::extension::trace::overlay::{apply_trace_overlays, TraceOverlayRequest};
 use crate::extension::trace::probes::TraceProbeConfig;
-use crate::extension::{ExtensionCapability, ExtensionExecutionContext, RunnerOutput};
+use crate::extension::{ExtensionCapability, RunnerOutput};
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::{Component, ScopedExtensionConfig};
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_core::engine::run_dir::RunDir;
