@@ -495,7 +495,13 @@ fn run_next_skips_persisted_test_detached_recipe_and_executes_eligible_work() {
             "cook_continuation_preflight_failed"
         );
         assert_eq!(result.skipped[0].error_code, "validation.invalid_argument");
-        assert!(result.skipped[0].remediation.contains("agent-task status"));
+        assert_eq!(
+            result.skipped[0].remediation,
+            format!(
+                "inspect retained diagnostics with: homeboy agent-task diagnose {} --full",
+                options.identity.initial_run_id
+            )
+        );
     });
 }
 
