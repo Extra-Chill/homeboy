@@ -77,14 +77,14 @@ Diagnose provider and runtime readiness on a runner, and optionally repair it
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--runner` | `<RUNNER>` | _no help text_ |
-| `--backend` | `<BACKEND>` | _no help text_ |
-| `--selector` | `<PROVIDER_ID>` | _no help text_ |
-| `--path` | `<PATH>` | _no help text_ |
-| `--extension` | `<EXTENSION>` | _no help text_ |
-| `--require-tool` | `<TOOL>` | _no help text_ |
-| `--secret-env` | `<ENV>` | _no help text_ |
-| `--repair` | flag | _no help text_ |
+| `--runner` | `<RUNNER>` | Runner to diagnose and optionally repair |
+| `--backend` | `<BACKEND>` | Restrict diagnostics to this executor backend |
+| `--selector` | `<PROVIDER_ID>` | Restrict diagnostics to this backend-specific provider selector |
+| `--path` | `<PATH>` | Add this directory to the runner diagnostic path search |
+| `--extension` | `<EXTENSION>` | Require this extension to be available on the runner. Repeatable |
+| `--require-tool` | `<TOOL>` | Require this executable to be available on the runner. Repeatable |
+| `--secret-env` | `<ENV>` | Declare a secret environment variable available for readiness checks. Repeatable |
+| `--repair` | flag | Repair remediable runner readiness failures |
 
 ## `homeboy agent-task cook`
 
@@ -110,7 +110,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--prompt` | `<PROMPT>` | Inline prompt, `@<path>` to read a file, `-` to read stdin, or `@prompt:<id>` for a stored prompt |
 | `--cwd` | `<PATH>` | Existing local repo checkout or worktree path to cook in. For Cook, omitting --repo infers its configured component when the Git remote maps unambiguously to one registered component |
 | `--workspace` | `<ID_OR_PATH>` | Homeboy workspace ID or existing local workspace path to cook in. For Cook, omitting --repo infers its configured component when the workspace Git remote maps unambiguously to one registered component |
-| `--repo` | `<REPO>` | Repository or configured component slug for metadata and task grouping, e.g. sample-plugin. Cook accepts configured component aliases and normalizes them to the configured component before provisioning. It infers this from an explicit --workspace or --cwd Git checkout when its configured remote mapping is unambiguous; an explicit value must match the checkout |
+| `--repo` | `<REPO>` | Repository or configured component slug, e.g. sample-plugin. Cook accepts configured component aliases, preserves the canonical owning repository for provisioning and task grouping, and resolves the execution component separately. It infers both from an explicit --workspace or --cwd Git checkout when its configured remote mapping is unambiguous; an explicit value must match the checkout |
 | `--task-url` | `<URL>` | Issue, PR, or tracker URL the task is cooking |
 | `--backend` | `<BACKEND>` | Executor backend to request. Defaults to the configured coding backend |
 | `--selector` | `<PROVIDER_ID>` | Optional provider id when more than one provider exists for the backend |
@@ -133,9 +133,9 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--goal` | `<TEXT>` | One-line statement of what a successful cook must achieve. Recorded as framing metadata for the provider task and used for review. Without --prompt, it supplies the one provider task |
 | `--provider-evidence` | `<JSON>` | JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular-file path): `--provider-evidence '{"id":"evidence","source":"/absolute/path"}'`. Each source is limited to 64 MiB. |
 | `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into. The handle is `<repo>@<branch-slug>`, where the slug replaces every character of --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle `repo@fix-1234-x`. Existing destinations are reused. A missing destination is created after durable Cook admission through an enabled worktree provider with `commands.ensure`, or through Homeboy's built-in local provider when no configured provider declares creation capability; previewing creation additionally requires that provider's non-mutating `commands.plan` counterpart. When omitted, an explicit --cwd is the canonical destination. Otherwise, --repo plus --task-url derives an issue-owned destination through the same provider boundary. An explicit --workspace or --cwd Git checkout can infer --repo when its remote maps to exactly one configured component; an explicit --repo must match that checkout. When paired with --cwd, this must name the same existing local or active registered linked task worktree; --cwd remains the Cook workspace authority |
-| `--worktree-provider-self-repair` | `<PROVIDER_ID>` | Temporarily use the explicit clean --cwd as workspace authority while repairing the configured provider that owns this repository. The provider must declare its repository under settings.worktree_provider_self_repair; normal Cook gates, review, PR finalization, and durable provenance remain active |
-| `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
-| `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |
+| `--worktree-provider-self-repair` | `<PROVIDER_ID>` | Temporarily use the explicit clean --cwd as workspace authority while repairing the configured provider that owns this repository. The provider must declare its repository under settings.worktree_provider_self_repair; normal Cook gates, review, PR finalization, and durable provenance remain active. Deprecated shell command for the promotion apply-provider |
+| `--provider-command` | `<COMMAND>` | Exact argv element for the promotion apply-provider. Repeat once per element |
+| `--provider-argv` | `<ARG>` | Exact argv element for the promotion apply-provider. Repeat once per element; values are never shell-split |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
 | `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
 | `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
@@ -193,6 +193,7 @@ Continue a detached Cook from its durable Cook ID or provider attempt ID. The pe
 | `--rearm` | flag | Explicitly rearm one failed terminal continuation before consuming it |
 | `--artifact-id` | `<ID>` | Select the patch artifact to promote when the durable attempt produced more than one patch candidate. This resumes controller-side promotion without dispatching another provider execution |
 | `--timeout-ms` | `<MS>` | Explicitly increase the provider timeout for a new retry attempt. The override and its operator authority are retained in the Cook recipe |
+| `--review-form-timeout-ms` | `<MS>` | Explicitly increase the optional review-form deadline for a new retry attempt. Distinct from `--timeout-ms`; capped at 600000ms |
 | `--full` | flag | Include the complete Cook report rather than the compact lifecycle view |
 
 ## `homeboy agent-task loop`
@@ -224,18 +225,18 @@ Define or update a durable loop from a spec.
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<SPEC>` | yes | _no help text_ |
+| `<SPEC>` | yes | Loop specification file or inline definition |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--on` | flag | _no help text_ |
-| `--off` | flag | _no help text_ |
-| `--revolution-limit` | `<N>` | _no help text_ |
-| `--resume` | flag | _no help text_ |
-| `--dispatch-backend` | `<BACKEND>` | _no help text_ |
-| `--dispatch-selector` | `<PROVIDER_ID>` | _no help text_ |
-| `--dispatch-model` | `<MODEL>` | _no help text_ |
-| `--dispatch-provider-config` | `<JSON>` | _no help text_ |
+| `--on` | flag | Start the defined loop immediately |
+| `--off` | flag | Save the defined loop in the stopped state |
+| `--revolution-limit` | `<N>` | Maximum revolutions before the loop stops automatically |
+| `--resume` | flag | Continue an existing loop definition from its recorded state |
+| `--dispatch-backend` | `<BACKEND>` | Backend used when the loop dispatches provider work |
+| `--dispatch-selector` | `<PROVIDER_ID>` | Backend-specific provider selector used for loop dispatch |
+| `--dispatch-model` | `<MODEL>` | Model used for loop dispatch |
+| `--dispatch-provider-config` | `<JSON>` | Backend-specific JSON configuration used for loop dispatch |
 
 ## `homeboy agent-task loop status`
 
@@ -247,7 +248,7 @@ Read durable loop state: on/off, revolutions taken, and continuation policy
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<LOOP_ID>` | yes | _no help text_ |
+| `<LOOP_ID>` | yes | Durable loop ID to inspect or stop |
 
 ## `homeboy agent-task loop resume`
 
@@ -259,15 +260,15 @@ Resume a stopped or exhausted durable loop, optionally raising its revolution li
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<LOOP_ID>` | yes | _no help text_ |
+| `<LOOP_ID>` | yes | Durable loop ID to resume |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--revolution-limit` | `<N>` | _no help text_ |
-| `--dispatch-backend` | `<BACKEND>` | _no help text_ |
-| `--dispatch-selector` | `<PROVIDER_ID>` | _no help text_ |
-| `--dispatch-model` | `<MODEL>` | _no help text_ |
-| `--dispatch-provider-config` | `<JSON>` | _no help text_ |
+| `--revolution-limit` | `<N>` | New maximum revolutions before the loop stops automatically |
+| `--dispatch-backend` | `<BACKEND>` | Backend used for resumed loop dispatches |
+| `--dispatch-selector` | `<PROVIDER_ID>` | Backend-specific provider selector used for resumed loop dispatches |
+| `--dispatch-model` | `<MODEL>` | Model used for resumed loop dispatches |
+| `--dispatch-provider-config` | `<JSON>` | Backend-specific JSON configuration used for resumed loop dispatches |
 
 ## `homeboy agent-task loop stop`
 
@@ -279,7 +280,7 @@ Stop a durable loop and record the handoff
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<LOOP_ID>` | yes | _no help text_ |
+| `<LOOP_ID>` | yes | Durable loop ID to inspect or stop |
 
 ## `homeboy agent-task run-plan`
 
@@ -292,8 +293,8 @@ Run an `AgentTaskPlan` through extension-declared executor providers
 | Option | Value | Description |
 | --- | --- | --- |
 | `--plan` | `<JSON|@FILE|->` | Agent-task plan as a JSON spec: inline JSON, `@FILE` to read a file, or `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json` |
-| `--record-run-id` | `<ID>` | _no help text_ |
-| `--timeout-ms` | `<MS>` | _no help text_ |
+| `--record-run-id` | `<ID>` | Durable run ID to record for this planned lifecycle |
+| `--timeout-ms` | `<MS>` | Maximum execution time in milliseconds |
 
 ## `homeboy agent-task run`
 
@@ -309,7 +310,7 @@ Execute a previously submitted durable run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--timeout-ms` | `<MS>` | _no help text_ |
+| `--timeout-ms` | `<MS>` | Maximum execution time in milliseconds |
 
 ## `homeboy agent-task run-next`
 
@@ -334,7 +335,7 @@ Persist an agent-task plan and return a durable run id without executing it
 | Option | Value | Description |
 | --- | --- | --- |
 | `--plan` | `<JSON|@FILE|->` | Agent-task plan as a JSON spec: inline JSON, `@FILE` to read a file, or `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json` |
-| `--run-id` | `<ID>` | _no help text_ |
+| `--run-id` | `<ID>` | Optional durable run ID for the submitted plan |
 
 ## `homeboy agent-task validate-plan`
 
@@ -358,17 +359,17 @@ Read durable run status
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID whose status to inspect |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--exact` | flag | _no help text_ |
-| `--bridge` | flag | _no help text_ |
-| `--since-cursor` | `<CURSOR>` | _no help text_ |
-| `--full` | flag | _no help text_ |
+| `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
+| `--bridge` | flag | Read status through the runner bridge |
+| `--since-cursor` | `<CURSOR>` | Resume bridged status events after this cursor |
+| `--full` | flag | Return complete status details instead of the bounded summary |
 | `--bounded` | flag | Present `--full` as a bounded, outcome-first summary with drill-down refs |
 | `--strict-subject-exit` | flag | Exit nonzero when the inspected Cook needs follow-up action |
-| `--no-runner-probe` | flag | _no help text_ |
+| `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 | `--watch` | flag | Follow this durable status until it reaches a terminal state or the timeout expires |
 | `--interval` | `<DURATION>` | Delay between status reads while following. Accepts ms, s, m, h, or d |
 | `--timeout` | `<DURATION>` | Total time to follow before returning the latest partial status. Accepts ms, s, m, h, or d |
@@ -405,15 +406,15 @@ Discovery returns a finite agent-facing page by default; use `--limit` for a dif
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--limit` | `<N>` | _no help text_ |
+| `--limit` | `<N>` | Maximum matching durable runs to return |
 | `--cursor` | `<N>` | Continue at this zero-based offset. Reuse every filter from the prior page |
-| `--repo` | `<REPO>` | _no help text_ |
-| `--worktree` | `<WORKTREE>` | _no help text_ |
-| `--task-url` | `<TASK_URL>` | _no help text_ |
+| `--repo` | `<REPO>` | Restrict results to this repository identity |
+| `--worktree` | `<WORKTREE>` | Restrict results to this workspace handle or path |
+| `--task-url` | `<TASK_URL>` | Restrict results to this task URL |
 | `--submitted-after` | `<RFC3339>` | RFC3339 submission timestamp; excludes older records |
-| `--state` | `<STATE>` | _no help text_ Values: `queued`, `running`, `succeeded`, `failed`, `cancelled`. |
+| `--state` | `<STATE>` | Restrict results to this durable lifecycle state Values: `queued`, `running`, `succeeded`, `failed`, `cancelled`. |
 | `--run-placement` | `<RUN_PLACEMENT>` | Filter by recorded execution placement, not the global routing policy Values: `local`, `remote`, `runner`. |
-| `--parent-id` | `<PARENT_ID>` | _no help text_ |
+| `--parent-id` | `<PARENT_ID>` | Restrict results to records owned by this parent run or group |
 | `--full` | flag | Return every matching record. This is intentionally explicit because discovery defaults to a finite agent-facing page |
 | `--latest` | flag | Return only the newest record matching the supplied list filters |
 
@@ -432,9 +433,9 @@ List queued and running durable runs, newest first.
 | `--limit` | `<N>` | Cap active discovery to a positive page size. Cannot be combined with `--full` or fleet-wide `--reconcile` |
 | `--cursor` | `<N>` | Continue at this zero-based offset from the prior active page. Cannot be combined with `--full` or fleet-wide `--reconcile` |
 | `--full` | flag | Return every matching record. This is intentionally explicit because discovery defaults to a finite agent-facing page and cannot scope fleet-wide `--reconcile` |
-| `--reconcile` | flag | _no help text_ |
-| `--dry-run` | flag | _no help text_ |
-| `--apply` | flag | _no help text_ |
+| `--reconcile` | flag | Preview reconciliation for every active record in the selected scope |
+| `--dry-run` | flag | Explicitly retain preview-only reconciliation mode |
+| `--apply` | flag | Apply reconciliation to every selected active record |
 
 ## `homeboy agent-task reconcile`
 
@@ -446,7 +447,7 @@ Reconcile one durable agent-task run or explicit Cook group. This is a preview b
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run ID or Cook group ID to reconcile |
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -463,7 +464,7 @@ Reconcile stored durable run records against authoritative provider state
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--dry-run` | flag | _no help text_ |
+| `--dry-run` | flag | Preview record reconciliation without persisting changes |
 
 ## `homeboy agent-task latest`
 
@@ -475,7 +476,7 @@ Show the latest durable run
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--limit` | `<N>` | _no help text_ |
+| `--limit` | `<N>` | Number of newest durable runs to inspect before selecting the latest |
 
 ## `homeboy agent-task logs`
 
@@ -489,7 +490,7 @@ Read the canonical durable event stream for a run.
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID whose logs to retrieve |
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -505,14 +506,14 @@ List artifacts and evidence refs recorded for a completed run
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID to inspect |
 
 | Option | Value | Description |
 | --- | --- | --- |
 | `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | _no help text_ |
-| `--since-cursor` | `<CURSOR>` | _no help text_ |
-| `--full` | flag | _no help text_ |
+| `--bridge` | flag | Read through the runner bridge instead of controller-only state |
+| `--since-cursor` | `<CURSOR>` | Resume bridged events after this cursor |
+| `--full` | flag | Return complete lifecycle details instead of the bounded summary |
 | `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 
 ## `homeboy agent-task retained-artifacts`
@@ -538,7 +539,7 @@ Resolve the retained workspace and print bounded, run-ID-only attach guidance
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Terminal Lab Cook run ID whose retained workspace is discovered |
 
 ## `homeboy agent-task retained-artifacts attach`
 
@@ -550,7 +551,7 @@ Attach one repository-relative file or directory from the retained workspace
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Terminal Lab Cook run ID that owns the retained workspace |
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -569,13 +570,13 @@ Narrow the result with `--task` or `--kind`; `--full` returns the unprojected ev
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID whose evidence to retrieve |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--kind` | `<KIND>` | _no help text_ |
-| `--task` | `<TASK_ID>` | _no help text_ |
-| `--failure-only` | flag | _no help text_ |
+| `--kind` | `<KIND>` | Restrict results to this evidence kind |
+| `--task` | `<TASK_ID>` | Restrict results to this task ID |
+| `--failure-only` | flag | Return only evidence associated with failures |
 | `--full` | flag | Return every matching evidence record rather than the bounded preview |
 
 ## `homeboy agent-task diagnose`
@@ -590,7 +591,7 @@ Next actions are derived from the failure classification, not from prose.
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID to diagnose |
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -637,11 +638,11 @@ Persists the inspection as `provider-boundary-replay` evidence. Use `--task <tas
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run whose provider boundary to replay |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--task` | `<TASK_ID>` | _no help text_ |
+| `--task` | `<TASK_ID>` | Restrict the replay to this task ID |
 
 ## `homeboy agent-task cancel`
 
@@ -653,11 +654,11 @@ Mark a queued or stale-running durable run as cancelled
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID to cancel |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--reason` | `<TEXT>` | _no help text_ |
+| `--reason` | `<TEXT>` | Optional explanation recorded with the cancellation |
 
 ## `homeboy agent-task quarantine`
 
@@ -673,7 +674,7 @@ Exclude one exact queued record while preserving its lifecycle and evidence
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--reason` | `<TEXT>` | _no help text_ |
+| `--reason` | `<TEXT>` | Explanation recorded with the quarantine action |
 
 ## `homeboy agent-task rearm`
 
@@ -697,14 +698,14 @@ Resume a queued or stale-running durable run
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID to inspect |
 
 | Option | Value | Description |
 | --- | --- | --- |
 | `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | _no help text_ |
-| `--since-cursor` | `<CURSOR>` | _no help text_ |
-| `--full` | flag | _no help text_ |
+| `--bridge` | flag | Read through the runner bridge instead of controller-only state |
+| `--since-cursor` | `<CURSOR>` | Resume bridged events after this cursor |
+| `--full` | flag | Return complete lifecycle details instead of the bounded summary |
 | `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
 
 ## `homeboy agent-task retry`
@@ -717,12 +718,12 @@ Submit a fresh durable run from an existing run's plan
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID to retry |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--new-run-id` | `<ID>` | _no help text_ |
-| `--run` | flag | _no help text_ |
+| `--new-run-id` | `<ID>` | Durable ID to assign to the new retry run |
+| `--run` | flag | Execute the retry immediately after creating it |
 | `--force` | flag | Permit a new retry after every prior retry in this lineage is terminal |
 
 ## `homeboy agent-task fanout`
@@ -754,27 +755,29 @@ homeboy agent-task fanout cook-batch [OPTIONS] <ISSUE_URL>...
 
 Cook a wave of independent tasks, one child cook per issue.
 
+TWO-PHASE MODEL: this command plans first and executes only when told to. Without `--run-plan` it resolves the batch — issues, repository, default branch, gates, backend — and creates or reuses every child worktree, but it does NOT dispatch any cook; run the returned `fanout run-plan` command (or pass `--run-plan`) to execute the wave. `--preview` (historical spelling `--dry-run`) is the fully static form: it validates the same plan without touching repositories, providers, worktrees, or files, mirroring `agent-task cook --preview`.
+
 Every child requires a deterministic gate from shared --verify/ --private-verify inputs or --verification-profiles. A child that cannot verify its work cannot promote it (#9838).
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<ISSUE_URL>...` | yes | _no help text_ |
+| `<ISSUE_URL>...` | yes | GitHub issue URL cooked by one child of the wave. Repeat for multiple issues; every URL must be unique and resolve through the tracker |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--repo` | `<REPO_SLUG_OR_PRIMARY_PATH>` | Registered repository slug or exact registered primary checkout path |
+| `--repo` | `<REPO_SLUG_OR_PRIMARY_PATH>` | Registered repository/component slug or exact registered primary checkout path |
 | `--from` | `<REF>` | Source ref used to create every child worktree. When omitted, this is inferred from the repository default branch. An explicit value wins and must resolve to the same commit as --base |
 | `--base` | `<BRANCH>` | Pull-request base branch. When omitted, Homeboy resolves the registered repository's remote default branch before any worktree mutation |
-| `--branch-prefix` | `<PREFIX>` | _no help text_ |
-| `--fanout-id` | `<ID>` | _no help text_ |
+| `--branch-prefix` | `<PREFIX>` | Prefix for generated child branches. Each child branch is `<PREFIX>/issue-<number>-<repo-slug>` (default `fix`, yielding `fix/issue-12-owner-repo`) |
+| `--fanout-id` | `<ID>` | Explicit identity for this batch plan and its durable records. Defaults to a content-derived `cook-batch-...` id from the resolved children; supply your own to keep a stable identity across replans |
 | `--worktree` | `<ISSUE_URL=HANDLE>` | Bind one issue URL to an existing provider-managed worktree handle. Repeat as `--worktree ISSUE_URL=HANDLE`. Every supplied issue must have exactly one binding; Homeboy validates and adopts the exact destination instead of requesting provider creation |
-| `--prompt-template` | `<TEXT>` | _no help text_ |
-| `--backend` | `<BACKEND>` | _no help text_ |
-| `--selector` | `<PROVIDER_ID>` | _no help text_ |
-| `--model` | `<MODEL>` | _no help text_ |
-| `--provider-profile` | `<PROFILE>` | _no help text_ |
-| `--secret-env` | `<ENV>` | _no help text_ |
-| `--provider-config` | `<JSON>` | _no help text_ |
+| `--prompt-template` | `<TEXT>` | Prompt template rendered for every child cook. `{issue_url}`, `{issue_ref}`, `{repo}`, `{branch}`, and `{worktree}` are substituted. Omit for the default fix-the-issue prompt |
+| `--backend` | `<BACKEND>` | Executor backend serving every child cook. Omit to use the configured `agent_task.default_backend`; the resolved backend is validated up front and pinned identically for all children |
+| `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
+| `--model` | `<MODEL>` | Model name forwarded to the selected provider for every child cook |
+| `--provider-profile` | `<PROFILE>` | Named provider profile declared by an installed provider's CLI, supplying default backend/selector/model/provider-config values for every child. Explicit flags win over the profile |
+| `--secret-env` | `<ENV>` | Name of an environment variable that holds a provider credential for this batch. Repeatable. Values are resolved by the provider at execution, never read or recorded here |
+| `--provider-config` | `<JSON>` | Provider-specific configuration forwarded to every child's provider invocation, as inline JSON, `@FILE`, or `-` for stdin |
 | `--provider-evidence` | `<JSON>` | JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular-file path): `--provider-evidence '{"id":"evidence","source":"/absolute/path"}'`. Each source is limited to 64 MiB. |
 | `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. When omitted, each child derives its disclosure from its effective provider and model selection |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
@@ -800,28 +803,64 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 | `--gate-shared-cargo-target` | flag | Override the component's declared shared Cargo target policy for deterministic gates. Omit to inherit the repository component policy |
 | `--no-gate-shared-cargo-target` | flag | Explicitly keep deterministic gate Cargo output local to its workspace |
-| `--verification-profiles` | `<JSON>` | JSON verification profile declaration, inline or @file.json. Profiles append to or replace shared --verify/--private-verify gates per issue |
+| `--verification-profiles` | `<JSON>` | JSON verification profile declaration, inline or @file.json. Profiles contain visible `verify` and/or `private_verify` command arrays. `mode` is `append` (the default, combining profile and shared gates) or `replace` (discarding shared gates for that child). Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector. Complete example: {"profiles":{"rust":{"verify":["cargo test"],"private_verify":["./private-check"],"mode":"append"},"node":{"verify":["npm test"],"mode":"replace"}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"rust"},{"selector":"owner/repo#124","profile":"node"}]} |
 | `--max-concurrency` | `<N>` | Maximum number of child cooks to run at once |
 | `--max-duration` | `<SECONDS>` | Wall-clock budget, in seconds, for the whole batch — every child, every attempt, and every gate |
-| `--dry-run` | flag | _no help text_ |
-| `--dry-run-planner-timeout-seconds` | `<SECONDS>` | Maximum wall-clock budget for each bounded static dry-run planning phase |
-| `--run-plan` | flag | _no help text_ |
+| `--preview` | flag | Resolve and validate the batch without side effects: no repository hydration, provider dispatch, worktree creation, or file reads. Prints the static plan, worktree projection, preflight, and a replayable command — the batch-wide counterpart of `agent-task cook --preview`. `--dry-run` is accepted as the historical spelling of this flag |
+| `--dry-run-planner-timeout-seconds` | `<SECONDS>` | Maximum wall-clock budget for each bounded static --preview planning phase (default 10 seconds per phase) |
+| `--run-plan` | flag | Execute the planned wave in this invocation. After admission and worktree preflight, every child cook runs through the cook-loop service and successful children open or update their own pull requests. Without this flag the command only plans the batch and creates or reuses the child worktrees — see the two-phase model above |
 
 ## `homeboy agent-task fanout plan`
 
 ```sh
-homeboy agent-task fanout plan [OPTIONS]
+homeboy agent-task fanout plan [OPTIONS] [ISSUE_URL]...
 ```
 
-Normalize and inspect a batch-cook plan without submitting or running it
+Normalize and inspect a batch-cook plan without submitting or running it.
+
+Reads an existing persisted plan with `--input <SPEC>`, or plans statically from `--repo <REPO_SLUG>` plus one or more issue URLs — the same input `fanout cook-batch` accepts, without any side effects.
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `[ISSUE_URL]...` | no | GitHub issue URL to plan one child cook for. Repeat for a wave. Every child still requires a deterministic gate: pass shared --verify / --private-verify inputs or --verification-profiles, exactly as `fanout cook-batch --preview` requires |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--input` | `<SPEC>` | _no help text_ |
-| `--fanout-id` | `<ID>` | _no help text_ |
-| `--backend` | `<BACKEND>` | _no help text_ |
-| `--selector` | `<PROVIDER_ID>` | _no help text_ |
-| `--model` | `<MODEL>` | _no help text_ |
+| `--input` | `<SPEC>` | Existing batch-cook fanout plan to normalize and inspect: inline JSON, `@FILE`, `-` for stdin, or the `@<path>` controller-owned private plan artifact. Omit this and pass `--repo` plus issue URLs to plan statically instead |
+| `--fanout-id` | `<ID>` | Explicit identity for the planned batch. Only used with the `--repo` issue-planning input; a loaded plan keeps its own identity |
+| `--backend` | `<BACKEND>` | Executor backend serving every planned child cook. Omit to use the configured `agent_task.default_backend` |
+| `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
+| `--model` | `<MODEL>` | Model name forwarded to the selected provider for every planned child |
+| `--repo` | `<REPO_SLUG_OR_PRIMARY_PATH>` | Registered repository slug or exact registered primary checkout path to plan children for. Required with (and only with) issue URLs |
+| `--from` | `<REF>` | Source ref the planned child worktrees would be created from. When omitted, this is inferred from the repository default branch |
+| `--base` | `<BRANCH>` | Pull-request base branch for the planned children. When omitted, Homeboy resolves the registered repository's remote default branch |
+| `--branch-prefix` | `<PREFIX>` | Prefix for generated child branches (default `fix`) |
+| `--prompt-template` | `<TEXT>` | Prompt template rendered for every planned child cook. `{issue_url}`, `{issue_ref}`, `{repo}`, `{branch}`, and `{worktree}` are substituted |
+| `--verification-profiles` | `<JSON>` | JSON verification profile declaration, inline or @file.json. Profiles append to or replace shared --verify/--private-verify gates per issue |
+| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
+| `--verify-file` | `<PATH>` | Read one public verification shell program from a file. Prefer this for loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the exact file bytes before submission. Relative paths use the controller's invocation directory. Example: `--verify-file quality-gate.sh` containing `for file in src/*.rs; do cargo fmt --check -- "$file"; done` |
+| `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
+| `--private-verify-file` | `<PATH>` | Read one private verification shell program from a file. The controller snapshots its bytes before submission; durable provenance records its digest and redaction policy, not its file path. Relative paths use the controller's invocation directory |
+| `--gate-input-source` | `<JSON>` | Durable source metadata emitted by Homeboy-generated promotion commands. This preserves the immutable provenance of a previously snapshotted gate; private entries retain no source path |
+| `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
+| `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
+| `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
+| `--gate-heartbeat-interval-seconds` | `<SECONDS>` | How often, in seconds, to emit a heartbeat while a gate runs so long gates are not mistaken for a stalled cook (default 5) |
+| `--gate-no-progress-timeout-seconds` | `<SECONDS>` | Maximum time, in seconds, a gate may run without a structured `HOMEBOY_PROGRESS` marker (default 300 = 5 min) |
+| `--rerun-completed-gates` | flag | Re-run gates that already recorded a passing result on a previous attempt instead of reusing the recorded pass. Off by default |
+| `--accept-inherited-failures` | flag | Finalize only when an inherited required-gate failure was reproduced on the immutable baseline. The gate remains reported as baseline-red |
+| `--gate-environment-mode` | `<MODE>` | Environment for gate commands: `inherit` (default) extends the current environment; `replace` starts from an empty environment plus `--gate-env` Values: `inherit`, `replace`. |
+| `--gate-env` | `<NAME=VALUE>` | Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable |
+| `--gate-env-from` | `<NAME=SOURCE[/PATH]>` | Preserve a required toolchain setting from the host as `NAME=SOURCE` or `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence |
+| `--gate-toolchain` | `<COMMAND>` | Required executable to initialize before provider execution. Its probe is `COMMAND --version` in the final isolated gate environment. Repeatable |
+| `--gate-toolchain-spec` | `<JSON>` | Exact toolchain probe contract as JSON. Use when a probe needs arguments other than the `--version` default retained by `--gate-toolchain` |
+| `--gate-package-artifact` | `<JSON>` | Caller-declared package resource readiness as a JSON object. The object defines its environment mapping, required paths or digests, and opaque remediation metadata. Repeat for multiple resources |
+| `--gate-extension-input` | `<JSON>` | Explicit extension input as a JSON object with `id` and absolute `source`. Only selected inputs are copied into isolated HOME |
+| `--isolate-gate-home` | `<ISOLATE_GATE_HOME>` | Run gates with an isolated `$HOME` so gate side effects do not touch the operator's home directory (default true) Values: `true`, `false`. |
+| `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
+| `--gate-shared-cargo-target` | flag | Override the component's declared shared Cargo target policy for deterministic gates. Omit to inherit the repository component policy |
+| `--no-gate-shared-cargo-target` | flag | Explicitly keep deterministic gate Cargo output local to its workspace |
+| `--preview` | flag | Accepted for verb consistency with `agent-task cook --preview` and `fanout cook-batch --preview`: `fanout plan` is always side-effect free, so this flag changes nothing. `--dry-run` is accepted as the historical spelling |
 
 ## `homeboy agent-task fanout submit`
 
@@ -833,12 +872,12 @@ Submit a batch of independent cooks and print the exact per-cook commands for ru
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--input` | `<SPEC>` | _no help text_ |
-| `--fanout-id` | `<ID>` | _no help text_ |
-| `--backend` | `<BACKEND>` | _no help text_ |
-| `--selector` | `<PROVIDER_ID>` | _no help text_ |
-| `--model` | `<MODEL>` | _no help text_ |
-| `--run-id` | `<ID>` | _no help text_ |
+| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`); `submit-batch` and `run-plan` expect an `AgentTaskPlan` JSON spec |
+| `--fanout-id` | `<ID>` | Stable identity recorded for the submitted batch. Omit to keep the identity already carried by the plan |
+| `--backend` | `<BACKEND>` | Executor backend override applied to the loaded plan's cooks |
+| `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
+| `--model` | `<MODEL>` | Model name override forwarded to the selected provider |
+| `--run-id` | `<ID>` | Durable run ID to assign while submitting the loaded batch-cook plan |
 
 ## `homeboy agent-task fanout submit-batch`
 
@@ -852,12 +891,12 @@ Provider-neutral by design: drive execution with `agent-task run-next` or an exi
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--input` | `<SPEC>` | _no help text_ |
-| `--fanout-id` | `<ID>` | _no help text_ |
-| `--backend` | `<BACKEND>` | _no help text_ |
-| `--selector` | `<PROVIDER_ID>` | _no help text_ |
-| `--model` | `<MODEL>` | _no help text_ |
-| `--batch-id` | `<ID>` | _no help text_ |
+| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`); `submit-batch` and `run-plan` expect an `AgentTaskPlan` JSON spec |
+| `--fanout-id` | `<ID>` | Stable identity recorded for the submitted batch. Omit to keep the identity already carried by the plan |
+| `--backend` | `<BACKEND>` | Executor backend override applied to the loaded plan's cooks |
+| `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
+| `--model` | `<MODEL>` | Model name override forwarded to the selected provider |
+| `--batch-id` | `<ID>` | Durable batch ID to assign while submitting the loaded agent-task plan |
 
 ## `homeboy agent-task fanout status`
 
@@ -869,7 +908,7 @@ Read durable batch state and per-child run status
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<BATCH_ID>` | yes | _no help text_ |
+| `<BATCH_ID>` | yes | Durable fanout batch ID whose status, resume result, or artifacts to read |
 
 ## `homeboy agent-task fanout resume`
 
@@ -881,7 +920,7 @@ Resume a durable fanout batch after coordinator loss: idempotently harvest termi
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<BATCH_ID>` | yes | _no help text_ |
+| `<BATCH_ID>` | yes | Durable fanout batch ID whose status, resume result, or artifacts to read |
 
 ## `homeboy agent-task fanout artifacts`
 
@@ -893,7 +932,7 @@ List artifacts recorded by a durable batch's child runs
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<BATCH_ID>` | yes | _no help text_ |
+| `<BATCH_ID>` | yes | Durable fanout batch ID whose status, resume result, or artifacts to read |
 
 ## `homeboy agent-task fanout run-plan`
 
@@ -907,12 +946,12 @@ Successful child cooks open or update their own pull requests.
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--input` | `<SPEC>` | _no help text_ |
-| `--fanout-id` | `<ID>` | _no help text_ |
-| `--backend` | `<BACKEND>` | _no help text_ |
-| `--selector` | `<PROVIDER_ID>` | _no help text_ |
-| `--model` | `<MODEL>` | _no help text_ |
-| `--record-run-id` | `<ID>` | _no help text_ |
+| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`); `submit-batch` and `run-plan` expect an `AgentTaskPlan` JSON spec |
+| `--fanout-id` | `<ID>` | Stable identity recorded for the submitted batch. Omit to keep the identity already carried by the plan |
+| `--backend` | `<BACKEND>` | Executor backend override applied to the loaded plan's cooks |
+| `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
+| `--model` | `<MODEL>` | Model name override forwarded to the selected provider |
+| `--record-run-id` | `<ID>` | Durable run id recorded for this execution of the plan |
 | `--ai-tool` | `<TEXT>` | AI tool disclosure recorded in every child PR's assistance attribution. Overrides the persisted plan value for this execution |
 | `--max-concurrency` | `<N>` | Maximum number of child cooks to run at once. See `fanout cook-batch --max-concurrency` |
 | `--max-duration` | `<SECONDS>` | Wall-clock budget, in seconds, for the whole batch. See `fanout cook-batch --max-duration` |
@@ -927,14 +966,14 @@ Build a durable aggregate review envelope from run state, logs, artifacts, and p
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run or Cook ID to review |
 
 | Option | Value | Description |
 | --- | --- | --- |
 | `--full` | flag | Include complete lifecycle, promotion, and gate evidence. The default keeps one actionable candidate and bounded gate findings |
-| `--to-worktree` | `<HANDLE>` | _no help text_ |
-| `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
-| `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |
+| `--to-worktree` | `<HANDLE>` | Target managed worktree handle for the review candidate |
+| `--provider-command` | `<COMMAND>` | Deprecated shell command for the promotion apply provider |
+| `--provider-argv` | `<ARG>` | Exact argv element for the promotion apply provider; repeat per element |
 
 ## `homeboy agent-task promote`
 
@@ -946,17 +985,17 @@ Promote a completed generic patch artifact into a managed worktree
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<SOURCE>` | yes | _no help text_ |
+| `<SOURCE>` | yes | Durable run or Cook ID that supplies the promotion candidate |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--to-worktree` | `<HANDLE>` | _no help text_ |
+| `--to-worktree` | `<HANDLE>` | Target managed worktree handle for the promoted candidate |
 | `--base` | `<BRANCH>` | Declared base branch resolved immediately before promotion gates run |
-| `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
-| `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |
-| `--task-id` | `<TASK_ID>` | _no help text_ |
-| `--artifact-id` | `<ARTIFACT_ID>` | _no help text_ |
-| `--dry-run` | flag | _no help text_ |
+| `--provider-command` | `<COMMAND>` | Deprecated shell command for the promotion apply provider |
+| `--provider-argv` | `<ARG>` | Exact argv element for the promotion apply provider; repeat per element |
+| `--task-id` | `<TASK_ID>` | Restrict promotion to this task ID |
+| `--artifact-id` | `<ARTIFACT_ID>` | Restrict promotion to this artifact ID |
+| `--dry-run` | flag | Validate the promotion without applying it |
 | `--full` | flag | Include complete promotion and gate evidence |
 | `--gates-from-cook-recipe` | flag | Replay the exact gate policy from the source run's durable Cook recipe. Homeboy-generated review commands use this reference so private gate programs remain outside reviewer-facing command output |
 | `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
@@ -1018,13 +1057,13 @@ This is the core-owned publication boundary for external runtimes.
 | --- | --- | --- |
 | `--full` | flag | Include complete finalization and gate evidence |
 | `--recover` | `<RUN_OR_COOK_ID>` | Hydrate finalization from a durable Cook recipe or a validated manual-finalization record |
-| `--run-id` | `<ID>` | _no help text_ |
-| `--path` | `<PATH>` | _no help text_ |
-| `--base` | `<BRANCH>` | _no help text_ |
+| `--run-id` | `<ID>` | Durable run ID for a manual finalization record |
+| `--path` | `<PATH>` | Worktree path containing the manual finalization candidate |
+| `--base` | `<BRANCH>` | Base branch for the manual finalization candidate |
 | `--verified-base-sha` | `<SHA>` | Immutable base commit SHA recorded before the declared verification gates ran |
-| `--head` | `<BRANCH>` | _no help text_ |
-| `--title` | `<TEXT>` | _no help text_ |
-| `--commit-message` | `<TEXT>` | _no help text_ |
+| `--head` | `<BRANCH>` | Head branch for the manual finalization candidate |
+| `--title` | `<TEXT>` | Pull request title for the manual finalization candidate |
+| `--commit-message` | `<TEXT>` | Commit message for the manual finalization candidate |
 | `--attempt-summary` | `<TEXT>` | Attempt summary to include in the PR body |
 | `--source-ref` | `<REF>` | Source tracker/reference URL or identifier. Repeatable |
 | `--artifact-ref` | `<REF>` | Artifact/evidence URL, path, or identifier. Repeatable |
@@ -1049,18 +1088,18 @@ This is the core-owned publication boundary for external runtimes.
 | `--external-usage-source` | `<TEXT>` | Source used for external usage evidence |
 | `--external-usage-limitations` | `<TEXT>` | Limitations of the external usage evidence or manual review |
 | `--external-usage-url` | `<URL>` | Reviewer-resolvable HTTPS URL for external usage evidence |
-| `--gate-result` | `<NAME=STATUS[:DETAIL]>` | _no help text_ |
+| `--gate-result` | `<NAME=STATUS[:DETAIL]>` | Recorded result for a verification gate: `NAME=STATUS[:DETAIL]` |
 | `--verify` | `<COMMAND>` | Execute a deterministic verification command against the committed manual candidate. Repeat for multiple gates |
-| `--changed-file` | `<PATH>` | _no help text_ |
-| `--protected-branch` | `<BRANCH>` | _no help text_ |
-| `--ai-used-for` | `<TEXT>` | _no help text_ |
-| `--summary` | `<TEXT>` | _no help text_ |
-| `--what-changed` | `<TEXT>` | _no help text_ |
+| `--changed-file` | `<PATH>` | Changed file path to include in the finalization dossier |
+| `--protected-branch` | `<BRANCH>` | Branch that must not be updated by finalization; repeat for multiple branches |
+| `--ai-used-for` | `<TEXT>` | Description of how AI was used for the finalization |
+| `--summary` | `<TEXT>` | Summary of the finalization candidate |
+| `--what-changed` | `<TEXT>` | User-visible change description; repeat for multiple entries |
 | `--test-step` | `<COMMAND=>EXPECTED>` | Reviewer test step. Strict shape: COMMAND=>EXPECTED |
-| `--compatibility` | `<TEXT>` | _no help text_ |
+| `--compatibility` | `<TEXT>` | Compatibility notes for the finalization candidate |
 | `--closes` | `<ISSUE_REF>` | Closing issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL |
 | `--relates-to` | `<ISSUE_REF>` | Related issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL |
-| `--review-override` | `<TARGET=VALUE@PROVENANCE>` | _no help text_ |
+| `--review-override` | `<TARGET=VALUE@PROVENANCE>` | Explicit reviewer override in `TARGET=VALUE@PROVENANCE` form |
 | `--preflight` | flag | Validate the complete hydrated dossier and candidate without publishing |
 | `--manual-finalization` | flag | Publish corrected, independently verified work without a promotion lineage. The ID must identify a failed attempt (a Cook ID resolves to its newest attempt, which must be failed), or be unused so Homeboy can reserve a durable manual-finalization record for its intent and receipt |
 
@@ -1131,13 +1170,13 @@ Record an independent, durable acceptance verdict for a candidate
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `<RUN_ID>` | yes | _no help text_ |
+| `<RUN_ID>` | yes | Durable run ID whose candidate receives the verdict |
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--verdict` | `<VERDICT>` | _no help text_ Values: `accepted`, `rejected`. |
+| `--verdict` | `<VERDICT>` | Acceptance decision: `accepted` permits finalization; `rejected` records a failure Values: `accepted`, `rejected`. |
 | `--token` | `<TOKEN>` | Opaque credential consumed by the configured acceptance verifier |
-| `--evidence-ref` | `<EVIDENCE_REFS>` | _no help text_ |
+| `--evidence-ref` | `<EVIDENCE_REFS>` | Durable evidence reference supporting the verdict. Repeatable |
 | `--feedback` | `<TEXT>` | Bounded reviewer remediation feedback retained with a rejected Cook candidate for its one authorized repair attempt |
 
 ## `homeboy agent-task gate-feedback`
@@ -1152,10 +1191,10 @@ Convert deterministic gate results into a cook retry or stop decision
 | --- | --- | --- |
 | `--promotion` | `<JSON|@FILE|->` | Promotion report as a JSON spec: inline JSON, `@FILE` to read a file, or `-` to read stdin. A bare path is NOT accepted — use `@/path/promotion.json` |
 | `--source-task` | `<JSON|@FILE|->` | Source task as a JSON spec: inline JSON, `@FILE` to read a file, or `-` to read stdin. A bare path is NOT accepted — use `@/path/task.json` |
-| `--attempt` | `<N>` | _no help text_ |
-| `--max-attempts` | `<N>` | _no help text_ |
-| `--source-run-id` | `<ID>` | _no help text_ |
-| `--current-diff` | `<SPEC>` | _no help text_ |
+| `--attempt` | `<N>` | Current feedback attempt number |
+| `--max-attempts` | `<N>` | Maximum feedback attempts before stopping |
+| `--source-run-id` | `<ID>` | Durable source run ID associated with the feedback |
+| `--current-diff` | `<SPEC>` | Current candidate diff as an inline or file-backed specification |
 
 ## `homeboy agent-task providers`
 
@@ -1169,14 +1208,14 @@ List extension-declared executor providers and optional secret/backend readiness
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--backend` | `<BACKEND>` | _no help text_ |
-| `--selector` | `<PROVIDER_ID>` | _no help text_ |
+| `--backend` | `<BACKEND>` | Restrict results to this executor backend |
+| `--selector` | `<PROVIDER_ID>` | Restrict results to this backend-specific provider selector |
 | `--model` | `<MODEL>` | Validate or report this exact model selection using Cook's provider route |
 | `--runtime` | `<RUNTIME>` | Restrict results to the runtime that owns the provider |
 | `--status` | `<STATUS>` | Restrict results to `default`, `available`, or `unavailable` providers |
-| `--secret-env` | `<ENV>` | _no help text_ |
-| `--validate-readiness` | flag | _no help text_ |
-| `--refresh` | flag | _no help text_ |
+| `--secret-env` | `<ENV>` | Declare a secret environment variable available for readiness checks. Repeatable |
+| `--validate-readiness` | flag | Live-probe matching providers and report their readiness |
+| `--refresh` | flag | Refresh cached provider discovery before listing results |
 | `--catalog` | flag | Return the full multi-backend catalog even when `--backend` is set. Without this, `--backend X` filters the presentation to X so the output stays within caller display limits (#9654) |
 | `--full` | flag | Return the complete provider declarations and discovery diagnostics |
 | `--set-default` | flag | Live-probe every declared backend and, if at least one is ready right now, persist it as `agent_task.default_backend` with the remaining ready backends recorded as an `agent_task.rotation` fallback chain |
@@ -1256,7 +1295,7 @@ Export Homeboy's machine-readable agent-task core contract metadata
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--format` | `<FORMAT>` | _no help text_ Values: `json`. |
+| `--format` | `<FORMAT>` | Serialization format for the exported contract metadata Values: `json`. |
 
 ## `homeboy agent-task compile-loop`
 
@@ -1268,7 +1307,7 @@ Compile a declarative loop definition into an agent-task plan without submitting
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--definition` | `<SPEC>` | _no help text_ |
+| `--definition` | `<SPEC>` | Declarative loop definition to compile into an agent-task plan |
 
 ## `homeboy agent-task auth`
 
