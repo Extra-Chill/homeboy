@@ -2,6 +2,7 @@
  * External dependencies
  */
 import path from 'node:path';
+import { realpathSync } from 'node:fs';
 
 export function selectedScenarioIds(raw = '') {
   return [...new Set(String(raw).split(',').map((id) => id.trim()).filter(Boolean))];
@@ -43,12 +44,20 @@ function relativeComponentFile(source, componentPath) {
     return undefined;
   }
 
-  const relative = path.relative(path.resolve(componentPath), path.resolve(source));
+  const relative = path.relative(canonicalPath(componentPath), canonicalPath(source));
   if (!relative || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
     return undefined;
   }
 
   return relative.split(path.sep).join('/');
+}
+
+function canonicalPath(value) {
+  try {
+    return realpathSync.native(value);
+  } catch {
+    return path.resolve(value);
+  }
 }
 
 function scenarioId(filename) {
