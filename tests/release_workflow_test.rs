@@ -344,6 +344,23 @@ fn release_concurrency_scopes_recovery_runs_to_the_requested_tag() {
     ));
 }
 
+#[test]
+fn generated_release_commit_does_not_start_a_competing_release() {
+    let workflow = release_workflow();
+    let check = job_section(workflow, "check");
+
+    assert!(
+        check.contains(
+            "if: \"${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release: v') }}\""
+        ),
+        "the run that creates a canonical release commit must remain the sole publisher"
+    );
+    assert!(
+        workflow.contains("workflow_dispatch:"),
+        "explicit recovery must remain available"
+    );
+}
+
 /// Three rapid main pushes must collapse their expensive read-only planning to
 /// the latest SHA without allowing a workflow-level cancellation to interrupt
 /// a release that has already entered mutation or publication (#12504, #10645).
