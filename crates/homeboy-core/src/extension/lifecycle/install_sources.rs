@@ -356,9 +356,7 @@ fn install_shared_assets_from_root(
 }
 
 fn runtime_generation_boundary_active() -> Result<bool> {
-    Ok(std::fs::read_link(paths::legacy_agent_runtimes()?)
-        .ok()
-        .as_deref()
+    Ok(std::fs::read_link(paths::agent_runtimes()?).ok().as_deref()
         == Some(std::path::Path::new(
             "runtime-generations/current/agent-runtimes",
         )))
@@ -390,7 +388,7 @@ fn installed_shared_asset_target(extension_dir: &Path, shared_dir: &str) -> Resu
         // Extension installation maintains the legacy/source layout. A runtime
         // refresh snapshots it into an immutable generation; it must not write
         // through the active generation read boundary.
-        "agent-runtimes" => paths::legacy_agent_runtimes()?,
+        "agent-runtimes" => paths::agent_runtimes()?,
         "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(shared_dir),
         // Shared extension libraries install under the extensions root so
         // installed wrappers can source `../../../scripts/lib/...`.
