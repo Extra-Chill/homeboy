@@ -3457,6 +3457,34 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
             replay.metadata["local_provider_ownership"]["state"],
             json!("owner_dead")
         );
+        assert_eq!(
+            replay.metadata["stop_reason"],
+            json!("local Cook observer was interrupted during provider execution")
+        );
+        assert_eq!(
+            replay.metadata["terminal_failure_classification"],
+            json!("interrupted_owner")
+        );
+        assert_eq!(replay.metadata["provider_executions_consumed"], json!(1));
+        assert_eq!(
+            replay.metadata["interrupted_owner"]["provider_budget_consumed"],
+            json!(true)
+        );
+        assert_eq!(
+            replay.metadata["interrupted_owner"]["in_flight_work_may_be_duplicated"],
+            json!(true)
+        );
+        let aggregate = test_lifecycle_store()
+            .read_aggregate("owner-dead")
+            .expect("interrupted-owner aggregate");
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "interrupted_owner"
+        );
+        assert!(aggregate.outcomes[0]
+            .evidence_refs
+            .iter()
+            .any(|reference| { reference.kind == "interrupted-owner-candidate" }));
     });
 }
 
@@ -3504,15 +3532,22 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
             recovered.metadata["provider_executions"][0]["state"],
             json!("succeeded")
         );
+        assert_eq!(
+            recovered.metadata["terminal_failure_classification"],
+            json!("interrupted_owner")
+        );
+        test_lifecycle_store()
+            .read_aggregate("owner-late-success")
+            .expect("interrupted-owner aggregate");
     });
 }
 
 /// A foreground controller can be interrupted after the provider's terminal
 /// result was persisted but before aggregate harvesting starts. The failed
-/// provider result is sufficient to converge without an aggregate, handle, or
-/// surviving owner process.
+/// provider result still converges, and the interrupted-owner path persists the
+/// aggregate before that terminal transition.
 #[test]
-fn terminal_provider_failure_without_owner_or_aggregate_converges_to_failed() {
+fn terminal_provider_failure_without_owner_persists_interrupted_owner_aggregate() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("provider-failed-no-owner")).expect("submitted");
@@ -3547,11 +3582,22 @@ fn terminal_provider_failure_without_owner_or_aggregate_converges_to_failed() {
         assert_eq!(terminal.state, AgentTaskRunState::Failed);
         assert_eq!(replay.state, AgentTaskRunState::Failed);
         assert!(replay.provider_handles.is_empty());
-        assert!(replay.aggregate_path.is_none());
+        assert!(replay.aggregate_path.is_some());
         assert_eq!(replay.tasks[0].state, AgentTaskState::Failed);
         assert_eq!(
             replay.metadata["local_provider_ownership"]["state"],
             json!("provider_failed")
+        );
+        assert_eq!(
+            replay.metadata["stop_reason"],
+            json!("local Cook observer was interrupted during provider execution")
+        );
+        let aggregate = test_lifecycle_store()
+            .read_aggregate("provider-failed-no-owner")
+            .expect("interrupted-owner aggregate");
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "interrupted_owner"
         );
     });
 }

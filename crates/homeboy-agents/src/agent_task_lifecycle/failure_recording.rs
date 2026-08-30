@@ -55,6 +55,367 @@ pub fn record_pre_execution_failure_in_store(
     Ok(record)
 }
 
+/// Persist interrupted-owner evidence before a local Cook observer loss becomes
+/// terminal. Aggregate, attempt diagnostics, candidate harvest (or explicit
+/// unavailability), stop reason, and retry duplication facts are committed first
+/// so later status/diagnose reads are not an empty Failed tombstone.
+pub fn record_interrupted_local_owner_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let (mut record, aggregate) = lifecycle_store.with_config_lock(|| {
+        let mut record = lifecycle_store.read_record(&run_id)?;
+        if record.state.is_terminal() {
+            return Ok((record, None));
+        }
+        let decision = annotate_local_provider_ownership(&mut record);
+        record_interrupted_local_owner_locked(lifecycle_store, record, decision)
+    })?;
+    if let Some(aggregate) = aggregate {
+        record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
+        update_cook_candidate_after_completion_in_store(
+            lifecycle_store,
+            &record,
+            &aggregate,
+            None,
+        )?;
+    } else if record.state.is_terminal() {
+        lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
+    }
+    Ok(record)
+}
+
+fn record_interrupted_local_owner_locked(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    mut record: AgentTaskRunRecord,
+    decision: LocalProviderOwnerDecision,
+) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
+    let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+    let now = now_timestamp();
+    let (has_succeeded, has_failed, recovery_identity) = match decision {
+        LocalProviderOwnerDecision::Interrupted {
+            has_succeeded,
+            has_failed,
+            recovery_identity,
+        } => (has_succeeded, has_failed, recovery_identity),
+        LocalProviderOwnerDecision::StayRunning | LocalProviderOwnerDecision::NotApplicable => {
+            let identity = record
+                .metadata
+                .get("provider_executions")
+                .and_then(Value::as_array)
+                .map(|executions| {
+                    executions
+                        .iter()
+                        .map(|execution| execution["owner_identity"].clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (false, false, identity)
+        }
+    };
+    let consumed = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .map(|executions| executions.len())
+        .unwrap_or_default();
+    let in_flight = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .is_some_and(|executions| {
+            executions
+                .iter()
+                .any(|execution| execution["state"] == json!("running"))
+        });
+    if in_flight {
+        if let Some(executions) = record
+            .ensure_metadata_object()
+            .get_mut("provider_executions")
+            .and_then(Value::as_array_mut)
+        {
+            for execution in executions {
+                if execution["state"] == json!("running") {
+                    execution["state"] = json!("cancelled");
+                    execution["finished_at"] = json!(now.clone());
+                }
+            }
+        }
+    }
+    let stop_reason = "local Cook observer was interrupted during provider execution".to_string();
+    let outcomes = plan
+        .tasks
+        .iter()
+        .map(|task| {
+            build_interrupted_owner_outcome(
+                &record.run_id,
+                task,
+                has_succeeded,
+                has_failed,
+                consumed,
+                in_flight,
+                &stop_reason,
+            )
+        })
+        .collect::<Vec<_>>();
+    let harvested = outcomes.iter().any(|outcome| {
+        outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+            || outcome
+                .artifacts
+                .iter()
+                .any(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact)
+    });
+    let (aggregate_status, ownership_state, run_cancelled) = if has_succeeded || harvested {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
+            "owner_dead",
+            false,
+        )
+    } else if has_failed {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
+            "provider_failed",
+            false,
+        )
+    } else {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled,
+            "owner_dead",
+            true,
+        )
+    };
+    let failed = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Failed | AgentTaskOutcomeStatus::Cancelled
+            )
+        })
+        .count();
+    let candidate_recoverable = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable)
+        .count();
+    let cancelled = outcomes
+        .iter()
+        .filter(|outcome| outcome.status == AgentTaskOutcomeStatus::Cancelled)
+        .count();
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: aggregate_status,
+        totals: AgentTaskAggregateTotals {
+            failed,
+            cancelled,
+            candidate_recoverable,
+            recoverable_candidates: candidate_recoverable,
+            ..AgentTaskAggregateTotals::default()
+        },
+        outcomes,
+        events: plan
+            .tasks
+            .iter()
+            .map(|task| AgentTaskProgressEvent {
+                task_id: task.task_id.clone(),
+                state: if harvested || has_succeeded {
+                    AgentTaskState::CandidateRecoverable
+                } else if run_cancelled {
+                    AgentTaskState::Cancelled
+                } else {
+                    AgentTaskState::Failed
+                },
+                attempt: 1,
+                message: Some(stop_reason.clone()),
+            })
+            .collect(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: AgentTaskQueueStatus {
+            max_concurrency: plan.options.max_concurrency,
+            completed: plan.tasks.len(),
+            ..AgentTaskQueueStatus::default()
+        },
+    };
+    let aggregate_path = lifecycle_store
+        .aggregate_path(&record.run_id)
+        .display()
+        .to_string();
+    apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "local_provider_ownership".to_string(),
+        json!({
+            "state": ownership_state,
+            "recovery_identity": recovery_identity,
+            "reconciled_at": now,
+        }),
+    );
+    metadata.insert("stop_reason".to_string(), json!(stop_reason));
+    metadata.insert(
+        "terminal_failure_classification".to_string(),
+        json!("interrupted_owner"),
+    );
+    metadata.insert("terminal_phase".to_string(), json!("interrupted_owner"));
+    metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
+    metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
+    metadata.insert(
+        "interrupted_owner".to_string(),
+        json!({
+            "schema": "homeboy/agent-task-interrupted-owner/v1",
+            "cause": "observer_interrupted_during_provider_execution",
+            "stop_reason": stop_reason,
+            "provider_executions_consumed": consumed,
+            "provider_budget_consumed": consumed > 0,
+            "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
+            "candidate_status": if harvested || has_succeeded {
+                "harvested_or_recoverable"
+            } else {
+                "unavailable"
+            },
+        }),
+    );
+    if run_cancelled {
+        metadata.insert(
+            "cancel_reason".to_string(),
+            json!("local provider owner process is not running"),
+        );
+    }
+    metadata.insert(
+        "cook_progress".to_string(),
+        json!({
+            "phase": "terminal",
+            "attempt": 1,
+            "detail": "interrupted_owner",
+            "terminal_success": harvested || has_succeeded,
+            "exit_code": if harvested || has_succeeded { 0 } else { 1 },
+            "updated_at": now,
+        }),
+    );
+    let record = lifecycle_store
+        .write_aggregate_and_record_locked_without_terminal_projection(&record, &aggregate)?;
+    Ok((record, Some(aggregate)))
+}
+
+fn build_interrupted_owner_outcome(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    has_succeeded: bool,
+    has_failed: bool,
+    consumed: usize,
+    in_flight: bool,
+    stop_reason: &str,
+) -> AgentTaskOutcome {
+    let mut outcome = AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id: task.task_id.clone(),
+        status: if has_succeeded {
+            AgentTaskOutcomeStatus::CandidateRecoverable
+        } else if has_failed {
+            AgentTaskOutcomeStatus::Failed
+        } else {
+            AgentTaskOutcomeStatus::Cancelled
+        },
+        summary: Some(stop_reason.to_string()),
+        failure_classification: if has_succeeded {
+            None
+        } else {
+            Some(AgentTaskFailureClassification::ExecutionFailed)
+        },
+        evidence_refs: vec![AgentTaskEvidenceRef {
+            kind: "interrupted-owner".to_string(),
+            uri: format!("homeboy://agent-task/run/{run_id}/status#interrupted-owner"),
+            label: Some("Interrupted local Cook observer".to_string()),
+        }],
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "interrupted_owner".to_string(),
+            message: stop_reason.to_string(),
+            data: json!({
+                "phase": "interrupted_owner",
+                "provider_executions_consumed": consumed,
+                "provider_budget_consumed": consumed > 0,
+                "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
+            }),
+        }],
+        outputs: json!({
+            "schema": "homeboy/agent-task-interrupted-owner/v1",
+            "phase": "interrupted_owner",
+            "stop_reason": stop_reason,
+            "provider_executions_consumed": consumed,
+            "provider_budget_consumed": consumed > 0,
+            "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
+        }),
+        metadata: json!({
+            "kind": "interrupted_owner",
+            "phase": "interrupted_owner",
+            "provider_executions_consumed": consumed,
+            "provider_budget_consumed": consumed > 0,
+            "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
+        }),
+        ..Default::default()
+    };
+    harvest_interrupted_owner_candidate(run_id, task, &mut outcome);
+    outcome
+}
+
+fn harvest_interrupted_owner_candidate(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    outcome: &mut AgentTaskOutcome,
+) {
+    let discovery = crate::agent_task_timeout_artifacts::TimeoutArtifactDiscovery::discover(task);
+    crate::agent_task_timeout_artifacts::append_unique_artifacts(
+        &mut outcome.artifacts,
+        discovery.artifacts,
+    );
+    crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+        &mut outcome.evidence_refs,
+        discovery.evidence_refs,
+    );
+    outcome.diagnostics.extend(discovery.diagnostics);
+    if let Some(discovered) = discovery.outcome {
+        crate::agent_task_timeout_artifacts::append_unique_artifacts(
+            &mut outcome.artifacts,
+            discovered.artifacts,
+        );
+        crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+            &mut outcome.evidence_refs,
+            discovered.evidence_refs,
+        );
+        outcome.diagnostics.extend(discovered.diagnostics);
+    }
+    let harvested = outcome
+        .artifacts
+        .iter()
+        .any(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact);
+    if harvested {
+        outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        outcome.failure_classification = None;
+        outcome.summary =
+            Some("interrupted local Cook observer left a recoverable candidate".to_string());
+        outcome.metadata["candidate_status"] = json!("harvested");
+        return;
+    }
+    crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+        &mut outcome.evidence_refs,
+        vec![AgentTaskEvidenceRef {
+            kind: "interrupted-owner-candidate".to_string(),
+            uri: format!("homeboy://agent-task/run/{run_id}/status#interrupted-owner-candidate"),
+            label: Some("Candidate unavailable after interrupted owner".to_string()),
+        }],
+    );
+    outcome.diagnostics.push(AgentTaskDiagnostic {
+        class: "interrupted_owner.candidate_unavailable".to_string(),
+        message:
+            "no candidate could be harvested after the local Cook observer was interrupted during provider execution"
+                .to_string(),
+        data: json!({ "status": "unavailable" }),
+    });
+    outcome.metadata["candidate_status"] = json!("unavailable");
+}
+
 /// Replace only a scheduler-terminal snapshot fence failure with Cook's normal
 /// retryable pre-execution record. A provider ledger entry is authoritative: it
 /// permanently fences this path from rewriting real provider failures.

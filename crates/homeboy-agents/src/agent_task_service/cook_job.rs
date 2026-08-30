@@ -520,16 +520,17 @@ impl AgentTaskCookJob {
                 &self.request.cook_id,
                 "detached Cook exited before materializing its first attempt",
             )?;
-        }
-        // A retry supervisor is attached to an existing queued attempt rather
-        // than an initial handoff parent. If its launcher exits before provider
-        // execution, retain the normal zero-provider terminal outcome.
-        if self.request.supervisor_id.is_some() {
-            if let Some(run_id) = run_id.as_deref() {
-                let lifecycle_store =
-                    agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-                let record = lifecycle_store.read_record(run_id)?;
-                if !record.state.is_terminal() {
+        } else if let Some(run_id) = run_id.as_deref() {
+            let lifecycle_store =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            let record = lifecycle_store.read_record(run_id)?;
+            if !record.state.is_terminal() {
+                let provider_started = record
+                    .metadata
+                    .get("provider_executions")
+                    .and_then(Value::as_array)
+                    .is_some_and(|executions| !executions.is_empty());
+                if self.request.supervisor_id.is_some() && !provider_started {
                     let plan = lifecycle_store.read_controller_plan(run_id)?;
                     let error = retry_child_failure(&self.request);
                     agent_task_lifecycle::record_pre_execution_failure_in_store(
@@ -538,6 +539,11 @@ impl AgentTaskCookJob {
                         &plan,
                         "local_retry_supervisor",
                         &error,
+                    )?;
+                } else {
+                    agent_task_lifecycle::record_interrupted_local_owner_in_store(
+                        &lifecycle_store,
+                        run_id,
                     )?;
                 }
             }
@@ -1422,6 +1428,109 @@ mod tests {
                     && reference.uri
                         == format!("homeboy://agent-task/run/{run_id}/status#detached-child-command-result")
             }));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observe_terminal_persists_interrupted_owner_aggregate_during_provider_execution() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-interrupted-observer";
+            let run_id = "cook-interrupted-observer-attempt-1";
+            let plan = crate::agent_task_scheduler::AgentTaskPlan::new(
+                "interrupted-observer",
+                vec![AgentTaskRequest {
+                    schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "task-a".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: AgentTaskExecutor {
+                        backend: "test".to_string(),
+                        selector: Some("fixture".to_string()),
+                        runtime_selection: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: None,
+                        config: Value::Null,
+                    },
+                    instructions: "run".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: AgentTaskWorkspace::default(),
+                    component_contracts: Vec::new(),
+                    policy: AgentTaskPolicy::default(),
+                    limits: AgentTaskLimits::default(),
+                    expected_artifacts: Vec::new(),
+                    artifact_declarations: Vec::new(),
+                    output_declarations: Vec::new(),
+                    runtime_tools: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            );
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                run_id,
+            )
+            .expect("index attempt");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::reserve_provider_execution_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                &plan.tasks[0],
+                1,
+            )
+            .expect("reserved");
+            let mut owner = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("start cook observer");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
+                record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] =
+                    Value::Null;
+            })
+            .expect("observer fixture");
+            owner.kill().expect("kill cook observer");
+            owner.wait().expect("reap cook observer");
+
+            let mut job =
+                AgentTaskCookJob::parse(request_of(cook_id, u32::MAX)).expect("parse request");
+            job.phase = AgentTaskCookJobPhase::Supervising;
+            job.observe_terminal(Some(run_id.to_string()))
+                .expect("observe interrupted observer");
+
+            let record = agent_task_lifecycle::exact_record(run_id).expect("read interrupted run");
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                record.metadata["stop_reason"],
+                json!("local Cook observer was interrupted during provider execution")
+            );
+            assert_eq!(
+                record.metadata["terminal_failure_classification"],
+                json!("interrupted_owner")
+            );
+            assert_eq!(
+                record.metadata["interrupted_owner"]["provider_budget_consumed"],
+                true
+            );
+            let aggregate = test_lifecycle_store()
+                .read_aggregate(run_id)
+                .expect("read interrupted-owner aggregate");
+            assert_eq!(
+                aggregate.outcomes[0].diagnostics[0].class,
+                "interrupted_owner"
+            );
         });
     }
 
