@@ -6,7 +6,7 @@ pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
     pub(crate) const RUN_LOG: &str = "homeboy/agent-task-run-log/v2";
     pub(crate) const EVENT: &str = "homeboy/agent-task-event/v1";
-    pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v1";
+    pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v2";
     pub(crate) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
     pub(crate) const COOK_INDEX: &str = "homeboy/agent-task-cook-index/v1";
 }
@@ -1737,20 +1737,13 @@ pub struct AgentTaskEventEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunStatus {
     pub schema: String,
-    pub run_id: String,
+    pub control_plane_run: homeboy_control_plane_contract::ControlPlaneRun,
     pub plan_id: String,
-    pub state: AgentTaskRunState,
-    pub submitted_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<String>,
     pub totals: AgentTaskAggregateTotals,
     pub latest_event_cursor: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<AgentTaskArtifactRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normalized_events: Vec<AgentTaskEventEnvelope>,
-    /// Additive projection for multi-candidate Cook runs. Older consumers retain
-    /// the existing status fields and omit this when the plan has one task.
+    /// Candidate detail for multi-candidate Cook runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate: Option<AgentTaskCandidateStatus>,
 }

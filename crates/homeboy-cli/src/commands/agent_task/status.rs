@@ -309,9 +309,6 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         // can also change what a later `activity show` returns. Say so (#W3-15).
         let bridge_status = agent_task_service::run_status(&target.run_id, args.since_cursor)?;
         let mut value = serde_json::to_value(bridge_status).unwrap_or(Value::Null);
-        let record = agent_task_lifecycle::persisted_status(&target.run_id)?;
-        let plan = agent_task_lifecycle::load_plan(&target.run_id).ok();
-        attach_control_plane_run(&mut value, &record, plan.as_ref())?;
         attach_reconciled(&mut value, true);
         if let Some(selection) = target.selection {
             value["candidate_selection"] = selection;
@@ -558,7 +555,7 @@ fn emit_status_change_event(
     full: bool,
     retained_limit_reached: bool,
 ) -> String {
-    let run_id = snapshot.get("run_id").and_then(Value::as_str).or_else(|| {
+    let run_id = status_run_id(snapshot).or_else(|| {
         snapshot
             .pointer("/identity/resolved_run_id")
             .and_then(Value::as_str)
@@ -567,7 +564,7 @@ fn emit_status_change_event(
         "schema": "homeboy/agent-task-status-watch-event/v2",
         "event": "status_changed",
         "run_id": run_id,
-        "state": snapshot.get("state"),
+        "state": status_run_state(snapshot),
         "poll": poll,
         "change": status_watch_change(snapshot, poll, full),
         "retained_limit_reached": retained_limit_reached,
@@ -578,7 +575,7 @@ fn emit_status_change_event(
     if serialized_len(&event) > STATUS_WATCH_EVENT_BYTE_LIMIT {
         event["change"] = json!({
             "run_id": run_id,
-            "state": snapshot.get("state"),
+            "state": status_run_state(snapshot),
             "change_basis": status_change_digest_projection(snapshot),
             "full_status_ref": snapshot.get("full_command"),
         });
@@ -589,7 +586,7 @@ fn emit_status_change_event(
     }
     event["change"] = json!({
         "run_id": run_id,
-        "state": snapshot.get("state"),
+        "state": status_run_state(snapshot),
         "full_status_ref": snapshot.get("full_command"),
     });
     serde_json::to_string(&event).expect("bounded status watch JSONL event serializes")
@@ -600,8 +597,8 @@ fn emit_status_change_event(
 fn status_watch_change(snapshot: &Value, poll: u64, full: bool) -> Value {
     let mut change = json!({
         "poll": poll,
-        "run_id": snapshot.get("run_id").or_else(|| snapshot.pointer("/identity/resolved_run_id")),
-        "state": snapshot.get("state"),
+        "run_id": status_run_id(snapshot).or_else(|| snapshot.pointer("/identity/resolved_run_id").and_then(Value::as_str)),
+        "state": status_run_state(snapshot),
         "status": snapshot.get("status"),
         "terminal_status": snapshot.get("terminal_status"),
         "child_run_state": snapshot.get("child_run_state"),
@@ -622,11 +619,11 @@ fn status_watch_change(snapshot: &Value, poll: u64, full: bool) -> Value {
     if serialized_len(&change) > STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT {
         return json!({
             "poll": poll,
-            "run_id": snapshot.get("run_id"),
-            "state": snapshot.get("state"),
+            "run_id": status_run_id(snapshot),
+            "state": status_run_state(snapshot),
             "change_basis": status_change_digest_projection(snapshot),
             "full_status_ref": {
-                "run_id": snapshot.get("run_id"),
+                "run_id": status_run_id(snapshot),
                 "command": snapshot.get("full_command"),
             },
         });
@@ -660,7 +657,7 @@ fn status_change_projection(status: &Value) -> Value {
         )
     });
     json!({
-        "state": status.get("state"),
+        "state": status_run_state(status),
         "terminal_status": status.get("terminal_status"),
         "child_run_state": status.get("child_run_state"),
         "totals": status.get("totals"),
@@ -688,13 +685,13 @@ fn status_change_digest_projection(status: &Value) -> Value {
 
 fn status_is_terminal(status: &Value) -> bool {
     !matches!(
-        status.get("state").and_then(Value::as_str),
+        status_run_state(status).and_then(Value::as_str),
         Some("queued" | "running" | "in_flight")
     )
 }
 
 fn status_is_failure(status: &Value) -> bool {
-    let Some(state) = status.get("state").and_then(Value::as_str) else {
+    let Some(state) = status_run_state(status).and_then(Value::as_str) else {
         // Recipe-only Cook status is a successful read whose recovery state is
         // intentionally carried under `status`, not lifecycle `state`.
         return false;
@@ -778,8 +775,8 @@ fn watch_status_output(
 fn status_watch_latest(snapshot: &Value, run_id: &str, full: bool) -> Value {
     let mut latest = json!({
         "schema": "homeboy/agent-task-status-watch-latest/v2",
-        "run_id": snapshot.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
-        "state": snapshot.get("state"),
+        "run_id": status_run_id(snapshot).unwrap_or(run_id),
+        "state": status_run_state(snapshot),
         "status": snapshot.get("status"),
         "terminal_status": snapshot.get("terminal_status"),
         "child_run_state": snapshot.get("child_run_state"),
@@ -842,8 +839,8 @@ fn enforce_watch_output_budget(output: &mut Value, continuation: &str) {
 fn status_watch_terminal_summary(snapshot: &Value, run_id: &str) -> Value {
     enforce_compact_status_budget(json!({
         "schema": "homeboy/agent-task-status-watch-terminal/v1",
-        "run_id": snapshot.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
-        "state": snapshot.get("state"),
+        "run_id": status_run_id(snapshot).unwrap_or(run_id),
+        "state": status_run_state(snapshot),
         "status": snapshot.get("status"),
         "terminal_status": snapshot.get("terminal_status"),
         "child_run_state": snapshot.get("child_run_state"),
@@ -858,6 +855,20 @@ fn status_watch_terminal_summary(snapshot: &Value, run_id: &str) -> Value {
         "actionable": snapshot.get(ACTIONABLE_METADATA_KEY),
         "full_command": snapshot.get("full_command").cloned().unwrap_or_else(|| json!(format!("homeboy agent-task status {} --full", quote_arg(run_id)))),
     }))
+}
+
+fn status_run_id(status: &Value) -> Option<&str> {
+    status.get("run_id").and_then(Value::as_str).or_else(|| {
+        status
+            .pointer("/control_plane_run/run")
+            .and_then(Value::as_str)
+    })
+}
+
+fn status_run_state(status: &Value) -> Option<&Value> {
+    status
+        .get("state")
+        .or_else(|| status.pointer("/control_plane_run/state"))
 }
 
 /// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
@@ -4004,8 +4015,11 @@ mod watch_tests {
     #[test]
     fn bridge_snapshot_is_retained_without_projection_loss() {
         let bridge = json!({
-            "schema": "homeboy/agent-task-run-status/v1",
-            "state": "succeeded",
+            "schema": "homeboy/agent-task-run-status/v2",
+            "control_plane_run": {
+                "run": "run-1",
+                "state": "succeeded"
+            },
             "reconciled": true,
             "normalized_events": [{ "type": "agent_task.state_changed" }]
         });

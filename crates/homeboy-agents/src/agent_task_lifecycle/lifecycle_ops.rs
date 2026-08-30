@@ -5392,19 +5392,24 @@ pub fn run_status_in_store(
         .into_iter()
         .filter(|event| event.sequence > cursor)
         .collect();
+    let control_plane_run =
+        crate::orchestration::project_record(&record, plan.as_ref()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "run_id",
+                error.message,
+                Some(record.run_id.clone()),
+                None,
+            )
+        })?;
 
     Ok(AgentTaskRunStatus {
         schema: schemas::RUN_STATUS.to_string(),
-        run_id: record.run_id,
+        control_plane_run,
         plan_id: record.plan_id,
-        state: record.state,
-        submitted_at: record.submitted_at,
-        updated_at: record.updated_at,
         totals: record
             .totals
             .unwrap_or_else(|| totals_for_tasks(&record.tasks)),
         latest_event_cursor,
-        artifact_refs: record.artifact_refs,
         normalized_events,
         candidate,
     })

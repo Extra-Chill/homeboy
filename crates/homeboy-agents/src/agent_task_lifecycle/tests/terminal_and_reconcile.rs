@@ -3888,7 +3888,10 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
         run_status_in_store(&lifecycle_store, "run-status-bridge", Some(1)).expect("bridge status");
 
     assert_eq!(status.schema, schemas::RUN_STATUS);
-    assert_eq!(status.state, AgentTaskRunState::Succeeded);
+    assert_eq!(
+        status.control_plane_run.state,
+        homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+    );
     assert_eq!(status.latest_event_cursor, 2);
     assert_eq!(status.normalized_events.len(), 1);
     assert_eq!(status.normalized_events[0].sequence, 2);
@@ -3898,7 +3901,10 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
         "agent_task.state_changed"
     );
     assert_eq!(status.normalized_events[0].artifact_refs.len(), 1);
-    assert_eq!(status.artifact_refs[0].kind, "artifact-bundle");
+    assert_eq!(
+        status.control_plane_run.artifacts[0].kind,
+        "artifact-bundle"
+    );
 }
 
 #[test]

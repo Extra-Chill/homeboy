@@ -2710,7 +2710,7 @@ fn submit_run_status_reports_terminal_state() {
         assert_eq!(bridge_status_exit_code, 0);
         assert_eq!(
             bridge_status_json["schema"],
-            "homeboy/agent-task-run-status/v1"
+            "homeboy/agent-task-run-status/v2"
         );
         assert!(bridge_status_json["normalized_events"].is_array());
         assert_eq!(
@@ -4976,7 +4976,9 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         .expect("bridge resume reconciles terminal projection");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(value["schema"], "homeboy/agent-task-run-status/v1");
+        assert_eq!(value["schema"], "homeboy/agent-task-run-status/v2");
+        assert_eq!(value["control_plane_run"]["run"], run_id);
+        assert_eq!(value["control_plane_run"]["state"], "succeeded");
         assert_eq!(value["latest_event_cursor"], 2);
         assert_eq!(value["normalized_events"].as_array().map(Vec::len), Some(1));
         assert_eq!(
