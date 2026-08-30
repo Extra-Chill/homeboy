@@ -629,7 +629,9 @@
         "forbid": {
           "glob": "crates/**",
           "patterns": [
-            "\\bextension_store\\b"
+            "\\bextension_store\\b",
+            "\\bextension::(?:manifest|summary)::",
+            "\\bextension::(?:deployment_provider_layered_input|deployment_providers|structured_sidecar_schema_version|structured_sidecars|list_summaries|list_summaries_with|ActionSummary|ExtensionSummary)\\b"
           ]
         },
         "name": "extensions-use-canonical-catalog-api"

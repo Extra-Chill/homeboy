@@ -102,7 +102,7 @@ pub fn structured_sidecars(manifest: &ExtensionManifest) -> Vec<StructuredSideca
         .structured_sidecars
         .iter()
         .filter_map(|(name, contract)| {
-            super::manifest_sidecar::structured_sidecar_declaration(contract, name)
+            crate::extension::manifest_sidecar::structured_sidecar_declaration(contract, name)
         })
         .collect()
 }

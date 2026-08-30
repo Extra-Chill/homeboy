@@ -14,7 +14,7 @@ use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
 use homeboy_core::extension::readiness::{
     extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
-use homeboy_core::extension::{invoke::run_setup, ExtensionSummary};
+use homeboy_core::extension::{catalog::ExtensionSummary, invoke::run_setup};
 use homeboy_extension_contract as extension_contract;
 use homeboy_extension_contract::update_output::UpdateEntry;
 use std::collections::BTreeMap;
@@ -687,7 +687,7 @@ fn readiness_mode(live_readiness: bool, _skip_ready_check: bool) -> ExtensionRea
 
 fn list(project: Option<String>, readiness: ExtensionReadinessMode) -> CmdResult<ExtensionOutput> {
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
-    let summaries = extension::list_summaries_with(project_config.as_ref(), readiness);
+    let summaries = extension::catalog::list_summaries_with(project_config.as_ref(), readiness);
 
     Ok((
         ExtensionOutput::List {
@@ -706,7 +706,7 @@ fn diff_installed(
         return runner_diff_installed(extension_id, runner_id);
     }
 
-    let rows = extension::list_summaries_with(None, ExtensionReadinessMode::Cached)
+    let rows = extension::catalog::list_summaries_with(None, ExtensionReadinessMode::Cached)
         .into_iter()
         .filter(|summary| extension_id.is_none_or(|id| summary.id == id))
         .map(installed_extension_diff)
@@ -1051,7 +1051,7 @@ fn show_extension(
             .collect(),
         inputs: extension.inputs().to_vec(),
         settings: extension.settings.clone(),
-        structured_sidecars: homeboy_core::extension::structured_sidecars(&extension),
+        structured_sidecars: homeboy_core::extension::catalog::structured_sidecars(&extension),
         ci_cache: extension.ci.as_ref().and_then(|ci| ci.cache.clone()),
         materialization_source: extension.materialization_source.clone(),
         contract_producers: extension.contract_producers.clone(),

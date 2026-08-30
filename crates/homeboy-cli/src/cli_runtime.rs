@@ -21,7 +21,7 @@ use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
-use homeboy::extension::{list_summaries_with, ExtensionSummary};
+use homeboy::extension::catalog::{list_summaries_with, ExtensionSummary};
 use homeboy_agents::agent_task_service::cook_continue_command;
 use homeboy_core::extension::catalog::load_all_extensions;
 use homeboy_core::extension::readiness::ExtensionReadinessMode;
