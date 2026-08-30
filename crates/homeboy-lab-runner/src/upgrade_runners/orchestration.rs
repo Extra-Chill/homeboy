@@ -1418,9 +1418,15 @@ fn refresh_managed_immutable_runner(
         }
     };
     let homeboy_path = refreshed.selected_binary_path;
-    let new_version = runner_homeboy_version(runner, &homeboy_path, exec)
-        .ok()
-        .flatten();
+    let new_version = reconciled
+        .session
+        .as_ref()
+        .map(|session| session.homeboy_version.clone())
+        .or_else(|| {
+            runner_homeboy_version(runner, &homeboy_path, exec)
+                .ok()
+                .flatten()
+        });
     let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
     let admission_ready = managed_immutable_admission_ready(&reconciled);
