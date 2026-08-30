@@ -488,6 +488,16 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             None => None,
         },
     };
+    if source_run_id.is_none() && args.idempotency_key.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "idempotency_key",
+            "promotion idempotency requires a durable run source",
+            args.idempotency_key,
+            Some(vec![
+                "omit --idempotency-key when promoting a standalone aggregate file".to_string(),
+            ]),
+        ));
+    }
     let gates = resolve_promotion_gates(
         &mut args.gates,
         args.gates_from_cook_recipe,

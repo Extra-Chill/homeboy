@@ -601,14 +601,29 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
             )));
         }
     }
+    if request.action == ControlPlaneAction::Retry {
+        serde_json::from_value::<ControlPlaneRetryParameters>(request.parameters.data.clone())
+            .map_err(|error| {
+                ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
+            })?;
+    }
+    if request.action == ControlPlaneAction::Promote {
+        serde_json::from_value::<crate::agent_task_service::AgentTaskPromotionRequest>(
+            request.parameters.data.clone(),
+        )
+        .map_err(|error| {
+            ControlPlaneError::invalid_argument(format!("promote parameters: {error}"))
+        })?;
+    }
     if matches!(
         request.action,
-        ControlPlaneAction::Cancel | ControlPlaneAction::Retry
+        ControlPlaneAction::Cancel | ControlPlaneAction::Promote | ControlPlaneAction::Retry
     ) && !request.confirmed
     {
-        return Err(ControlPlaneError::invalid_argument(
-            "cancel requires explicit confirmation",
-        ));
+        return Err(ControlPlaneError::invalid_argument(format!(
+            "{} requires explicit confirmation",
+            action_name(request.action)
+        )));
     }
     Ok(())
 }
@@ -1645,6 +1660,18 @@ mod tests {
                 },
                 confirmed: true,
             };
+            let mut malformed = request.clone();
+            malformed.parameters.data = json!({ "source": "{}" });
+            let error = service
+                .execute_action_with_delegates(
+                    &run,
+                    &malformed,
+                    |_| panic!("retry delegate must not run"),
+                    || panic!("resume delegate must not run"),
+                    |_| panic!("promote delegate must not run"),
+                )
+                .expect_err("malformed parameters");
+            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
             let executions = std::rc::Rc::new(std::cell::Cell::new(0));
             let execute = || {
                 let executions = std::rc::Rc::clone(&executions);
