@@ -33,6 +33,7 @@ use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::local_files;
 use homeboy_core::engine::text;
 use homeboy_extension::ExtensionManifest;
+use homeboy_extension_contract::HookEvent;
 use serde_json::Value;
 use std::path::Path;
 
@@ -562,14 +563,10 @@ pub fn bump_component_version_with_changelog(
 
     // Run lifecycle hooks that may update/stage generated artifacts impacted by the bump.
     // This must happen AFTER version targets are updated so artifacts match the new version.
+    hooks::run_hooks(component, HookEvent::PreVersionBump, HookFailureMode::Fatal)?;
     hooks::run_hooks(
         component,
-        hooks::events::PRE_VERSION_BUMP,
-        HookFailureMode::Fatal,
-    )?;
-    hooks::run_hooks(
-        component,
-        hooks::events::POST_VERSION_BUMP,
+        HookEvent::PostVersionBump,
         HookFailureMode::Fatal,
     )?;
 
@@ -1021,7 +1018,7 @@ mod tests {
             artifact_path: None,
         }]);
         component.hooks.insert(
-            hooks::events::POST_VERSION_BUMP.to_string(),
+            HookEvent::PostVersionBump,
             vec!["sh -c 'grep 0.1.1 package.json > generated.lock'".to_string()],
         );
 

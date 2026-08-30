@@ -238,7 +238,7 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
     let post_release_hooks = homeboy_core::engine::hooks::resolve_hooks_with_extensions(
         component,
         extensions,
-        homeboy_core::engine::hooks::events::POST_RELEASE,
+        homeboy_extension_contract::HookEvent::PostRelease,
     )?;
     if !post_release_hooks.is_empty() {
         let post_release_needs = if package_step_needed && !options.pipeline.deploy {
@@ -405,7 +405,7 @@ fn build_head_release_steps(
 
     let post_release_hooks = homeboy_core::engine::hooks::resolve_hooks(
         component,
-        homeboy_core::engine::hooks::events::POST_RELEASE,
+        homeboy_extension_contract::HookEvent::PostRelease,
     )?;
     if !post_release_hooks.is_empty() {
         let post_release_needs = if package_step_needed && !options.pipeline.deploy {

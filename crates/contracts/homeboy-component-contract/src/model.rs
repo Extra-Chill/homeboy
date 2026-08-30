@@ -151,10 +151,9 @@ pub struct Component {
     pub changelog_next_section_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changelog_next_section_aliases: Option<Vec<String>>,
-    /// Lifecycle hooks: event name -> list of shell commands.
-    /// Events: `pre:version:bump`, `post:version:bump`, `post:release`, `post:deploy`
+    /// Lifecycle hooks keyed by an event Homeboy actually emits.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub hooks: HashMap<String, Vec<String>>,
+    pub hooks: HashMap<homeboy_extension_contract::HookEvent, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

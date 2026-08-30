@@ -778,9 +778,12 @@ mod tests {
                 "fixture".to_string(),
                 homeboy_core::project::ProjectComponentOverrides {
                     remote_path: Some("plugins/one".to_string()),
-                    hooks: [("post:deploy".to_string(), vec!["one".to_string()])]
-                        .into_iter()
-                        .collect(),
+                    hooks: [(
+                        homeboy_extension_contract::HookEvent::PostDeploy,
+                        vec!["one".to_string()],
+                    )]
+                    .into_iter()
+                    .collect(),
                     ..Default::default()
                 },
             )]

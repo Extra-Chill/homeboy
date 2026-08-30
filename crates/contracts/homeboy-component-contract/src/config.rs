@@ -141,7 +141,7 @@ pub struct ComponentOverrideConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_deploy: Option<GitDeployConfig>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub hooks: HashMap<String, Vec<String>>,
+    pub hooks: HashMap<homeboy_extension_contract::HookEvent, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<ScopeConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
