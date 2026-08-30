@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::runner::ExtensionRunner;
+use super::invoke::{read_extension_phase_timings, ExtensionRunner, RunnerOutput};
 use crate::extension::catalog::load_extension;
 use crate::extension::env_provider;
-use crate::extension::RunnerOutput;
 use homeboy_core::component::Component;
 pub use homeboy_core::component_script_provider::ComponentScriptOutput;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};
@@ -241,8 +240,7 @@ pub(crate) fn run_component_scripts_with_run_dir_and_timeout(
         request.script_args,
         request.timeout,
     )?;
-    output.extension_phase_timings =
-        super::runner::read_extension_phase_timings(request.run_dir.path())?;
+    output.extension_phase_timings = read_extension_phase_timings(request.run_dir.path())?;
     Ok(output)
 }
 

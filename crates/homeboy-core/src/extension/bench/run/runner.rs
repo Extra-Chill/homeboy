@@ -8,8 +8,9 @@ use crate::extension::bench::aggregate_runs;
 use crate::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
 use crate::extension::bench::parsing::{self, BenchResults, BenchScenario};
 use crate::extension::bench::responsiveness::{memory_sample, BenchFailureMemorySample};
+use crate::extension::invoke::ExtensionRunner;
 use crate::extension::resolve::ExtensionExecutionContext;
-use crate::extension::{build_scenario_runner, ExtensionRunner, ScenarioRunnerOptions};
+use crate::extension::{build_scenario_runner, ScenarioRunnerOptions};
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
@@ -371,7 +372,7 @@ pub(crate) fn run_concurrent_instances(
         }));
     }
 
-    let mut per_instance: Vec<(u32, crate::extension::RunnerOutput)> =
+    let mut per_instance: Vec<(u32, crate::extension::invoke::RunnerOutput)> =
         Vec::with_capacity(concurrency as usize);
     for h in handles {
         match h.join() {

@@ -14,6 +14,10 @@ use homeboy_engine_primitives::shell;
 use homeboy_extension_contract::{ExtensionCapability, TestSecretEnvProjection};
 use serde_json::json;
 
+mod evidence;
+use evidence::{failure_payload, stale_validation_dependency_message};
+pub(crate) use evidence::{read_extension_phase_timings, tail_lines};
+
 /// Env var that makes a validation runner fail closed when a resolved
 /// validation dependency's local checkout is behind its upstream, instead of
 /// warning and proceeding. Set for blocking gates (differential CI lint, and
@@ -285,7 +289,7 @@ impl ExtensionRunner {
     /// 7. Prepare environment variables
     /// 8. Execute via shell
     pub fn run(&self) -> Result<RunnerOutput> {
-        let prepared = super::invoke::prepare_capability_run(
+        let prepared = super::prepare_capability_run(
             &self.execution_context,
             self.pre_loaded_component
                 .as_ref()
@@ -309,7 +313,7 @@ impl ExtensionRunner {
             "extension child",
         )?;
         let mut extra_env_vars =
-            super::component_script::component_env_vars(&prepared.execution.component);
+            crate::extension::component_script::component_env_vars(&prepared.execution.component);
         extra_env_vars.extend(self.env_vars.clone());
         let explicit_cargo_target = extra_env_vars
             .iter()
@@ -486,7 +490,7 @@ impl ExtensionRunner {
         extra_env_vars: &[(String, String)],
     ) -> Result<Vec<(String, String)>> {
         let additional_env_provider_paths = self.additional_env_provider_paths()?;
-        super::invoke::build_capability_env_with_additional_providers(
+        super::build_capability_env_with_additional_providers(
             extension_name,
             &self.execution_context.component.id,
             extension_path,
@@ -523,7 +527,7 @@ impl ExtensionRunner {
                 self.command_string(extension_path)
             )
         });
-        super::invoke::execute_capability_script(
+        super::execute_capability_script(
             extension_path,
             &self.execution_context.script_path,
             &self.script_args,
@@ -532,7 +536,7 @@ impl ExtensionRunner {
             command_override
                 .as_deref()
                 .or(self.command_override.as_deref()),
-            super::invoke::CapabilityScriptOptions {
+            super::CapabilityScriptOptions {
                 // Streaming an arbitrary child stream cannot guarantee exact
                 // value redaction. Secret-bearing children are captured first,
                 // then redacted before any Homeboy evidence is produced.
@@ -948,88 +952,6 @@ fn write_json_sidecar(path: &Path, value: &serde_json::Value) -> Result<()> {
             )),
         )
     })
-}
-
-fn failure_payload(phase: &str, command: &str, output: &CommandOutput) -> serde_json::Value {
-    let (stdout_tail, stdout_truncated) = tail_lines(&output.stdout, FAILURE_TAIL_LINES);
-    let (stderr_tail, stderr_truncated) = tail_lines(&output.stderr, FAILURE_TAIL_LINES);
-    let mut payload = json!({
-        "phase": phase,
-        "command": command,
-        "exit_code": output.exit_code,
-        "stdout_tail": stdout_tail,
-        "stderr_tail": stderr_tail,
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
-    });
-
-    if let Some(detail) = parsed_detail(&output.stdout).or_else(|| parsed_detail(&output.stderr)) {
-        payload["parsed_detail"] = detail;
-    }
-
-    payload
-}
-
-fn parsed_detail(output: &str) -> Option<serde_json::Value> {
-    let trimmed = output.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    serde_json::from_str(trimmed).ok().or_else(|| {
-        trimmed
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find_map(|line| serde_json::from_str(line).ok())
-    })
-}
-
-pub(crate) fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
-    let lines: Vec<&str> = s.lines().collect();
-    if lines.len() <= max_lines {
-        (s.to_string(), false)
-    } else {
-        let start = lines.len() - max_lines;
-        (lines[start..].join("\n"), true)
-    }
-}
-
-pub(crate) fn read_extension_phase_timings(
-    run_dir_path: &Path,
-) -> Result<Vec<ExtensionPhaseTiming>> {
-    let run_dir = RunDir::from_existing(run_dir_path.to_path_buf())?;
-    let Some(value) = run_dir.read_step_output(run_dir::files::PHASE_TIMINGS) else {
-        return Ok(Vec::new());
-    };
-
-    if let Some(timings) = value.get("phase_timings") {
-        return serde_json::from_value(timings.clone()).map_err(|e| {
-            Error::internal_json(
-                e.to_string(),
-                Some("parse extension phase timings".to_string()),
-            )
-        });
-    }
-
-    serde_json::from_value(value).map_err(|e| {
-        Error::internal_json(
-            e.to_string(),
-            Some("parse extension phase timings".to_string()),
-        )
-    })
-}
-
-fn stale_validation_dependency_message(stdout: &str, stderr: &str) -> Option<String> {
-    stderr
-        .lines()
-        .chain(stdout.lines())
-        .map(str::trim)
-        .find(|line| {
-            line.contains(STALE_VALIDATION_DEPENDENCY_PREFIX)
-                && line.contains(" is behind ")
-                && line.contains("commit(s)")
-        })
-        .map(str::to_string)
 }
 
 #[cfg(test)]

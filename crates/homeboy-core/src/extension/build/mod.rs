@@ -576,7 +576,7 @@ fn execute_build_component(
         )?
         .into()
     } else if let Some(context) = build_context {
-        let mut runner = extension::ExtensionRunner::for_context(context.clone())
+        let mut runner = extension::invoke::ExtensionRunner::for_context(context.clone())
             .component(comp.clone())
             .working_dir(&local_path_str)
             .command_override(build_cmd.clone())
@@ -592,7 +592,7 @@ fn execute_build_component(
         runner.run()?
     } else {
         let context = resolve::resolve_execution_context(comp, ExtensionCapability::Build)?;
-        let mut runner = extension::ExtensionRunner::for_context(context)
+        let mut runner = extension::invoke::ExtensionRunner::for_context(context)
             .component(comp.clone())
             .working_dir(&local_path_str)
             .command_override(build_cmd.clone())
@@ -691,7 +691,7 @@ fn resolve_changed_scope(
 
     let mut scope_context = context.clone();
     scope_context.script_path = changed_scope_script.to_string();
-    let output = extension::ExtensionRunner::for_context(scope_context)
+    let output = extension::invoke::ExtensionRunner::for_context(scope_context)
         .component(comp.clone())
         .working_dir(working_dir)
         .env("HOMEBOY_CHANGED_SINCE", changed_since)

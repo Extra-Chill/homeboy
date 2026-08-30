@@ -115,7 +115,7 @@ fn auto_run_ids_scope_identical_payloads_while_explicit_ids_remain_stable() {
 fn fuzz_contract_exposes_only_declared_core_helper_environment() {
     let config = FuzzConfig {
         runtime_helpers: vec![homeboy_extension_contract::RuntimeHelperRequirement {
-            id: homeboy_core::extension::RUNTIME_SETTINGS_HELPER_ID.to_string(),
+            id: homeboy_core::extension::invoke::RUNTIME_SETTINGS_HELPER_ID.to_string(),
             revision: None,
         }],
         ..Default::default()
@@ -124,7 +124,7 @@ fn fuzz_contract_exposes_only_declared_core_helper_environment() {
 
     assert!(contract
         .env
-        .contains(&homeboy_core::extension::RUNTIME_SETTINGS_HELPER_ENV.to_string()));
+        .contains(&homeboy_core::extension::invoke::RUNTIME_SETTINGS_HELPER_ENV.to_string()));
     assert!(!contract
         .env
         .contains(&"HOMEBOY_RUNTIME_HELPERS_PROVENANCE".to_string()));

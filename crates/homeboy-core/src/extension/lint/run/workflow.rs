@@ -35,7 +35,7 @@ struct LintRunEvidence {
 }
 
 struct ScopedLintOutput {
-    output: extension::RunnerOutput,
+    output: extension::invoke::RunnerOutput,
     evidence: Vec<LintRunEvidence>,
     child_run_dirs: Vec<RunDir>,
 }
@@ -503,7 +503,7 @@ fn run_scoped_lint_runs(
     }
 
     Ok(ScopedLintOutput {
-        output: extension::RunnerOutput {
+        output: extension::invoke::RunnerOutput {
             exit_code,
             success,
             stdout,
