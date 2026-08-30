@@ -797,6 +797,26 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         homeboy::core::defaults::save_config(&config).expect("save worktree provider config");
         std::fs::write(source.join("pre-existing-candidate.txt"), "preserve me\n")
             .expect("write pre-existing candidate");
+        std::fs::write(target.join("candidate-commit.txt"), "existing candidate\n")
+            .expect("write candidate commit");
+        let status = Command::new("git")
+            .args(["add", "candidate-commit.txt"])
+            .current_dir(&target)
+            .status()
+            .expect("stage candidate commit");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "commit",
+                "-m",
+                "fix: preserve existing candidate title",
+                "-m",
+                "commit body must not become the pull request title",
+            ])
+            .current_dir(&target)
+            .status()
+            .expect("commit existing candidate");
+        assert!(status.success());
         let expected_patch = temp.path().join("expected.patch");
         let promotion_request = temp.path().join("promotion-request.json");
         std::fs::write(
@@ -923,6 +943,12 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         assert!(prepared.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["status"], "green_no_finalize");
+        let recipe = homeboy::agents::agent_task_service::load_recipe("cook-committed-work")
+            .expect("load persisted Cook recipe");
+        assert_eq!(
+            recipe.finalization["title"],
+            "fix: preserve existing candidate title"
+        );
         assert_eq!(
             value["attempts"][0]["feedback"]["status"],
             "green_completed"
