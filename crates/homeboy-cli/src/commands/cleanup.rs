@@ -225,6 +225,8 @@ pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> Cmd
                         all_configured_providers: args.all_providers,
                         apply: args.apply,
                         timeout: None,
+                        provider_run_id: args.provider_run_id,
+                        provider_plan_id: args.provider_plan_id,
                         ..WorktreeCleanupRequest::default()
                     }),
                 },
@@ -2008,6 +2010,8 @@ fn cleanup_inventory_with_deadline(
                         cleanup_branches: apply,
                         allow_unmerged_branches: false,
                         timeout: None,
+                        provider_run_id: None,
+                        provider_plan_id: None,
                     },
                     &homeboy::core::defaults::load_config(),
                 )?
