@@ -50,7 +50,7 @@ pub struct FuzzDoctorExtensionOutput {
     pub version: String,
     pub path: String,
     pub linked: bool,
-    pub readiness: homeboy_core::extension_readiness::ExtensionReadinessState,
+    pub readiness: homeboy_core::extension::readiness::ExtensionReadinessState,
     pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,

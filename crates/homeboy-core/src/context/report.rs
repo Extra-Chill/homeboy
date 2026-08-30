@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::component::{self, Component};
 use crate::extension::catalog::{is_extension_linked, load_all_extensions};
-use crate::extension_readiness::is_extension_compatible;
+use crate::extension::resolve::is_extension_compatible;
 use crate::project::{self, Project};
 use crate::release_provider::{self, ReleaseStateEntry};
 use crate::server::{self, Server};
@@ -120,7 +120,7 @@ pub struct ExtensionEntry {
     pub description: String,
     pub runtime: String,
     pub compatible: bool,
-    pub readiness: crate::extension_readiness::ExtensionReadinessState,
+    pub readiness: crate::extension::readiness::ExtensionReadinessState,
     pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
@@ -274,9 +274,9 @@ fn build_report_at(
         .iter()
         .filter(|m| show_all || linked_extension_ids.contains(&m.id) || m.executable.is_none())
         .map(|m| {
-            let ready_status = crate::extension_readiness::extension_ready_status_with(
+            let ready_status = crate::extension::readiness::extension_ready_status_with(
                 m,
-                crate::extension_readiness::ExtensionReadinessMode::Cached,
+                crate::extension::readiness::ExtensionReadinessMode::Cached,
             );
             ExtensionEntry {
                 id: m.id.clone(),

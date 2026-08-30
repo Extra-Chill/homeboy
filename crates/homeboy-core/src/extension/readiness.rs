@@ -3,11 +3,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::project::Project;
 use crate::server::execute_local_command_in_dir_with_timeout;
 use homeboy_engine_primitives::template;
 
-use crate::extension::catalog::load_extension;
 use homeboy_extension_contract::ExtensionManifest;
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
@@ -333,31 +331,6 @@ fn write_cached_status(
             status: status.clone(),
         },
     );
-}
-
-/// Check if a extension is compatible with a project.
-pub fn is_extension_compatible(extension: &ExtensionManifest, project: Option<&Project>) -> bool {
-    let Some(ref requires) = extension.requires else {
-        return true;
-    };
-
-    // Required extensions must be installed globally
-    for required_extension in &requires.extensions {
-        if load_extension(required_extension).is_err() {
-            return false;
-        }
-    }
-
-    // Required components must be linked to the project (if project context exists)
-    if let Some(project) = project {
-        for component in &requires.components {
-            if !crate::project::has_component(project, component) {
-                return false;
-            }
-        }
-    }
-
-    true
 }
 
 #[cfg(test)]
