@@ -394,6 +394,141 @@ fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateO
 }
 
 #[test]
+fn import_records_an_exact_existing_worktree_without_changing_git_and_replays_idempotently() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, _) = registered_create_fixture(home.path(), "import-fixture");
+        let branch = "fix/import";
+        let handle = "import-fixture@fix-import";
+        let path = source.parent().expect("source parent").join(handle);
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                &path.to_string_lossy(),
+                "HEAD",
+            ],
+        );
+        let head_before = git::run_git(&path, &["rev-parse", "HEAD"], "git head").unwrap();
+        let status_before = git::run_git(&path, &["status", "--porcelain"], "git status").unwrap();
+        let options = WorktreeImportOptions {
+            component_id: "import-fixture".to_string(),
+            handle: handle.to_string(),
+            path: path.display().to_string(),
+            branch: branch.to_string(),
+            base_ref: "origin/main".to_string(),
+            task_url: Some("https://example.com/tasks/import".to_string()),
+            owner_run_ref: Some("run-import".to_string()),
+            cleanup_policy: CleanupPolicy::PreserveOnFailure,
+            created_at: Some("2026-01-02T03:04:05Z".to_string()),
+        };
+
+        let imported = import(options.clone()).expect("import exact worktree");
+        let replay = import(options).expect("replay exact import");
+
+        assert!(imported.imported);
+        assert!(!replay.imported);
+        assert_eq!(replay.record, imported.record);
+        assert_eq!(imported.record.created_at, "2026-01-02T03:04:05Z");
+        assert_eq!(imported.record.run_id.as_deref(), Some("run-import"));
+        assert_eq!(
+            git::run_git(&path, &["rev-parse", "HEAD"], "git head").unwrap(),
+            head_before
+        );
+        assert_eq!(
+            git::run_git(&path, &["status", "--porcelain"], "git status").unwrap(),
+            status_before
+        );
+    });
+}
+
+#[test]
+fn import_refuses_primary_mismatched_handle_and_conflicting_replay() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, _) = registered_create_fixture(home.path(), "import-conflict");
+        let branch = "fix/import";
+        let handle = "import-conflict@fix-import";
+        let path = source.parent().expect("source parent").join(handle);
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                &path.to_string_lossy(),
+                "HEAD",
+            ],
+        );
+        let options = WorktreeImportOptions {
+            component_id: "import-conflict".to_string(),
+            handle: handle.to_string(),
+            path: path.display().to_string(),
+            branch: branch.to_string(),
+            base_ref: "HEAD".to_string(),
+            task_url: None,
+            owner_run_ref: Some("run-import".to_string()),
+            cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+            created_at: None,
+        };
+
+        let mut primary = options.clone();
+        primary.path = source.display().to_string();
+        assert!(import(primary).is_err());
+        let mut wrong_handle = options.clone();
+        wrong_handle.handle = "import-conflict@wrong".to_string();
+        assert!(import(wrong_handle).is_err());
+        import(options.clone()).expect("initial import");
+        let mut conflicting = options;
+        conflicting.base_ref = "origin/main".to_string();
+        assert!(import(conflicting).is_err());
+    });
+}
+
+#[test]
+fn finalization_is_owner_bound_idempotent_conflict_safe_and_never_cleans_up() {
+    crate::test_support::with_isolated_home(|home| {
+        let (_, mut options) = registered_create_fixture(home.path(), "finalize-fixture");
+        options.run_id = Some("run-finalize".to_string());
+        let created = create(options).expect("create task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+
+        assert!(finalize_provider_lifecycle(
+            &created.record.id,
+            "wrong-owner",
+            crate::worktree_provider::WorktreeTerminalDisposition::Failed,
+        )
+        .is_err());
+        let finalized = finalize_provider_lifecycle(
+            &created.record.id,
+            "run-finalize",
+            crate::worktree_provider::WorktreeTerminalDisposition::Failed,
+        )
+        .expect("finalize worktree");
+        let replay = finalize_provider_lifecycle(
+            &created.record.id,
+            "run-finalize",
+            crate::worktree_provider::WorktreeTerminalDisposition::Failed,
+        )
+        .expect("replay finalization");
+
+        assert_eq!(replay, finalized);
+        assert_eq!(finalized.lifecycle_revision, 1);
+        assert_eq!(finalized.terminal_disposition.as_deref(), Some("failed"));
+        assert_eq!(finalized.cleanup_policy, CleanupPolicy::PreserveOnFailure);
+        assert!(path.exists(), "finalization must not clean up the worktree");
+        assert!(finalize_provider_lifecycle(
+            &created.record.id,
+            "run-finalize",
+            crate::worktree_provider::WorktreeTerminalDisposition::Succeeded,
+        )
+        .is_err());
+    });
+}
+
+#[test]
 fn create_restores_missing_active_record_from_an_unclaimed_existing_branch() {
     crate::test_support::with_isolated_home(|home| {
         let (source, options) = registered_create_fixture(home.path(), "restore-fixture");

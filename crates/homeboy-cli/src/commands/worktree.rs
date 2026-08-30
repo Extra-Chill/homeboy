@@ -78,9 +78,11 @@ enum WorktreeCommand {
         #[arg(long)]
         task_url: Option<String>,
         #[arg(long)]
-        run_id: Option<String>,
+        owner_run_ref: Option<String>,
         #[arg(long, value_enum)]
         cleanup_policy: CliCleanupPolicy,
+        #[arg(long)]
+        created_at: Option<String>,
     },
     /// Record a terminal worktree disposition without performing cleanup
     Finalize {
@@ -535,8 +537,9 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             branch,
             base_ref,
             task_url,
-            run_id,
+            owner_run_ref,
             cleanup_policy,
+            created_at,
         } => WorktreeOutput::Import(worktree::import(WorktreeImportOptions {
             component_id,
             handle,
@@ -544,8 +547,9 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             branch,
             base_ref,
             task_url,
-            run_id,
+            owner_run_ref,
             cleanup_policy: cleanup_policy.into(),
+            created_at,
         })?),
         WorktreeCommand::Finalize {
             handle,
@@ -812,7 +816,7 @@ mod tests {
     use homeboy::core::worktree::{
         CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState, WorktreeCreateAction,
         WorktreeCreateEvidence, WorktreeCreateOutput, WorktreeCreateReconciliation,
-        WorktreeListOutput,
+        WorktreeImportOutput, WorktreeListOutput,
     };
 
     use crate::cli_surface::{Cli, Commands};
@@ -894,6 +898,65 @@ mod tests {
         assert!(existing.get("reconciliation").is_none());
         assert_eq!(restored["action"], "create");
         assert_eq!(restored["reconciliation"]["action"], "restored");
+    }
+
+    #[test]
+    fn worktree_import_and_finalize_are_public_typed_cli_commands() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "worktree",
+            "import",
+            "fixture",
+            "fixture@branch",
+            "/tmp/fixture@branch",
+            "--branch",
+            "branch",
+            "--base-ref",
+            "main",
+            "--owner-run-ref",
+            "run-1",
+            "--cleanup-policy",
+            "preserve-on-failure",
+            "--created-at",
+            "2026-01-02T03:04:05Z",
+        ]);
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Import {
+            owner_run_ref,
+            created_at,
+            ..
+        } = args.command
+        else {
+            panic!("expected import command");
+        };
+        assert_eq!(owner_run_ref.as_deref(), Some("run-1"));
+        assert_eq!(created_at.as_deref(), Some("2026-01-02T03:04:05Z"));
+
+        let record = create_output(None).record;
+        let imported = serde_json::to_value(WorktreeOutput::Import(WorktreeImportOutput {
+            record,
+            imported: true,
+        }))
+        .expect("serialize import");
+        let finalized = serde_json::to_value(WorktreeOutput::Finalize(
+            homeboy::core::worktree_provider::WorktreeFinalization {
+                provider_id: "builtin".to_string(),
+                handle: "fixture@branch".to_string(),
+                disposition:
+                    homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded,
+                owner_outcome: "success".to_string(),
+                lifecycle_state: "completed".to_string(),
+                inspection_path: "/tmp/fixture@branch".to_string(),
+            },
+        ))
+        .expect("serialize finalization");
+
+        assert_eq!(imported["action"], "import");
+        assert_eq!(imported["imported"], true);
+        assert_eq!(finalized["action"], "finalize");
+        assert_eq!(finalized["disposition"], "succeeded");
     }
 
     #[test]
