@@ -4,6 +4,26 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.365.2] - 2026-08-30
+
+### Changed
+- cover candidate-derived Cook title
+- Consolidate extension lifecycle ownership
+- return canonical status resource
+- Apply prepared deploys with bounded concurrency
+- Consolidate extension API ownership
+- Regenerate CLI command contract
+- Remove deprecated daemon recovery confirmations
+- Reuse prepared deploy payloads across targets
+- Remove extension discovery re-exports
+
+### Fixed
+- derive Cook pull request titles
+- preserve upgrade failure streams
+- recover detached Cook retries
+- recover missing promotion aggregates
+- preflight rig runner tools
+
 ## [0.365.1] - 2026-08-30
 
 ### Changed
