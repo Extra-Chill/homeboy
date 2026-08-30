@@ -9,6 +9,7 @@ mod capability;
 mod discovery;
 mod lifecycle;
 mod resource;
+mod session;
 mod workspace;
 
 pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
@@ -24,6 +25,10 @@ pub use discovery::{
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{
     RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+};
+pub use session::{
+    RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
+    RunnerTunnelProcessStartIdentity,
 };
 pub use workspace::{RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode};
 

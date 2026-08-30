@@ -37,6 +37,12 @@ pub use homeboy_runner_contract::{
     RunnerCapabilityPreflight, RunnerKind, RunnerLifecycleOwner, RunnerRequiredTool,
     RunnerToolCapabilityRequirement, RunnerToolchainReadinessProbe,
 };
+/// Compatibility exports for established Lab runner consumers. Persisted
+/// session and tunnel records are canonical in `homeboy-runner-contract`.
+pub use homeboy_runner_contract::{
+    RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
+    RunnerTunnelProcessStartIdentity,
+};
 /// Compatibility exports for established Lab runner consumers. Generic runner
 /// resource telemetry is canonical in `homeboy-runner-contract`.
 pub use homeboy_runner_contract::{
@@ -154,153 +160,6 @@ pub enum LabRunnerGateDecision {
         reason: String,
         remediation: Vec<String>,
     },
-}
-
-/// How a runner session is tunneled. Pure serde data (with small label helpers)
-/// so the core daemon can build/persist sessions without a core -> runner edge.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerTunnelMode {
-    DirectSsh,
-    Reverse,
-}
-
-impl RunnerTunnelMode {
-    /// This mode rendered for humans — `direct SSH`, `reverse-connected`.
-    ///
-    /// A different vocabulary, not a different format of
-    /// [`RunnerTunnelMode::metadata_value`]: this is prose for operator-facing
-    /// output, and it is deliberately not the wire string. Merging the two
-    /// would put a space and a hyphen into persisted metadata that
-    /// `#[serde(rename_all = "snake_case")]` spells `direct_ssh`, with no
-    /// compile error to catch it.
-    pub fn label(&self) -> &'static str {
-        self.labels().0
-    }
-
-    /// This mode as its own canonical wire string — the value `serde` already
-    /// produces, pinned to it by
-    /// `runner_tunnel_mode_metadata_value_matches_its_serialized_form`.
-    ///
-    /// Unlike [`RunnerTunnelMode::label`], this is a hand-written restatement
-    /// of the derived form, so it can drift silently on a variant rename or a
-    /// serde attribute change (#13400). The pin is what stops that.
-    pub fn metadata_value(&self) -> &'static str {
-        self.labels().1
-    }
-
-    fn labels(&self) -> (&'static str, &'static str) {
-        match self {
-            RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
-            RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
-        }
-    }
-}
-
-fn default_tunnel_mode() -> RunnerTunnelMode {
-    RunnerTunnelMode::DirectSsh
-}
-
-/// Which side owns a runner session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerSessionRole {
-    Controller,
-    Runner,
-}
-
-fn default_session_role() -> RunnerSessionRole {
-    RunnerSessionRole::Controller
-}
-
-/// The connectivity state of a runner session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerSessionState {
-    Connected,
-    Disconnected,
-    Recorded,
-}
-
-/// Kernel-derived identity for one local tunnel process instance. This survives
-/// controller restart so a recycled PID is never signaled from durable state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "platform", rename_all = "snake_case")]
-pub enum RunnerTunnelProcessStartIdentity {
-    Linux {
-        starttime_ticks: u64,
-    },
-    Macos {
-        start_seconds: u64,
-        start_microseconds: u64,
-    },
-}
-
-/// A controller-owned reverse forward that exposes a controller-local proxy to
-/// a direct SSH runner. The URL is safe to pass to a runner process: it points
-/// at the runner loopback listener and never carries controller credentials.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerProxyForward {
-    pub runner_url: String,
-    pub tunnel_pid: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
-}
-
-/// A persisted runner session record. Pure serde data so the core daemon's
-/// `/runner/sessions` endpoints can build and persist sessions without a
-/// core -> runner edge. `leaseless_recovery_evidence` is carried as opaque JSON
-/// (the runner layer owns its typed `RunnerLeaselessRecoveryEvidence`); the
-/// daemon never populates it, so the JSON roundtrips identically.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerSession {
-    pub runner_id: String,
-    #[serde(default = "default_tunnel_mode")]
-    pub mode: RunnerTunnelMode,
-    #[serde(default = "default_session_role")]
-    pub role: RunnerSessionRole,
-    pub server_id: Option<String>,
-    #[serde(default)]
-    pub controller_id: Option<String>,
-    #[serde(default)]
-    pub broker_url: Option<String>,
-    #[serde(default)]
-    pub remote_daemon_address: Option<String>,
-    #[serde(default)]
-    pub local_port: Option<u16>,
-    #[serde(default)]
-    pub local_url: Option<String>,
-    pub tunnel_pid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
-    /// Optional controller proxy exposure owned with this direct SSH session.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_forward: Option<RunnerProxyForward>,
-    pub remote_daemon_pid: Option<u32>,
-    #[serde(default)]
-    pub remote_daemon_lease_id: Option<String>,
-    pub homeboy_version: String,
-    #[serde(default)]
-    pub homeboy_build_identity: Option<String>,
-    pub connected_at: String,
-    #[serde(default)]
-    pub worker_identity: Option<String>,
-    #[serde(default)]
-    pub worker_pid: Option<u32>,
-    #[serde(default)]
-    pub last_seen_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leaseless_recovery_evidence: Option<serde_json::Value>,
-}
-
-impl RunnerSession {
-    /// Which side owns this session's lifecycle, derived from its role.
-    pub fn lifecycle_owner(&self) -> RunnerLifecycleOwner {
-        match self.role {
-            RunnerSessionRole::Controller => RunnerLifecycleOwner::Controller,
-            RunnerSessionRole::Runner => RunnerLifecycleOwner::Runner,
-        }
-    }
 }
 
 /// A versioned Lab contract required by a controller or advertised by an
@@ -593,36 +452,6 @@ fn advertised_capability_versions(
             .insert(capability.version);
     }
     versions
-}
-
-#[cfg(test)]
-mod runner_tunnel_mode_label_tests {
-    use super::RunnerTunnelMode;
-
-    /// `metadata_value` restates what `#[serde(rename_all = "snake_case")]`
-    /// already produces. It agrees today, which is exactly the state
-    /// `RunnerWorkspaceSyncMode` was in before it drifted — nothing tied the
-    /// copy to its source. This is that tie (#13400).
-    #[test]
-    fn runner_tunnel_mode_metadata_value_matches_its_serialized_form() {
-        for mode in [RunnerTunnelMode::DirectSsh, RunnerTunnelMode::Reverse] {
-            assert_eq!(
-                serde_json::to_value(&mode).expect("serialize"),
-                serde_json::json!(mode.metadata_value()),
-                "{mode:?}"
-            );
-        }
-    }
-
-    /// `label` is a different vocabulary, not a different format, and merging
-    /// it into `metadata_value` would push prose into persisted metadata
-    /// through a string assignment with no compile error. It fails here
-    /// instead.
-    #[test]
-    fn the_operator_facing_vocabulary_stays_prose() {
-        assert_eq!(RunnerTunnelMode::DirectSsh.label(), "direct SSH");
-        assert_eq!(RunnerTunnelMode::Reverse.label(), "reverse-connected");
-    }
 }
 
 #[cfg(test)]
