@@ -4950,6 +4950,39 @@ fn cook_selected_candidate_provenance(
     Some(value)
 }
 
+/// Map a zero-budget aggregate diagnostic onto a pre-provider cause.
+///
+/// Harvest and other scheduler refusals fail before provider dispatch, so the
+/// Cook report would otherwise fall through to `phase=provider` with no class.
+pub(crate) fn pre_provider_diagnostic_cause<'a>(
+    provider_executions_consumed: u64,
+    diagnostics: impl IntoIterator<Item = &'a crate::agent_task::AgentTaskDiagnostic>,
+) -> Option<(String, String, Value)> {
+    if provider_executions_consumed > 0 {
+        return None;
+    }
+    let diagnostic = diagnostics
+        .into_iter()
+        .find(|item| !item.class.trim().is_empty())?;
+    let phase = if diagnostic
+        .class
+        .starts_with("agent_task.committed_harvest_")
+    {
+        "committed_harvest_preflight"
+    } else {
+        "pre_provider"
+    };
+    Some((
+        phase.to_string(),
+        diagnostic.class.clone(),
+        json!({
+            "class": diagnostic.class,
+            "message": diagnostic.message,
+            "data": diagnostic.data,
+        }),
+    ))
+}
+
 /// Build recovery coordinates from durable controller records only. Provider
 /// failures contribute only a bounded, redacted causal command projection;
 /// expanded output remains behind `diagnose`.
@@ -5066,6 +5099,17 @@ pub fn cook_failure_context(
             },
         )
     });
+    let pre_provider_cause = agent_task_lifecycle::read_attempt_aggregate(record_run_id)
+        .ok()
+        .and_then(|aggregate| {
+            pre_provider_diagnostic_cause(
+                provider_executions_consumed,
+                aggregate
+                    .outcomes
+                    .iter()
+                    .flat_map(|outcome| &outcome.diagnostics),
+            )
+        });
     let (phase, reason_code, diagnostic) = if blocking_claim.is_some() {
         (
             "promotion".to_string(),
@@ -5140,6 +5184,8 @@ pub fn cook_failure_context(
             "review_form_timeout".to_string(),
             None,
         )
+    } else if let Some((phase, class, diagnostic)) = pre_provider_cause {
+        (phase, class, Some(diagnostic))
     } else {
         (
             "provider".to_string(),
@@ -5647,6 +5693,30 @@ mod recovery_action_tests {
             .legal_actions
             .iter()
             .any(|action| action.command.contains("mime-shaped")));
+    }
+}
+
+#[cfg(test)]
+mod pre_provider_cause_tests {
+    use super::*;
+    use crate::agent_task::AgentTaskDiagnostic;
+
+    #[test]
+    fn harvest_dirty_workspace_is_a_shared_pre_provider_cause() {
+        let diagnostic = AgentTaskDiagnostic {
+            class: "agent_task.committed_harvest_dirty_workspace".to_string(),
+            message: "refusing committed-change harvest from a workspace with pre-existing uncommitted changes"
+                .to_string(),
+            data: json!({ "status": " M user-edit.txt" }),
+        };
+
+        let (phase, class, value) =
+            pre_provider_diagnostic_cause(0, std::iter::once(&diagnostic)).expect("cause");
+
+        assert_eq!(phase, "committed_harvest_preflight");
+        assert_eq!(class, "agent_task.committed_harvest_dirty_workspace");
+        assert_eq!(value["message"], diagnostic.message);
+        assert!(pre_provider_diagnostic_cause(1, std::iter::once(&diagnostic)).is_none());
     }
 }
 
