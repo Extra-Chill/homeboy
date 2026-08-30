@@ -17,7 +17,7 @@ use homeboy_core::lab_contract::{
 use homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy;
 use homeboy_core::runner_execution_envelope::RunnerExecutionProjection;
 use homeboy_core::source_snapshot::SourceSnapshot;
-use homeboy_lab_runner_contract::RunnerWorkspaceLease;
+use homeboy_runner_contract::RunnerWorkspaceLease;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExtensionDevRunPlan {

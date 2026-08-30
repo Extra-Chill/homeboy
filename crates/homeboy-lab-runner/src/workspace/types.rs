@@ -29,11 +29,8 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     "*.pfx",
 ];
 
-// RunnerWorkspaceSyncMode + RunnerWorkspaceSyncOptions are behavior-free data;
-// they now live in the shared runner-contract crate so core can name them
-// without a core -> runner edge. Re-exported so internal/CLI call sites resolve
-// unchanged.
-pub use homeboy_lab_runner_contract::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
+pub use homeboy_lab_runner_contract::RunnerWorkspaceSyncOptions;
+pub use homeboy_runner_contract::RunnerWorkspaceSyncMode;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceSyncOutput {
@@ -645,9 +642,7 @@ pub(crate) struct RunnerWorkspaceReconciliation {
     pub job_logs_command: String,
 }
 
-// RunnerWorkspaceCurrentSummary now lives in the shared runner-contract crate
-// (core's dev_run names it). Re-exported so runner-internal call sites resolve.
-pub use homeboy_lab_runner_contract::RunnerWorkspaceCurrentSummary;
+pub use homeboy_runner_contract::RunnerWorkspaceCurrentSummary;
 
 /// File + byte counts for a synced/snapshotted workspace tree.
 ///
