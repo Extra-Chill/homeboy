@@ -5,9 +5,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::metadata::JobArtifactMetadata;
-use crate::metadata::RunnerJobLifecycleMetadata;
 use homeboy_lab_contract::path_materialization::PathMaterializationPlan;
-use homeboy_lab_runner_contract::RunnerLifecycleOwner;
+use homeboy_runner_contract::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 use homeboy_source_snapshot_contract::SourceSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

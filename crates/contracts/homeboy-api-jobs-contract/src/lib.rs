@@ -2,9 +2,9 @@
 //!
 //! `Job`, `JobStatus`, `JobEvent`, and their runner/daemon companions describe
 //! the shape of a homeboy API job as it crosses process boundaries between the
-//! controller, daemon, and runner. These are behavior-free serde data types
-//! (plus the pure `JobArtifactMetadata` / `RunnerJobLifecycleMetadata`), so this
-//! is a leaf crate other crates can depend on without pulling in core.
+//! controller, daemon, and runner. These are behavior-free serde data types, so
+//! this crate can depend on the canonical runner contract without pulling in
+//! core. Established API-job imports for shared metadata remain re-exported.
 //!
 //! The job *store* (`api_jobs::store`, persistence, remote-runner dispatch,
 //! provider hooks) stays in `homeboy-core`.

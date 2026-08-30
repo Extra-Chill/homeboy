@@ -1,11 +1,11 @@
-//! Shared runner contract: behavior-free types and env-var constants that both
-//! `homeboy-core` and the optional `homeboy-runner` feature crate depend on.
+//! Lab routing, handoff, and compatibility contracts used by `homeboy-core` and
+//! the optional `homeboy-runner` feature crate.
 //!
 //! Runner is an optional Lab-offload feature; core must not depend on runner
 //! *behavior*. But some core code legitimately needs to name runner *concepts*
 //! (e.g. the runner kind, or the env-var markers used when an exec crosses a
-//! remote-runner boundary). Those plain-data contracts live here so core can
-//! reference them without a `core -> runner` edge.
+//! remote-runner boundary). Generic lifecycle data is canonical in
+//! `homeboy-runner-contract`; its established import is re-exported here.
 //!
 //! Two single-type crates were folded in here for the same reason they existed
 //! separately — both are behavior-free runner contracts below core, and both
@@ -27,6 +27,9 @@ pub use execution_placement::{
     ExecutionPlacementRequirement, ExecutionPlacementRunnerSelection, RunnerSelectionSource,
     CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
 };
+/// Compatibility export for established Lab runner consumers. Lifecycle
+/// ownership is canonical in `homeboy-runner-contract`.
+pub use homeboy_runner_contract::RunnerLifecycleOwner;
 pub use placement::Placement;
 pub use provider_source_types::AgentTaskProviderRunnerSource;
 
@@ -40,27 +43,6 @@ use serde::{Deserialize, Serialize};
 pub enum RunnerKind {
     Local,
     Ssh,
-}
-
-/// Which side of a runner exchange owns a lifecycle resource.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerLifecycleOwner {
-    Controller,
-    Runner,
-    Broker,
-    Local,
-}
-
-impl RunnerLifecycleOwner {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Controller => "controller",
-            Self::Runner => "runner",
-            Self::Broker => "broker",
-            Self::Local => "local",
-        }
-    }
 }
 
 /// File + byte counts for a workspace sync.
