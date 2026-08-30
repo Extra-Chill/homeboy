@@ -243,7 +243,7 @@ fn required_extension_revisions(
 ) -> Vec<LabRunnerWorkloadExtensionRevision> {
     required_extension_revisions_with(
         required_extensions,
-        homeboy_core::extension_update_check::read_source_revision,
+        homeboy_core::extension::lifecycle::read_source_revision,
     )
 }
 

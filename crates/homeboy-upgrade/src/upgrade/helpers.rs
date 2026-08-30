@@ -2,7 +2,7 @@ use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension::catalog::{discover_extensions, DiscoveredExtension};
 use homeboy_core::extension::lifecycle;
-use homeboy_core::extension_update_check::is_git_url;
+use homeboy_core::extension::lifecycle::is_git_url;
 use homeboy_core::{build_identity, git};
 use semver::Version;
 use std::path::{Path, PathBuf};
@@ -890,7 +890,7 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
                     .and_then(|requirements| requirements.homeboy.as_deref());
                 match homeboy_extension_contract::evaluate_core_compatibility_for_version(
                     requires,
-                    homeboy_core::extension_update_check::read_source_revision(&extension_id),
+                    homeboy_core::extension::lifecycle::read_source_revision(&extension_id),
                     candidate_version,
                 ) {
                     Ok(report) if report.status != "incompatible" => None,
@@ -939,7 +939,7 @@ fn linked_extension_source_blocker(
         (Some(root), Some(source)) if source.starts_with(root)
     );
     if is_registered_source
-        && homeboy_core::extension_update_check::read_source_revision(extension_id).is_some()
+        && homeboy_core::extension::lifecycle::read_source_revision(extension_id).is_some()
     {
         return None;
     }
@@ -1518,7 +1518,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                         source_path: manifest.extension_path,
                         git_root: None,
                         source_url,
-                        source_revision: homeboy_core::extension_update_check::read_source_revision(&extension_id),
+                        source_revision: homeboy_core::extension::lifecycle::read_source_revision(&extension_id),
                         source_update: homeboy_extension_contract::update_output::ExtensionSourceUpdate {
                             update_note,
                             ..Default::default()
@@ -1755,7 +1755,7 @@ fn update_all_extensions(
                     .source_update
                     .new_source_revision
                     .clone()
-                    .or_else(|| homeboy_core::extension_update_check::read_source_revision(id));
+                    .or_else(|| homeboy_core::extension::lifecycle::read_source_revision(id));
 
                 if result.linked {
                     let branch_detail = match (

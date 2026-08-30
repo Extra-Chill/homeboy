@@ -290,7 +290,7 @@ pub(crate) fn write_source_metadata(
     source_url: &str,
     source_revision: Option<String>,
 ) {
-    let metadata_dir = homeboy_core::extension_update_check::source_metadata_dir(extension_dir);
+    let metadata_dir = super::source_metadata_dir(extension_dir);
     let revision_path = metadata_dir.join(source_metadata_file(extension_dir, "revision"));
     if let Some(rev) = source_revision {
         let _ = std::fs::write(revision_path, rev);
@@ -307,7 +307,7 @@ pub(crate) fn write_source_metadata(
 /// Extracted monorepo installs discard `.git`, so this is the only durable
 /// input that lets a later update preserve a branch, tag, or commit pin.
 pub(crate) fn write_requested_source_ref(extension_dir: &Path, requested_ref: Option<&str>) {
-    let path = homeboy_core::extension_update_check::source_metadata_dir(extension_dir)
+    let path = super::source_metadata_dir(extension_dir)
         .join(source_metadata_file(extension_dir, "requested-ref"));
     match requested_ref.filter(|value| !value.trim().is_empty()) {
         Some(value) => {
@@ -320,7 +320,7 @@ pub(crate) fn write_requested_source_ref(extension_dir: &Path, requested_ref: Op
 }
 
 pub(crate) fn read_source_requested_ref(extension_dir: &Path) -> Option<String> {
-    homeboy_core::extension_update_check::read_source_metadata_value(extension_dir, "requested-ref")
+    super::read_source_metadata_value(extension_dir, "requested-ref")
 }
 
 /// The extension update gate. `Ok(())` when the worktree holds nothing an

@@ -40,9 +40,16 @@ pub struct UpdateResult {
 }
 
 mod repair;
+mod source;
 pub mod source_metadata;
 
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
+pub use source::{
+    check_update_available, check_update_available_until, is_git_url, read_source_cleanliness,
+    read_source_revision, read_source_revision_at, read_source_url, ExtensionSourceCleanliness,
+    UpdateAvailable,
+};
+use source::{read_source_metadata_value, source_metadata_dir};
 
 pub fn slugify_id(value: &str) -> Result<String> {
     identifier::slugify_id(value, "extension_id")
@@ -78,7 +85,7 @@ pub fn install_with_revision(
     id_override: Option<&str>,
     revision: Option<&str>,
 ) -> Result<InstallResult> {
-    if homeboy_core::extension_update_check::is_git_url(source) {
+    if is_git_url(source) {
         install_from_url(source, id_override, revision)
     } else {
         install_from_path(source, id_override, None, revision)
@@ -160,7 +167,7 @@ pub fn refresh(
         None => derive_id_from_url(source)?,
     };
 
-    let local_source_revision = if homeboy_core::extension_update_check::is_git_url(source) {
+    let local_source_revision = if is_git_url(source) {
         None
     } else {
         git::short_head_revision(&absolute_source_path(source)?)
@@ -198,7 +205,7 @@ pub fn refresh(
 }
 
 fn durable_refresh_source(source: &str, extension_id: &str) -> Result<String> {
-    if homeboy_core::extension_update_check::is_git_url(source) {
+    if is_git_url(source) {
         return Ok(source.to_string());
     }
 
@@ -334,7 +341,6 @@ pub(crate) use install_sources::{
 };
 
 mod update;
-pub use homeboy_core::extension_update_check::{read_source_revision, read_source_url};
 #[cfg(test)]
 use update::is_extension_update_workdir_clean;
 pub(crate) use update::write_requested_source_ref;
@@ -374,8 +380,9 @@ pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
 mod tests {
     use super::{
         install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
-        load_extension, refresh, register_component_install_runner,
-        shared_assets_for_extension_source, source_metadata, uninstall, update,
+        load_extension, read_source_revision, read_source_url, refresh,
+        register_component_install_runner, shared_assets_for_extension_source, source_metadata,
+        uninstall, update,
     };
     use crate::extension::update_all;
     use homeboy_core::component;
@@ -977,7 +984,7 @@ exec '{}' "$@"
                 Some(source_revision.as_str())
             );
             assert_eq!(
-                homeboy_core::extension_update_check::read_source_revision("nodejs").as_deref(),
+                read_source_revision("nodejs").as_deref(),
                 Some(source_revision.as_str())
             );
             assert_eq!(
@@ -1022,8 +1029,7 @@ exec '{}' "$@"
             install(&extension_source.to_string_lossy(), Some("wordpress"))
                 .expect("install linked extension");
 
-            let before = homeboy_core::extension_update_check::read_source_revision("wordpress")
-                .expect("linked git revision");
+            let before = read_source_revision("wordpress").expect("linked git revision");
             assert!(!extension_source.join(".source-revision").exists());
 
             update("wordpress", false).expect("update linked extension");
@@ -1033,7 +1039,7 @@ exec '{}' "$@"
                 "linked update must not write metadata into the source checkout"
             );
             assert_eq!(
-                homeboy_core::extension_update_check::read_source_revision("wordpress"),
+                read_source_revision("wordpress"),
                 Some(before),
                 "linked extensions should resolve revisions through git discovery"
             );
@@ -1060,11 +1066,11 @@ exec '{}' "$@"
                 "linked install metadata should not dirty the source checkout"
             );
             assert_eq!(
-                homeboy_core::extension_update_check::read_source_revision("wordpress").as_deref(),
+                read_source_revision("wordpress").as_deref(),
                 Some("abc1234")
             );
             assert_eq!(
-                homeboy_core::extension_update_check::read_source_url(&result.path).as_deref(),
+                read_source_url(&result.path).as_deref(),
                 Some(source.join("wordpress").to_string_lossy().as_ref())
             );
 
@@ -1150,7 +1156,7 @@ exec '{}' "$@"
                 remote_url.to_string_lossy()
             );
             assert_eq!(
-                homeboy_core::extension_update_check::read_source_revision("wordpress"),
+                read_source_revision("wordpress"),
                 result.source_revision,
                 "monorepo installs keep the stored source revision after .git is discarded"
             );
@@ -1594,7 +1600,7 @@ exec '{}' "$@"
                 Some(pinned_revision.as_str())
             );
             assert_eq!(
-                homeboy_core::extension_update_check::read_source_revision("wordpress").as_deref(),
+                read_source_revision("wordpress").as_deref(),
                 Some(pinned_revision.as_str())
             );
         });

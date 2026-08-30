@@ -1,7 +1,7 @@
 use super::write_source_metadata;
+use super::{read_source_revision, read_source_url};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
-use homeboy_core::extension_update_check::read_source_url;
 use homeboy_core::git;
 use homeboy_core::paths;
 
@@ -35,7 +35,7 @@ pub fn resolve_source_url_read_only(extension_id: &str) -> Result<String> {
 pub fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution> {
     let extension = load_extension(extension_id)?;
     let extension_dir = paths::extension(extension_id)?;
-    let metadata_url = homeboy_core::extension_update_check::read_source_url(&extension_dir);
+    let metadata_url = read_source_url(&extension_dir);
 
     let manifest_source_url = manifest_source_url(&extension);
 
@@ -44,7 +44,7 @@ pub fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution
             write_source_metadata(
                 &extension_dir,
                 &source_url,
-                homeboy_core::extension_update_check::read_source_revision(extension_id),
+                read_source_revision(extension_id),
             );
             Some(SourceMetadataRepair {
                 source_url: source_url.clone(),

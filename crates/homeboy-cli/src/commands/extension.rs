@@ -889,7 +889,7 @@ fn read_source_url_metadata(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    homeboy_core::extension_update_check::read_source_url(Path::new(path))
+    homeboy_core::extension::lifecycle::read_source_url(Path::new(path))
 }
 
 fn local_source_path(source: &str) -> Option<String> {
@@ -1005,7 +1005,7 @@ fn show_extension(
         components: r.components.clone(),
     });
 
-    let source_revision = homeboy_core::extension_update_check::read_source_revision(&extension.id);
+    let source_revision = homeboy_core::extension::lifecycle::read_source_revision(&extension.id);
     let core_compatibility = extension_contract::core_compat::evaluate_core_compatibility(
         extension
             .requires
@@ -1320,7 +1320,7 @@ fn converge_extensions() -> CmdResult<ExtensionOutput> {
         .iter()
         .map(|id| {
             let manifest = homeboy_core::extension::catalog::load_extension(id)?;
-            let source_revision = homeboy_core::extension_update_check::read_source_revision(id);
+            let source_revision = homeboy_core::extension::lifecycle::read_source_revision(id);
             let report = extension_contract::core_compat::evaluate_core_compatibility(
                 manifest
                     .requires
@@ -1472,7 +1472,7 @@ fn extension_runtime_diagnostics(
         .and_then(|extension| extension.extension_path.clone())
         .unwrap_or_default();
     let source_revision = source_revision
-        .or_else(|| homeboy_core::extension_update_check::read_source_revision(extension_id));
+        .or_else(|| homeboy_core::extension::lifecycle::read_source_revision(extension_id));
     let matching_manifests = discover_agent_runtime_catalog()
         .manifests
         .into_iter()
@@ -1767,7 +1767,7 @@ mod tests {
             assert!(sentinel.exists(), "configured extension service restarted");
 
             let before_rollback =
-                homeboy_core::extension_update_check::read_source_revision("fixture")
+                homeboy_core::extension::lifecycle::read_source_revision("fixture")
                     .expect("current revision");
             write_convergence_manifest(&seed, ">=999.0.0");
             commit_and_push(&seed, "incompatible refresh");
@@ -1784,7 +1784,7 @@ mod tests {
             assert_eq!(skipped.len(), 1);
             assert!(skipped[0].reason.contains("requires homeboy"));
             assert_eq!(
-                homeboy_core::extension_update_check::read_source_revision("fixture").as_deref(),
+                homeboy_core::extension::lifecycle::read_source_revision("fixture").as_deref(),
                 Some(before_rollback.as_str())
             );
             assert!(

@@ -3273,7 +3273,7 @@ fn run_startup_update_checks(command: &Commands) {
         Commands::Upgrade(_) | Commands::Daemon(_) | Commands::SelfCmd(_)
     ) {
         homeboy_upgrade::upgrade::update_check::run_startup_check();
-        homeboy_core::extension::update_check::run_startup_check();
+        homeboy_upgrade::upgrade::extension_update_check::run_startup_check();
     }
 }
 

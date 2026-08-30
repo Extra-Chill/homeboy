@@ -286,7 +286,7 @@ fn readiness_identity(
     if let Some(revision) = extension
         .extension_path
         .as_deref()
-        .and_then(|path| crate::extension_update_check::read_source_revision_at(path.as_ref()))
+        .and_then(|path| crate::extension::lifecycle::read_source_revision_at(path.as_ref()))
     {
         hasher.update(revision.as_bytes());
     }

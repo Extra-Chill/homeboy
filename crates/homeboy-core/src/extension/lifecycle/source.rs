@@ -1,6 +1,4 @@
-//! Extension update-check + source-URL utilities (core glue over an extension's
-//! git checkout). Relocated from the extension lifecycle module - depends only on
-//! core paths/git/error + the core extension store, no extension behavior.
+//! Extension source provenance and remote update probes.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -28,9 +26,9 @@ pub fn check_update_available(extension_id: &str) -> Option<UpdateAvailable> {
 /// The startup update check is advisory, but it runs before every normal CLI
 /// command. Keep each extension probe bounded so an unreachable Git transport
 /// or credential helper cannot withhold unrelated command output.
-pub const EXTENSION_UPDATE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const EXTENSION_UPDATE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub fn check_update_available_with_timeout(
+fn check_update_available_with_timeout(
     extension_id: &str,
     timeout: Duration,
 ) -> Option<UpdateAvailable> {
@@ -226,7 +224,7 @@ pub fn read_source_cleanliness(extension_id: &str) -> ExtensionSourceCleanliness
 ///
 /// Scoped to the extension directory itself: a monorepo of extensions must not
 /// report `rust` as dirty because `nodejs` was edited.
-pub fn read_source_cleanliness_at(extension_dir: &Path) -> ExtensionSourceCleanliness {
+fn read_source_cleanliness_at(extension_dir: &Path) -> ExtensionSourceCleanliness {
     if !extension_dir.exists() {
         return ExtensionSourceCleanliness::Unknown;
     }
@@ -277,7 +275,7 @@ fn is_generated_source_metadata_path(path: &str) -> bool {
     GENERATED_SOURCE_METADATA.contains(&name)
 }
 
-pub fn read_source_metadata_value(extension_dir: &Path, kind: &str) -> Option<String> {
+pub(super) fn read_source_metadata_value(extension_dir: &Path, kind: &str) -> Option<String> {
     let sidecar =
         source_metadata_dir(extension_dir).join(source_metadata_file(extension_dir, kind));
     let embedded = extension_dir.join(format!(".source-{kind}"));
@@ -304,7 +302,7 @@ pub fn read_source_url(extension_dir: &Path) -> Option<String> {
     read_source_metadata_value(extension_dir, "url")
 }
 
-pub fn source_metadata_dir(extension_dir: &Path) -> PathBuf {
+pub(super) fn source_metadata_dir(extension_dir: &Path) -> PathBuf {
     if extension_dir.is_symlink() {
         return extension_dir
             .parent()

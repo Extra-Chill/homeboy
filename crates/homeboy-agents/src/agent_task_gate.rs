@@ -2792,7 +2792,7 @@ fn materialize_extension_inputs(
             ));
         }
         let identity = extension_tree_identity(source)?;
-        let source_revision = homeboy_core::extension_update_check::read_source_revision_at(source);
+        let source_revision = homeboy_core::extension::lifecycle::read_source_revision_at(source);
         if input
             .identity
             .as_deref()

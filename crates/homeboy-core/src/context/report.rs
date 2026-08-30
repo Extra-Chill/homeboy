@@ -648,7 +648,7 @@ fn build_actionable_next_steps(
 
     let mut outdated_extensions = Vec::new();
     for extension in all_extensions {
-        if let Some(update) = crate::extension_update_check::check_update_available(&extension.id) {
+        if let Some(update) = crate::extension::lifecycle::check_update_available(&extension.id) {
             outdated_extensions.push(update);
         }
     }

@@ -26,7 +26,7 @@ pub fn execute_action(
             .requires
             .as_ref()
             .and_then(|requires| requires.homeboy.as_deref()),
-        homeboy_core::extension_update_check::read_source_revision(extension_id),
+        homeboy_core::extension::lifecycle::read_source_revision(extension_id),
     )?;
 
     if extension.actions.is_empty() {

@@ -775,7 +775,7 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
             Some(detached_short.as_str())
         );
         assert_eq!(
-            homeboy_core::extension_update_check::read_source_revision("wordpress").as_deref(),
+            homeboy_core::extension::lifecycle::read_source_revision("wordpress").as_deref(),
             Some(detached_full.as_str())
         );
     });
