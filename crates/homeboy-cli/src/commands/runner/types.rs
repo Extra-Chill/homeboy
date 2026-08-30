@@ -522,7 +522,7 @@ pub enum RunnerCommandOutput {
 pub struct RecipeRunProvidersOutput {
     pub variant: &'static str,
     pub command: &'static str,
-    pub providers: Vec<homeboy_core::extension::RecipeRunProviderInventoryEntry>,
+    pub providers: Vec<homeboy_core::extension::recipe_run::RecipeRunProviderInventoryEntry>,
 }
 
 /// An authoritative job observation or a retained generation ownership record.

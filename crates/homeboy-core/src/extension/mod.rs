@@ -30,10 +30,6 @@ pub(crate) use homeboy_core::extension::resolve::{extension_guidance_hints, stde
 
 pub use fingerprint::run_fingerprint_script;
 pub(crate) use invoke::build_settings_json_from_manifest;
-pub use recipe_run::{
-    recipe_run_provider_inventory, render_recipe_run_command, resolve_recipe_run_provider,
-    RecipeRunProviderInventoryEntry, RecipeRunProviderValidation, RecipeRunRequest,
-};
 pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,
     RefactorScriptFailure, RefactorScriptFailureKind, RelatedTests, ResolvedImports,
