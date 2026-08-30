@@ -328,6 +328,8 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                 // Re-read immediately before apply. A newly-live runner or a changed
                 // owner is authoritative and turns this scoped request into a no-op.
                 let refreshed = rooted_exact_status(&lifecycle_store, resolved_run_id)?;
+                let locally_reconcilable_after_runner_idle =
+                    refreshed.is_locally_reconcilable_after_runner_idle();
                 let still_reconcilable = discover_runs(AgentTaskDiscoveryFilter::Active)?
                     .runs
                     .into_iter()
@@ -346,6 +348,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                     });
                 } else if refreshed.runner_id().is_some()
                     && refreshed.runner_job_id().is_some()
+                    && !locally_reconcilable_after_runner_idle
                     && refreshed.runner_id().is_some_and(|runner_id| {
                         agent_task_lifecycle::runner_authority(runner_id)
                             != agent_task_lifecycle::RunnerAuthority::Removed
@@ -376,6 +379,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                     if let Some(runner_id) = refreshed.runner_id() {
                         if agent_task_lifecycle::runner_authority(runner_id)
                             != agent_task_lifecycle::RunnerAuthority::Removed
+                            && !locally_reconcilable_after_runner_idle
                         {
                             failed += 1;
                             runs.push(AgentTaskReconcileRun {
