@@ -29,7 +29,7 @@ pub fn extensions_for_compiler_warning_contract(
     if let Some(component) = homeboy_core::component::discover_from_portable(root) {
         if let Some(component_extensions) = component.extensions.as_ref() {
             for extension_id in component_extensions.keys() {
-                let Ok(extension) = crate::load_extension(extension_id) else {
+                let Ok(extension) = crate::extension_store::load_extension(extension_id) else {
                     continue;
                 };
                 if contract.script_path(&extension).is_some() && seen.insert(extension.id.clone()) {
@@ -41,7 +41,7 @@ pub fn extensions_for_compiler_warning_contract(
 
     if extensions.is_empty() {
         extensions.extend(
-            crate::load_all_extensions()
+            crate::extension_store::load_all_extensions()
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|extension| contract.script_path(extension).is_some()),
@@ -168,7 +168,7 @@ mod tests {
         .unwrap();
         extension.id = "example".to_string();
         extension.extension_path = Some(dir.path().to_string_lossy().to_string());
-        extension.scripts = Some(crate::ScriptsConfig {
+        extension.scripts = Some(crate::extension::ScriptsConfig {
             compiler_warnings: Some("warnings.sh".to_string()),
             ..Default::default()
         });

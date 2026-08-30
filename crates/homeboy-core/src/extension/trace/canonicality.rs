@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::extension::manifest_config::TraceToolchainProvenanceConfig;
-use crate::ExtensionExecutionContext;
+use crate::extension_execution::ExtensionExecutionContext;
 use homeboy_core::component::Component;
 use homeboy_core::error::Result;
 use homeboy_core::lab_workspace_provenance::{
@@ -596,8 +596,8 @@ fn parse_ahead_behind(value: &str) -> Option<(Option<u32>, Option<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::run::{run_trace_workflow, TraceRunnerInputs};
-    use crate::ExtensionCapability;
+    use crate::extension::trace::run::{run_trace_workflow, TraceRunnerInputs};
+    use crate::extension::ExtensionCapability;
     use homeboy_core::engine::run_dir::RunDir;
     use homeboy_engine_primitives::baseline::BaselineFlags;
     use std::path::Path;
@@ -1145,8 +1145,9 @@ mod tests {
                 ratchet: false,
             },
             regression_threshold_percent:
-                crate::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: crate::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
+                crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+            regression_min_delta_ms:
+                crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
             canonical_policy: TraceCanonicalPolicy::Development,
             checkout_provenance: None,
         }

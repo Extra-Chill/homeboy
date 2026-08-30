@@ -1,10 +1,12 @@
-use crate as extension;
+use crate::extension;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::{exec_context, ExtensionCapability, ExtensionExecutionContext, ExtensionPhaseTiming};
+use crate::extension::{
+    exec_context, ExtensionCapability, ExtensionExecutionContext, ExtensionPhaseTiming,
+};
 use homeboy_core::artifact_inputs::{self, ResolvedArtifactInput};
 use homeboy_core::component::{self, Component};
 use homeboy_core::config::{is_json_input, parse_bulk_ids};
@@ -560,9 +562,9 @@ fn execute_build_component(
         build_timeout.as_secs()
     );
     let runner_output = if let ResolvedBuildCommand::ComponentScript { .. } = &resolved {
-        crate::component_script::run_component_scripts_with_run_dir_and_timeout(
+        crate::extension::component_script::run_component_scripts_with_run_dir_and_timeout(
             comp,
-            crate::component_script::ComponentScriptRunRequest {
+            crate::extension::component_script::ComponentScriptRunRequest {
                 capability: extension::ExtensionCapability::Build,
                 source_path: &validated_path,
                 run_dir: &run_dir,
@@ -883,7 +885,7 @@ fn run_pre_build_scripts(
             build_context.component.local_path.clone(),
         ),
     ];
-    env.extend(crate::component_script::component_env_vars(
+    env.extend(crate::extension::component_script::component_env_vars(
         &build_context.component,
     ));
     let env_refs: Vec<(&str, &str)> = env

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use crate::bench::artifact::BenchArtifact;
-use crate::bench::parsing::BenchResults;
+use crate::extension::bench::artifact::BenchArtifact;
+use crate::extension::bench::parsing::BenchResults;
 use homeboy_core::engine::resource::{self, ExtensionChildResourceSummary};
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{Error, Result};

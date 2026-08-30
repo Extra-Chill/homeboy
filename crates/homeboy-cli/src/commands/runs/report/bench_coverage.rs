@@ -4,10 +4,10 @@ use serde::Serialize;
 use homeboy::core::component::{self, Component};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy_core::bench::{
+use homeboy_core::extension::bench::{
     run_bench_list_workflow, BenchListWorkflowArgs, BenchListWorkflowResult, BenchScenario,
 };
-use homeboy_core::{resolve_extension_for_capability, ExtensionCapability};
+use homeboy_core::extension::{resolve_extension_for_capability, ExtensionCapability};
 
 use crate::commands::escape_markdown_table_cell;
 use crate::commands::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
@@ -376,7 +376,7 @@ pub fn render_markdown(report: &BenchCoverageReport) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use homeboy_core::bench::{BenchMetrics, BenchScenario};
+    use homeboy_core::extension::bench::{BenchMetrics, BenchScenario};
 
     use super::*;
 

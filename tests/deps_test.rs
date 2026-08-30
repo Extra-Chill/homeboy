@@ -16,8 +16,8 @@ use tempfile::tempdir;
 // test run that excludes a registering sibling, these tests failed with "no
 // component-script runner registered" (#8964).
 fn register_component_script_runner() {
-    homeboy_core::component_script::register_component_script_runner();
-    homeboy_core::build::register_component_build_runner();
+    homeboy_core::extension::component_script::register_component_script_runner();
+    homeboy_core::extension::build::register_component_build_runner();
 }
 
 fn write_file(path: &std::path::Path, contents: &str) {

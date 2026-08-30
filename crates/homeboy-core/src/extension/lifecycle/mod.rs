@@ -373,7 +373,7 @@ mod tests {
         load_extension, refresh, register_component_install_runner,
         shared_assets_for_extension_source, source_metadata, uninstall, update,
     };
-    use crate::update_all;
+    use crate::extension::update_all;
     use homeboy_core::component;
     use homeboy_core::test_support::with_isolated_home;
     use std::fs;

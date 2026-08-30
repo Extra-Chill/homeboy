@@ -7,7 +7,7 @@ use homeboy_engine_primitives::validation;
 
 use super::{build_action_env, execute_extension_command, load_extension, ExtensionExecutionMode};
 use crate::extension::manifest::{ActionConfig, ActionType, HttpMethod};
-use crate::ExtensionScope;
+use crate::extension_scope::ExtensionScope;
 
 pub fn execute_action(
     extension_id: &str,
@@ -17,7 +17,7 @@ pub fn execute_action(
     payload: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let extension = load_extension(extension_id)?;
-    crate::validate_core_compatibility(
+    crate::extension::validate_core_compatibility(
         "extension",
         extension_id,
         extension

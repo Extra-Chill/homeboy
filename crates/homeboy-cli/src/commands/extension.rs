@@ -10,9 +10,11 @@ use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
-use homeboy_core::{
-    self, extension_ready_status_with, is_extension_linked, load_extension, run_setup,
-    ExtensionReadinessMode, ExtensionSummary, UpdateEntry,
+use homeboy_core::extension::{
+    is_extension_linked, load_extension, run_setup, ExtensionSummary, UpdateEntry,
+};
+use homeboy_core::extension_readiness::{
+    extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -417,13 +419,13 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         git_root: Option<String>,
         #[serde(flatten)]
-        source_update: homeboy_core::ExtensionSourceUpdate,
+        source_update: homeboy_core::extension::ExtensionSourceUpdate,
         #[serde(skip_serializing_if = "Option::is_none")]
         old_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         new_version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        repaired_source_metadata: Option<homeboy_core::SourceMetadataRepair>,
+        repaired_source_metadata: Option<homeboy_core::extension::SourceMetadataRepair>,
     },
     #[serde(rename = "extension.update_all")]
     UpdateAll {
@@ -435,7 +437,7 @@ pub enum ExtensionOutput {
         controller_version: String,
         compatibility: Vec<ExtensionConvergenceCompatibility>,
         updated: Vec<UpdateEntry>,
-        skipped: Vec<homeboy_core::UpdateSkippedEntry>,
+        skipped: Vec<homeboy_core::extension::UpdateSkippedEntry>,
         revision_evidence: Vec<ExtensionRevisionEvidence>,
         provider_catalog_before: ProviderCatalogEvidence,
         provider_catalog_after: ProviderCatalogEvidence,
@@ -476,7 +478,7 @@ pub enum ExtensionOutput {
 #[derive(Serialize)]
 pub struct ExtensionConvergenceCompatibility {
     pub extension_id: String,
-    pub core_compatibility: homeboy_core::CoreCompatibilityReport,
+    pub core_compatibility: homeboy_core::extension::CoreCompatibilityReport,
 }
 
 #[derive(Serialize)]
@@ -514,14 +516,14 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     pub runtime: String,
-    pub core_compatibility: homeboy_core::CoreCompatibilityReport,
+    pub core_compatibility: homeboy_core::extension::CoreCompatibilityReport,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_requirements: Option<homeboy_core::RuntimeRequirementsConfig>,
+    pub runtime_requirements: Option<homeboy_core::extension::RuntimeRequirementsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_setup: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_ready_check: Option<bool>,
-    pub readiness: homeboy_core::ExtensionReadinessState,
+    pub readiness: ExtensionReadinessState,
     pub ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
@@ -545,19 +547,20 @@ pub struct ExtensionDetail {
     pub actions: Vec<ActionDetail>,
     /// Installed transport IDs and schemas, without executable argv.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub notification_transports: Vec<homeboy_core::NotificationTransportDescriptor>,
+    pub notification_transports: Vec<homeboy_core::extension::NotificationTransportDescriptor>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<homeboy_core::InputConfig>,
+    pub inputs: Vec<homeboy_core::extension::InputConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub settings: Vec<homeboy_core::SettingConfig>,
+    pub settings: Vec<homeboy_core::extension::SettingConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub structured_sidecars: Vec<homeboy_core::StructuredSidecarDeclaration>,
+    pub structured_sidecars: Vec<homeboy_core::extension::StructuredSidecarDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ci_cache: Option<homeboy_core::CiCacheSpec>,
+    pub ci_cache: Option<homeboy_core::extension::CiCacheSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub materialization_source: Option<homeboy_core::ExtensionMaterializationSourceContract>,
+    pub materialization_source:
+        Option<homeboy_core::extension::ExtensionMaterializationSourceContract>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub contract_producers: Vec<homeboy_core::ExtensionContractProducer>,
+    pub contract_producers: Vec<homeboy_core::extension::ExtensionContractProducer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequiresDetail>,
 }
@@ -585,11 +588,11 @@ pub struct ActionDetail {
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
-    pub action_type: homeboy_core::ActionType,
+    pub action_type: homeboy_core::extension::ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<homeboy_core::HttpMethod>,
+    pub method: Option<homeboy_core::extension::HttpMethod>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
@@ -992,7 +995,7 @@ fn show_extension(
     });
 
     let source_revision = homeboy_core::extension_update_check::read_source_revision(&extension.id);
-    let core_compatibility = homeboy_core::evaluate_core_compatibility(
+    let core_compatibility = homeboy_core::extension::evaluate_core_compatibility(
         extension
             .requires
             .as_ref()
@@ -1037,7 +1040,7 @@ fn show_extension(
             .collect(),
         inputs: extension.inputs().to_vec(),
         settings: extension.settings.clone(),
-        structured_sidecars: homeboy_core::structured_sidecars(&extension),
+        structured_sidecars: homeboy_core::extension::structured_sidecars(&extension),
         ci_cache: extension.ci.as_ref().and_then(|ci| ci.cache.clone()),
         materialization_source: extension.materialization_source.clone(),
         contract_producers: extension.contract_producers.clone(),
@@ -1059,7 +1062,7 @@ fn run_extension(
     step: Option<String>,
     skip: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    use homeboy_core::{ExtensionExecutionMode, ExtensionStepFilter};
+    use homeboy_core::extension::{ExtensionExecutionMode, ExtensionStepFilter};
 
     let mode = if no_stream {
         ExtensionExecutionMode::Captured
@@ -1071,7 +1074,7 @@ fn run_extension(
 
     let filter = ExtensionStepFilter { step, skip };
 
-    let result = homeboy_core::run_extension(
+    let result = homeboy_core::extension::run_extension(
         extension_id,
         project.as_deref(),
         component.as_deref(),
@@ -1098,8 +1101,11 @@ fn install_extension(
     replace: bool,
 ) -> CmdResult<ExtensionOutput> {
     if replace {
-        let result =
-            homeboy_core::replace_with_revision(source, id.as_deref(), revision.as_deref())?;
+        let result = homeboy_core::extension::replace_with_revision(
+            source,
+            id.as_deref(),
+            revision.as_deref(),
+        )?;
         return Ok((
             ExtensionOutput::Replace {
                 extension_id: result.extension_id,
@@ -1114,7 +1120,8 @@ fn install_extension(
         ));
     }
 
-    let result = homeboy_core::install_with_revision(source, id.as_deref(), revision.as_deref())?;
+    let result =
+        homeboy_core::extension::install_with_revision(source, id.as_deref(), revision.as_deref())?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1135,7 +1142,7 @@ fn refresh_extension(
     id: Option<&str>,
     revision: Option<&str>,
 ) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::refresh(source, id, revision)?;
+    let result = homeboy_core::extension::refresh(source, id, revision)?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1157,7 +1164,7 @@ fn refresh_extension(
 }
 
 fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::relink(extension_id, source)?;
+    let result = homeboy_core::extension::relink(extension_id, source)?;
 
     Ok((
         ExtensionOutput::Replace {
@@ -1187,7 +1194,7 @@ fn dev_run_extension(
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy_core::install_for_component(&component, source)?;
+    let result = homeboy_core::extension::install_for_component(&component, source)?;
 
     let installed = result
         .installed
@@ -1410,7 +1417,7 @@ fn bounded_diagnostic(message: &str) -> String {
 
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     let was_linked = is_extension_linked(extension_id);
-    let path = homeboy_core::uninstall(extension_id)?;
+    let path = homeboy_core::extension::uninstall(extension_id)?;
 
     Ok((
         ExtensionOutput::Uninstall {
@@ -1538,7 +1545,7 @@ fn run_action(
     project_id: Option<String>,
     data: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let response = homeboy_core::run_action(
+    let response = homeboy_core::extension::run_action(
         extension_id,
         action_id,
         project_id.as_deref(),
@@ -1561,7 +1568,7 @@ fn set_extension(
     json: &str,
     replace_fields: &[String],
 ) -> CmdResult<ExtensionOutput> {
-    match homeboy_core::merge(extension_id, json, replace_fields)? {
+    match homeboy_core::extension::merge(extension_id, json, replace_fields)? {
         homeboy::core::MergeOutput::Single(result) => Ok((
             ExtensionOutput::Set {
                 extension_id: result.id,
@@ -1596,7 +1603,7 @@ fn exec_extension_tool(
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
-    use homeboy_core::{ExtensionSourceUpdate, UpdateEntry};
+    use homeboy_core::extension::{ExtensionSourceUpdate, UpdateEntry};
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -2070,7 +2077,7 @@ mod tests {
 
             assert_eq!(
                 source.source_kind,
-                homeboy_core::ExtensionMaterializationSourceKind::Git
+                homeboy_core::extension::ExtensionMaterializationSourceKind::Git
             );
             assert_eq!(source.revision.as_deref(), Some("abc1234"));
             assert_eq!(
@@ -2117,7 +2124,7 @@ mod tests {
             assert_eq!(extension.notification_transports[0].id, "example.completed");
             assert_eq!(
                 extension.notification_transports[0].schema,
-                homeboy_core::NOTIFICATION_TRANSPORT_SCHEMA
+                homeboy_core::extension::NOTIFICATION_TRANSPORT_SCHEMA
             );
             assert!(
                 serde_json::to_value(&extension)
@@ -2181,11 +2188,11 @@ mod tests {
             assert_eq!(extension.contract_producers[0].id, "handoff-envelope");
             assert_eq!(
                 extension.contract_producers[0].phase,
-                homeboy_core::ExtensionContractProducerPhase::Handoff
+                homeboy_core::extension::ExtensionContractProducerPhase::Handoff
             );
             assert_eq!(
                 extension.contract_producers[0].produces[0].kind,
-                homeboy_core::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
+                homeboy_core::extension::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
             );
         });
     }
@@ -2231,7 +2238,7 @@ mod tests {
             assert_eq!(cache.paths.len(), 3);
             assert_eq!(
                 cache.paths[1].root,
-                homeboy_core::CiCachePathRoot::HomeboyData
+                homeboy_core::extension::CiCachePathRoot::HomeboyData
             );
             assert_eq!(cache.paths[1].path, "build-targets");
             assert_eq!(cache.paths[2].env.as_deref(), Some("BUILD_TARGET_DIR"));
@@ -2307,8 +2314,8 @@ mod tests {
             description: String::new(),
             runtime: "platform".to_string(),
             compatible: true,
-            core_compatibility: homeboy_core::CoreCompatibilityReport::undeclared(None),
-            readiness: homeboy_core::ExtensionReadinessState::Ready,
+            core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(None),
+            readiness: ExtensionReadinessState::Ready,
             ready: Some(true),
             ready_reason: None,
             ready_detail: None,
@@ -2371,8 +2378,10 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
-                core_compatibility: homeboy_core::CoreCompatibilityReport::undeclared(None),
-                readiness: homeboy_core::ExtensionReadinessState::Ready,
+                core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(
+                    None,
+                ),
+                readiness: ExtensionReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,
@@ -2424,8 +2433,10 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
-                core_compatibility: homeboy_core::CoreCompatibilityReport::undeclared(None),
-                readiness: homeboy_core::ExtensionReadinessState::Ready,
+                core_compatibility: homeboy_core::extension::CoreCompatibilityReport::undeclared(
+                    None,
+                ),
+                readiness: ExtensionReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,

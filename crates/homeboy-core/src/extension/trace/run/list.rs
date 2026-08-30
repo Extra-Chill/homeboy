@@ -1,6 +1,6 @@
 //! Trace scenario discovery (list-only) workflow.
 
-use crate::{resolve_execution_context, ExtensionCapability, RunnerOutput};
+use crate::extension::{resolve_execution_context, ExtensionCapability, RunnerOutput};
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
@@ -17,9 +17,11 @@ pub fn run_trace_list_workflow(
     run_dir: &RunDir,
 ) -> Result<TraceList> {
     if component.has_script(ExtensionCapability::Trace) {
-        let source_path =
-            crate::component_script::source_path(component, args.path_override.as_deref());
-        let output = crate::component_script::run_component_scripts_with_run_dir(
+        let source_path = crate::extension::component_script::source_path(
+            component,
+            args.path_override.as_deref(),
+        );
+        let output = crate::extension::component_script::run_component_scripts_with_run_dir(
             component,
             ExtensionCapability::Trace,
             &source_path,
@@ -75,8 +77,8 @@ struct TraceListOutput {
     stderr: String,
 }
 
-impl From<crate::component_script::ComponentScriptOutput> for TraceListOutput {
-    fn from(output: crate::component_script::ComponentScriptOutput) -> Self {
+impl From<crate::extension::component_script::ComponentScriptOutput> for TraceListOutput {
+    fn from(output: crate::extension::component_script::ComponentScriptOutput) -> Self {
         Self {
             exit_code: output.exit_code,
             success: output.success,

@@ -1,5 +1,5 @@
 use homeboy::rig;
-use homeboy_core::trace as extension_trace;
+use homeboy_core::extension::trace as extension_trace;
 
 use super::{trace_scenario, trace_workload_scenario_id, TraceArgs, TraceRigContext};
 

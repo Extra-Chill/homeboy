@@ -31,7 +31,8 @@ use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use homeboy_core::engine::symbol_graph::module_path_from_file;
 use homeboy_core::Result;
 use homeboy_core::{
-    self, AdjustedItem, ExtensionManifest, ParsedItem, RelatedTests, ResolvedImports,
+    self,
+    extension::{AdjustedItem, ExtensionManifest, ParsedItem, RelatedTests, ResolvedImports},
 };
 
 impl ItemKind {

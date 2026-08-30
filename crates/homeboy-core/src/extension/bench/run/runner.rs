@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::thread;
 
-use crate::bench::aggregate_runs;
-use crate::bench::failure_diagnostic::bench_failure_stderr_tail;
-use crate::bench::parsing::{self, BenchResults, BenchScenario};
-use crate::bench::responsiveness::{memory_sample, BenchFailureMemorySample};
-use crate::{
+use crate::extension::bench::aggregate_runs;
+use crate::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
+use crate::extension::bench::parsing::{self, BenchResults, BenchScenario};
+use crate::extension::bench::responsiveness::{memory_sample, BenchFailureMemorySample};
+use crate::extension::{
     build_scenario_runner, ExtensionExecutionContext, ExtensionRunner, ScenarioRunnerOptions,
 };
 use homeboy_core::component::Component;
@@ -187,7 +187,7 @@ pub(crate) fn build_runner(
     .env("HOMEBOY_BENCH_ITERATIONS", &args.iterations.to_string())
     .env(
         "HOMEBOY_BENCH_RESPONSIVENESS_MISSED_MS",
-        &crate::bench::responsiveness::missed_ping_window_ms().to_string(),
+        &crate::extension::bench::responsiveness::missed_ping_window_ms().to_string(),
     )
     .env("HOMEBOY_BENCH_PROGRESS", bench_progress_env_value())
     .env("HOMEBOY_BENCH_PROGRESS_STREAM", "stderr")
@@ -372,7 +372,7 @@ pub(crate) fn run_concurrent_instances(
         }));
     }
 
-    let mut per_instance: Vec<(u32, crate::RunnerOutput)> =
+    let mut per_instance: Vec<(u32, crate::extension::RunnerOutput)> =
         Vec::with_capacity(concurrency as usize);
     for h in handles {
         match h.join() {

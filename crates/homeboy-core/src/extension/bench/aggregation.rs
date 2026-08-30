@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::bench::distribution::{distribution, percentile};
-use crate::bench::parsing::{BenchMetrics, BenchResults, BenchRunSnapshot, BenchScenario};
+use crate::extension::bench::distribution::{distribution, percentile};
+use crate::extension::bench::parsing::{
+    BenchMetrics, BenchResults, BenchRunSnapshot, BenchScenario,
+};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::observation::timeline::{ObservationSpanResult, ObservationSpanStatus};
 

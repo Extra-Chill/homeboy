@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::{DeployCapability, ExtensionManifest};
+use homeboy_core::extension::{DeployCapability, ExtensionManifest};
 
 /// Framework-neutral shared directory names that typically contain sibling components.
 const GENERIC_PROTECTED_PATH_SUFFIXES: &[&str] =

@@ -12,10 +12,10 @@ use super::formatting::{extract_formatting_findings, self_check_output_is_harnes
 use super::hints::build_autofix_hint;
 use super::scoping::resolve_scoped_lint_runs;
 use super::types::{LintRunWorkflowArgs, LintRunWorkflowResult, ScopedLintPlan, ScopedLintRun};
-use crate as extension;
-use crate::lint::baseline as lint_baseline;
-use crate::lint::build_lint_runner;
-use crate::ExtensionCapability;
+use crate::extension;
+use crate::extension::lint::baseline as lint_baseline;
+use crate::extension::lint::build_lint_runner;
+use crate::extension::ExtensionCapability;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::finding::HomeboyFinding;
@@ -127,7 +127,7 @@ pub fn run_main_lint_workflow(
             None,
             vec![("lint runner".to_string(), args.component_label.clone())],
         )?;
-        let runner = build_lint_runner(crate::lint::LintRunnerRequest {
+        let runner = build_lint_runner(crate::extension::lint::LintRunnerRequest {
             component,
             path_override: args.path_override.clone(),
             settings: &args.settings,
@@ -158,7 +158,9 @@ pub fn run_main_lint_workflow(
         let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
         progress.finish(0, output.exit_code, stdout_artifact, stderr_artifact)?;
         let lint_findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
-        if crate::lint::declares_lint_findings_sidecar(component) && !lint_findings_file.is_file() {
+        if crate::extension::lint::declares_lint_findings_sidecar(component)
+            && !lint_findings_file.is_file()
+        {
             return Err(missing_findings_evidence_error(&lint_findings_file));
         }
         let lint_producers_file = run_dir.step_file(run_dir::files::LINT_PRODUCERS);
@@ -402,7 +404,8 @@ fn run_scoped_lint_runs(
     // Read the declaration once, not once per scoped run: it is a property of
     // the component's lint extension, and every run in this loop is that same
     // extension.
-    let requires_findings_evidence = crate::lint::declares_lint_findings_sidecar(component);
+    let requires_findings_evidence =
+        crate::extension::lint::declares_lint_findings_sidecar(component);
     let mut progress = ValidationProgressRecorder::new(
         run_dir,
         None,
@@ -423,7 +426,7 @@ fn run_scoped_lint_runs(
         let scoped_run_dir = (index > 0).then(RunDir::create).transpose()?;
         let active_run_dir = scoped_run_dir.as_ref().unwrap_or(run_dir);
 
-        let runner = build_lint_runner(crate::lint::LintRunnerRequest {
+        let runner = build_lint_runner(crate::extension::lint::LintRunnerRequest {
             component,
             path_override: args.path_override.clone(),
             settings: &args.settings,
@@ -523,13 +526,13 @@ fn finish_scoped_lint_run_dirs(run_dirs: &[RunDir], success: bool) {
 
 /// Reported only when the extension *declared* `lint.findings` and then did not
 /// write it — i.e. it broke a contract it opted into. See
-/// [`crate::lint::declares_lint_findings_sidecar`] for why the declaration
+/// [`crate::extension::lint::declares_lint_findings_sidecar`] for why the declaration
 /// gates this at all.
 fn missing_findings_evidence_error(path: &Path) -> homeboy_core::Error {
     homeboy_core::Error::internal_io(
         format!(
             "Lint runner declares the `{}` structured sidecar but did not produce it at {}",
-            crate::lint::LINT_FINDINGS_SIDECAR,
+            crate::extension::lint::LINT_FINDINGS_SIDECAR,
             path.display()
         ),
         Some("lint.findings.evidence".to_string()),
@@ -537,7 +540,7 @@ fn missing_findings_evidence_error(path: &Path) -> homeboy_core::Error {
     .with_hint(format!(
         "Either write the sidecar on every exit path (seed it empty for a clean pass) or drop \
          `\"{}\"` from the extension manifest's `structured_sidecars`.",
-        crate::lint::LINT_FINDINGS_SIDECAR
+        crate::extension::lint::LINT_FINDINGS_SIDECAR
     ))
 }
 

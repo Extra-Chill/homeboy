@@ -74,7 +74,7 @@ pub fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution
     ))
 }
 
-fn manifest_source_url(extension: &crate::ExtensionManifest) -> Option<String> {
+fn manifest_source_url(extension: &crate::extension::ExtensionManifest) -> Option<String> {
     extension
         .source_url
         .clone()

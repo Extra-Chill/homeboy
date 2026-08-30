@@ -28,6 +28,7 @@ Manage component-backed task worktrees
 | `homeboy worktree list` | List worktrees owned by configured and built-in providers |
 | `homeboy worktree inventory` | Report bounded local task-worktree inventory and reconcile only leased terminal snapshots |
 | `homeboy worktree status` | Inspect a provider-owned worktree and its safety state |
+| `homeboy worktree holder` | Report the session currently holding a managed checkout's write lease |
 | `homeboy worktree remove` | Remove one task worktree after safety checks |
 | `homeboy worktree cleanup` | Clean up eligible configured and built-in provider worktrees |
 | `homeboy worktree quarantine` | Inspect or explicitly reconcile quarantined malformed task-worktree records |
@@ -125,6 +126,18 @@ Inspect a provider-owned worktree and its safety state
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<ID>` | yes | Task worktree ID, e.g. component@branch-slug |
+
+## `homeboy worktree holder`
+
+```sh
+homeboy worktree holder <TARGET>
+```
+
+Report the session currently holding a managed checkout's write lease
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<TARGET>` | yes | Managed worktree handle or any path inside the checkout |
 
 ## `homeboy worktree remove`
 

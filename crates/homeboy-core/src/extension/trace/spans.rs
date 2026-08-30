@@ -50,7 +50,7 @@ pub(crate) fn event_matches_key(event: &TraceEvent, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::parsing::{TraceAssertion, TraceSpanStatus, TraceStatus};
+    use crate::extension::trace::parsing::{TraceAssertion, TraceSpanStatus, TraceStatus};
 
     fn event(t_ms: u64, source: &str, event: &str) -> TraceEvent {
         TraceEvent {

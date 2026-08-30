@@ -1,6 +1,3 @@
-pub use homeboy_core::extension_update_check::{
-    check_update_available, is_git_url, UpdateAvailable,
-};
 pub mod audit_compiler_warning_provider;
 pub mod audit_fingerprint_script_provider;
 pub mod audit_grammar_source_provider;
@@ -13,13 +10,6 @@ pub mod component_script;
 mod env_provider;
 mod execution;
 mod fingerprint;
-// invocation_context relocated to homeboy_core::extension_invocation_context
-// The grammar parsing engine is a language-agnostic primitive; it now lives in
-// homeboy-engine-primitives. Re-exported here so existing
-// `crate::grammar` / `crate::grammar_items` paths keep
-// resolving. (grammar_items is now the `items` submodule of grammar.)
-pub use homeboy_engine_primitives::grammar;
-pub use homeboy_engine_primitives::grammar::items as grammar_items;
 pub mod lifecycle;
 pub mod lint;
 mod maintenance;
@@ -33,7 +23,6 @@ mod refactor_protocol;
 mod repair;
 mod runner;
 mod runtime_helper;
-// scope relocated to homeboy_core::extension_scope (core glue over the contract manifest)
 pub mod self_check;
 mod setup_env;
 mod summary;
@@ -68,10 +57,8 @@ pub use env_provider::{
 pub(crate) use execution::build_settings_json_from_manifest;
 pub use execution::execute_action;
 pub use execution::{
-    extension_ready_status, extension_ready_status_with, is_extension_compatible, run_action,
-    run_deployment_provider, run_extension, run_setup, ExtensionExecutionMode,
-    ExtensionReadinessMode, ExtensionReadinessState, ExtensionReadyStatus, ExtensionRunResult,
-    ExtensionSetupResult, ExtensionStepFilter,
+    run_action, run_deployment_provider, run_extension, run_setup, ExtensionExecutionMode,
+    ExtensionRunResult, ExtensionSetupResult, ExtensionStepFilter,
 };
 pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateDefinitionFact, AggregateFieldFact,
@@ -79,8 +66,6 @@ pub use fingerprint::{
     FactLocation, FieldAccessFact, FieldAccessKind, FingerprintOutput, HookRef, MethodCallFact,
     ProjectionFieldFact, UnusedParam,
 };
-pub use homeboy_core::extension_invocation_context::ResolvedExtensionInvocationContext;
-pub use homeboy_core::extension_scope::ExtensionScope;
 pub use homeboy_core::extension_store::{
     available_extension_ids, discover_extensions, extension_path, find_extension_by_tool,
     find_extension_for_file_ext, is_extension_linked, load_all_extensions, load_extension, merge,

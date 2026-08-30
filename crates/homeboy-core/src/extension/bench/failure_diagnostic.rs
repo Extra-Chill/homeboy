@@ -1,6 +1,6 @@
 //! Bench runner failure diagnostic enrichment.
 
-use crate::stderr_tail;
+use crate::extension::stderr_tail;
 
 use super::run::BenchRunWorkflowArgs;
 
@@ -85,7 +85,7 @@ fn text_after<'a>(text: &'a str, start: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bench::parsing::BenchRunExecution;
+    use crate::extension::bench::parsing::BenchRunExecution;
     use homeboy_engine_primitives::baseline::BaselineFlags;
 
     #[test]

@@ -1,17 +1,17 @@
-use crate as extension;
+use crate::extension;
 use crate::extension::runner::tail_lines;
-use crate::test::analyze::{analyze, TestAnalysisInput};
-use crate::test::baseline::{self, TestCounts};
-use crate::test::durations::{
+use crate::extension::test::analyze::{analyze, TestAnalysisInput};
+use crate::extension::test::baseline::{self, TestCounts};
+use crate::extension::test::durations::{
     build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestPolicy,
     TestDurations,
 };
-use crate::test::{
+use crate::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope,
     normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
     parse_test_results_file_with_spec, parse_test_results_text, parse_test_results_text_with_spec,
 };
-use crate::{ExtensionCapability, ExtensionPhaseTiming};
+use crate::extension::{ExtensionCapability, ExtensionPhaseTiming};
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, ErrorCode};
@@ -469,7 +469,7 @@ impl InventoryProfile {
     /// A declared config that selects no fingerprint files, or names no usable
     /// runner, is refused rather than silently degraded: an inventory bound to
     /// a constant fingerprint would compare equal across unrelated workspaces.
-    fn resolve(config: Option<&crate::TestInventoryConfig>) -> Option<Self> {
+    fn resolve(config: Option<&crate::extension::TestInventoryConfig>) -> Option<Self> {
         let Some(config) = config else {
             return Some(Self::cargo());
         };
@@ -1297,7 +1297,7 @@ fn run_main_test_workflow_inner(
 ) -> homeboy_core::Result<TestRunWorkflowResult> {
     let changed_scope = if let Some(ref git_ref) = args.changed_since {
         Some(match args.precomputed_changed_files.as_ref() {
-            Some(changed_files) => crate::test::compute_changed_test_scope_for_files(
+            Some(changed_files) => crate::extension::test::compute_changed_test_scope_for_files(
                 component,
                 git_ref,
                 changed_files,
@@ -1539,10 +1539,10 @@ fn run_main_test_workflow_inner(
         }
     }
 
-    let test_context = crate::test::resolve_test_command(component).ok();
+    let test_context = crate::extension::test::resolve_test_command(component).ok();
     let test_config = test_context
         .as_ref()
-        .and_then(|context| crate::load_extension(&context.extension_id).ok())
+        .and_then(|context| crate::extension_store::load_extension(&context.extension_id).ok())
         .and_then(|extension| extension.test);
     let result_parse = test_config
         .as_ref()
@@ -2185,7 +2185,7 @@ fn parse_compiler_failures(stdout: &str, stderr: &str) -> Option<TestAnalysisInp
             .captures(&message)
             .map(|captures| captures[1].to_string())
             .unwrap_or_else(|| message.clone());
-        failures.push(crate::test::TestFailure {
+        failures.push(crate::extension::test::TestFailure {
             test_name: format!("{code}: {symbol}"),
             test_file: String::new(),
             error_type: format!("compiler_error:{code}"),
@@ -2345,7 +2345,7 @@ fn failed_test_workflow(
 
 fn run_declared_result_parser(
     component: &Component,
-    context: &crate::ExtensionExecutionContext,
+    context: &crate::extension_execution::ExtensionExecutionContext,
     spec: &ParseSpec,
     stdout: &str,
     run_dir: &RunDir,
@@ -2737,7 +2737,7 @@ fn merge_reported_test_artifact_locators(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::TestFailure;
+    use crate::extension::test::TestFailure;
     use homeboy_core::component::{ComponentScriptsConfig, ScopedExtensionConfig};
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -3150,12 +3150,13 @@ mod tests {
             .expect("marker script");
 
             assert_eq!(
-                crate::test::declared_secret_env_names(&matching).expect("matching declaration"),
+                crate::extension::test::declared_secret_env_names(&matching)
+                    .expect("matching declaration"),
                 vec!["FIRST_PROJECTED_SECRET", "SECOND_PROJECTED_SECRET"]
             );
 
             let local = conditional_test_component(home.path(), source.path(), "local");
-            assert!(crate::test::declared_secret_env_names(&local)
+            assert!(crate::extension::test::declared_secret_env_names(&local)
                 .expect("non-matching declaration")
                 .is_empty());
 
@@ -5570,7 +5571,7 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
                 "fixture-extension".to_string(),
                 None,
             );
-            let context = crate::ExtensionExecutionContext {
+            let context = crate::extension_execution::ExtensionExecutionContext {
                 component: component.clone(),
                 capability: ExtensionCapability::Test,
                 extension_id: "fixture-extension".to_string(),
@@ -5631,7 +5632,7 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
             "fixture-extension".to_string(),
             None,
         );
-        let context = crate::ExtensionExecutionContext {
+        let context = crate::extension_execution::ExtensionExecutionContext {
             component: component.clone(),
             capability: ExtensionCapability::Test,
             extension_id: "fixture-extension".to_string(),
@@ -5706,7 +5707,7 @@ exit 23
                 "fixture-extension".to_string(),
                 None,
             );
-            let context = crate::ExtensionExecutionContext {
+            let context = crate::extension_execution::ExtensionExecutionContext {
                 component: component.clone(),
                 capability: ExtensionCapability::Test,
                 extension_id: "fixture-extension".to_string(),
@@ -5778,7 +5779,7 @@ printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
                 "fixture-extension".to_string(),
                 None,
             );
-            let context = crate::ExtensionExecutionContext {
+            let context = crate::extension_execution::ExtensionExecutionContext {
                 component: component.clone(),
                 capability: ExtensionCapability::Test,
                 extension_id: "fixture-extension".to_string(),
@@ -5845,7 +5846,7 @@ printf 'not json\n'
             "fixture-extension".to_string(),
             None,
         );
-        let context = crate::ExtensionExecutionContext {
+        let context = crate::extension_execution::ExtensionExecutionContext {
             component: component.clone(),
             capability: ExtensionCapability::Test,
             extension_id: "fixture-extension".to_string(),
@@ -5909,7 +5910,7 @@ printf 'not json\n'
 #[cfg(all(test, unix))]
 mod inventory_profile_tests {
     use super::*;
-    use crate::{TestInventoryConfig, TestInventoryRunner};
+    use crate::extension::{TestInventoryConfig, TestInventoryRunner};
 
     fn wordpress_config() -> TestInventoryConfig {
         TestInventoryConfig {

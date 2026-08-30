@@ -13,7 +13,7 @@
 //! [`homeboy_core::update_check_cache`]. The on-disk filename and JSON
 //! schema live here and are unchanged.
 
-use crate as extension;
+use crate::extension;
 use homeboy_core::update_check_cache;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
