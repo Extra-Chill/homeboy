@@ -522,6 +522,50 @@ impl AgentTaskRunRecord {
         !self.provider_handles.is_empty() || self.has_candidate_terminal_state()
     }
 
+    /// Whether runner placement was recorded without any execution ever taking
+    /// ownership or producing durable work. A leftover `runner_job_id` is not
+    /// ownership once the runner's live-job view is authoritatively idle.
+    pub(crate) fn is_ownerless_zero_artifact_queued_runner_record(&self) -> bool {
+        let now = chrono::Utc::now();
+        self.state == AgentTaskRunState::Queued
+            && self.runner_id().is_some()
+            && self.runner_job_id().is_some()
+            && self.lab_handoff.is_none()
+            && self.local_owner_liveness() == LocalOwnerLiveness::Absent
+            && !self.has_planned_runner_execution()
+            && !super::has_live_pending_runner_submission_intent(self, now)
+            && !self.has_live_pending_local_cook_supervisor(now)
+            && self.aggregate_path.is_none()
+            && self.totals.is_none()
+            && self.artifact_refs.is_empty()
+            && self.provider_handles.is_empty()
+            && self.latest_executor_evidence.is_none()
+            && self.candidate_adoption.is_none()
+            && self.lifecycle.external_runtime_ids.is_empty()
+            && self
+                .lifecycle
+                .provider_runtime
+                .iter()
+                .all(|runtime| runtime.external_runtime_ids.is_empty())
+            && self
+                .metadata
+                .get("provider_executions")
+                .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
+            && self
+                .metadata
+                .get("provider_executions_consumed")
+                .is_none_or(|value| value.as_u64() == Some(0))
+    }
+
+    /// Ownerless queued runner residue whose runner has already proved zero live
+    /// jobs. Runner-generation reconcile cannot mutate this durable record.
+    pub(crate) fn is_locally_reconcilable_after_runner_idle(&self) -> bool {
+        self.is_ownerless_zero_artifact_queued_runner_record()
+            && self.runner_id().is_some_and(|runner_id| {
+                super::runner_live_job_authority(runner_id) == super::RunnerLiveJobAuthority::Idle
+            })
+    }
+
     /// A terminal state that carries a produced candidate (success or a
     /// recoverable/partial candidate), as opposed to a bare failure/cancellation
     /// that produced nothing to preserve.

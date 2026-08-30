@@ -93,8 +93,8 @@ pub use runner_continuation::{
     clear_runner_continuation_provider_for_test, RunnerContinuationTestGuard,
 };
 pub use runner_continuation::{
-    register_runner_continuation_provider, runner_authority, RunnerAuthority,
-    RunnerContinuationProvider, RunnerJobReconciliation,
+    register_runner_continuation_provider, runner_authority, runner_live_job_authority,
+    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
 pub use runner_exec::*;
 pub use workspace_authority::*;

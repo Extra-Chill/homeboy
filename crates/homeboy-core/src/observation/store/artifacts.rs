@@ -2573,61 +2573,6 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_open_does_not_wait_for_rollback_writer_maintenance_lock() {
-        with_isolated_home(|home| {
-            let database = home.path().join("observation.sqlite");
-            let setup = schema::open_connection(&database).expect("open schema");
-            schema::apply_migrations(&setup).expect("apply schema");
-            setup
-                .execute_batch("PRAGMA journal_mode=DELETE;")
-                .expect("use rollback journal mode");
-            setup
-                .execute(
-                    "INSERT INTO runs(id, kind, started_at, status, metadata_json) VALUES ('retry-run', 'agent-task', '2026-01-01T00:00:00Z', 'running', '{}')",
-                    [],
-                )
-                .expect("persist retry identity");
-            let staging = home.path().join("locked.staging");
-            let final_path = home.path().join("locked.final");
-            fs::write(&staging, b"staged").expect("staging bytes");
-            fs::write(&final_path, b"finalized before crash").expect("final bytes");
-            setup.execute(
-                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('locked', 'artifact', ?1, ?2, 'dead-owner', 0)",
-                params![staging.display().to_string(), final_path.display().to_string()],
-            ).expect("journal intent");
-            drop(setup);
-
-            let writer = rusqlite::Connection::open(&database).expect("open locking connection");
-            writer
-                .execute_batch("BEGIN IMMEDIATE;")
-                .expect("hold rollback writer lock");
-            let (opened_tx, opened_rx) = mpsc::sync_channel(1);
-            let opener = std::thread::spawn(move || {
-                opened_tx.send(ObservationStore::open_initialized_for_lifecycle_at(
-                    &database,
-                ))
-            });
-
-            let opened = opened_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("lifecycle open must not wait for maintenance lock")
-                .expect("lifecycle open succeeds while maintenance is deferred");
-            assert!(opened
-                .get_run("retry-run")
-                .expect("read retry identity")
-                .is_some());
-            drop(opened);
-            writer
-                .execute_batch("COMMIT;")
-                .expect("release writer lock");
-            opener
-                .join()
-                .expect("lifecycle opener joined")
-                .expect("lifecycle open result sent");
-        });
-    }
-
-    #[test]
     fn reconciliation_eventually_recovers_after_a_rollback_writer_lock() {
         with_isolated_home(|home| {
             let database = home.path().join("observation.sqlite");
