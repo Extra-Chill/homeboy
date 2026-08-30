@@ -900,11 +900,13 @@ pub fn upgrade_runner_with_executor(
     let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
+    let selected_source_revision = source_path.and_then(source_checkout_revision);
     if is_managed_immutable_homeboy_path(runner, &original_homeboy_path) {
         return refresh_managed_immutable_runner(
             runner,
             original_homeboy_path,
             previous_version,
+            selected_source_revision.as_deref(),
             extension_updates,
             exec,
         );
@@ -916,7 +918,6 @@ pub fn upgrade_runner_with_executor(
                 .then(|| source_path.and_then(source_checkout_build_identity))
                 .flatten()
         });
-    let selected_source_revision = source_path.and_then(source_checkout_revision);
     let selected_source_url = source_path.and_then(homeboy_core::git::remote_origin_url);
     let command_source_path = match runner_upgrade_source_path(
         runner,
@@ -1323,24 +1324,31 @@ fn refresh_managed_immutable_runner(
     runner: &Runner,
     previous_homeboy_path: String,
     previous_version: Option<String>,
+    selected_source_revision: Option<&str>,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> RunnerUpgradeEntry {
-    let recovery_commands = managed_immutable_runner_recovery_commands(&runner.id);
-    let Some(controller_commit) = homeboy_product_identity::build_identity().git_commit else {
+    let Some(controller_commit) =
+        managed_immutable_runner_target_revision(selected_source_revision)
+    else {
         return managed_immutable_runner_failure_entry(
             &runner.id,
             previous_homeboy_path,
             previous_version,
+            None,
             1,
             "managed immutable runner refresh requires the controller's immutable commit identity; no mutable version-tag recovery action was emitted".to_string(),
         );
     };
+    let recovery_commands = managed_immutable_runner_recovery_commands_with_commit(
+        &runner.id,
+        Some(&controller_commit),
+    );
     let options = crate::HomeboyBinaryRefreshOptions {
         runner_id: runner.id.clone(),
         mode: crate::HomeboyBinaryRefreshMode::Materialize,
         source: None,
-        git_ref: Some(controller_commit),
+        git_ref: Some(controller_commit.clone()),
         target_dir: None,
         reconnect: true,
         force: false,
@@ -1354,6 +1362,7 @@ fn refresh_managed_immutable_runner(
                 &runner.id,
                 previous_homeboy_path,
                 previous_version,
+                Some(&controller_commit),
                 1,
                 format!(
                     "managed immutable runner refresh failed: {}; recover with {}",
@@ -1398,6 +1407,7 @@ fn refresh_managed_immutable_runner(
                 &runner.id,
                 refreshed.selected_binary_path,
                 previous_version,
+                Some(&controller_commit),
                 1,
                 format!(
                     "managed immutable runner refresh completed but reconciliation failed: {}; recover with {}",
@@ -1408,9 +1418,15 @@ fn refresh_managed_immutable_runner(
         }
     };
     let homeboy_path = refreshed.selected_binary_path;
-    let new_version = runner_homeboy_version(runner, &homeboy_path, exec)
-        .ok()
-        .flatten();
+    let new_version = reconciled
+        .session
+        .as_ref()
+        .map(|session| session.homeboy_version.clone())
+        .or_else(|| {
+            runner_homeboy_version(runner, &homeboy_path, exec)
+                .ok()
+                .flatten()
+        });
     let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
     let admission_ready = managed_immutable_admission_ready(&reconciled);
@@ -1445,6 +1461,14 @@ fn refresh_managed_immutable_runner(
     }
 }
 
+pub(super) fn managed_immutable_runner_target_revision(
+    selected_source_revision: Option<&str>,
+) -> Option<String> {
+    selected_source_revision
+        .map(str::to_string)
+        .or_else(|| homeboy_product_identity::build_identity().git_commit)
+}
+
 pub(super) fn managed_immutable_admission_ready(status: &crate::RunnerStatusReport) -> bool {
     status.admission_summary(0).accepting_jobs
 }
@@ -1461,6 +1485,7 @@ fn managed_immutable_runner_failure_entry(
     runner_id: &str,
     homeboy_path: String,
     previous_version: Option<String>,
+    target_revision: Option<&str>,
     exit_code: i32,
     detail: String,
 ) -> RunnerUpgradeEntry {
@@ -1473,7 +1498,10 @@ fn managed_immutable_runner_failure_entry(
         new_version: None,
         bare_homeboy_version: None,
         path_drift: Some("managed immutable runner refresh did not converge".to_string()),
-        recovery_commands: managed_immutable_runner_recovery_commands(runner_id),
+        recovery_commands: managed_immutable_runner_recovery_commands_with_commit(
+            runner_id,
+            target_revision,
+        ),
         extensions_synced: Vec::new(),
         extensions_skipped: Vec::new(),
         extensions_failed: Vec::new(),
