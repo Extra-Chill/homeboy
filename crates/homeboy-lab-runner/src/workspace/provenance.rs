@@ -58,12 +58,30 @@ pub(crate) fn materialize_verified_lab_snapshot_git_baseline(
             "does not require a synthetic Git baseline for git materialization".to_string(),
         );
     }
-    if materialized_workspace_path.join(".git").exists() {
-        // A replay reaches the same accepted snapshot after a prior worker has
-        // already materialized its deterministic baseline. Reuse it only after
-        // validating every provenance and Git-root invariant.
-        verify_lab_workspace_git_root(materialized_workspace_path, &provenance)?;
-        return git(materialized_workspace_path, &["rev-parse", "HEAD"]);
+    let git_path = materialized_workspace_path.join(".git");
+    if git_path.exists() {
+        match super::util::verify_valid_git_representation(materialized_workspace_path) {
+            Ok(()) => {
+                // A replay reaches the same accepted snapshot after a prior worker has
+                // already materialized its deterministic baseline. Reuse it only after
+                // validating every provenance and Git-root invariant.
+                verify_lab_workspace_git_root(materialized_workspace_path, &provenance)?;
+                return git(materialized_workspace_path, &["rev-parse", "HEAD"]);
+            }
+            Err(_) if git_path.is_file() && provenance.materialization_mode != "snapshot-git" => {
+                // A leftover linked-worktree gitfile whose gitdir was not
+                // snapshotted is not a reusable baseline. Snapshot modes replace
+                // it with a verified synthetic checkout before handoff.
+                std::fs::remove_file(&git_path)
+                    .map_err(|error| format!("could not replace invalid .git pointer: {error}"))?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "workspace .git representation is not a valid Git checkout: {}",
+                    error.message
+                ))
+            }
+        }
     }
     if let Some(path) = nested_git_metadata(materialized_workspace_path, &provenance.sync_excludes)?
     {
@@ -1694,6 +1712,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn snapshot_baseline_replaces_dangling_linked_worktree_gitfile_before_handoff() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        std::fs::write(
+            workspace.path().join(".git"),
+            "gitdir: /does-not-exist/gitdir\n",
+        )
+        .expect("dangling linked-worktree gitfile");
+        let snapshot = snapshot(workspace.path());
+        let lab = lab(workspace.path(), &snapshot);
+
+        let baseline = materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect("dangling gitfile is replaced with a synthetic baseline");
+
+        assert!(!baseline.is_empty());
+        assert!(workspace.path().join(".git").is_dir());
+        super::super::util::verify_valid_git_representation(workspace.path())
+            .expect("handoff workspace has a verified valid .git representation");
+    }
+
+    #[test]
+    fn snapshot_git_baseline_rejects_dangling_linked_worktree_gitfile() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        std::fs::write(
+            workspace.path().join(".git"),
+            "gitdir: /does-not-exist/gitdir\n",
+        )
+        .expect("dangling linked-worktree gitfile");
+        let snapshot = snapshot(workspace.path());
+        let mut lab = lab(workspace.path(), &snapshot);
+        lab["sync_mode"] = serde_json::json!("snapshot-git");
+
+        let error = materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect_err("snapshot-git must fail closed on an invalid gitfile");
+        assert!(
+            error.contains("not a valid Git checkout"),
+            "unexpected error: {error}"
+        );
+        assert!(workspace.path().join(".git").is_file());
     }
 
     #[test]
