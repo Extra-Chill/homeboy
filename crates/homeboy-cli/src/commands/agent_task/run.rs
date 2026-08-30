@@ -5540,10 +5540,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         .and_then(|task| task.workspace.root.as_ref())
         .map(std::path::PathBuf::from);
     let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
-    let title = args
-        .title
-        .clone()
-        .unwrap_or_else(|| default_loop_title(&args));
+    let title = default_loop_title(&args, source_worktree_path.as_deref());
     let commit_message = args
         .commit_message
         .clone()
@@ -8228,14 +8225,62 @@ fn git_head_sha(path: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn default_loop_title(args: &AgentTaskCookArgs) -> String {
+fn default_loop_title(args: &AgentTaskCookArgs, source_worktree_path: Option<&Path>) -> String {
+    if let Some(title) = &args.title {
+        return title.clone();
+    }
+    if let Some(title) = args.goal.as_deref().and_then(bounded_cook_title) {
+        return title;
+    }
+    if let Some(title) = source_worktree_path
+        .zip(
+            args.base_resolution
+                .as_ref()
+                .and_then(|resolution| resolution.get("sha"))
+                .and_then(Value::as_str),
+        )
+        .and_then(|(path, base_sha)| existing_candidate_title(path, base_sha))
+    {
+        return title;
+    }
     let target = args
         .dispatch
         .repo
         .as_deref()
         .or(args.dispatch.task_url.as_deref())
         .unwrap_or("agent task");
-    format!("Cook {target}")
+    bounded_cook_title(&format!("Cook {target}")).unwrap_or_else(|| "Cook agent task".to_string())
+}
+
+fn existing_candidate_title(path: &Path, base_sha: &str) -> Option<String> {
+    let head_sha = git_head_sha(path)?;
+    if head_sha == base_sha
+        || !Command::new("git")
+            .args(["merge-base", "--is-ancestor", base_sha, &head_sha])
+            .current_dir(path)
+            .status()
+            .ok()?
+            .success()
+    {
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["show", "-s", "--format=%s", &head_sha])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .and_then(|subject| bounded_cook_title(&subject))
+}
+
+fn bounded_cook_title(value: &str) -> Option<String> {
+    const MAX_PR_TITLE_CHARS: usize = 256;
+
+    let title = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then(|| title.chars().take(MAX_PR_TITLE_CHARS).collect())
 }
 
 fn default_loop_commit_message(args: &AgentTaskCookArgs) -> String {
@@ -8521,13 +8566,98 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        cook_attached_local_placement_disclosure, cook_continuation_status,
+        bounded_cook_title, cook_attached_local_placement_disclosure, cook_continuation_status,
         cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
-        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
-        project_preview_dirty_admission,
+        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure, default_loop_title,
+        detached_cook_route_less_warning, durable_cook_identity_lines, existing_candidate_title,
+        preflight_continue_cook, project_preview_dirty_admission,
     };
+    use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
+    use crate::commands::agent_task::AgentTaskCommand;
+    use clap::Parser;
+
+    fn title_cook_args(extra: &[&str]) -> super::AgentTaskCookArgs {
+        let mut argv = vec![
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "fixture",
+            "--cwd",
+            ".",
+            "--no-finalize",
+        ];
+        argv.extend_from_slice(extra);
+        let Commands::AgentTask(command) = Cli::parse_from(argv).command else {
+            panic!("agent-task command");
+        };
+        let AgentTaskCommand::Cook(args) = command.command else {
+            panic!("cook command");
+        };
+        *args
+    }
+
+    #[test]
+    fn cook_title_precedence_keeps_explicit_goal_candidate_and_fallback_semantics() {
+        let explicit = title_cook_args(&["--title", "Explicit title", "--goal", "Goal title"]);
+        assert_eq!(default_loop_title(&explicit, None), "Explicit title");
+
+        let goal = title_cook_args(&["--goal", "  Restore\n cold\t reconstruction  "]);
+        assert_eq!(
+            default_loop_title(&goal, None),
+            "Restore cold reconstruction"
+        );
+
+        let fallback = title_cook_args(&["--repo", "fixture-repository"]);
+        assert_eq!(
+            default_loop_title(&fallback, None),
+            "Cook fixture-repository"
+        );
+    }
+
+    #[test]
+    fn cook_title_semantics_are_bounded_and_candidate_aware() {
+        assert_eq!(
+            bounded_cook_title("  Restore\n cold\t reconstruction  ").as_deref(),
+            Some("Restore cold reconstruction")
+        );
+        assert_eq!(
+            bounded_cook_title(&"x".repeat(300))
+                .expect("bounded title")
+                .chars()
+                .count(),
+            256
+        );
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "agent@example.test"]);
+        git(&["config", "user.name", "Agent"]);
+        std::fs::write(workspace.path().join("candidate.txt"), "base\n").expect("write base");
+        git(&["add", "candidate.txt"]);
+        git(&["commit", "-m", "base"]);
+        let base = super::git_head_sha(workspace.path()).expect("base sha");
+        assert_eq!(existing_candidate_title(workspace.path(), &base), None);
+
+        std::fs::write(workspace.path().join("candidate.txt"), "candidate\n")
+            .expect("write candidate");
+        git(&["commit", "-am", "fix: restore schema\n\nuntrusted body"]);
+        let mut candidate = title_cook_args(&["--repo", "fixture-repository"]);
+        candidate.base_resolution = Some(serde_json::json!({ "sha": base }));
+        assert_eq!(
+            default_loop_title(&candidate, Some(workspace.path())),
+            "fix: restore schema"
+        );
+    }
 
     #[test]
     fn preview_projects_each_dirty_admission_state() {
