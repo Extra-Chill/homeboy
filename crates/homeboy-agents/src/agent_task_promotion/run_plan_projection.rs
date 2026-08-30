@@ -89,7 +89,8 @@ mod tests {
             )
             .expect("detached projection uses the controller plan");
 
-            let projected = agent_task_lifecycle::status("detached-run").expect("projection");
+            let projected =
+                agent_task_lifecycle::reconcile_status("detached-run").expect("projection");
             assert_eq!(projected.plan_id, controller_plan.plan_id);
             assert_eq!(projected.plan_path, submitted.plan_path);
             let retry = agent_task_lifecycle::retry("detached-run", Some("local-retry"))

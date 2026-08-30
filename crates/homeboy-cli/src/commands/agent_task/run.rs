@@ -3002,7 +3002,7 @@ where
     )? {
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
         | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
-            let record = agent_task_lifecycle::status_in_store(
+            let record = agent_task_lifecycle::reconcile_status_in_store(
                 &lifecycle_store,
                 run_id,
                 agent_task_lifecycle::AgentTaskStatusOptions::default(),

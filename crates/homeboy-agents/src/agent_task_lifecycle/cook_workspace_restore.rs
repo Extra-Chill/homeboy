@@ -21,14 +21,14 @@ use crate::agent_task_scheduler::AgentTaskPlan;
 /// found in the terminal projection.
 ///
 /// The durable promotion below is *not* rooted here, deliberately.
-/// `persisted_promotion_for_attempt` reads through `agent_task_lifecycle::status`,
+/// `persisted_promotion_for_attempt` reads through `agent_task_lifecycle::reconcile_status`,
 /// which reconciles and writes as it reads; its `_in_store` sibling is a plain
 /// record read instead.
 ///
-/// `status_in_store` now exists, so the missing rooted form is no longer the
+/// `reconcile_status_in_store` now exists, so the missing rooted form is no longer the
 /// obstacle. What remains is a behaviour decision this slice does not get to
 /// make silently: `persisted_promotion_for_attempt_in_store` is a plain
-/// `read_record`, and pointing it at `status_in_store` would add roughly twenty
+/// `read_record`, and pointing it at `reconcile_status_in_store` would add roughly twenty
 /// durable writes and two advisory locks to every existing caller of the rooted
 /// promotion read. Either that read starts reconciling for everyone or this
 /// function keeps reading a not-yet-reconciled record — both are defensible and

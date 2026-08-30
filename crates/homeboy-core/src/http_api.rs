@@ -462,9 +462,9 @@ const MAX_AGENT_TASK_RUN_ID_LEN: usize = 256;
 ///
 /// # This is a pure read, deliberately
 ///
-/// The CLI's `agent-task status` is a reconciling read that writes. Neither
-/// live runner probes nor durable rewrites belong behind these routes: the
-/// daemon accept loop is serial, and this module is the read-only contract.
+/// CLI and HTTP status reads share the same non-reconciling contract. Live
+/// runner probes and durable rewrites belong to explicit reconciliation, not
+/// the serial daemon accept loop.
 fn control_plane_capabilities_response() -> Result<HttpApiResponse> {
     control_plane_ok(
         HttpEndpoint::ControlPlaneCapabilities,

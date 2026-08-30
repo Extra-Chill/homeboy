@@ -2994,7 +2994,7 @@ pub(crate) fn dispatch_controller_plan_to_lab(
         run_id,
         None,
     )?;
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     Ok(serde_json::json!({
         "schema": "homeboy/agent-task-controller-lab-handoff/v1",
         "run_id": run_id,
@@ -3710,7 +3710,7 @@ fn materialize_agent_task_retry_handoff(
     {
         return Ok(None);
     }
-    if agent_task_lifecycle::status_in_store(
+    if agent_task_lifecycle::reconcile_status_in_store(
         &lifecycle_store,
         &retry.run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -3966,7 +3966,7 @@ fn persist_retry_handoff_preacceptance_failure(
     let selected_runner = route_runner_id
         .map(str::to_string)
         .or_else(|| {
-            agent_task_lifecycle::status(&handoff.run_id)
+            agent_task_lifecycle::reconcile_status(&handoff.run_id)
                 .ok()
                 .and_then(|record| record.runner_id().map(str::to_string))
         })

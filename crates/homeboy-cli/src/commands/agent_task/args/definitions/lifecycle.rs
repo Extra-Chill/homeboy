@@ -81,10 +81,10 @@ pub struct StatusArgs {
     /// Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt.
     #[arg(long, conflicts_with = "bridge")]
     pub exact: bool,
-    /// Read status through the runner bridge.
+    /// Return canonical bridged events beside the durable run projection.
     #[arg(long)]
     pub bridge: bool,
-    /// Resume bridged status events after this cursor.
+    /// Resume canonical bridged events after this cursor.
     #[arg(long, value_name = "CURSOR", requires = "bridge")]
     pub since_cursor: Option<String>,
     /// Return complete status details instead of the bounded summary.

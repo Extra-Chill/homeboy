@@ -411,7 +411,7 @@ pub fn execute_promotion_with_progress_and_cancellation(
 
 fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
     let previous = request.source_run_id.as_ref().and_then(|run_id| {
-        agent_task_lifecycle::status(run_id)
+        agent_task_lifecycle::reconcile_status(run_id)
             .ok()
             .and_then(|record| record.metadata.get("latest_promotion").cloned())
     });

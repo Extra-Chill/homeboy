@@ -112,8 +112,8 @@ fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
         .expect("accepted job must become an in-flight outcome");
 
         assert!(matches!(outcome, LabOffloadOutcome::InFlight { .. }));
-        let record =
-            homeboy_agents::agent_task_lifecycle::status(run_id).expect("controller record");
+        let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)
+            .expect("controller record");
         assert_eq!(
             record.state,
             homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Running
@@ -550,7 +550,7 @@ fn capability_fallback_persists_the_verified_local_outcome() {
         )
         .expect("verified local fallback");
 
-        let record = homeboy_agents::agent_task_lifecycle::status("fallback-run")
+        let record = homeboy_agents::agent_task_lifecycle::reconcile_status("fallback-run")
             .expect("durable fallback run");
         assert_eq!(
             record.metadata["execution_placement_outcome"]["effective"],
@@ -669,7 +669,7 @@ fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
             outcome,
             homeboy_core::lab_routing::LabRouteOutcome::RunLocal
         ));
-        let record = homeboy_agents::agent_task_lifecycle::status("timed-fallback")
+        let record = homeboy_agents::agent_task_lifecycle::reconcile_status("timed-fallback")
             .expect("durable fallback run");
         assert_eq!(
             record.metadata["execution_placement_outcome"]["decision_id"],

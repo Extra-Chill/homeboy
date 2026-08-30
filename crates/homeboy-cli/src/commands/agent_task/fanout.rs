@@ -545,7 +545,7 @@ fn reconcile_fanout_pr_states(batch_id: &str, mutate: bool) -> Result<BTreeMap<S
     let mut statuses = BTreeMap::new();
     for child in batch.child_runs {
         let record = if mutate {
-            agent_task_lifecycle::status(&child.run_id)?
+            agent_task_lifecycle::reconcile_status(&child.run_id)?
         } else {
             match agent_task_lifecycle::persisted_status(&child.run_id) {
                 Ok(record) => record,
@@ -1029,7 +1029,7 @@ impl supervisor::FanoutPortfolioAdapter for CookFanoutPortfolioAdapter {
 fn force_with_lease_then_reconcile(
     child: &supervisor::AgentTaskFanoutPortfolioChild,
 ) -> Result<()> {
-    let record = agent_task_lifecycle::status(&child.run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(&child.run_id)?;
     let promotion = record.metadata.get("latest_promotion").ok_or_else(|| {
         Error::validation_invalid_argument(
             "latest_promotion",
@@ -1175,7 +1175,7 @@ fn portfolio_observation(
 ) -> Result<homeboy::agents::agent_tasks::fanout_supervisor::AgentTaskFanoutPortfolioObservation> {
     use homeboy::agents::agent_tasks::fanout_supervisor as supervisor;
     let record = if reconcile {
-        agent_task_lifecycle::status(run_id)
+        agent_task_lifecycle::reconcile_status(run_id)
     } else {
         agent_task_lifecycle::persisted_status(run_id)
     }
@@ -3584,7 +3584,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
 fn durable_terminal_worktree_paths(plan: &BatchCookFanoutPlan) -> Result<BTreeMap<String, String>> {
     let mut terminal = BTreeMap::new();
     for cook in &plan.cooks {
-        let Ok(record) = agent_task_lifecycle::status(&cook.run_id()) else {
+        let Ok(record) = agent_task_lifecycle::reconcile_status(&cook.run_id()) else {
             continue;
         };
         if !record.state.is_terminal() {
@@ -7106,7 +7106,7 @@ fi
             assert_eq!(receipt["steps"]["gates_invalidate"]["status"], "completed");
             assert_eq!(receipt["steps"]["review_invalidate"]["status"], "completed");
             let dependent =
-                agent_task_lifecycle::status("dependent-run").expect("dependent record");
+                agent_task_lifecycle::reconcile_status("dependent-run").expect("dependent record");
             assert!(dependent.metadata.get("cook_finalization").is_none());
             assert_eq!(
                 dependent.metadata["cook_recovery_source_checkpoint"]["phase"],

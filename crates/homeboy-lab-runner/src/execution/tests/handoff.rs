@@ -722,8 +722,9 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
             run.metadata_json["lab"]["remote_job"]["id"].as_str(),
             Some(job_id)
         );
-        let controller_record = homeboy_agents::agent_task_lifecycle::status(stable_run_id)
-            .expect("accepted reverse-broker handoff remains durable");
+        let controller_record =
+            homeboy_agents::agent_task_lifecycle::reconcile_status(stable_run_id)
+                .expect("accepted reverse-broker handoff remains durable");
         assert!(controller_record.lab_handoff.is_some_and(|handoff| {
             handoff.state
                 == homeboy_agents::agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
@@ -800,7 +801,7 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
             "detached handoff waited for the blocked workload"
         );
         let job_id = output.job_id.expect("durably accepted daemon job");
-        let controller_record = homeboy_agents::agent_task_lifecycle::status(run_id)
+        let controller_record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)
             .expect("controller record remains observable after accepted handoff");
         assert_eq!(controller_record.runner_id(), Some("lab"));
         assert_eq!(controller_record.runner_job_id(), Some(job_id.as_str()));
@@ -981,7 +982,7 @@ fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_i
         .expect("foreground portable handoff");
 
         assert_eq!(exit_code, 0);
-        let record = homeboy_agents::agent_task_lifecycle::status(run_id)
+        let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)
             .expect("terminal projection keeps controller record readable");
         assert_eq!(record.runner_id(), Some("lab"));
         assert_eq!(record.runner_job_id(), output.job_id.as_deref());

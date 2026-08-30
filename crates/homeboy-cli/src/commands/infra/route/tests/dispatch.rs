@@ -54,7 +54,7 @@ fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
         .expect("persist detached bench handoff");
 
         assert_eq!(handoff.run_id, "ssi-fixture-37-20260727-runtime-fixed");
-        let record = agent_task_lifecycle::status(&handoff.run_id)
+        let record = agent_task_lifecycle::reconcile_status(&handoff.run_id)
             .expect("interrupted caller leaves a discoverable run");
         assert!(!record.state.is_terminal());
         assert_eq!(record.plan_id, handoff.plan.plan_id);
@@ -99,7 +99,7 @@ fn detached_planless_handoff_reuses_the_same_explicit_bench_label() {
 
         assert_eq!(first.run_id, second.run_id);
         assert_eq!(first.plan.plan_id, second.plan.plan_id);
-        assert!(agent_task_lifecycle::status(&first.run_id).is_ok());
+        assert!(agent_task_lifecycle::reconcile_status(&first.run_id).is_ok());
     });
 }
 
@@ -662,7 +662,7 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
                     .expect("authorized Lab outcome"),
             )
             .expect("persist verified outcome");
-            let record = agent_task_lifecycle::status(run_id).expect("durable attempt");
+            let record = agent_task_lifecycle::reconcile_status(run_id).expect("durable attempt");
             assert_eq!(
                 record.metadata["execution_placement_decision"]["decision_id"],
                 initial.decision_id
@@ -704,8 +704,8 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
         );
         agent_task_lifecycle::submit_plan(&replacement_plan, Some("workspace-replacement"))
             .expect("persist replacement");
-        let replacement_record =
-            agent_task_lifecycle::status("workspace-replacement").expect("replacement record");
+        let replacement_record = agent_task_lifecycle::reconcile_status("workspace-replacement")
+            .expect("replacement record");
         assert_eq!(
             replacement_record.metadata["execution_placement_invalidated"]["prior_decision_id"],
             replacement_plan.metadata["execution_placement_invalidated"]["prior_decision_id"]
@@ -724,8 +724,8 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
                 .expect("replacement Lab outcome"),
         )
         .expect("persist replacement outcome");
-        let replacement_record =
-            agent_task_lifecycle::status("workspace-replacement").expect("replacement record");
+        let replacement_record = agent_task_lifecycle::reconcile_status("workspace-replacement")
+            .expect("replacement record");
         assert_eq!(
             replacement_record.metadata["execution_placement_outcome"]["decision_id"],
             replacement.decision_id
@@ -863,7 +863,7 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
 
         assert!(!error.message.is_empty());
         assert_eq!(error.retryable, Some(true));
-        let record = agent_task_lifecycle::status("cook-preacceptance-order")
+        let record = agent_task_lifecycle::reconcile_status("cook-preacceptance-order")
             .expect("controller record remains inspectable after preacceptance failure");
         assert!(record.lab_handoff.is_none());
         assert_eq!(record.metadata["runner_id"], "missing-homeboy-lab");
@@ -2128,12 +2128,13 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         // inventing a global --cwd. The route carries the selected task
         // checkout separately, and workspace staging maps it to the job cwd.
         assert!(remote_cli.detach_after_handoff);
-        let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
+        let replacement =
+            agent_task_lifecycle::reconcile_status(&handoff.run_id).expect("replacement");
         assert_eq!(replacement.metadata["retry_of"], "failed-run");
         assert_eq!(replacement.metadata["retried_from"], "failed-run");
         assert_eq!(replacement.metadata["retry_root"], "failed-run");
         assert_eq!(
-            agent_task_lifecycle::status("failed-run")
+            agent_task_lifecycle::reconcile_status("failed-run")
                 .expect("source retry lineage")
                 .metadata["retries"],
             serde_json::json!(["failed-run-retry-on-lab"])
@@ -2144,13 +2145,13 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         // still resolve the retry reservation through the controller store.
         agent_task_lifecycle::submit_plan(&handoff.plan, Some(&handoff.run_id))
             .expect("resubmit replacement from Lab handoff");
-        let resubmitted =
-            agent_task_lifecycle::status(&handoff.run_id).expect("resubmitted replacement");
+        let resubmitted = agent_task_lifecycle::reconcile_status(&handoff.run_id)
+            .expect("resubmitted replacement");
         assert_eq!(resubmitted.metadata["retry_of"], "failed-run");
         assert_eq!(resubmitted.metadata["retried_from"], "failed-run");
         assert_eq!(resubmitted.metadata["retry_root"], "failed-run");
         assert_eq!(
-            agent_task_lifecycle::status("failed-run")
+            agent_task_lifecycle::reconcile_status("failed-run")
                 .expect("source retry lineage remains idempotent")
                 .metadata["retries"],
             serde_json::json!(["failed-run-retry-on-lab"])
@@ -2158,7 +2159,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
 
         stage_retry_lab_handoff_before_preacceptance(Some(&handoff), Some("homeboy-lab"))
             .expect("stage replacement handoff before Lab preacceptance");
-        let replacement = agent_task_lifecycle::status(&handoff.run_id)
+        let replacement = agent_task_lifecycle::reconcile_status(&handoff.run_id)
             .expect("staged replacement remains inspectable");
         // Staging binds the controller proxy to its runner. The typed
         // `lab_handoff` is deliberately not written here: since #10855 restored
@@ -2181,7 +2182,8 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
             .iter()
             .any(|hint| hint.message.contains("agent-task retry")
                 && hint.message.contains(&handoff.run_id)));
-        let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("failed retry");
+        let replacement =
+            agent_task_lifecycle::reconcile_status(&handoff.run_id).expect("failed retry");
         assert_eq!(
             replacement.state,
             homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState::Failed
@@ -2635,7 +2637,7 @@ fn retry_handoff_refuses_multiple_task_workspaces() {
             Err(error) => error,
         };
         assert!(error.message.contains("multiple task workspaces"));
-        assert!(agent_task_lifecycle::status("failed-run-retry-1").is_err());
+        assert!(agent_task_lifecycle::reconcile_status("failed-run-retry-1").is_err());
     });
 }
 
@@ -2844,7 +2846,7 @@ fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
         };
 
         assert!(error.message.contains("original persisted plan has none"));
-        assert!(agent_task_lifecycle::status("failed-run-retry-1").is_err());
+        assert!(agent_task_lifecycle::reconcile_status("failed-run-retry-1").is_err());
     });
 }
 

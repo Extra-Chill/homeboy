@@ -9,7 +9,8 @@ use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
 use homeboy_core::{Error, Result};
 
 use super::{
-    apply_aggregate_to_record, status, store, verified_controller_artifact_projection_path,
+    apply_aggregate_to_record, reconcile_status, store,
+    verified_controller_artifact_projection_path,
 };
 
 /// Materialize recovered patch artifacts for a controller-side promotion.
@@ -22,7 +23,7 @@ pub fn materialize_recovered_patch_artifact(
     task_id: Option<&str>,
     artifact_id: Option<&str>,
 ) -> Result<bool> {
-    let mut record = status(run_id)?;
+    let mut record = reconcile_status(run_id)?;
     let mut aggregate = store::read_aggregate(&record.run_id)?;
     let artifact_id = artifact_id
         .map(|artifact_id| resolve_promotion_patch_artifact_id(run_id, task_id, artifact_id))

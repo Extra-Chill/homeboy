@@ -826,7 +826,7 @@ fn reached_freeze_boundary_in_store(
 ) -> Result<Option<RecipeFreezeBoundary>> {
     let mut reached = None;
     for attempt in &recipe.attempts {
-        let Ok(record) = crate::agent_task_lifecycle::status_in_store(
+        let Ok(record) = crate::agent_task_lifecycle::reconcile_status_in_store(
             lifecycle_store,
             &attempt.run_id,
             crate::agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -3962,7 +3962,7 @@ mod tests {
         )
         .unwrap();
 
-        crate::agent_task_lifecycle::status_in_store(
+        crate::agent_task_lifecycle::reconcile_status_in_store(
             &failed_lifecycle_store,
             "run",
             crate::agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -3982,7 +3982,7 @@ mod tests {
         )
         .unwrap();
 
-        crate::agent_task_lifecycle::status_in_store(
+        crate::agent_task_lifecycle::reconcile_status_in_store(
             &cancelled_lifecycle_store,
             "run",
             crate::agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -4020,9 +4020,9 @@ mod tests {
             crate::agent_task_lifecycle::record_run_aggregate("run", &plan, &aggregate).unwrap();
             let executions = AtomicUsize::new(0);
 
-            crate::agent_task_lifecycle::status("run").unwrap();
+            crate::agent_task_lifecycle::reconcile_status("run").unwrap();
 
-            let record = crate::agent_task_lifecycle::status("run").unwrap();
+            let record = crate::agent_task_lifecycle::reconcile_status("run").unwrap();
             assert_eq!(
                 record.metadata["cook_continuation_scheduler"]["status"],
                 "queued"
@@ -4078,7 +4078,7 @@ mod tests {
         )
         .unwrap();
 
-        let record = crate::agent_task_lifecycle::status_in_store(
+        let record = crate::agent_task_lifecycle::reconcile_status_in_store(
             &lifecycle_store,
             "run",
             crate::agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -4490,7 +4490,7 @@ mod tests {
         .unwrap();
         fs::write(store.recipe_path("cook"), b"not json").unwrap();
 
-        let record = crate::agent_task_lifecycle::status_in_store(
+        let record = crate::agent_task_lifecycle::reconcile_status_in_store(
             &lifecycle_store,
             "run",
             crate::agent_task_lifecycle::AgentTaskStatusOptions::default(),
