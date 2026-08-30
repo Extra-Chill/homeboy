@@ -401,55 +401,75 @@ fn observed_agent_task_terminal_job_status(
     if run_id_owns_generic_exec {
         return None;
     }
-    let state = homeboy_agents::agent_task_lifecycle::persisted_status(run_id)
-        .ok()?
-        .state;
-    agent_task_terminal_job_status(state)
+    let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
+    let store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .ok()?;
+    let run = homeboy_agents::orchestration::OrchestrationService::new(
+        homeboy_agents::orchestration::LifecycleStoreLookup::new(store),
+    )
+    .run(&run_id)
+    .ok()?;
+    control_plane_terminal_job_status(run.state)
 }
 
-fn agent_task_terminal_job_status(
-    state: homeboy_agents::agent_task_lifecycle::AgentTaskRunState,
+fn control_plane_terminal_job_status(
+    state: homeboy_control_plane_contract::ControlPlaneRunState,
 ) -> Option<JobStatus> {
-    use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
+    use homeboy_control_plane_contract::ControlPlaneRunState;
     match state {
-        AgentTaskRunState::Succeeded
-        | AgentTaskRunState::CandidateRecoverable
-        | AgentTaskRunState::PartialRecoverable => Some(JobStatus::Succeeded),
-        AgentTaskRunState::PartialFailure | AgentTaskRunState::Failed => Some(JobStatus::Failed),
-        AgentTaskRunState::Cancelled => Some(JobStatus::Cancelled),
-        AgentTaskRunState::Queued | AgentTaskRunState::Running => None,
+        ControlPlaneRunState::Succeeded
+        | ControlPlaneRunState::CandidateRecoverable
+        | ControlPlaneRunState::PartialRecoverable => Some(JobStatus::Succeeded),
+        ControlPlaneRunState::PartialFailure
+        | ControlPlaneRunState::Failed
+        | ControlPlaneRunState::TimedOut => Some(JobStatus::Failed),
+        ControlPlaneRunState::Cancelled => Some(JobStatus::Cancelled),
+        ControlPlaneRunState::Queued
+        | ControlPlaneRunState::Running
+        | ControlPlaneRunState::Stale
+        | ControlPlaneRunState::Unknown => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
+    use homeboy_control_plane_contract::ControlPlaneRunState;
 
     #[test]
     fn agent_task_terminal_state_bounds_stale_runner_job_polling() {
         for state in [
-            AgentTaskRunState::Succeeded,
-            AgentTaskRunState::CandidateRecoverable,
-            AgentTaskRunState::PartialRecoverable,
+            ControlPlaneRunState::Succeeded,
+            ControlPlaneRunState::CandidateRecoverable,
+            ControlPlaneRunState::PartialRecoverable,
         ] {
             assert_eq!(
-                agent_task_terminal_job_status(state),
+                control_plane_terminal_job_status(state),
                 Some(JobStatus::Succeeded)
             );
         }
-        for state in [AgentTaskRunState::PartialFailure, AgentTaskRunState::Failed] {
+        for state in [
+            ControlPlaneRunState::PartialFailure,
+            ControlPlaneRunState::Failed,
+            ControlPlaneRunState::TimedOut,
+        ] {
             assert_eq!(
-                agent_task_terminal_job_status(state),
+                control_plane_terminal_job_status(state),
                 Some(JobStatus::Failed)
             );
         }
         assert_eq!(
-            agent_task_terminal_job_status(AgentTaskRunState::Cancelled),
+            control_plane_terminal_job_status(ControlPlaneRunState::Cancelled),
             Some(JobStatus::Cancelled)
         );
-        for state in [AgentTaskRunState::Queued, AgentTaskRunState::Running] {
-            assert_eq!(agent_task_terminal_job_status(state), None);
+        for state in [
+            ControlPlaneRunState::Queued,
+            ControlPlaneRunState::Running,
+            ControlPlaneRunState::Stale,
+            ControlPlaneRunState::Unknown,
+        ] {
+            assert_eq!(control_plane_terminal_job_status(state), None);
         }
     }
 }

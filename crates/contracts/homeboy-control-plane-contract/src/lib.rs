@@ -23,7 +23,10 @@ pub use identity::{
 };
 pub use resolve::{resolve, IdentityKind, ResolveError, ResolvedIdentities};
 pub use resource::{
+    ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
+    ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneBlocker,
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation,
-    ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, CONTROL_PLANE_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult, ControlPlaneRun,
+    ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
+    CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
