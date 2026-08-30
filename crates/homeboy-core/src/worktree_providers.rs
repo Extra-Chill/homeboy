@@ -2445,6 +2445,7 @@ fn run_provider_mutation_command(
         None,
         Some(provider_command_evidence(command, &output)),
     );
+    promote_provider_command_failure(&mut error, &output);
     annotate_provider_lookup_error(&mut error, provider_id, command, operation, "command");
     Err(error)
 }
@@ -2956,6 +2957,7 @@ fn run_provider_split_command(
             None,
             Some(provider_command_evidence(command, &output)),
         );
+        promote_provider_command_failure(&mut error, &output);
         annotate_provider_lookup_error(&mut error, provider_id, command, operation, "command");
         return Err(error);
     }
@@ -3170,6 +3172,7 @@ fn run_provider_lookup_command(
             None,
             Some(provider_command_evidence(command, &output)),
         );
+        promote_provider_command_failure(&mut error, &output);
         annotate_provider_lookup_error(&mut error, provider_id, command, operation, "command");
         return Err(error);
     }
@@ -3496,6 +3499,118 @@ fn provider_command_evidence(command: &[String], output: &std::process::Output) 
     }
 }
 
+/// Promote a provider's declared current failure beside the lossless command
+/// evidence. Stderr wins when both streams contain failure JSON because it is
+/// the command's diagnostic channel; stdout remains preserved as evidence.
+fn promote_provider_command_failure(error: &mut Error, output: &std::process::Output) {
+    let failure = [&output.stderr, &output.stdout]
+        .into_iter()
+        .filter_map(|stream| serde_json::from_slice::<Value>(stream).ok())
+        .find_map(|value| bounded_declared_provider_failure(&value));
+    if let Some(failure) = failure {
+        error.details["provider_failure"] = failure;
+    }
+}
+
+fn bounded_declared_provider_failure(value: &Value) -> Option<Value> {
+    const TEXT_LIMIT: usize = 1_000;
+    const CODE_LIMIT: usize = 128;
+    const REMEDIATION_LIMIT: usize = 4;
+
+    let object = value.as_object()?;
+    let failed = object.get("success").and_then(Value::as_bool) == Some(false)
+        || object
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| {
+                matches!(
+                    status.to_ascii_lowercase().as_str(),
+                    "blocked" | "error" | "failed" | "failure" | "timed_out" | "timeout"
+                )
+            });
+    if !failed {
+        return None;
+    }
+    let message = ["message", "problem", "summary"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(Value::as_str))
+        .or_else(|| object.get("error").and_then(Value::as_str))
+        .or_else(|| object.get("failure").and_then(Value::as_str))?
+        .trim();
+    if message.is_empty() {
+        return None;
+    }
+    let bounded = |text: &str, limit: usize| text.chars().take(limit).collect::<String>();
+    let bounded_detail = |text: &str, limit: usize| {
+        crate::redaction::redact_string(text)
+            .chars()
+            .take(limit)
+            .collect::<String>()
+    };
+    let mut details = serde_json::Map::new();
+    if let Some(command) = object
+        .get("refresh_command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.trim().is_empty())
+    {
+        details.insert(
+            "refresh_command".to_string(),
+            Value::String(bounded_detail(command.trim(), TEXT_LIMIT)),
+        );
+    }
+    if let Some(remediation) = object.get("remediation") {
+        let remediation = match remediation {
+            Value::String(text) => Value::String(bounded_detail(text, TEXT_LIMIT)),
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(REMEDIATION_LIMIT)
+                    .map(|text| Value::String(bounded_detail(text, TEXT_LIMIT)))
+                    .collect(),
+            ),
+            Value::Object(remediation) => {
+                let mut projected = serde_json::Map::new();
+                for key in ["command", "replay_command", "message"] {
+                    if let Some(text) = remediation.get(key).and_then(Value::as_str) {
+                        projected.insert(
+                            key.to_string(),
+                            Value::String(bounded_detail(text, TEXT_LIMIT)),
+                        );
+                    }
+                }
+                Value::Object(projected)
+            }
+            _ => Value::Null,
+        };
+        if !remediation.is_null() {
+            details.insert("remediation".to_string(), remediation);
+        }
+    }
+    let mut failure = serde_json::json!({
+        "message": bounded_detail(message, TEXT_LIMIT),
+        "details": details,
+    });
+    if let Some(code) = object
+        .get("code")
+        .or_else(|| object.get("kind"))
+        .or_else(|| object.get("class"))
+        .and_then(Value::as_str)
+        .filter(|code| !code.trim().is_empty())
+    {
+        failure["code"] = Value::String(bounded(code.trim(), CODE_LIMIT));
+    }
+    for key in ["stdout", "stderr"] {
+        if let Some(text) = object.get(key).and_then(Value::as_str) {
+            failure[format!("{key}_tail")] = Value::String(bounded_detail(text, TEXT_LIMIT));
+        }
+    }
+    if let Some(retryable) = object.get("retryable").and_then(Value::as_bool) {
+        failure["retryable"] = Value::Bool(retryable);
+    }
+    Some(failure)
+}
+
 fn bounded_provider_output(output: &[u8]) -> (String, bool) {
     const MAX_OUTPUT_CHARS: usize = 8_192;
 
@@ -3506,7 +3621,7 @@ fn bounded_provider_output(output: &[u8]) -> (String, bool) {
 
 #[cfg(test)]
 mod compact_provider_failure_details_tests {
-    use super::compact_provider_failure_details;
+    use super::{bounded_declared_provider_failure, compact_provider_failure_details};
     use serde_json::json;
 
     #[test]
@@ -3599,6 +3714,49 @@ mod compact_provider_failure_details_tests {
             "Authorization: Bearer [REDACTED]"
         );
         assert!(!projection.to_string().contains("provider-secret"));
+    }
+
+    #[test]
+    fn typed_failure_keeps_code_when_error_is_a_sibling_string() {
+        let failure = bounded_declared_provider_failure(&json!({
+            "status": "error",
+            "code": "freshness_refresh_required",
+            "message": "refresh before planning",
+            "error": "generic wrapper text",
+        }))
+        .expect("declared failure");
+
+        assert_eq!(failure["code"], "freshness_refresh_required");
+        assert_eq!(failure["message"], "refresh before planning");
+    }
+
+    #[test]
+    fn declared_failure_bounds_refresh_and_remediation_deterministically() {
+        let failure = bounded_declared_provider_failure(&json!({
+            "status": "blocked",
+            "message": "refresh required",
+            "refresh_command": "r".repeat(1_200),
+            "remediation": ["one", "two", "three", "four", "five"],
+            "unrelated": "must not be promoted",
+        }))
+        .expect("declared failure");
+
+        assert_eq!(
+            failure["details"]["refresh_command"]
+                .as_str()
+                .expect("refresh command")
+                .chars()
+                .count(),
+            1_000
+        );
+        assert_eq!(
+            failure["details"]["remediation"]
+                .as_array()
+                .expect("remediation")
+                .len(),
+            4
+        );
+        assert!(failure["details"].get("unrelated").is_none());
     }
 }
 
@@ -7921,6 +8079,85 @@ mod tests {
             .details
             .to_string()
             .contains("provider-secret-must-not-persist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_failure_json_on_stderr_precedes_stdout_for_lookup_and_mutation() {
+        let dir = unique_fixture_script_dir();
+        let script = dir.join("provider");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"failed\",\"code\":\"stdout_failure\",\"message\":\"stdout cause\"}'\nprintf '%s\\n' '{\"status\":\"error\",\"code\":\"stderr_failure\",\"message\":\"stderr cause\",\"error\":\"generic sibling\"}' >&2\nexit 1\n",
+        )
+        .expect("write provider");
+        make_executable(&script);
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: None,
+        };
+
+        let command = [script.to_string_lossy().to_string()];
+        let lookup = run_provider_lookup_command("fixture", &provider, &command, "resolve", &[])
+            .expect_err("lookup fails");
+        let mutation = run_provider_mutation_command("fixture", &provider, &command, "ensure")
+            .expect_err("mutation fails");
+
+        for error in [lookup, mutation] {
+            assert_eq!(error.details["provider_failure"]["code"], "stderr_failure");
+            assert_eq!(error.details["provider_failure"]["message"], "stderr cause");
+            assert!(error.details["command_evidence"]["stdout"]
+                .as_str()
+                .expect("stdout evidence")
+                .contains("stdout_failure"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_json_lookup_and_ensure_failures_keep_command_evidence() {
+        let dir = unique_fixture_script_dir();
+        let script = dir.join("provider");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'plain stdout evidence\\n'\nprintf 'plain stderr evidence\\n' >&2\nexit 23\n",
+        )
+        .expect("write provider");
+        make_executable(&script);
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            mutation_timeout_ms: 30_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands::default(),
+            list_result_mapping: None,
+        };
+        let command = [script.to_string_lossy().to_string()];
+
+        let lookup = run_provider_lookup_command("fixture", &provider, &command, "resolve", &[])
+            .expect_err("lookup fails");
+        let ensure =
+            run_provider_ensure_command("fixture", &provider, &command).expect_err("ensure fails");
+        for error in [lookup, ensure] {
+            assert_eq!(error.details["command_evidence"]["exit_code"], 23);
+            assert_eq!(
+                error.details["command_evidence"]["stdout"],
+                "plain stdout evidence\n"
+            );
+            assert_eq!(
+                error.details["command_evidence"]["stderr"],
+                "plain stderr evidence\n"
+            );
+            assert!(error.details.get("provider_failure").is_none());
+        }
     }
 
     #[cfg(unix)]
