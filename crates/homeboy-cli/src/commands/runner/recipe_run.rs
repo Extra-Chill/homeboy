@@ -24,10 +24,10 @@ pub(super) fn recipe_run(
             None,
         ));
     }
-    let descriptor = homeboy_core::extension::resolve_recipe_run_provider(provider_id)?;
-    let command = homeboy_core::extension::render_recipe_run_command(
+    let descriptor = homeboy_core::extension::recipe_run::resolve_recipe_run_provider(provider_id)?;
+    let command = homeboy_core::extension::recipe_run::render_recipe_run_command(
         &descriptor,
-        &homeboy_core::extension::RecipeRunRequest {
+        &homeboy_core::extension::recipe_run::RecipeRunRequest {
             recipe_path: recipe,
             artifact_path: artifacts.clone(),
         },

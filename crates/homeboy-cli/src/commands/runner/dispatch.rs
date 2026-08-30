@@ -317,7 +317,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             RunnerCommandOutput::RecipeRunProviders(Box::new(RecipeRunProvidersOutput {
                 variant: "recipe_run_providers",
                 command: "list",
-                providers: homeboy_core::extension::recipe_run_provider_inventory(),
+                providers: homeboy_core::extension::recipe_run::recipe_run_provider_inventory(),
             })),
             0,
         )),

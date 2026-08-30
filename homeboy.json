@@ -650,6 +650,15 @@
         "forbid": {
           "glob": "crates/**",
           "patterns": [
+            "\\bextension::(?:recipe_run_provider_inventory|render_recipe_run_command|resolve_recipe_run_provider|RecipeRunProviderInventoryEntry|RecipeRunProviderValidation|RecipeRunRequest)\\b"
+          ]
+        },
+        "name": "extensions-use-canonical-recipe-run-api"
+      },
+      {
+        "forbid": {
+          "glob": "crates/**",
+          "patterns": [
             "\\bextension_execution\\b",
             "\\bfind_extension_for_file_ext\\b"
           ]
