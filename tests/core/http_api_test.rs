@@ -9,8 +9,8 @@ use crate::observation::{
 };
 use homeboy_control_plane_contract::{
     ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass, ControlPlaneOperation,
-    ControlPlaneRef, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, MissionId, RunId,
-    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    ControlPlaneResource, ControlPlaneResult, ControlPlaneRun, ControlPlaneRunState, MissionId,
+    RunId, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
 
 use crate::test_support::with_isolated_home;
@@ -242,53 +242,13 @@ fn routes_activity_endpoints() {
     );
 }
 
-#[test]
-fn routes_agent_task_run_endpoint() {
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/agent-task/runs/cook-abc").expect("route"),
-        HttpEndpoint::AgentTaskRun {
-            id: "cook-abc".to_string()
-        }
-    );
-    // Trailing slashes and query strings are stripped by the shared segment
-    // parser, exactly as they are for every neighbouring route.
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/agent-task/runs/cook-abc/?x=1").expect("route"),
-        HttpEndpoint::AgentTaskRun {
-            id: "cook-abc".to_string()
-        }
-    );
-}
-
-#[test]
-fn agent_task_run_route_is_read_only_and_exact() {
-    // This change adds a read route and nothing else. Submission and retry have
-    // their own safety review, so nothing under /agent-task may be reachable by
-    // POST, and the collection path must not resolve.
-    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc")
-        .expect_err("agent-task runs are not writable through this route");
-    http_api::route(HttpMethod::Post, "/agent-task/runs")
-        .expect_err("there is no agent-task submit route");
-    http_api::route(HttpMethod::Get, "/agent-task/runs")
-        .expect_err("there is no agent-task run collection route");
-    http_api::route(HttpMethod::Get, "/agent-task").expect_err("there is no agent-task root route");
-    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc/cancel")
-        .expect_err("cancellation stays on the controller-job surface");
-    http_api::route(HttpMethod::Post, "/agent-task/runs/cook-abc/retry")
-        .expect_err("retry is out of scope for this change");
-}
-
 const CONTROL_PLANE_FIXTURE_RUN: &str =
     "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
 const CONTROL_PLANE_FIXTURE_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
 
 fn fixture_control_plane_run() -> ControlPlaneRun {
     let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
-    let mut resource = ControlPlaneRun::new(
-        run.clone(),
-        ControlPlaneRef::Mission(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission")),
-        ControlPlaneRef::Run(run.clone()),
-    );
+    let mut resource = ControlPlaneRun::new(run.clone());
     resource.mission = Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"));
     resource.state = ControlPlaneRunState::Succeeded;
     resource.created_at = "2026-01-01T00:00:00Z".to_string();
@@ -298,16 +258,23 @@ fn fixture_control_plane_run() -> ControlPlaneRun {
 struct FixtureControlPlaneProvider;
 
 impl ControlPlaneProvider for FixtureControlPlaneProvider {
+    fn capabilities(&self) -> ControlPlaneCapabilities {
+        ControlPlaneCapabilities::new(
+            vec![ControlPlaneResource::Run],
+            vec![
+                ControlPlaneOperation::GetCapabilities,
+                ControlPlaneOperation::GetRun,
+            ],
+        )
+    }
+
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
-        if requested_id.as_str() == CONTROL_PLANE_FIXTURE_RUN
-            || requested_id.as_str() == CONTROL_PLANE_FIXTURE_COOK
-        {
+        if requested_id.as_str() == CONTROL_PLANE_FIXTURE_RUN {
             Ok(fixture_control_plane_run())
         } else {
-            Err(ControlPlaneError::not_found(
-                format!("agent-task run not found: {requested_id}"),
-                "homeboy agent-task active",
-            ))
+            Err(ControlPlaneError::not_found(format!(
+                "agent-task run not found: {requested_id}"
+            )))
         }
     }
 }
@@ -323,19 +290,22 @@ fn routes_versioned_control_plane_endpoints() {
         HttpEndpoint::ControlPlaneCapabilities
     );
     assert_eq!(
-        http_api::route(HttpMethod::Get, "/v1/control-plane/runs/cook-abc").expect("route"),
+        http_api::route(HttpMethod::Get, "/v1/control-plane/runs/run-abc").expect("route"),
         HttpEndpoint::ControlPlaneRun {
-            id: "cook-abc".to_string()
+            id: "run-abc".to_string()
         }
     );
-    http_api::route(HttpMethod::Post, "/v1/control-plane/runs/cook-abc")
+    http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc")
         .expect_err("control-plane mutations are not wired");
+    http_api::route(HttpMethod::Get, "/agent-task/runs/run-abc")
+        .expect_err("the unversioned compatibility route is removed");
     http_api::route(HttpMethod::Get, "/v1/control-plane/missions")
         .expect_err("no extra resource family");
 }
 
 #[test]
 fn control_plane_capabilities_advertise_only_wired_operations() {
+    register_fixture_control_plane_provider();
     let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
         path: "/v1/control-plane/capabilities".to_string(),
@@ -356,7 +326,6 @@ fn control_plane_capabilities_advertise_only_wired_operations() {
             ControlPlaneOperation::GetRun
         ]
     );
-    assert_eq!(capabilities.compatibility.legacy_minor_versions, 1);
 }
 
 #[test]
@@ -365,7 +334,7 @@ fn control_plane_http_run_matches_the_service_fixture() {
     let expected = fixture_control_plane_run();
     let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
-        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_COOK}"),
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}"),
         body: None,
     })
     .expect("run");
@@ -376,40 +345,7 @@ fn control_plane_http_run_matches_the_service_fixture() {
     let resource = result.resource.expect("resource");
     assert_eq!(resource, expected);
     assert_eq!(resource.schema, CONTROL_PLANE_RUN_SCHEMA);
-    assert!(!resource.reconciles);
-    assert_eq!(
-        resource.requested,
-        ControlPlaneRef::Mission(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"))
-    );
-}
-
-#[test]
-fn legacy_agent_task_run_route_delegates_to_the_same_control_plane_run() {
-    register_fixture_control_plane_provider();
-    let versioned = http_api::handle(HttpApiRequest {
-        method: HttpMethod::Get,
-        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}"),
-        body: None,
-    })
-    .expect("v1");
-    let legacy = http_api::handle(HttpApiRequest {
-        method: HttpMethod::Get,
-        path: format!("/agent-task/runs/{CONTROL_PLANE_FIXTURE_RUN}"),
-        body: None,
-    })
-    .expect("legacy");
-    let versioned: ControlPlaneResult<ControlPlaneRun> =
-        serde_json::from_value(versioned.body).expect("v1 result");
-    let legacy_body = legacy.body;
-    let legacy_run: ControlPlaneRun =
-        serde_json::from_value(legacy_body["run"].clone()).expect("legacy run");
-    assert_eq!(versioned.resource.expect("versioned resource"), legacy_run);
-    assert_eq!(legacy_body["command"], "api.agent_task.runs.show");
-    assert_eq!(legacy_body["run_id"], CONTROL_PLANE_FIXTURE_RUN);
-    assert_eq!(legacy_body["requested_id"], CONTROL_PLANE_FIXTURE_RUN);
-    assert_eq!(legacy_body["projection"]["reconciles"], false);
-    assert_eq!(legacy_body["projection"]["probe_failed"], false);
-    assert_eq!(legacy_body["job_surface"]["list"], "/jobs");
+    assert_eq!(resource.run.as_str(), CONTROL_PLANE_FIXTURE_RUN);
 }
 
 #[test]
@@ -427,10 +363,6 @@ fn control_plane_run_lookup_miss_is_a_structured_not_found() {
     let error = result.error.expect("error");
     assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
     assert!(!error.retryable);
-    assert_eq!(
-        error.next_action.as_deref(),
-        Some("homeboy agent-task active")
-    );
     assert!(error.message.contains("no-such-agent-task-run"));
 }
 
