@@ -1,6 +1,7 @@
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
+use homeboy_core::extension_update_check::is_git_url;
 use homeboy_core::{build_identity, git};
 use semver::Version;
 use std::path::{Path, PathBuf};
@@ -1467,7 +1468,7 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
                 Ok(manifest) => {
                     let (source_url, update_note) =
                         match extension::resolve_source_url_read_only(&extension_id) {
-                            Ok(source_url) if extension::is_git_url(&source_url) => {
+                            Ok(source_url) if is_git_url(&source_url) => {
                                 (Some(source_url), None)
                             }
                             Ok(source_url) => (
@@ -2039,7 +2040,7 @@ fn portable_extension_source_url(result: &homeboy_core::extension::UpdateResult)
         return git::remote_origin_url(git_root);
     }
 
-    if extension::is_git_url(&result.url) {
+    if is_git_url(&result.url) {
         Some(result.url.clone())
     } else {
         None
