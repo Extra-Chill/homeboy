@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.364.19] - 2026-08-30
+
+### Changed
+- Move bridge status onto control-plane run
+- Fold extension subsystem into core
+- Unify canonical control-plane run detail
+
 ## [0.364.18] - 2026-08-30
 
 ### Changed
