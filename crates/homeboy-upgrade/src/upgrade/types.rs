@@ -167,6 +167,10 @@ pub struct UpgradeResult {
     /// exact recovery command so the operator can restart it manually.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services_pending_restart: Vec<ServiceRestartEntry>,
+    /// Durable observation-run id for this upgrade. Inspect with
+    /// `homeboy upgrade status <id>` after a client timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 /// Compact named outcome for one upgrade dimension. Detailed build output stays
@@ -376,6 +380,7 @@ mod tests {
             extensions_unrefreshed: Vec::new(),
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
+            operation_id: None,
         };
 
         let json = serde_json::to_value(&result).expect("upgrade result serializes");
