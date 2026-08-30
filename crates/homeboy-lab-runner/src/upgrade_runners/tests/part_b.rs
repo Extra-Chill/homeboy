@@ -36,7 +36,11 @@ fn managed_immutable_runner_slots_route_to_one_exact_refresh_action() {
         "/home/user/workspace/_homeboy_binaries/homeboy-main/target/release/homeboy"
     ));
 
-    let commands = managed_immutable_runner_recovery_commands("homeboy-lab");
+    let identity = homeboy_product_identity::build_identity();
+    let commands = managed_immutable_runner_recovery_commands_with_commit(
+        "homeboy-lab",
+        identity.git_commit.as_deref(),
+    );
     assert_eq!(commands.len(), 1);
     assert!(commands[0].starts_with("homeboy runner refresh-homeboy homeboy-lab --ref "));
     assert!(commands[0].ends_with(" --reconnect"));

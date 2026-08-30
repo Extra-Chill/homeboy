@@ -67,15 +67,6 @@ pub fn is_managed_immutable_homeboy_path(runner: &Runner, homeboy_path: &str) ->
     immutable_slot
 }
 
-pub fn managed_immutable_runner_recovery_commands(runner_id: &str) -> Vec<String> {
-    managed_immutable_runner_recovery_commands_with_commit(
-        runner_id,
-        homeboy_product_identity::build_identity()
-            .git_commit
-            .as_deref(),
-    )
-}
-
 pub(crate) fn managed_immutable_runner_recovery_commands_with_commit(
     runner_id: &str,
     commit: Option<&str>,
