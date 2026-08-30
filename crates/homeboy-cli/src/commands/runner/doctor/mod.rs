@@ -84,10 +84,13 @@ pub(crate) fn run_with_options(
         repair::apply(&target, &options, &mut report);
     }
 
-    // Doctor probes the runner directly. Its observation supersedes any
-    // process-local capability answer, so the next execution preflight probes
-    // the exact command environment rather than replaying stale remediation.
-    runner::observe_runner_capabilities(runner_id);
+    // Only general doctor observes the complete capability surface. Scoped
+    // Lab diagnostics deliberately skip CPU, tools, workspace, and artifact
+    // probes, so treating that partial report as a complete observation would
+    // evict known-good admission evidence.
+    if observes_complete_capabilities(options.scope) {
+        runner::observe_runner_capabilities(runner_id);
+    }
     if options.scope == RunnerDoctorScope::LabOffload {
         let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
         let eligible_provider_ids = probes::eligible_provider_ids(
@@ -285,6 +288,10 @@ pub(super) fn repair_scope(scope: RunnerDoctorScope, repair: bool) -> RunnerDoct
     } else {
         scope
     }
+}
+
+fn observes_complete_capabilities(scope: RunnerDoctorScope) -> bool {
+    scope != RunnerDoctorScope::LabOffload
 }
 
 fn runner_summary(

@@ -336,12 +336,29 @@ pub fn selected_mirrored_daemon_job_status(run: &RunRecord) -> Result<Option<Str
     match runner_evidence::with_runner_evidence(|p| {
         p.daemon_api_get(&runner_id, &format!("/jobs/{job_id}"))
     }) {
-        Ok(_) => Ok(None),
+        Ok(data) => Ok(Some(daemon_job_status(&data, &runner_id, &job_id)?)),
         Err(err) if err.details.get("http_status").and_then(Value::as_u64) == Some(404) => {
             Ok(Some("not_found".to_string()))
         }
         Err(err) => Err(err),
     }
+}
+
+fn daemon_job_status(data: &Value, runner_id: &str, job_id: &str) -> Result<String> {
+    data.pointer("/data/body")
+        .or_else(|| data.get("body"))
+        .unwrap_or(data)
+        .pointer("/job/status")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner_job_status",
+                format!("runner `{runner_id}` job `{job_id}` response did not include job.status"),
+                None,
+                None,
+            )
+        })
 }
 
 pub fn refresh_selected_mirrored_daemon_evidence(
@@ -447,6 +464,19 @@ fn finish_stale_runner_child_run(store: &ObservationStore, job: &StaleRunnerJobI
 #[cfg(test)]
 mod guidance_tests {
     use super::*;
+
+    #[test]
+    fn daemon_job_status_reads_the_authoritative_terminal_state() {
+        let response = serde_json::json!({
+            "data": { "body": { "job": { "status": "succeeded" } } }
+        });
+
+        assert_eq!(
+            daemon_job_status(&response, "homeboy-lab", "job-1").expect("job status"),
+            "succeeded"
+        );
+        assert!(daemon_job_status(&serde_json::json!({}), "homeboy-lab", "job-1").is_err());
+    }
 
     #[test]
     fn runner_owned_guidance_offers_non_destructive_controller_and_read_only_retrieval() {

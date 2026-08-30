@@ -114,10 +114,15 @@ pub(crate) fn reconcile_owned_stale_running_run(
     if run.status != RunStatus::Running.as_str() {
         return Ok(None);
     }
-    let Some(reason) = stale_running_reason(run, &pid_is_running) else {
-        return Ok(None);
-    };
-    reconcile_orphaned_running_run(store, run, reason, false).map(Some)
+    Ok(reconcile_orphaned_running_runs_with_remote_status(
+        store,
+        vec![run.clone()],
+        false,
+        pid_is_running,
+        runs_service::selected_mirrored_daemon_job_status,
+    )?
+    .into_iter()
+    .next())
 }
 
 fn reconcile_orphaned_running_runs<F>(
@@ -129,11 +134,47 @@ fn reconcile_orphaned_running_runs<F>(
 where
     F: Fn(u32) -> bool,
 {
-    Ok(running
-        .iter()
-        .filter_map(|run| stale_running_reason(run, &pid_is_alive).map(|reason| (run, reason)))
-        .map(|(run, reason)| reconcile_orphaned_running_run(store, run, reason, dry_run))
-        .collect::<homeboy::core::Result<Vec<_>>>()?)
+    reconcile_orphaned_running_runs_with_remote_status(
+        store,
+        running,
+        dry_run,
+        pid_is_alive,
+        runs_service::selected_mirrored_daemon_job_status,
+    )
+}
+
+fn reconcile_orphaned_running_runs_with_remote_status<F, R>(
+    store: &ObservationStore,
+    running: Vec<RunRecord>,
+    dry_run: bool,
+    pid_is_alive: F,
+    remote_status: R,
+) -> homeboy::core::Result<Vec<ReconciledRunSummary>>
+where
+    F: Fn(u32) -> bool,
+    R: Fn(&RunRecord) -> homeboy::core::Result<Option<String>>,
+{
+    let mut reconciled = Vec::new();
+    for run in &running {
+        // An unavailable or malformed runner answer cannot prove terminality.
+        // Leave the row running rather than falling back to daemon-PID or age
+        // heuristics that could contradict live remote work.
+        let Ok(remote_job_status) = remote_status(run) else {
+            continue;
+        };
+        let Some(reason) = reconciliation_reason(run, &pid_is_alive, remote_job_status.as_deref())
+        else {
+            continue;
+        };
+        reconciled.push(reconcile_orphaned_running_run(
+            store,
+            run,
+            reason,
+            remote_job_status,
+            dry_run,
+        )?);
+    }
+    Ok(reconciled)
 }
 
 fn running_runs(store: &ObservationStore, limit: i64) -> homeboy::core::Result<Vec<RunRecord>> {
@@ -148,42 +189,67 @@ fn reconcile_orphaned_running_run(
     store: &ObservationStore,
     run: &RunRecord,
     reason: &str,
+    remote_job_status: Option<String>,
     dry_run: bool,
 ) -> homeboy::core::Result<ReconciledRunSummary> {
     let owner_pid = run_owner_pid(run);
-    let remote_job_status = runs_service::selected_mirrored_daemon_job_status(run)?;
     if !dry_run {
         // Candidate selection is entirely local. Refresh only a selected row,
         // never the unrelated running mirrors that happen to share the store.
         runs_service::refresh_selected_mirrored_daemon_evidence(store, run);
     }
-    let reason = if remote_job_status.as_deref() == Some("not_found") {
-        "daemon_job_not_found"
-    } else {
-        reason
-    };
     let artifact_count = if dry_run {
         store.list_artifacts(&run.id)?.len()
     } else {
         reconcile_available_run_dir_artifacts(store, run)?
     };
-    let finished = if dry_run {
-        None
+    let terminal_status = remote_job_status.as_deref().and_then(terminal_run_status);
+    let (status, finished) = if dry_run {
+        (terminal_status.unwrap_or(RunStatus::Stale), None)
     } else if remote_job_status.as_deref() == Some("not_found") {
-        store.get_run(&run.id)?.and_then(|run| run.finished_at)
+        let refreshed = store.get_run(&run.id)?;
+        (
+            refreshed
+                .as_ref()
+                .and_then(|run| RunStatus::from_label(&run.status))
+                .unwrap_or(RunStatus::Stale),
+            refreshed.and_then(|run| run.finished_at),
+        )
+    } else if let Some(status) = terminal_status {
+        let metadata = with_runner_terminal_metadata(
+            run,
+            owner_pid,
+            reason,
+            remote_job_status
+                .as_deref()
+                .expect("terminal status is present"),
+        );
+        let refreshed = store
+            .finish_running_run(&run.id, status, Some(metadata))?
+            .or_else(|| store.get_run(&run.id).ok().flatten());
+        (
+            refreshed
+                .as_ref()
+                .and_then(|run| RunStatus::from_label(&run.status))
+                .unwrap_or(status),
+            refreshed.and_then(|run| run.finished_at),
+        )
     } else {
         let metadata =
             with_reconcile_metadata(run, owner_pid, reason, &reconcile_run_dir_metadata(run));
-        store
-            .finish_run(&run.id, RunStatus::Stale, Some(metadata))?
-            .finished_at
+        (
+            RunStatus::Stale,
+            store
+                .finish_run(&run.id, RunStatus::Stale, Some(metadata))?
+                .finished_at,
+        )
     };
 
     Ok(ReconciledRunSummary {
         id: run.id.clone(),
         kind: run.kind.clone(),
         previous_status: run.status.clone(),
-        status: RunStatus::Stale.as_str().to_string(),
+        status: status.as_str().to_string(),
         started_at: run.started_at.clone(),
         finished_at: finished,
         owner_pid,
@@ -191,6 +257,65 @@ fn reconcile_orphaned_running_run(
         artifact_count,
         remote_job_status,
     })
+}
+
+fn reconciliation_reason<F>(
+    run: &RunRecord,
+    pid_is_alive: &F,
+    remote_job_status: Option<&str>,
+) -> Option<&'static str>
+where
+    F: Fn(u32) -> bool,
+{
+    match remote_job_status {
+        Some("succeeded") => Some("runner_job_succeeded"),
+        Some("failed") => Some("runner_job_failed"),
+        Some("cancelled") => Some("runner_job_cancelled"),
+        Some("queued" | "running") => None,
+        Some("not_found") => {
+            stale_running_reason(run, pid_is_alive).map(|_| "daemon_job_not_found")
+        }
+        Some(_) => None,
+        None => stale_running_reason(run, pid_is_alive),
+    }
+}
+
+fn terminal_run_status(remote_job_status: &str) -> Option<RunStatus> {
+    match remote_job_status {
+        "succeeded" => Some(RunStatus::Pass),
+        "failed" | "cancelled" => Some(RunStatus::Fail),
+        _ => None,
+    }
+}
+
+fn with_runner_terminal_metadata(
+    run: &RunRecord,
+    owner_pid: Option<u32>,
+    reason: &str,
+    remote_job_status: &str,
+) -> Value {
+    let mut metadata =
+        with_reconcile_metadata(run, owner_pid, reason, &reconcile_run_dir_metadata(run));
+    let status = terminal_run_status(remote_job_status).expect("terminal status is known");
+    if let Some(marker) = metadata
+        .get_mut("homeboy_reconciled")
+        .and_then(Value::as_object_mut)
+    {
+        marker.insert(
+            "status".to_string(),
+            Value::String(status.as_str().to_string()),
+        );
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "runner_terminal_evidence".to_string(),
+            serde_json::json!({
+                "status": remote_job_status,
+                "reconciled_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        );
+    }
+    metadata
 }
 
 pub(crate) fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'static str>
@@ -565,6 +690,118 @@ mod tests {
 
             assert!(reconciled.is_empty());
             assert_eq!(unchanged.status, "running");
+        });
+    }
+
+    #[test]
+    fn authoritative_terminal_runner_job_outranks_live_daemon_owner() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let mut run = phantom_handoff_run("terminal-runner-job", minutes_ago(1));
+            run.metadata_json = serde_json::json!({
+                "homeboy_run_owner": { "pid": std::process::id() },
+                "lab": {
+                    "runner": { "id": "homeboy-lab" },
+                    "remote_job": { "id": "terminal-job" },
+                    "remote_job_status": "running"
+                }
+            });
+            store.import_run(&run).expect("import runner-backed run");
+
+            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                &store,
+                vec![run],
+                false,
+                |_| true,
+                |_| Ok(Some("succeeded".to_string())),
+            )
+            .expect("reconcile terminal runner job");
+            let updated = store
+                .get_run("terminal-runner-job")
+                .expect("get run")
+                .expect("run exists");
+
+            assert_eq!(reconciled.len(), 1);
+            assert_eq!(reconciled[0].reason, "runner_job_succeeded");
+            assert_eq!(
+                reconciled[0].remote_job_status.as_deref(),
+                Some("succeeded")
+            );
+            assert_eq!(reconciled[0].status, RunStatus::Pass.as_str());
+            assert_eq!(updated.status, RunStatus::Pass.as_str());
+            assert_eq!(
+                updated.metadata_json["homeboy_reconciled"]["status"],
+                RunStatus::Pass.as_str()
+            );
+            assert_eq!(
+                updated.metadata_json["runner_terminal_evidence"]["status"],
+                "succeeded"
+            );
+        });
+    }
+
+    #[test]
+    fn authoritative_active_runner_job_remains_running() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let mut run = phantom_handoff_run(
+                "active-runner-job",
+                minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
+            );
+            run.metadata_json["homeboy_run_owner"] = serde_json::json!({ "pid": u32::MAX });
+            store.import_run(&run).expect("import runner-backed run");
+
+            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                &store,
+                vec![run],
+                false,
+                |_| false,
+                |_| Ok(Some("running".to_string())),
+            )
+            .expect("inspect active runner job");
+            let unchanged = store
+                .get_run("active-runner-job")
+                .expect("get run")
+                .expect("run exists");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(unchanged.status, RunStatus::Running.as_str());
+        });
+    }
+
+    #[test]
+    fn unavailable_runner_job_status_remains_fail_closed() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let mut run = phantom_handoff_run(
+                "unavailable-runner-job",
+                minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
+            );
+            run.metadata_json["homeboy_run_owner"] = serde_json::json!({ "pid": u32::MAX });
+            store.import_run(&run).expect("import runner-backed run");
+
+            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                &store,
+                vec![run],
+                false,
+                |_| false,
+                |_| {
+                    Err(homeboy::core::Error::internal_unexpected(
+                        "runner unavailable",
+                    ))
+                },
+            )
+            .expect("unavailable runner remains fail closed");
+            let unchanged = store
+                .get_run("unavailable-runner-job")
+                .expect("get run")
+                .expect("run exists");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(unchanged.status, RunStatus::Running.as_str());
         });
     }
 
