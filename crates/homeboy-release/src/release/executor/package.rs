@@ -629,8 +629,13 @@ fn run_package_action_with_retry(
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     for attempt in 1..=PACKAGE_ACTION_MAX_ATTEMPTS {
-        match extension::execute_action(extension_id, "release.package", None, None, Some(payload))
-        {
+        match extension::invoke::execute_action(
+            extension_id,
+            "release.package",
+            None,
+            None,
+            Some(payload),
+        ) {
             Ok(response) => {
                 let success = response
                     .get("success")
@@ -742,13 +747,16 @@ pub(crate) fn run_extension_release_preflight(
     }
 
     let payload = build_release_payload(state, component_id, component_local_path, None, None);
-    let response =
-        match extension::execute_action(extension_id, action_id, None, None, Some(&payload)) {
-            Ok(response) => response,
-            Err(err) => {
-                return step_failed(&step.id, &step.kind, None, Some(err.message), err.hints)
-            }
-        };
+    let response = match extension::invoke::execute_action(
+        extension_id,
+        action_id,
+        None,
+        None,
+        Some(&payload),
+    ) {
+        Ok(response) => response,
+        Err(err) => return step_failed(&step.id, &step.kind, None, Some(err.message), err.hints),
+    };
 
     let data = Some(serde_json::json!({
         "extension": extension_id,

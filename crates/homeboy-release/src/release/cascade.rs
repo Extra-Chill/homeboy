@@ -263,7 +263,7 @@ fn update_dependency(
         upstream,
     );
 
-    extension::execute_action(
+    extension::invoke::execute_action(
         &extension_id,
         UPDATE_DEPENDENCY_ACTION,
         None,

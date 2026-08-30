@@ -127,14 +127,14 @@ fn run_component_scripts_with_env_and_timeout(
         }
 
         let command = command_with_args(command, script_args);
-        let output = super::execution::execute_capability_script(
+        let output = super::invoke::execute_capability_script(
             source_path,
             "",
             &[],
             &env,
             Some(&source_path.to_string_lossy()),
             Some(&command),
-            super::execution::CapabilityScriptOptions {
+            super::invoke::CapabilityScriptOptions {
                 passthrough,
                 stderr_passthrough: false,
                 timeout,

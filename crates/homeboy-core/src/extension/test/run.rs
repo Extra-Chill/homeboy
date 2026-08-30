@@ -2418,7 +2418,7 @@ fn run_declared_result_parser(
     let mut args = vec![source_file.to_string_lossy().to_string()];
     args.extend(spec.adapters.iter().cloned());
     let settings_json = "{}";
-    let mut env_vars = crate::extension::execution::build_capability_env(
+    let mut env_vars = crate::extension::invoke::build_capability_env(
         &context.extension_id,
         &component.id,
         &context.extension_path,
@@ -2443,14 +2443,14 @@ fn run_declared_result_parser(
         spec.adapters.join(" "),
     ));
 
-    let output = crate::extension::execution::execute_capability_script(
+    let output = crate::extension::invoke::execute_capability_script(
         &context.extension_path,
         script_path,
         &args,
         &env_vars,
         None,
         None,
-        crate::extension::execution::CapabilityScriptOptions {
+        crate::extension::invoke::CapabilityScriptOptions {
             passthrough: false,
             stderr_passthrough: false,
             timeout: None,
