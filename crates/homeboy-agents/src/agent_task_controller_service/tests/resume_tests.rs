@@ -481,8 +481,9 @@ fn resume_recovers_running_action_with_stale_child_run() {
             event.event_type == "controller.action.stale_child_recovery"
                 && event.payload["run_id"] == json!("controller-service-stale-child-a")
         }));
-        let child = crate::agent_task_lifecycle::status("controller-service-stale-child-a")
-            .expect("child status");
+        let child =
+            crate::agent_task_lifecycle::reconcile_status("controller-service-stale-child-a")
+                .expect("child status");
         assert_eq!(child.metadata["reclaimed_stale_running"], json!(true));
     });
 }

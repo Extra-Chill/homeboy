@@ -107,7 +107,7 @@ pub(super) fn intercept_local_cook_retry(
             ))
         };
     }
-    let source = match agent_task_lifecycle::status(&retry.run_id) {
+    let source = match agent_task_lifecycle::reconcile_status(&retry.run_id) {
         Ok(record) => record,
         Err(_) => return Ok(None),
     };
@@ -207,7 +207,7 @@ pub(super) fn intercept_local_cook_retry(
             println!(
                 "{}",
                 serde_json::to_string(
-                    &agent_task_lifecycle::status_in_store(
+                    &agent_task_lifecycle::reconcile_status_in_store(
                         &lifecycle_store,
                         &run_id,
                         agent_task_lifecycle::AgentTaskStatusOptions::default(),
@@ -2202,7 +2202,7 @@ mod tests {
             )
             .expect("persist handoff parent");
 
-            let status = agent_task_lifecycle::status("cook-pending")
+            let status = agent_task_lifecycle::reconcile_status("cook-pending")
                 .expect("pending handoff status resolves");
             let logs =
                 agent_task_lifecycle::logs("cook-pending").expect("pending handoff logs resolve");
@@ -2552,7 +2552,7 @@ mod tests {
             assert_eq!(handoff.state, DetachedHandoffState::Pending);
             assert_eq!(detached_handoff_rejection_reason(handoff.state), None);
             assert_eq!(
-                agent_task_lifecycle::status(cook_id)
+                agent_task_lifecycle::reconcile_status(cook_id)
                     .expect("pending status command resolves")
                     .run_id,
                 cook_id

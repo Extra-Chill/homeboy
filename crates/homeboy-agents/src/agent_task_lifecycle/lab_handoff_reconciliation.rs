@@ -32,7 +32,7 @@ use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 ///   key and binds the acceptance it gets back;
 /// * `expire_unaccepted_lab_handoff_in_store` takes `LabHandoffLock` on this
 ///   store's `run_dir` and terminalizes;
-/// * `status_in_store` takes two advisory locks of its own and has roughly
+/// * `reconcile_status_in_store` takes two advisory locks of its own and has roughly
 ///   twenty durable write sites.
 ///
 /// Selecting a run from one installation's queue and then expiring or
@@ -78,7 +78,7 @@ pub fn reconcile_active_lab_runner_handoffs_in_store(
         // ambient `status` entry point delegates to, with its own defaults:
         // `AgentTaskStatusOptions::default()` and a Cook-alias-resolving
         // (non-exact) read, which is exactly what `status` passed.
-        if status_in_store(
+        if reconcile_status_in_store(
             lifecycle_store,
             &run_id,
             AgentTaskStatusOptions::default(),
@@ -526,7 +526,7 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
 /// There is deliberately no ambient wrapper. Both outcomes this dispatches to
 /// write: the snapshot branch commits a binding, a live-progress update, or a
 /// terminal aggregate, and the confirmed-absence branch replaces the record
-/// with a terminal pre-execution failure. Its only caller is `status_in_store`
+/// with a terminal pre-execution failure. Its only caller is `reconcile_status_in_store`
 /// in `lifecycle_ops`, which already holds the store whose record it is
 /// reconciling. An ambient form would exist only to let a rooted status decide
 /// liveness against one installation's record and commit the result into

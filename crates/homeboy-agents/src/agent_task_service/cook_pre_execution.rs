@@ -450,7 +450,7 @@ fn ensure_cook_attempt_index(
 /// Record a failure for an already materialized Cook attempt using its exact
 /// recipe and lifecycle roots.
 ///
-/// `agent_task_lifecycle::status` is reconciliation, not a pure rooted read,
+/// `agent_task_lifecycle::reconcile_status` is not a pure rooted read,
 /// so it is intentionally outside this exact-store seam.
 fn record_materialized_cook_pre_execution_failure(
     recipe_store: &CookRecipeStore,

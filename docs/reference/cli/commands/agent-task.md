@@ -364,8 +364,8 @@ Read durable run status
 | Option | Value | Description |
 | --- | --- | --- |
 | `--exact` | flag | Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt |
-| `--bridge` | flag | Read status through the runner bridge |
-| `--since-cursor` | `<CURSOR>` | Resume bridged status events after this cursor |
+| `--bridge` | flag | Return canonical bridged events beside the durable run projection |
+| `--since-cursor` | `<CURSOR>` | Resume canonical bridged events after this cursor |
 | `--full` | flag | Return complete status details instead of the bounded summary |
 | `--bounded` | flag | Present `--full` as a bounded, outcome-first summary with drill-down refs |
 | `--strict-subject-exit` | flag | Exit nonzero when the inspected Cook needs follow-up action |
@@ -382,7 +382,7 @@ homeboy agent-task watch [OPTIONS] <ID>
 
 Poll a run until it reaches a terminal state.
 
-This is an alias for `homeboy activity watch` — the same command the cook completion notification already points at — so a cook id, durable run id, observation run id, or runner job id all resolve here, including records still resident on a Lab runner. Unlike `agent-task status`, the underlying read does not reconcile.
+This is an alias for `homeboy activity watch` — the same command the cook completion notification already points at — so a cook id, durable run id, observation run id, or runner job id all resolve here, including records still resident on a Lab runner. Like `agent-task status`, the underlying read does not reconcile.
 
 | Argument | Required | Description |
 | --- | --- | --- |

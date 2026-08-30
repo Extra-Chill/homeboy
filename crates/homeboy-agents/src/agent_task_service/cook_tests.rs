@@ -417,7 +417,7 @@ fn terminal_review_form_continuation_rejects_generic_failed_and_cancelled_runs()
                 )
                 .unwrap();
             }
-            let record = agent_task_lifecycle::status(run_id).unwrap();
+            let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
             assert!(!terminal_review_form_continuation_is_eligible(
                 &options.identity.initial_plan,
                 &record,
@@ -639,7 +639,7 @@ fn scoped_run_next_skips_bad_fanout_continuation_and_claims_queued_child() {
             "scoped-ready"
         );
         assert_eq!(
-            agent_task_lifecycle::status("scoped-ready-child")
+            agent_task_lifecycle::reconcile_status("scoped-ready-child")
                 .expect("ready child status")
                 .state,
             AgentTaskRunState::Succeeded
@@ -705,7 +705,7 @@ fn run_next_redacts_poisoned_recipe_dispatcher_kind() {
             None,
         )
         .expect("poisoned continuation does not block eligible work");
-        let status = agent_task_lifecycle::status(&options.identity.initial_run_id)
+        let status = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("continuation record status");
         let logs = agent_task_lifecycle::logs(&options.identity.initial_run_id)
             .expect("continuation record logs");
@@ -775,7 +775,7 @@ fn durable_cook_inspection_reports_an_unsupported_run_schema() {
         })
         .unwrap();
 
-        let error = agent_task_lifecycle::status(run_id)
+        let error = agent_task_lifecycle::reconcile_status(run_id)
             .expect_err("unsupported durable record schema must be diagnosable");
         assert!(error
             .message
@@ -1981,7 +1981,8 @@ fn cook_persists_selection_required_before_promotion_or_gates() {
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
-        let record = agent_task_lifecycle::status(&options.identity.initial_run_id).unwrap();
+        let record =
+            agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id).unwrap();
         assert_eq!(result.value.status, "selection_required");
         assert_eq!(promotions.load(Ordering::SeqCst), 1);
         assert!(record.metadata.get("latest_promotion").is_none());
@@ -2247,7 +2248,7 @@ fn pre_artifact_interruption_classifies_provider_ledger_without_phantom_executio
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
         agent_task_lifecycle::cancel_run(&run_id, Some("controller interrupted")).unwrap();
 
-        let before = agent_task_lifecycle::status(&run_id).unwrap();
+        let before = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
         assert!(before.aggregate_path.is_none());
         assert_eq!(
             pre_artifact_interruption_phase(&before),
@@ -2261,7 +2262,9 @@ fn pre_artifact_interruption_classifies_provider_ledger_without_phantom_executio
         })
         .unwrap();
         assert_eq!(
-            pre_artifact_interruption_phase(&agent_task_lifecycle::status(&run_id).unwrap()),
+            pre_artifact_interruption_phase(
+                &agent_task_lifecycle::reconcile_status(&run_id).unwrap()
+            ),
             PreArtifactInterruptionPhase::DuringProviderExecution
         );
         agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
@@ -2271,7 +2274,9 @@ fn pre_artifact_interruption_classifies_provider_ledger_without_phantom_executio
         })
         .unwrap();
         assert_eq!(
-            pre_artifact_interruption_phase(&agent_task_lifecycle::status(&run_id).unwrap()),
+            pre_artifact_interruption_phase(
+                &agent_task_lifecycle::reconcile_status(&run_id).unwrap()
+            ),
             PreArtifactInterruptionPhase::AfterProviderReturn
         );
         assert!(agent_task_lifecycle::read_aggregate(&run_id).is_err());
@@ -2293,7 +2298,7 @@ fn pre_artifact_interruption_does_not_bypass_an_authoritative_aggregate_path() {
         })
         .unwrap();
 
-        let record = agent_task_lifecycle::status(&run_id).unwrap();
+        let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
         assert!(record.state.is_terminal());
         assert!(record.aggregate_path.is_some());
         assert!(agent_task_lifecycle::read_aggregate(&run_id).is_err());
@@ -2843,7 +2848,7 @@ fn moving_base_recovery_persists_across_restart_without_provider_replay() {
         let restarted = moving_base_recovery_for_run(run_id)
             .unwrap()
             .expect("durable recovery");
-        let record = agent_task_lifecycle::status(run_id).unwrap();
+        let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
         assert_eq!(restarted.cook_id, "cook-restart");
         assert_eq!(restarted.run_id, run_id);
         assert_eq!(
@@ -3182,7 +3187,9 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         assert_eq!(rebase_count.load(Ordering::SeqCst), 1);
         assert_eq!(finalization_count.load(Ordering::SeqCst), 1);
         assert_eq!(
-            agent_task_lifecycle::status(run_id).unwrap().metadata["provider_executions_consumed"],
+            agent_task_lifecycle::reconcile_status(run_id)
+                .unwrap()
+                .metadata["provider_executions_consumed"],
             1
         );
         assert!(crate::agent_task_service::claim_continuation()
@@ -3465,7 +3472,9 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
             ""
         );
         assert_eq!(
-            agent_task_lifecycle::status(run_id).unwrap().metadata["provider_executions_consumed"],
+            agent_task_lifecycle::reconcile_status(run_id)
+                .unwrap()
+                .metadata["provider_executions_consumed"],
             1
         );
         assert!(moving_base_recovery_for_run(run_id).unwrap().is_none());
@@ -3546,7 +3555,7 @@ impl AgentTaskCookAttemptDispatcher for ProviderStartObservingDispatcher {
             "/runner/workspace",
             &["homeboy".to_string(), "agent-task".to_string()],
         )?;
-        let record = agent_task_lifecycle::status(run_id)?;
+        let record = agent_task_lifecycle::reconcile_status(run_id)?;
         *self.phase_at_dispatch.lock().expect("provider start phase") = Some(serde_json::json!({
             "phase": record.metadata["cook_progress"]["phase"],
             "state": record.state,
@@ -4561,7 +4570,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         assert_ne!(report.value.status, "pre_execution_failure");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         assert_eq!(provider_starts.load(Ordering::SeqCst), 1);
-        let record = agent_task_lifecycle::status(&options.identity.initial_run_id)
+        let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("durable provider execution record");
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
         assert_eq!(
@@ -4720,7 +4729,8 @@ fn workspace_snapshot_fence_invalidation_is_retryable_without_provider_execution
         });
         let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor))).unwrap();
         assert_eq!(report.value.status, "pre_execution_failure");
-        let record = agent_task_lifecycle::status(&options.identity.initial_run_id).unwrap();
+        let record =
+            agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id).unwrap();
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             "workspace_snapshot_fence"
@@ -4951,7 +4961,7 @@ fn non_ancestry_workspace_validation_retains_the_generic_pre_execution_phase() {
             .expect("primary checkout is a durable pre-execution failure");
         assert_eq!(report.value.status, "pre_execution_failure");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
-        let record = agent_task_lifecycle::status(&options.identity.initial_run_id)
+        let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("durable primary-checkout failure record");
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
@@ -6046,7 +6056,7 @@ impl CandidateAdoptionFixture {
             &Error::internal_unexpected("fixture pre-provider transport failure"),
         )
         .unwrap();
-        let record = agent_task_lifecycle::status(&self.run_id).unwrap();
+        let record = agent_task_lifecycle::reconcile_status(&self.run_id).unwrap();
         assert_eq!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Failed
@@ -6719,7 +6729,8 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
         assert_eq!(result.value.history_run_ids, vec![run_id]);
-        let record = agent_task_lifecycle::status(run_id).expect("returned attempt is resolvable");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("returned attempt is resolvable");
         let logs = agent_task_lifecycle::logs(run_id).expect("failed attempt logs are resolvable");
         let retry = agent_task_lifecycle::retry(run_id, Some("cook-admission-timeout-retry"))
             .expect("failed admission attempt is retryable");
@@ -6830,7 +6841,7 @@ fn cook_persists_initial_base_transport_failure_before_provider_execution() {
 
         assert_eq!(report.value.status, "pre_execution_failure");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
-        let record = agent_task_lifecycle::status(&options.identity.initial_run_id)
+        let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("initial base transport failure has a durable run");
         assert_eq!(record.state, AgentTaskRunState::Failed);
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
@@ -6854,8 +6865,9 @@ fn cook_persists_initial_base_transport_failure_before_provider_execution() {
             .expect("durable initial base transport failure replays");
         assert_eq!(replayed.value.status, "pre_execution_failure");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
-        let replayed_record = agent_task_lifecycle::status(&options.identity.initial_run_id)
-            .expect("replayed initial base transport failure remains status-addressable");
+        let replayed_record =
+            agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
+                .expect("replayed initial base transport failure remains status-addressable");
         assert_eq!(replayed_record.state, AgentTaskRunState::Failed);
         let retry = agent_task_lifecycle::retry(
             &options.identity.initial_run_id,
@@ -7004,7 +7016,7 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
         assert_eq!(result.exit_code, 1, "{:?}", result.value);
         assert_eq!(result.value.cook_id, cook_id);
         assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
-        let record = agent_task_lifecycle::status(run_id).expect("durable lookup record");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("durable lookup record");
         let persisted_plan = agent_task_lifecycle::load_plan(run_id).expect("durable lookup plan");
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
         assert_eq!(
@@ -7095,7 +7107,7 @@ fn persistent_slow_provider_with_known_path_returns_exhausted_cwd_recovery() {
             resumed_plan.metadata["cook_provision"]["action"],
             "existing"
         );
-        let resumed_record = agent_task_lifecycle::status(&retry.record.run_id)
+        let resumed_record = agent_task_lifecycle::reconcile_status(&retry.record.run_id)
             .expect("resumed Cook remains status-addressable");
         assert_eq!(resumed_record.metadata["provider_executions_consumed"], 0);
 
@@ -7808,7 +7820,8 @@ fn timed_out_ensure_does_not_adopt_a_competing_provider_destination() {
             !competing_resolve.exists(),
             "post-timeout reconciliation must not query a competing provider"
         );
-        let record = agent_task_lifecycle::status(run_id).expect("durable timeout record");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("durable timeout record");
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
         assert_eq!(
             record.metadata["pre_execution_failure"]["details"]["worktree_provider_operation"],
@@ -8110,7 +8123,8 @@ fn review_12349_deferred_lookup_cancellation_preserves_cancelled_state() {
             .expect("Cook thread joins")
             .expect("Cook returns cancellation report");
         assert_eq!(result.value.status, "cancelled");
-        let record = agent_task_lifecycle::status(run_id).expect("cancelled durable record");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("cancelled durable record");
         assert_eq!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -8198,7 +8212,8 @@ fn short_cook_deadline_caps_resolve_timeout_without_starting_retry() {
             "effective lookup timeout must cap total pre-execution time"
         );
         assert_eq!(result.value.status, "pre_execution_failure");
-        let record = agent_task_lifecycle::status(run_id).expect("durable timeout record");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("durable timeout record");
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
         assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
         assert_eq!(
@@ -8768,7 +8783,8 @@ fn pending_repo_only_lookup_rejects_provider_workspace_from_another_repository()
             .expect("Cook records identity failure");
 
         assert_eq!(result.value.status, "pre_execution_failure");
-        let record = agent_task_lifecycle::status(run_id).expect("durable identity failure");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("durable identity failure");
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
@@ -8832,7 +8848,7 @@ fn cook_failure_context_counts_preflight_cook_alias_as_zero_execution() {
         )
         .expect("index provider attempt");
         assert_eq!(
-            agent_task_lifecycle::status(cook_id)
+            agent_task_lifecycle::reconcile_status(cook_id)
                 .expect("resolve Cook alias to provider attempt")
                 .run_id,
             provider_run_id
@@ -8912,7 +8928,7 @@ fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
         super::record_active_cook_worktree_warning(&options)
             .expect("active worktree warning must not block Cook");
 
-        let current = agent_task_lifecycle::status(&options.identity.initial_run_id)
+        let current = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("current Cook remains inspectable");
         assert_eq!(
             current.state,
@@ -8963,7 +8979,7 @@ fn retryable_pre_provider_retry_stays_attached_to_its_cook() {
         assert_eq!(index.latest_run_id, retry_run_id);
         assert_eq!(index.attempts.len(), 2);
         assert_eq!(
-            agent_task_lifecycle::status(cook_id)
+            agent_task_lifecycle::reconcile_status(cook_id)
                 .expect("Cook alias resolves successful retry")
                 .state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -8989,7 +9005,7 @@ fn approved_empty_provider_failure_retry_stays_attached_and_becomes_continuation
         .expect("record provider failure");
         assert_eq!(failed.exit_code, 1);
         assert_eq!(
-            agent_task_lifecycle::status(&options.identity.initial_run_id)
+            agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
                 .expect("failed Cook attempt")
                 .state,
             agent_task_lifecycle::AgentTaskRunState::Failed
@@ -9022,7 +9038,7 @@ fn approved_empty_provider_failure_retry_stays_attached_and_becomes_continuation
             retry_run_id
         );
         assert_eq!(
-            agent_task_lifecycle::status(&retry_run_id)
+            agent_task_lifecycle::reconcile_status(&retry_run_id)
                 .expect("successful retry")
                 .state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -10121,8 +10137,8 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
         let result = run_cook(CookContext {
             durable_observer: Some(&move |event: &CookProgressEvent<'_>| {
                 let (phase, cook, run) = (event.phase, event.cook_id, event.run_id);
-                let status =
-                    agent_task_lifecycle::status(cook).expect("Cook alias resolves in observer");
+                let status = agent_task_lifecycle::reconcile_status(cook)
+                    .expect("Cook alias resolves in observer");
                 let logs =
                     agent_task_lifecycle::logs(cook).expect("Cook alias logs resolve in observer");
                 assert_eq!(status.run_id, run);
@@ -10164,7 +10180,7 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
             ]
         );
         assert_eq!(
-            agent_task_lifecycle::status(run_id)
+            agent_task_lifecycle::reconcile_status(run_id)
                 .expect("durable progress")
                 .metadata["cook_progress"]["phase"],
             "in_flight"
@@ -10175,7 +10191,7 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
         assert_eq!(index.attempts[0].attempt, 1);
         assert_eq!(index.attempts[0].run_id, run_id);
         assert_eq!(
-            agent_task_lifecycle::status(cook_id)
+            agent_task_lifecycle::reconcile_status(cook_id)
                 .expect("Cook alias status after restart")
                 .run_id,
             run_id
@@ -10205,7 +10221,7 @@ impl AgentTaskCookAttemptDispatcher for MaterializationInterruptingDispatcher {
         // Controller-side Lab materialization starts here. The durable record
         // must already resolve by id, or an interruption from this point on
         // strands an unnamed reservation.
-        let record = agent_task_lifecycle::status(&self.run_id)?;
+        let record = agent_task_lifecycle::reconcile_status(&self.run_id)?;
         *self
             .state_at_materialization
             .lock()
@@ -10251,7 +10267,7 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
                 // Every identity-bearing event must be immediately actionable:
                 // the caller can look the run up the moment it is told about it.
                 assert_eq!(
-                    agent_task_lifecycle::status(cook)
+                    agent_task_lifecycle::reconcile_status(cook)
                         .expect("Cook alias resolves in observer")
                         .run_id,
                     run
@@ -10284,13 +10300,14 @@ fn cook_publishes_durable_identity_before_materialization_and_survives_interrupt
         // 3. The interruption left a named, recoverable record — not an
         //    anonymous reservation an operator has to hunt for.
         assert_eq!(result.value.status, "pre_execution_failure");
-        let record = agent_task_lifecycle::status(run_id).expect("record survives interruption");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("record survives interruption");
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             serde_json::json!("cook_pre_execution")
         );
         assert_eq!(
-            agent_task_lifecycle::status(cook_id)
+            agent_task_lifecycle::reconcile_status(cook_id)
                 .expect("Cook alias resolves after interruption")
                 .run_id,
             run_id
@@ -10512,7 +10529,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
         assert_eq!(index.attempts.len(), 2);
         assert_eq!(index.latest_run_id, stranded_run_id);
         assert_eq!(
-            agent_task_lifecycle::status(stranded_run_id)
+            agent_task_lifecycle::reconcile_status(stranded_run_id)
                 .expect("repaired retry record")
                 .runner_job_id(),
             Some("recording-daemon-job")
@@ -11512,7 +11529,7 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
             .expect("transport preparation failure is durably reported");
         assert_eq!(failure.exit_code, 1);
         assert_eq!(failure.value.status, "pre_execution_failure");
-        let blocked = agent_task_lifecycle::status(cook_id)
+        let blocked = agent_task_lifecycle::reconcile_status(cook_id)
             .expect("cook alias exposes the preflight-blocked attempt");
         assert_eq!(blocked.run_id, first_run_id);
         assert_eq!(
@@ -11526,14 +11543,15 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
 
         let resumed = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("repaired runner resumes the immutable cook attempt");
-        let resumed_record = agent_task_lifecycle::status(cook_id).expect("resumed cook status");
+        let resumed_record =
+            agent_task_lifecycle::reconcile_status(cook_id).expect("resumed cook status");
         assert_eq!(
             resumed.value.status, "in_flight",
             "resumed cook report: {:#?}\nresumed lifecycle: {:#?}",
             resumed.value, resumed_record
         );
         assert_eq!(
-            agent_task_lifecycle::status(cook_id)
+            agent_task_lifecycle::reconcile_status(cook_id)
                 .expect("resumed cook alias")
                 .runner_job_id(),
             Some("accepted-daemon-job")
@@ -11583,7 +11601,8 @@ fn cook_persists_materialization_failure_without_provider_execution() {
         assert_eq!(result.value.attempts.len(), 1);
         assert!(result.value.failure_context.is_some());
         assert!(super::super::recipe_exists(cook_id).expect("durable recipe lookup"));
-        let record = agent_task_lifecycle::status(run_id).expect("persisted failed attempt");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("persisted failed attempt");
         assert_eq!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Failed
@@ -11754,7 +11773,7 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
             }
         });
         let durable = entered_staging.then(|| {
-            agent_task_lifecycle::status("cook-slow-baseline-attempt-1")
+            agent_task_lifecycle::reconcile_status("cook-slow-baseline-attempt-1")
                 .expect("staging attempt is durable before controller completion")
         });
         std::fs::write(&release, "release").expect("release baseline staging");
@@ -11802,7 +11821,7 @@ fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
             .expect("transport preparation failure is durably reported");
         assert_eq!(failure.exit_code, 1);
         assert_eq!(failure.value.status, "pre_execution_failure");
-        let record = agent_task_lifecycle::status("cook-runner-exhaustion")
+        let record = agent_task_lifecycle::reconcile_status("cook-runner-exhaustion")
             .expect("transport failure remains inspectable");
         assert_eq!(
             record.state,
@@ -11878,7 +11897,8 @@ fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("cook returns the persisted runtime mismatch");
 
-        let record = agent_task_lifecycle::status(run_id).expect("runtime mismatch attempt exists");
+        let record = agent_task_lifecycle::reconcile_status(run_id)
+            .expect("runtime mismatch attempt exists");
         assert_eq!(result.exit_code, 1);
         assert_eq!(
             record.state,
@@ -11957,7 +11977,7 @@ fn cook_lab_workspace_stage_failure_advertises_diagnostics_not_retry() {
             result.value.terminal_failure_classification.as_deref(),
             Some("invalid_input")
         );
-        let record = agent_task_lifecycle::status(run_id).expect("attempt exists");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("attempt exists");
         assert!(record.provider_handles.is_empty());
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
     });
@@ -12126,7 +12146,8 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
             .open_observation_initialized()
             .expect("observation store");
         for (transport_attempt, run_id) in result.value.history_run_ids.iter().enumerate() {
-            let record = agent_task_lifecycle::status(run_id).expect("retry attempt exists");
+            let record =
+                agent_task_lifecycle::reconcile_status(run_id).expect("retry attempt exists");
             let observation = observation_store
                 .get_run(run_id)
                 .expect("read retry observation")
@@ -12422,7 +12443,7 @@ fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_rep
             recipe_before.attempts[0].plan.tasks[0].instructions
         );
         let transitioned =
-            agent_task_lifecycle::status(&exhausted_run_id).expect("transition evidence");
+            agent_task_lifecycle::reconcile_status(&exhausted_run_id).expect("transition evidence");
         assert_eq!(
             transitioned.metadata["execution_placement_decision"]["decision_id"],
             local.decision_id
@@ -12514,7 +12535,7 @@ fn terminalize_cook_alias(cook: &CookRequest) {
     agent_task_lifecycle::cancel_run(&cook.identity.cook_id, Some("already finished"))
         .expect("terminalize the cook alias");
     assert!(
-        agent_task_lifecycle::status(&cook.identity.cook_id)
+        agent_task_lifecycle::reconcile_status(&cook.identity.cook_id)
             .expect("cook alias is readable")
             .state
             .is_terminal(),
@@ -13044,7 +13065,8 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
         assert_eq!(result.value.status, "in_flight");
         assert_eq!(result.value.attempts.len(), 1);
         assert_eq!(result.value.attempts[0].run_id, run_id);
-        let record = agent_task_lifecycle::status(run_id).expect("detached attempt record");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("detached attempt record");
         assert_eq!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Running
@@ -13078,7 +13100,7 @@ fn transport_retry_continuation_keeps_timeout_retry_budget_on_the_typed_attempt(
 
         seed_timeout_review_form_aggregate(run_id, &options.identity.initial_plan);
         let timed_out =
-            agent_task_lifecycle::status(run_id).expect("typed timeout remains readable");
+            agent_task_lifecycle::reconcile_status(run_id).expect("typed timeout remains readable");
         assert_eq!(
             timed_out.state,
             agent_task_lifecycle::AgentTaskRunState::Failed
@@ -13119,14 +13141,15 @@ fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
             .expect("recover orphan");
         assert_eq!(recovered.value.status, "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
-        let record = agent_task_lifecycle::status(run_id).expect("materialized run record");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("materialized run record");
         assert_eq!(record.runner_job_id(), Some("recording-daemon-job"));
 
         let replayed = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("idempotent replay");
         assert_eq!(replayed.value.status, "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
-        let replayed_record = agent_task_lifecycle::status(run_id).unwrap();
+        let replayed_record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
         assert_eq!(replayed_record.run_id, record.run_id);
         assert_eq!(replayed_record.state, record.state);
         assert_eq!(replayed_record.runner_id(), record.runner_id());
@@ -13190,7 +13213,7 @@ fn adoption_prefers_authenticated_preacceptance_recovery_over_failure_aggregate(
             &Error::internal_unexpected("Lab handoff JSON was truncated"),
         )
         .expect("record failed preacceptance attempt");
-        let record = agent_task_lifecycle::status(run_id).expect("failed attempt");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("failed attempt");
         assert!(record.aggregate_path.is_some());
 
         let (_source, source_path, recovery) =
@@ -13341,7 +13364,8 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
             });
         })
         .expect("expire handoff deadline");
-        let expired = agent_task_lifecycle::status(run_id).expect("expire preacceptance handoff");
+        let expired =
+            agent_task_lifecycle::reconcile_status(run_id).expect("expire preacceptance handoff");
         assert_eq!(
             expired.state,
             agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -13384,7 +13408,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
             false
         });
         let running = provider_started_in_time
-            .then(|| agent_task_lifecycle::status(run_id))
+            .then(|| agent_task_lifecycle::reconcile_status(run_id))
             .transpose();
         // Always release and join before asserting so a regression cannot
         // strand the fake provider and hang the test process.
@@ -13421,7 +13445,8 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
             std::fs::read_to_string(target.join("lib.rs")).unwrap(),
             "candidate\n"
         );
-        let promoted = agent_task_lifecycle::status(run_id).expect("adopted lifecycle record");
+        let promoted =
+            agent_task_lifecycle::reconcile_status(run_id).expect("adopted lifecycle record");
         assert_eq!(
             promoted.metadata["latest_promotion"]["provenance"]["adoption"]["candidate_ref"],
             candidate
@@ -13782,7 +13807,7 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
             result.value.attempts[0].feedback.as_ref().unwrap().status,
             AgentTaskCookLoopStatus::RetryRequested
         );
-        let adoption = agent_task_lifecycle::status(&fixture.run_id)
+        let adoption = agent_task_lifecycle::reconcile_status(&fixture.run_id)
             .unwrap()
             .candidate_adoption
             .unwrap();
@@ -13813,7 +13838,7 @@ fn adoption_review_child_plan_remains_one_bounded_execution() {
                 attempt: 1,
                 message: Some("historical provider execution".to_string()),
             });
-        let aggregate_path = agent_task_lifecycle::status(&fixture.run_id)
+        let aggregate_path = agent_task_lifecycle::reconcile_status(&fixture.run_id)
             .unwrap()
             .aggregate_path
             .expect("fixture aggregate path");
@@ -13900,7 +13925,7 @@ fn legacy_adoption_budget_failure_reenters_once_through_review_authority() {
             follow_up_plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"]["kind"],
             "candidate_adoption_review"
         );
-        let record = agent_task_lifecycle::status(&fixture.run_id).unwrap();
+        let record = agent_task_lifecycle::reconcile_status(&fixture.run_id).unwrap();
         let replacements = record.metadata["candidate_adoption_replacements"]
             .as_array()
             .expect("legacy terminal adoption retained for audit");
@@ -13934,7 +13959,7 @@ fn adoption_review_allowance_is_terminal_and_replay_does_not_dispatch() {
         assert_eq!(replay.exit_code, 0);
         assert_eq!(replay.value.status, "green_no_finalize");
         assert!(!backend.created);
-        let record = agent_task_lifecycle::status(&fixture.run_id).unwrap();
+        let record = agent_task_lifecycle::reconcile_status(&fixture.run_id).unwrap();
         assert_eq!(record.candidate_adoption.unwrap().state, "completed");
         let attempts = agent_task_lifecycle::cook_index(&fixture.cook_id)
             .unwrap()
@@ -14065,7 +14090,7 @@ fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
         })
         .unwrap();
         assert_eq!(
-            agent_task_lifecycle::status(&fixture.run_id)
+            agent_task_lifecycle::reconcile_status(&fixture.run_id)
                 .unwrap()
                 .candidate_adoption
                 .unwrap()
@@ -14146,7 +14171,7 @@ fn repeated_provider_discovery_failures_exhaust_the_adoption_review_allowance() 
                     .owner_pid = u32::MAX;
             })
             .unwrap();
-            agent_task_lifecycle::status(&fixture.run_id).unwrap();
+            agent_task_lifecycle::reconcile_status(&fixture.run_id).unwrap();
         }
 
         let exhausted = fixture
@@ -14215,7 +14240,7 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
 
         let follow_up_plan = agent_task_lifecycle::load_plan(follow_up).unwrap();
         seed_review_form_aggregate(follow_up, &follow_up_plan);
-        let terminal = agent_task_lifecycle::status(follow_up).unwrap();
+        let terminal = agent_task_lifecycle::reconcile_status(follow_up).unwrap();
         assert_eq!(
             terminal.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -14313,7 +14338,7 @@ fn detached_adoption_follow_up_failure_stays_non_green_and_skips_finalization() 
             },
         )
         .unwrap();
-        let terminal = agent_task_lifecycle::status(follow_up).unwrap();
+        let terminal = agent_task_lifecycle::reconcile_status(follow_up).unwrap();
         assert_eq!(
             terminal.state,
             agent_task_lifecycle::AgentTaskRunState::Failed
@@ -14676,7 +14701,7 @@ fn cook_alias_continuation_starts_from_failed_gate_feedback_attempt() {
         );
         assert!(agent_task_lifecycle::cook_attempt_run_id(cook_id, 3)
             .starts_with(&format!("{cook_id}-attempt-3-")));
-        let record = agent_task_lifecycle::status(&continuation_run_id)
+        let record = agent_task_lifecycle::reconcile_status(&continuation_run_id)
             .expect("failed gate-feedback attempt remains inspectable");
         super::super::validate_recipe_attempt_record(&recipe, &continuation_run_id, &record)
             .expect("matching Cook metadata passes the identity fence");
@@ -15093,7 +15118,7 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
                 serde_json::json!(1);
         })
         .expect("remove destination proof");
-        let selected_record = agent_task_lifecycle::status(candidate_run_id).unwrap();
+        let selected_record = agent_task_lifecycle::reconcile_status(candidate_run_id).unwrap();
         let promotion = &selected_record.metadata["latest_promotion"];
         assert_eq!(
             promotion["command_evidence"][0]["command"],
@@ -16368,7 +16393,8 @@ fn verify_replacement_gates_replays_completed_proof_without_rerunning_gates() {
             std::fs::read_to_string(gate_log).expect("read gate log"),
             "ranran"
         );
-        let record = agent_task_lifecycle::status("run-verify-replacement").expect("read record");
+        let record =
+            agent_task_lifecycle::reconcile_status("run-verify-replacement").expect("read record");
         assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 3);
         assert_eq!(
             agent_task_lifecycle::operation_claim(
@@ -16745,7 +16771,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         assert_eq!(fixture.continuation_record.state, "partial_failure");
 
         let before_preflight = serde_json::to_value(
-            agent_task_lifecycle::status(&historical.identity.initial_run_id).unwrap(),
+            agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id).unwrap(),
         )
         .unwrap();
         assert!(
@@ -16754,7 +16780,8 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         );
         assert_eq!(
             serde_json::to_value(
-                agent_task_lifecycle::status(&historical.identity.initial_run_id).unwrap()
+                agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id)
+                    .unwrap()
             )
             .unwrap(),
             before_preflight,
@@ -16785,7 +16812,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         .expect("candidate drift returns durable failure evidence before local dispatch");
         assert_eq!(result.exit_code, 1);
         assert!(result.value.disposition.is_terminal());
-        let trace = agent_task_lifecycle::status(&historical.identity.initial_run_id)
+        let trace = agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id)
             .unwrap()
             .metadata["cook_continuation_admission"]
             .clone();
@@ -16825,7 +16852,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         .expect("cancelled attempt returns durable failure evidence before local dispatch");
         assert_eq!(result.exit_code, 1);
         assert!(result.value.disposition.is_terminal());
-        let trace = agent_task_lifecycle::status(&historical.identity.initial_run_id)
+        let trace = agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id)
             .unwrap()
             .metadata["cook_continuation_admission"]
             .clone();
@@ -16867,7 +16894,7 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         .expect("malformed evidence returns durable failure evidence before local dispatch");
         assert_eq!(result.exit_code, 1);
         assert!(result.value.disposition.is_terminal());
-        let trace = agent_task_lifecycle::status(&historical.identity.initial_run_id)
+        let trace = agent_task_lifecycle::reconcile_status(&historical.identity.initial_run_id)
             .unwrap()
             .metadata["cook_continuation_admission"]
             .clone();
@@ -17070,7 +17097,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
                 move |_, _, received_run, promotion| {
                     finalization_count.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(received_run, expected_run_id);
-                    let persisted = agent_task_lifecycle::status(received_run).unwrap();
+                    let persisted = agent_task_lifecycle::reconcile_status(received_run).unwrap();
                     assert_eq!(
                         persisted.metadata["latest_promotion"]["deterministic_gates"][0]
                             ["baseline_comparison"]["result"],
@@ -17100,7 +17127,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
             .is_some_and(|reason| reason.contains("accepted inherited baseline-red")));
         assert_eq!(finalized.load(Ordering::SeqCst), 1);
         assert!(observer_calls.load(Ordering::SeqCst) >= 1);
-        let record = agent_task_lifecycle::status(&run_id).unwrap();
+        let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
         assert_eq!(
             record.metadata["cook_observer_events"][0]["kind"],
@@ -18294,7 +18321,8 @@ fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fre
             prepare_manual_finalization_identity(fresh_id).expect("fresh ID reserves a record"),
             fresh_id
         );
-        let fresh = agent_task_lifecycle::status(fresh_id).expect("reserved finalization record");
+        let fresh =
+            agent_task_lifecycle::reconcile_status(fresh_id).expect("reserved finalization record");
         assert_eq!(fresh.metadata["manual_finalization_identity"], true);
         assert_eq!(
             prepare_manual_finalization_identity(fresh_id)
@@ -18329,7 +18357,7 @@ fn direct_manual_publication_failure_records_retry_and_successful_recovery_super
 
         crate::agent_task_lifecycle::record_manual_finalization_failure(run_id, &error)
             .expect("record publication failure");
-        let record = agent_task_lifecycle::status(run_id).expect("failed manual record");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("failed manual record");
         assert_eq!(record.state, AgentTaskRunState::Failed);
         assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
         assert_eq!(
@@ -18352,7 +18380,8 @@ fn direct_manual_publication_failure_records_retry_and_successful_recovery_super
             serde_json::json!({ "status": "review_ready", "run_id": run_id }),
         )
         .expect("record successful retry receipt");
-        let recovered = agent_task_lifecycle::status(run_id).expect("recovered manual record");
+        let recovered =
+            agent_task_lifecycle::reconcile_status(run_id).expect("recovered manual record");
         assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
         assert_eq!(
             recovered.lifecycle.execution.state,
@@ -18445,7 +18474,8 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
             },
         )
         .expect_err("commit failure remains recoverable");
-        let record = agent_task_lifecycle::status(run_id).expect("failed Cook manual record");
+        let record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("failed Cook manual record");
         assert_eq!(record.state, AgentTaskRunState::Failed);
         // The rejecting hook staged the original bytes. A real content change
         // must still invalidate the retry's semantic tree/path binding.
@@ -18488,7 +18518,8 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
         )
         .expect("retry commits the bound candidate and publishes it");
         assert_eq!(recovered["status"], "review_ready");
-        let recovered_record = agent_task_lifecycle::status(run_id).expect("recovered status");
+        let recovered_record =
+            agent_task_lifecycle::reconcile_status(run_id).expect("recovered status");
         assert_eq!(recovered_record.state, AgentTaskRunState::Succeeded);
         assert!(recovered_record.metadata["manual_finalization_failure"].is_null());
         assert!(recovered_record.metadata["manual_finalization_retry"].is_null());
@@ -19002,7 +19033,7 @@ fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
         )
         .expect("manual preflight");
         persist_manual_finalization_intent(run_id, &intent).expect("persist intent");
-        assert!(agent_task_lifecycle::status(run_id)
+        assert!(agent_task_lifecycle::reconcile_status(run_id)
             .expect("status")
             .metadata["cook_finalization"]
             .is_null());
@@ -19108,7 +19139,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         })
         .expect("persist provider model provenance");
         assert_eq!(
-            agent_task_lifecycle::status(run_id)
+            agent_task_lifecycle::reconcile_status(run_id)
                 .expect("candidate status")
                 .state,
             AgentTaskRunState::CandidateRecoverable
@@ -19195,7 +19226,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
             Some("candidate-sha")
         );
         assert_eq!(
-            agent_task_lifecycle::status(run_id)
+            agent_task_lifecycle::reconcile_status(run_id)
                 .expect("read provider provenance")
                 .lifecycle
                 .provider_runtime
@@ -19204,7 +19235,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
             Some("fixture-model")
         );
         persist_manual_finalization_intent(run_id, &preflight).expect("persist bound intent");
-        let intent = agent_task_lifecycle::status(run_id)
+        let intent = agent_task_lifecycle::reconcile_status(run_id)
             .expect("read bound intent")
             .metadata["manual_finalization_intent"]
             .clone();
@@ -19270,7 +19301,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
                 .expect("recover bound candidate through fake publication");
         assert_eq!(published["status"], "review_ready");
         assert!(publish_backend.created);
-        let receipt = agent_task_lifecycle::status(run_id).expect("read receipt");
+        let receipt = agent_task_lifecycle::reconcile_status(run_id).expect("read receipt");
         assert_eq!(
             receipt.metadata["cook_finalization"]["manual_finalization"],
             true
@@ -19332,7 +19363,7 @@ fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering
         let error = persist_manual_finalization_intent(run_id, &copied_from_another_run)
             .expect_err("a dossier copied from another run cannot be persisted");
         assert!(error.message.contains("different durable run"));
-        assert!(agent_task_lifecycle::status(run_id)
+        assert!(agent_task_lifecycle::reconcile_status(run_id)
             .expect("status")
             .metadata["manual_finalization_intent"]
             .is_null());
@@ -19344,7 +19375,7 @@ fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering
         assert!(error
             .message
             .contains("dossier failed integrity validation"));
-        assert!(agent_task_lifecycle::status(run_id)
+        assert!(agent_task_lifecycle::reconcile_status(run_id)
             .expect("status")
             .metadata["manual_finalization_intent"]
             .is_null());
@@ -19444,12 +19475,13 @@ fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering
             .as_mut()
             .expect("Git identity")
             .commit_sha = Some("different-candidate-sha".to_string());
-        let before = agent_task_lifecycle::status(run_id).expect("receipt before rejection");
+        let before =
+            agent_task_lifecycle::reconcile_status(run_id).expect("receipt before rejection");
         let error = persist_manual_finalization_receipt(run_id, &different_candidate)
             .expect_err("a self-consistent receipt for a different candidate cannot persist");
         assert!(error.message.contains("controller validation"));
         assert_eq!(
-            agent_task_lifecycle::status(run_id)
+            agent_task_lifecycle::reconcile_status(run_id)
                 .expect("receipt after rejection")
                 .metadata,
             before.metadata
@@ -19585,7 +19617,7 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
-        let preflight_record = agent_task_lifecycle::status(run_id).unwrap();
+        let preflight_record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
         assert_eq!(
             preflight_record.metadata["latest_promotion"]["status"],
             "gate_failed"
@@ -19878,7 +19910,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             replay.status,
             crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
         );
-        let record = agent_task_lifecycle::status(run_id).expect("read durable evidence");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("read durable evidence");
         assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 2);
         assert_eq!(
             canonical_cook_recovery_run_id(cook_id).as_deref(),
@@ -20847,7 +20879,7 @@ fn fanout_resume_prefers_immutable_verification_checkpoint_over_later_failed_att
         assert!(backend.committed);
         assert!(backend.pushed);
         assert!(backend.created);
-        let source = agent_task_lifecycle::status(&run_id).unwrap();
+        let source = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
         assert_eq!(
             source.metadata["cook_recovery_source_checkpoint"],
             checkpoint

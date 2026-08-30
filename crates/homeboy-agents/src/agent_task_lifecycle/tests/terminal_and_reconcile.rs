@@ -403,8 +403,9 @@ fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
             b"corrupted legacy bytes"
         );
         assert_eq!(
-            status(&record.run_id).expect("recovered record").metadata
-                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
+            reconcile_status(&record.run_id)
+                .expect("recovered record")
+                .metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
             recovered
         );
         validate_controller_runtime_in_store(&test_lifecycle_store(), &record.run_id)
@@ -488,7 +489,7 @@ fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
         let pinned = pinned_runtime_for_mutation("runtime-a-lab-proxy")
             .expect("runtime B resolves the verified runtime A pin")
             .expect("runtime B delegates to runtime A");
-        let record = status("runtime-a-lab-proxy").expect("same durable proxy remains");
+        let record = reconcile_status("runtime-a-lab-proxy").expect("same durable proxy remains");
 
         assert!(pinned.is_file());
         assert_eq!(record.run_id, "runtime-a-lab-proxy");
@@ -524,7 +525,7 @@ fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
         )
         .expect("persist intent");
 
-        let pending = status("intent-before-post").expect("preparing intent status");
+        let pending = reconcile_status("intent-before-post").expect("preparing intent status");
         assert_eq!(
             pending.metadata["runner_submission_intent"]["state"],
             "preparing"
@@ -603,7 +604,7 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
     )
     .expect("terminal staging failure");
 
-    let record = status_in_store(
+    let record = reconcile_status_in_store(
         &lifecycle_store,
         attempt_run_id,
         AgentTaskStatusOptions::default(),
@@ -663,7 +664,7 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
     )
     .expect("terminal preacceptance failure");
 
-    let mut record = status_in_store(
+    let mut record = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -863,7 +864,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
         "/runner/workspace/repo"
     );
 
-    let loaded = status_in_store(
+    let loaded = reconcile_status_in_store(
         &lifecycle_store,
         "agent-task-pre-execution",
         AgentTaskStatusOptions::default(),
@@ -974,7 +975,7 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
 /// acceptance fails to find have to be the same file, which is only true if
 /// both acceptances and the terminal write name one installation.
 ///
-/// The runner-continuation registry `status_in_store` consults stays
+/// The runner-continuation registry `reconcile_status_in_store` consults stays
 /// process-global by design: it is configured trust material and a subprocess
 /// contract, not a lifecycle root (#12618).
 #[test]
@@ -994,7 +995,7 @@ fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_
         },
     )
     .expect("running proxy");
-    let mut record = status_in_store(
+    let mut record = reconcile_status_in_store(
         &lifecycle_store,
         "agent-task-late-artifact",
         AgentTaskStatusOptions::default(),
@@ -1172,7 +1173,7 @@ fn transport_only_reconciliation_stays_pending_until_foreground_projection_or_in
     )
     .expect("foreground transport result projects the explicit run"));
     assert_eq!(record.state, AgentTaskRunState::Running);
-    let projected = status_in_store(
+    let projected = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
         AgentTaskStatusOptions::default(),
@@ -1291,7 +1292,7 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
                 .expect("repeated terminal result is idempotent")
         );
 
-        let projected = status_in_store(
+        let projected = reconcile_status_in_store(
             &lifecycle_store,
             run_id,
             AgentTaskStatusOptions::default(),
@@ -1360,7 +1361,7 @@ fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotentl
         assert_eq!(report.considered, 0);
         assert_eq!(report.reconciled, 0);
 
-        let terminal = status(run_id).expect("authoritative aggregate imported");
+        let terminal = reconcile_status(run_id).expect("authoritative aggregate imported");
         assert_eq!(terminal.state, AgentTaskRunState::PartialRecoverable);
         assert_eq!(terminal.runner_id(), Some("homeboy-lab"));
         assert_eq!(
@@ -1377,7 +1378,9 @@ fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotentl
         let repeated = reconcile_run(run_id, false).expect("idempotent terminal reconcile");
         assert_eq!(repeated.considered, 0);
         assert_eq!(
-            status(run_id).expect("terminal state retained").state,
+            reconcile_status(run_id)
+                .expect("terminal state retained")
+                .state,
             AgentTaskRunState::PartialRecoverable
         );
     });
@@ -1419,7 +1422,7 @@ fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
         // terminal observation persisted before eviction rather than terminalizing
         // the controller projection as a missing live job.
         let _provider = RunnerContinuationTestGuard::install(Box::new(ConnectedRunnerProvider));
-        let recovered = status(run_id).expect("recover terminal observation");
+        let recovered = reconcile_status(run_id).expect("recover terminal observation");
         assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
         assert!(store::read_aggregate(run_id).is_ok());
 
@@ -1432,7 +1435,7 @@ fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
             !project_persisted_terminal_runner_events(&mut repeated_record)
                 .expect("terminal projection is exactly once")
         );
-        let repeated = status(run_id).expect("idempotent recovery");
+        let repeated = reconcile_status(run_id).expect("idempotent recovery");
         assert_eq!(repeated.state, AgentTaskRunState::Succeeded);
         assert_eq!(
             store::read_aggregate(run_id).expect("recovered aggregate remains stable"),
@@ -1931,7 +1934,7 @@ fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() 
     )
     .expect("handoff failure recorded");
 
-    let record = status_in_store(
+    let record = reconcile_status_in_store(
         &lifecycle_store,
         "agent-task-handoff-failure",
         AgentTaskStatusOptions::default(),
@@ -1998,7 +2001,7 @@ fn detached_lab_handoff_upgrades_existing_observation_record() {
     )
     .expect("detached handoff recorded");
 
-    let loaded = status_in_store(
+    let loaded = reconcile_status_in_store(
         &lifecycle_store,
         "agent-task-detached",
         AgentTaskStatusOptions::default(),
@@ -2213,7 +2216,7 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
                 .expect("remove unverified projection");
         }
 
-        let record = status("detached-run").expect("status");
+        let record = reconcile_status("detached-run").expect("status");
         assert_eq!(record.state, AgentTaskRunState::PartialRecoverable);
         assert_eq!(record.metadata["runner_id"], "local");
         assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
@@ -2238,7 +2241,7 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             .list_artifacts("detached-run")
             .expect("initial projections")
             .len();
-        let replay = status("detached-run").expect("idempotent status");
+        let replay = reconcile_status("detached-run").expect("idempotent status");
         assert_eq!(replay.metadata, record.metadata);
         assert_eq!(
             store
@@ -2285,7 +2288,7 @@ fn record_promotion_persists_latest_event_on_run_metadata() {
     let updated =
         record_promotion_in_store(&lifecycle_store, "run-promotion-status", promotion.clone())
             .expect("promotion recorded");
-    let loaded = status_in_store(
+    let loaded = reconcile_status_in_store(
         &lifecycle_store,
         "run-promotion-status",
         AgentTaskStatusOptions::default(),
@@ -2389,7 +2392,7 @@ fn acceptance_is_created_after_green_promotion_and_persists_verifier_provenance(
     );
     // Reloading models controller restart: the evidence remains available
     // for later cryptographic revalidation rather than living in memory.
-    let restarted = status_in_store(
+    let restarted = reconcile_status_in_store(
         &lifecycle_store,
         "acceptance-lifecycle",
         AgentTaskStatusOptions::default(),
@@ -2467,7 +2470,7 @@ fn acceptance_rejects_a_promotion_that_changes_during_authority_verification() {
     )
     .expect_err("stale verdict must not apply");
     assert!(error.message.contains("candidate changed"));
-    let acceptance = status_in_store(
+    let acceptance = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -2753,7 +2756,8 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         .expect("aggregate-only dispatch failure recorded")
         .expect("dispatch envelope recognized");
 
-        let loaded = status("conductor-full-loop-proof-retry2-20260611").expect("status loaded");
+        let loaded =
+            reconcile_status("conductor-full-loop-proof-retry2-20260611").expect("status loaded");
         let log = logs("conductor-full-loop-proof-retry2-20260611").expect("logs loaded");
         let artifacts =
             artifacts("conductor-full-loop-proof-retry2-20260611").expect("artifacts loaded");
@@ -2887,7 +2891,7 @@ fn status_repairs_terminal_provider_model_from_aggregate_idempotently() {
         .write_record(&stale)
         .expect("stale terminal record stored");
 
-    let repaired = status_in_store(
+    let repaired = reconcile_status_in_store(
         &lifecycle_store,
         "terminal-model-repair",
         AgentTaskStatusOptions::default(),
@@ -2919,7 +2923,7 @@ fn status_repairs_terminal_provider_model_from_aggregate_idempotently() {
         "openai/gpt-5.6-terra"
     );
 
-    let repeated = status_in_store(
+    let repeated = reconcile_status_in_store(
         &lifecycle_store,
         "terminal-model-repair",
         AgentTaskStatusOptions::default(),
@@ -3293,8 +3297,8 @@ fn status_keeps_live_local_provider_owner_running_idempotently() {
         )
         .expect("reserved");
 
-        let first = status("owner-live").expect("first status");
-        let second = status("owner-live").expect("second status");
+        let first = reconcile_status("owner-live").expect("first status");
+        let second = reconcile_status("owner-live").expect("second status");
         assert_eq!(first.state, AgentTaskRunState::Running);
         assert_eq!(second.state, AgentTaskRunState::Running);
         assert_eq!(
@@ -3329,7 +3333,8 @@ fn status_does_not_terminalize_a_live_owner_after_provider_success() {
         )
         .expect("provider success recorded");
 
-        let record = status("owner-live-late-import").expect("status before aggregate import");
+        let record =
+            reconcile_status("owner-live-late-import").expect("status before aggregate import");
         assert_eq!(record.state, AgentTaskRunState::Running);
         assert_eq!(
             record.metadata["provider_executions"][0]["owner_state"],
@@ -3370,7 +3375,7 @@ fn legacy_provider_reservation_without_owner_proof_remains_joinable() {
         })
         .expect("legacy reservation fixture");
 
-        let record = status("owner-legacy").expect("legacy status");
+        let record = reconcile_status("owner-legacy").expect("legacy status");
         assert_eq!(record.state, AgentTaskRunState::Running);
         assert_eq!(
             record.metadata["provider_executions"][0]["owner_state"],
@@ -3405,7 +3410,7 @@ fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it()
         })
         .expect("reused PID fixture");
 
-        let record = status("owner-pid-reused").expect("reconcile PID reuse");
+        let record = reconcile_status("owner-pid-reused").expect("reconcile PID reuse");
         assert_eq!(record.state, AgentTaskRunState::Cancelled);
         assert_eq!(
             record.metadata["provider_executions"][0]["owner_state"],
@@ -3445,8 +3450,8 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
         owner.kill().expect("interrupt provider owner");
         owner.wait().expect("reap provider owner");
 
-        let terminal = status("owner-dead").expect("reconciled status");
-        let replay = status("owner-dead").expect("idempotent status");
+        let terminal = reconcile_status("owner-dead").expect("reconciled status");
+        let replay = reconcile_status("owner-dead").expect("idempotent status");
         assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
         assert_eq!(replay.state, AgentTaskRunState::Cancelled);
         assert_eq!(
@@ -3526,7 +3531,7 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
         owner.kill().expect("interrupt provider owner");
         owner.wait().expect("reap provider owner");
 
-        let recovered = status("owner-late-success").expect("recovered status");
+        let recovered = reconcile_status("owner-late-success").expect("recovered status");
         assert_eq!(recovered.state, AgentTaskRunState::CandidateRecoverable);
         assert_eq!(
             recovered.metadata["provider_executions"][0]["state"],
@@ -3577,8 +3582,8 @@ fn terminal_provider_failure_without_owner_persists_interrupted_owner_aggregate(
         })
         .expect("interrupted foreground owner fixture");
 
-        let terminal = status("provider-failed-no-owner").expect("reconciled status");
-        let replay = status("provider-failed-no-owner").expect("idempotent status");
+        let terminal = reconcile_status("provider-failed-no-owner").expect("reconciled status");
+        let replay = reconcile_status("provider-failed-no-owner").expect("idempotent status");
         assert_eq!(terminal.state, AgentTaskRunState::Failed);
         assert_eq!(replay.state, AgentTaskRunState::Failed);
         assert!(replay.provider_handles.is_empty());
@@ -3638,7 +3643,7 @@ fn interrupted_foreground_owner_converges_terminal_provider_failure() {
         owner.kill().expect("interrupt foreground owner");
         owner.wait().expect("reap foreground owner");
 
-        let terminal = status("provider-failed-owner-dead").expect("reconciled status");
+        let terminal = reconcile_status("provider-failed-owner-dead").expect("reconciled status");
         assert_eq!(terminal.state, AgentTaskRunState::Failed);
         assert_eq!(
             terminal.metadata["provider_executions"][0]["owner_state"],
@@ -3765,7 +3770,7 @@ fn provider_terminalization_rejects_an_invalid_terminal_state() {
 
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
         assert_eq!(
-            status("invalid-provider-terminal-state")
+            reconcile_status("invalid-provider-terminal-state")
                 .expect("durable record")
                 .metadata["provider_executions"][0]["state"],
             json!("running")
@@ -3843,7 +3848,7 @@ fn record_health_reconciles_plan_backed_missing_metadata_idempotently() {
 
     let applied = reconcile_record_health_in_store(&lifecycle_store, false).expect("applied");
     assert_eq!(applied.migrated, 1);
-    let repaired = status_in_store(
+    let repaired = reconcile_status_in_store(
         &lifecycle_store,
         "repairable-metadata",
         AgentTaskStatusOptions::default(),
@@ -3891,11 +3896,10 @@ fn artifact_refs_omit_artifacts_with_empty_url_and_path() {
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The bridge projection reads the aggregate and plan back after
-/// reconciling — a write — so the run it terminalizes and the run it then
-/// projects have to be the same durable record.
+/// (#7505). Bridge projection reads the durable record, aggregate, plan, and
+/// canonical event page without changing lifecycle state.
 #[test]
-fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
+fn run_status_is_non_reconciling_and_reports_cursor_filtered_events() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -3929,11 +3933,21 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
         Some("run-status-bridge"),
     )
     .expect("recorded");
+    let before = lifecycle_store
+        .read_record("run-status-bridge")
+        .expect("record before bridge read");
 
     let cursor = homeboy_control_plane_contract::EventCursor::new("1").expect("cursor");
     let status = run_status_in_store(&lifecycle_store, "run-status-bridge", Some(cursor))
         .expect("bridge status");
+    let after = lifecycle_store
+        .read_record("run-status-bridge")
+        .expect("record after bridge read");
 
+    assert_eq!(
+        after, before,
+        "bridge status must not write lifecycle state"
+    );
     assert_eq!(status.schema, schemas::RUN_STATUS);
     assert_eq!(
         status.control_plane_run.state,
@@ -3959,6 +3973,25 @@ fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
         status.control_plane_run.artifacts[0].kind,
         "artifact-bundle"
     );
+}
+
+#[test]
+fn status_is_a_non_writing_durable_read() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let plan = test_plan();
+        let aggregate = succeeded_aggregate(&plan);
+        let expected =
+            record_completed_run(&plan, &aggregate, Some("pure-status-read")).expect("recorded");
+        store::fail_next_record_write_for_test();
+
+        let observed = status("pure-status-read").expect("pure status read");
+
+        assert_eq!(observed, expected);
+        assert!(
+            store::write_record(&observed).is_err(),
+            "status must leave the injected write failure unconsumed"
+        );
+    });
 }
 
 #[test]
@@ -4145,7 +4178,7 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
     )
     .expect("succeeded candidate");
 
-    let before = status_in_store(
+    let before = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -4187,7 +4220,7 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
 
     // The durable record on disk agrees — recovery can adopt this candidate
     // without rerunning the provider.
-    let reloaded = status_in_store(
+    let reloaded = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -4204,7 +4237,7 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
 
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The closing assertion is that the reprojection was *persisted*, so
-/// the record read back has to be the one `status_in_store` just wrote — the
+/// the record read back has to be the one `reconcile_status_in_store` just wrote — the
 /// same store the stale terminal state was planted in.
 #[test]
 fn status_reconciles_terminal_provider_model_from_aggregate_when_durable_is_null() {
@@ -4251,7 +4284,7 @@ fn status_reconciles_terminal_provider_model_from_aggregate_when_durable_is_null
 
     // Read-side reconciliation reprojects the authoritative aggregate model
     // onto the terminal record and persists it.
-    let reconciled = status_in_store(
+    let reconciled = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),
@@ -4303,7 +4336,7 @@ fn status_leaves_terminal_record_untouched_when_aggregate_has_no_model() {
     assert!(record.state.is_terminal());
 
     let before = lifecycle_store.read_record(run_id).expect("record before");
-    let reconciled = status_in_store(
+    let reconciled = reconcile_status_in_store(
         &lifecycle_store,
         run_id,
         AgentTaskStatusOptions::default(),

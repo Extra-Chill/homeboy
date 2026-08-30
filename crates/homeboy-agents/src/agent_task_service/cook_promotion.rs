@@ -716,7 +716,7 @@ fn continuation_artifact_id_in_store(
 pub(crate) fn persisted_promotion_for_attempt(
     run_id: &str,
 ) -> Result<Option<AgentTaskPromotionReport>> {
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     persisted_promotion_from_record(run_id, record)
 }
 
@@ -864,7 +864,7 @@ pub fn record_replacement_gate_proof(
         });
         return Err(error);
     }
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     let original_history_index = record
         .metadata
         .get("promotions")
@@ -1578,7 +1578,7 @@ fn promotion_checkpoint_matches(promotion: &AgentTaskPromotionReport, checkpoint
 }
 
 pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
-    agent_task_lifecycle::status(run_id)
+    agent_task_lifecycle::reconcile_status(run_id)
         .map(|record| run_record_needs_execution(&record))
         .unwrap_or(true)
 }
@@ -1612,7 +1612,7 @@ fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord)
 }
 
 pub(crate) fn retryable_provider_discovery_failure(run_id: &str) -> bool {
-    agent_task_lifecycle::status(run_id)
+    agent_task_lifecycle::reconcile_status(run_id)
         .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
         && agent_task_lifecycle::read_aggregate(run_id).is_ok_and(|aggregate| {
             !aggregate.outcomes.is_empty()
@@ -2926,7 +2926,7 @@ pub fn persist_manual_finalization_receipt(
     run_id: &str,
     report: &AgentTaskPrFinalizationReport,
 ) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
-    let record = agent_task_lifecycle::status(run_id)?;
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
     let intent = manual_finalization_intent_for_run(&record, run_id)?;
     if !valid_manual_finalization_receipt(report, &intent, &record, run_id, false) {
         return Err(Error::validation_invalid_argument(
@@ -2989,12 +2989,12 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
-        let retryable = agent_task_lifecycle::status(&report.run_id)?.metadata
+        let retryable = agent_task_lifecycle::reconcile_status(&report.run_id)?.metadata
             ["manual_finalization_retry"]
             == true;
         if retryable {
             require_manual_retry_candidate(
-                &agent_task_lifecycle::status(&report.run_id)?,
+                &agent_task_lifecycle::reconcile_status(&report.run_id)?,
                 &report.path,
             )?;
         }
@@ -3365,7 +3365,7 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
     preflight: bool,
     backend: &mut B,
 ) -> Result<Value> {
-    let record = agent_task_lifecycle::status(run_id).map_err(|_| {
+    let record = agent_task_lifecycle::reconcile_status(run_id).map_err(|_| {
         Error::validation_invalid_argument(
             "run_or_cook_id",
             "no durable Cook recipe or manual finalization record contains this run or cook id",
@@ -3449,7 +3449,7 @@ fn completed_finalization_receipt_for_recovery(
         manual_finalization_run_ids(recipe)
     };
     for run_id in run_ids {
-        let record = agent_task_lifecycle::status(run_id)?;
+        let record = agent_task_lifecycle::reconcile_status(run_id)?;
         let Some(value) = record.metadata.get("cook_finalization") else {
             continue;
         };
@@ -3522,7 +3522,7 @@ fn manual_finalization_intent_for_recovery(
         manual_finalization_run_ids(recipe)
     };
     for run_id in run_ids {
-        let record = agent_task_lifecycle::status(run_id)?;
+        let record = agent_task_lifecycle::reconcile_status(run_id)?;
         let Some(_) = record.metadata.get("manual_finalization_intent") else {
             continue;
         };

@@ -23,6 +23,8 @@ Manage component-backed task worktrees
 | Subcommand | Summary |
 | --- | --- |
 | `homeboy worktree create` | Create a task worktree through the configured or built-in provider |
+| `homeboy worktree import` | Import an existing exact Git worktree into the built-in lifecycle registry |
+| `homeboy worktree finalize` | Record a terminal worktree disposition without performing cleanup |
 | `homeboy worktree adopt` | Adopt an existing local workspace path for @workspace:<handle> refs |
 | `homeboy worktree queue-create` | Create multiple task worktrees one-at-a-time with queue status JSON |
 | `homeboy worktree list` | List worktrees owned by configured and built-in providers |
@@ -52,6 +54,46 @@ Create a task worktree through the configured or built-in provider
 | `--task-url` | `<TASK_URL>` | Task or issue URL associated with this worktree |
 | `--run-id` | `<RUN_ID>` | Agent-task run ID associated with this worktree |
 | `--cleanup-policy` | `<CLEANUP_POLICY>` | Cleanup policy for lifecycle cleanup Values: `remove-when-safe`, `preserve-on-failure`. |
+
+## `homeboy worktree import`
+
+```sh
+homeboy worktree import [OPTIONS] <COMPONENT_ID> <HANDLE> <PATH>
+```
+
+Import an existing exact Git worktree into the built-in lifecycle registry
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<COMPONENT_ID>` | yes | _no help text_ |
+| `<HANDLE>` | yes | _no help text_ |
+| `<PATH>` | yes | _no help text_ |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--branch` | `<BRANCH>` | _no help text_ |
+| `--base-ref` | `<BASE_REF>` | _no help text_ |
+| `--task-url` | `<TASK_URL>` | _no help text_ |
+| `--owner-run-ref` | `<OWNER_RUN_REF>` | _no help text_ |
+| `--cleanup-policy` | `<CLEANUP_POLICY>` | _no help text_ Values: `remove-when-safe`, `preserve-on-failure`. |
+| `--created-at` | `<CREATED_AT>` | _no help text_ |
+
+## `homeboy worktree finalize`
+
+```sh
+homeboy worktree finalize [OPTIONS] <HANDLE>
+```
+
+Record a terminal worktree disposition without performing cleanup
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<HANDLE>` | yes | _no help text_ |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--owner-run-ref` | `<OWNER_RUN_REF>` | _no help text_ |
+| `--disposition` | `<DISPOSITION>` | _no help text_ Values: `succeeded`, `failed`, `cancelled`, `timed-out`, `interrupted`. |
 
 ## `homeboy worktree adopt`
 

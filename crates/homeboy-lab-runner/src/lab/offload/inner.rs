@@ -3396,7 +3396,7 @@ mod tests {
             assert_eq!(metadata["runner_jobs_created"], 0);
             assert_eq!(metadata["transport_retry_attempts"], 0);
 
-            let record = homeboy_agents::agent_task_lifecycle::status(run_id)
+            let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)
                 .expect("persisted local fallback");
             assert!(record.lab_handoff.is_none());
             assert!(record.runner_id().is_none());
