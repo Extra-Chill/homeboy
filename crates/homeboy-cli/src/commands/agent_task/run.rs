@@ -2673,7 +2673,8 @@ fn apply_explicit_local_continuation(
     run_id: &str,
     options: &mut homeboy::agents::agent_task_service::CookRequest,
 ) -> homeboy::core::Result<()> {
-    let Some(decision) = explicit_local_continuation_decision(&options.initial_plan)? else {
+    let Some(decision) = explicit_local_continuation_decision(&options.identity.initial_plan)?
+    else {
         return Ok(());
     };
     let lifecycle_store =
@@ -2691,9 +2692,10 @@ fn apply_local_continuation_decision(
     options: &mut homeboy::agents::agent_task_service::CookRequest,
     decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
 ) -> homeboy::core::Result<()> {
-    options.initial_plan.metadata["execution_placement_decision"] = serde_json::to_value(decision)
-        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-    options.attempt_dispatcher = None;
+    options.identity.initial_plan.metadata["execution_placement_decision"] =
+        serde_json::to_value(decision)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    options.provider_transport.attempt_dispatcher = None;
     Ok(())
 }
 
@@ -2924,8 +2926,8 @@ where
     } else {
         agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)?
     };
-    options.initial_run_id = attempt.run_id.clone();
-    options.initial_plan = attempt.plan.clone();
+    options.identity.initial_run_id = attempt.run_id.clone();
+    options.identity.initial_plan = attempt.plan.clone();
     if local_override.is_some() {
         apply_explicit_local_continuation(&run_id, &mut options)?;
     }
@@ -3038,8 +3040,8 @@ where
                 } else {
                     agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?
                 };
-                options.initial_run_id = attempt.run_id.clone();
-                options.initial_plan = attempt.plan.clone();
+                options.identity.initial_run_id = attempt.run_id.clone();
+                options.identity.initial_plan = attempt.plan.clone();
                 agent_task_service::authorize_cook_continue_route(&options)?;
                 let result = run_cook_explicit(
                     options,
@@ -3307,8 +3309,8 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ))
         }
     };
-    options.initial_run_id = attempt.run_id.clone();
-    options.initial_plan = attempt.plan.clone();
+    options.identity.initial_run_id = attempt.run_id.clone();
+    options.identity.initial_plan = attempt.plan.clone();
     if let Some(decision) = local_override {
         if let Err(error) = apply_local_continuation_decision(&mut options, decision) {
             return Ok((
@@ -5577,43 +5579,55 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let result = agent_task_service::CookService::run(
             agent_task_service::CookRequest {
-            cook_id,
-            initial_run_id: run_id,
-            initial_plan,
-            to_worktree: args.to_worktree.expect("Cook destination is resolved"),
-            source_worktree_path,
-            provider_command: args.provider_command,
-            provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
-                argv: args.provider_argv,
-                ..Default::default()
-            }),
+            identity: homeboy::agents::agent_task_service::CookIdentity {
+                cook_id,
+                initial_run_id: run_id,
+                initial_plan,
+            },
+            workspace: homeboy::agents::agent_task_service::CookWorkspace {
+                to_worktree: args.to_worktree.expect("Cook destination is resolved"),
+                source_worktree_path,
+                task_base_sha,
+                source_refs: args.dispatch.task_url.into_iter().collect(),
+            },
+            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+                provider_command: args.provider_command,
+                provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
+                    argv: args.provider_argv,
+                    ..Default::default()
+                }),
+                attempt_dispatcher,
+            },
             gates: args.gates.into(),
-            max_attempts: args.max_attempts,
-            no_finalize: args.no_finalize,
-            draft_pr: args.draft_pr,
-            base: args.base.expect("Cook base is resolved before execution"),
-            task_base_sha,
-            head: args.head,
-            title,
-            commit_message,
-            source_refs: args.dispatch.task_url.into_iter().collect(),
-            protected_branches: args.protected_branches,
-            ai_tool: super::fanout::resolve_ai_tool_disclosure(
-                &args.ai_tool,
-                selected_identity.as_ref().map(|(backend, _, _)| backend.as_str()),
-                selected_identity
-                    .as_ref()
-                    .and_then(|(_, selector, _)| selector.as_deref()),
-                selected_model.as_deref(),
-            ),
+            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy {
+                max_attempts: args.max_attempts,
+            },
+            finalization: homeboy::agents::agent_task_service::CookFinalization {
+                no_finalize: args.no_finalize,
+                draft_pr: args.draft_pr,
+                base: args.base.expect("Cook base is resolved before execution"),
+                head: args.head,
+                title,
+                commit_message,
+                protected_branches: args.protected_branches,
+            },
+            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: super::fanout::resolve_ai_tool_disclosure(
+                    &args.ai_tool,
+                    selected_identity.as_ref().map(|(backend, _, _)| backend.as_str()),
+                    selected_identity
+                        .as_ref()
+                        .and_then(|(_, selector, _)| selector.as_deref()),
+                    selected_model.as_deref(),
+                ),
             // Model identity comes only from explicit/config/rotation selection
             // (`--model`, provider profile). Disclosure text like
             // `OpenCode (GPT-5.5)` is presentation, not execution provenance, and
             // must not be reverse-parsed into a model — an omitted model stays
             // omitted so finalization records only real model identity (#9789).
-            ai_model: selected_model,
-            ai_used_for: args.ai_used_for,
-            attempt_dispatcher,
+                ai_model: selected_model,
+                ai_used_for: args.ai_used_for,
+            },
             harvest_context:
                 homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process(
                 )?,

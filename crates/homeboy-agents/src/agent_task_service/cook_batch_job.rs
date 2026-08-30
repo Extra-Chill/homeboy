@@ -26,7 +26,7 @@
 //!
 //! # What the durable request is, and why a batch id is enough
 //!
-//! `cook_job` carries a `cook_id` because `AgentTaskCookServiceOptions` cannot
+//! `cook_job` carries a `cook_id` because `CookRequest` cannot
 //! be serialized — it holds an `Arc<dyn AgentTaskCookAttemptDispatcher>` — while
 //! the Cook recipe behind that id can. The batch has the same seam one level up.
 //! Before a batch dispatches its first child, the fanout coordinator has already
