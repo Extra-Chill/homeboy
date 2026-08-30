@@ -1,6 +1,7 @@
 use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
+use homeboy_core::extension_store::{discover_extensions, DiscoveredExtension};
 use homeboy_core::extension_update_check::is_git_url;
 use homeboy_core::{build_identity, git};
 use semver::Version;
@@ -861,10 +862,10 @@ fn extension_preflight_failure_result(
 /// Network refresh, setup, and runner convergence remain in their established
 /// phases; this gate only rejects failures that cannot be repaired by a retry.
 fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPreflightBlocker> {
-    extension::discover_extensions()
+    discover_extensions()
         .into_iter()
         .filter_map(|discovered| match discovered {
-            extension::DiscoveredExtension::Invalid(failure) => {
+            DiscoveredExtension::Invalid(failure) => {
                 let extension_id = failure.id;
                 Some(ExtensionPreflightBlocker {
                     extension_id: extension_id.clone(),
@@ -873,7 +874,7 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
                     recovery_command: format!("homeboy extension show {extension_id}"),
                 })
             }
-            extension::DiscoveredExtension::Valid(manifest) => {
+            DiscoveredExtension::Valid(manifest) => {
                 let extension_id = manifest.id.clone();
                 let source_path = manifest.extension_path.as_deref().map(Path::new)?;
                 if extension::is_extension_linked(&extension_id) {
