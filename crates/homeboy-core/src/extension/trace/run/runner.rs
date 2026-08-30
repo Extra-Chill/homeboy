@@ -2,9 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::extension::invoke::RunnerOutput;
+use crate::extension::invoke::{build_scenario_runner, RunnerOutput, ScenarioRunnerOptions};
 use crate::extension::resolve::ExtensionExecutionContext;
-use crate::extension::{build_scenario_runner, stderr_tail, ScenarioRunnerOptions};
+use crate::extension::stderr_tail;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, ErrorCode, Result};

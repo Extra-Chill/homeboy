@@ -4,9 +4,14 @@
 //! boundaries. Execution behavior and service ownership remain outside this
 //! crate.
 
+mod capability;
 mod discovery;
 mod lifecycle;
 
+pub use capability::{
+    RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
+    RunnerToolchainReadinessProbe,
+};
 pub use discovery::{
     RunnerCapabilities, RunnerDescriptor, RunnerInspection, RunnerKind, RunnerReadiness,
     RUNNER_CAPABILITIES_SCHEMA, RUNNER_DESCRIPTOR_SCHEMA, RUNNER_INSPECTION_SCHEMA,

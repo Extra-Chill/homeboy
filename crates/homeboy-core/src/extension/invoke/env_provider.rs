@@ -217,7 +217,7 @@ fn provider_command_payload(execution_context: &RunnerJobExecutionContext) -> Re
 }
 
 pub(crate) fn load_manifest_from_dir(extension_path: &Path) -> Result<ExtensionManifest> {
-    let manifest_value = super::invoke::load_extension_manifest_from_dir(extension_path)?;
+    let manifest_value = super::load_extension_manifest_from_dir(extension_path)?;
     let mut manifest =
         serde_json::from_value::<ExtensionManifest>(manifest_value).map_err(|e| {
             Error::validation_invalid_json(e, Some("parse extension manifest".to_string()), None)

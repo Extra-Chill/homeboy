@@ -17,14 +17,15 @@ use std::time::Duration;
 
 mod action;
 mod context;
+pub(crate) mod env_provider;
 mod environment;
 mod runner;
 mod runtime_helper;
+mod scenario_runner;
 mod scope;
 mod settings;
 mod tool;
 
-use super::env_provider;
 use crate::extension::catalog::load_extension;
 use homeboy_core::extension::resolve::ExtensionExecutionContext;
 use homeboy_extension_contract::exec_context;
@@ -34,6 +35,10 @@ use homeboy_extension_contract::ExtensionManifest;
 
 pub use action::execute_action;
 pub use context::ResolvedExtensionInvocationContext;
+pub use env_provider::{
+    declared_secret_names, resolve_installed, resolve_installed_all, EnvProviderCommandPayload,
+    EnvProviderContribution, ENV_PROVIDER_COMMAND_PAYLOAD_ENV,
+};
 pub(crate) use environment::prepare_capability_run;
 use environment::{
     build_action_env, build_exec_env, execute_extension_command, execute_extension_runtime,
@@ -47,6 +52,7 @@ pub use runtime_helper::{
     BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
     RUNTIME_SETTINGS_HELPER_ENV, RUNTIME_SETTINGS_HELPER_ID,
 };
+pub use scenario_runner::{build_scenario_runner, ScenarioRunnerOptions};
 use settings::serialize_settings;
 pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
 pub use tool::exec_tool;
@@ -174,7 +180,7 @@ fn persist_setup_runtime_env(extension: &ExtensionManifest, extension_id: &str) 
         None,
     );
 
-    match super::env_provider::env_vars(
+    match env_provider::env_vars(
         &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         extension,
         extension_dir,

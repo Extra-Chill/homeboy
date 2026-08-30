@@ -36,7 +36,11 @@ fn managed_immutable_runner_slots_route_to_one_exact_refresh_action() {
         "/home/user/workspace/_homeboy_binaries/homeboy-main/target/release/homeboy"
     ));
 
-    let commands = managed_immutable_runner_recovery_commands("homeboy-lab");
+    let identity = homeboy_product_identity::build_identity();
+    let commands = managed_immutable_runner_recovery_commands_with_commit(
+        "homeboy-lab",
+        identity.git_commit.as_deref(),
+    );
     assert_eq!(commands.len(), 1);
     assert!(commands[0].starts_with("homeboy runner refresh-homeboy homeboy-lab --ref "));
     assert!(commands[0].ends_with(" --reconnect"));
@@ -68,6 +72,23 @@ fn managed_immutable_runner_reconciles_a_rotated_but_draining_daemon() {
     assert!(!managed_refresh_can_reconcile(1, false, false));
     assert!(!managed_refresh_can_reconcile(1, true, true));
     assert!(!managed_refresh_can_reconcile(0, true, true));
+}
+
+#[test]
+fn managed_immutable_runner_prefers_selected_source_revision() {
+    let source = git_source_checkout();
+    let selected_revision = source_checkout_revision(source.path()).expect("source revision");
+
+    assert_ne!(
+        Some(selected_revision.as_str()),
+        homeboy_product_identity::build_identity()
+            .git_commit
+            .as_deref()
+    );
+    assert_eq!(
+        managed_immutable_runner_target_revision(Some(&selected_revision)),
+        Some(selected_revision)
+    );
 }
 
 #[test]

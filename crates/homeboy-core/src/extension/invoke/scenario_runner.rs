@@ -3,7 +3,7 @@ use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::Result;
 use std::path::{Path, PathBuf};
 
-use super::invoke::ExtensionRunner;
+use super::ExtensionRunner;
 use homeboy_core::extension::resolve::{path_list_env_value, ExtensionExecutionContext};
 
 pub struct ScenarioRunnerOptions<'a> {

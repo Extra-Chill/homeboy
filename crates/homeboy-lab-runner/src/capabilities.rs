@@ -23,12 +23,12 @@ pub(crate) const RUNNER_CAPABILITY_PROBE: &str = "runner_capability_batch";
 // data. Re-exported so internal/CLI call sites resolve unchanged. The
 // `From<LabRunnerGateDecision> for HomeboyGateResult` impl stays in core below
 // (orphan rule: HomeboyGateResult is core-owned).
-pub use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
+pub use homeboy_runner_contract::RunnerCapabilityPreflight;
 
 // RunnerToolCapabilityRequirement now lives in the shared runner-contract crate
 // (behavior-free data). Re-exported so existing call sites resolve unchanged.
-pub use homeboy_lab_runner_contract::RunnerToolCapabilityRequirement;
-pub use homeboy_lab_runner_contract::RunnerToolchainReadinessProbe;
+pub use homeboy_runner_contract::RunnerToolCapabilityRequirement;
+pub use homeboy_runner_contract::RunnerToolchainReadinessProbe;
 
 pub use homeboy_lab_runner_contract::{
     LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
@@ -37,7 +37,7 @@ pub use homeboy_lab_runner_contract::{
 
 // RunnerRequiredTool (data + pure constructors) now lives in the shared
 // runner-contract crate. Re-exported so existing call sites resolve unchanged.
-pub use homeboy_lab_runner_contract::RunnerRequiredTool;
+pub use homeboy_runner_contract::RunnerRequiredTool;
 
 /// Remediation text for a required tool. Lives in core (not on the contract
 /// type) because it consults core's runner tool registry — an inherent method
