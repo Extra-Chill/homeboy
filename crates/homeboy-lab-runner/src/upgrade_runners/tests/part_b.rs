@@ -71,6 +71,23 @@ fn managed_immutable_runner_reconciles_a_rotated_but_draining_daemon() {
 }
 
 #[test]
+fn managed_immutable_runner_prefers_selected_source_revision() {
+    let source = git_source_checkout();
+    let selected_revision = source_checkout_revision(source.path()).expect("source revision");
+
+    assert_ne!(
+        Some(selected_revision.as_str()),
+        homeboy_product_identity::build_identity()
+            .git_commit
+            .as_deref()
+    );
+    assert_eq!(
+        managed_immutable_runner_target_revision(Some(&selected_revision)),
+        Some(selected_revision)
+    );
+}
+
+#[test]
 fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
     let _local_version = pin_local_version_for_fixtures();
     let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
