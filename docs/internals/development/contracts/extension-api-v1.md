@@ -1,0 +1,81 @@
+# Extension API v1
+
+The Extension API is the transport-neutral contract through which Homeboy
+describes installed extensions and negotiates compatibility. Its serialized v1
+types live in `homeboy_extension_contract::api::v1`; catalog projection and
+negotiation behavior live in `homeboy_core::extension::catalog`.
+
+This boundary is independent of any extension family. A language toolchain, a
+deployment provider, and an agent runtime are all catalog entries described by
+the same identity, capability, readiness, and execution-requirement vocabulary.
+
+## Versioning
+
+API versions are numeric majors. Homeboy currently advertises major `1`.
+Clients send every major they understand in an
+`ExtensionApiHandshakeRequest`; Homeboy deterministically selects the highest
+shared major or returns a typed compatibility failure.
+
+The wire schemas are:
+
+- `homeboy/extension-api-descriptor/v1`
+- `homeboy/extension-api-handshake-request/v1`
+- `homeboy/extension-api-handshake-response/v1`
+
+Additive optional fields may be added within v1. Changes to identity,
+capability meaning, compatibility decisions, or required fields require a new
+major version. Numeric versions remain parseable by older clients so an unknown
+future major produces `no_shared_api_version` instead of a deserialization
+failure.
+
+The existing `HOMEBOY_EXEC_CONTEXT_VERSION=2` is a separate child-process
+environment protocol. It is not the Extension API version.
+
+## Descriptor
+
+`ExtensionApiDescriptor` projects an installed manifest into:
+
+- extension identity and source revision
+- open capability IDs with independent contract versions and schema references
+- runtime and toolchain readiness declarations
+- runner-neutral runtime requirements
+- the declared Homeboy version constraint
+
+Manifest command strings and local extension paths are not part of this public
+descriptor. They remain implementation details behind catalog and invocation
+services.
+
+## Handshake
+
+`extension::catalog::negotiate_api` evaluates two independent compatibility
+dimensions:
+
+1. The client and Homeboy must share an Extension API major.
+2. The installed extension's declared Homeboy version constraint must accept the
+   running controller.
+
+Failures are typed as `invalid_handshake_schema`, `no_shared_api_version`,
+`invalid_homeboy_version_constraint`, or `homeboy_version_incompatible`.
+Responses always advertise Homeboy's supported versions. A descriptor is
+returned only when an API major was selected.
+
+## Contract Classification
+
+`homeboy-extension-contract` predates the stable API and contains several kinds
+of portable data. Only `api` is a stable Extension API module in this slice.
+The rest is classified explicitly so package membership is not mistaken for API
+stability.
+
+| Classification | Modules | Direction |
+| --- | --- | --- |
+| Stable Extension API | `api` | Versioned public descriptor and handshake envelopes. |
+| Stable API candidates | `capability`, `core_compat`, `exec_context`, `runtime_helper`, `sidecar_config` | Reuse or reference from future v1 operations after their wire semantics are reviewed. |
+| Extension-owned domain contracts | `action_types`, `agent_task_executor_declaration`, `autofix_config`, `bench_artifact`, `bench_diagnostics`, `bench_distribution`, `bench_gate`, `bench_metric_preset`, `bench_responsiveness`, `bench_result`, `bench_results`, `bench_stage`, `ci_config`, `ci_context`, `external_check_detail_resolver`, `external_storage_retention`, `fuzz_config`, `lint_result`, `lint_results`, `notification_transport_config`, `source_metadata_repair`, `test_analysis`, `test_drift`, `test_duration`, `test_inventory_config`, `test_parsing`, `test_result`, `test_results`, `test_workflow`, `trace_config`, `trace_parsing`, `trace_preview`, `trace_results`, `trace_spec`, `update_output`, `worktree_retention` | Remain portable domain schemas; the Extension API references their schema IDs rather than absorbing their fields. |
+| Manifest and implementation detail | `extension_contract_producer`, `hook_event`, `manifest`, `manifest_action_config`, `manifest_artifact_cleanup`, `manifest_capabilities`, `manifest_capability_config`, `manifest_deploy_config`, `manifest_test_config`, `manifest_toolchain_config`, `runner_contract`, `version` | Inputs and helpers used to build or execute descriptors. They are not a stable service API. |
+
+## Next Operations
+
+The descriptor handshake deliberately does not define invocation lifecycle.
+Subsequent v1 slices will add typed catalog and resolve requests, followed by
+idempotent invoke, cancel, reconcile, readiness, activity, and terminal-result
+contracts anchored to canonical control-plane references from issue #13697.
