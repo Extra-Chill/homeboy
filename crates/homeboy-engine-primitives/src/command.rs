@@ -754,7 +754,7 @@ pub fn wait_with_bounded_output_supervised_guarded(
         let live_output = Arc::clone(&live_output);
         move |stream| {
             thread::spawn(move || {
-                capture_tail_with_live_snapshot(stream, byte_limit, true, live_output)
+                capture_tail_with_live_snapshot(stream, byte_limit, true, live_output, None)
             })
         }
     });
@@ -762,7 +762,7 @@ pub fn wait_with_bounded_output_supervised_guarded(
         let live_output = Arc::clone(&live_output);
         move |stream| {
             thread::spawn(move || {
-                capture_tail_with_live_snapshot(stream, byte_limit, false, live_output)
+                capture_tail_with_live_snapshot(stream, byte_limit, false, live_output, None)
             })
         }
     });
