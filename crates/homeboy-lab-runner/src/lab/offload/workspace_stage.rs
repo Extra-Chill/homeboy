@@ -66,6 +66,7 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) workspace_mapping: Vec<LabWorkspaceMappingEntry>,
     pub(crate) path_materialization_plan: PathMaterializationPlan,
     pub(crate) source_snapshot: SourceSnapshot,
+    pub(crate) workspace_snapshots: Vec<SourceSnapshot>,
     pub(crate) remapped_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
     pub(crate) runner_required_extensions: Vec<String>,
@@ -496,6 +497,22 @@ fn prepare_lab_offload_workspace_stage_inner(
     source_snapshot.synthetic_checkout_tree =
         synced.current_workspace.synthetic_checkout_tree.clone();
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
+    let mut workspace_snapshots = vec![source_snapshot.clone()];
+    for extra in &synced_extra_workspaces {
+        let mut snapshot = homeboy_core::source_snapshot::collect_local(
+            runner_id,
+            Path::new(&extra.local_path),
+            Some(&extra.remote_path),
+            "lab_offload",
+        );
+        snapshot.sync_excludes = extra.excludes.clone();
+        snapshot.workspace_snapshot_identity = Some(extra.snapshot_identity.clone());
+        snapshot.synthetic_checkout_commit =
+            extra.current_workspace.synthetic_checkout_commit.clone();
+        snapshot.synthetic_checkout_ref = extra.current_workspace.synthetic_checkout_ref.clone();
+        snapshot.synthetic_checkout_tree = extra.current_workspace.synthetic_checkout_tree.clone();
+        workspace_snapshots.push(snapshot);
+    }
     if contract.requires_extension_parity {
         plan = with_step(
             plan,
@@ -720,6 +737,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         workspace_mapping,
         path_materialization_plan,
         source_snapshot,
+        workspace_snapshots,
         remapped_args,
         agent_task_run_id,
         runner_required_extensions,

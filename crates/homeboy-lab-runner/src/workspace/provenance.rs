@@ -1805,6 +1805,92 @@ mod tests {
     }
 
     #[test]
+    fn multi_workspace_cook_uses_the_remapped_workspace_provenance() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        crate::register_lab_workspace_provenance_provider();
+        let primary = tempfile::tempdir().expect("primary workspace");
+        let task = tempfile::tempdir().expect("issue worktree");
+        let unmatched = tempfile::tempdir().expect("unmatched workspace");
+        std::fs::write(primary.path().join("file.txt"), "primary\n").expect("primary source");
+        std::fs::write(task.path().join("file.txt"), "task\n").expect("task source");
+        std::fs::write(unmatched.path().join("file.txt"), "unmatched\n").expect("unmatched source");
+
+        let primary_snapshot = snapshot(primary.path());
+        let task_snapshot = snapshot(task.path());
+        let primary_lab = lab(primary.path(), &primary_snapshot);
+        let task_lab = lab(task.path(), &task_snapshot);
+        let mut transport = primary_lab.clone();
+        transport["workspace_provenance"] = serde_json::json!({
+            "schema": "homeboy/lab-workspace-provenance/v1",
+            "entries": [
+                {
+                    "remote_path": primary.path().display().to_string(),
+                    "materialization_mode": "snapshot",
+                    "source_snapshot": primary_snapshot,
+                    "workspace_verification": primary_lab["workspace_verification"],
+                },
+                {
+                    "remote_path": task.path().display().to_string(),
+                    "materialization_mode": "snapshot",
+                    "source_snapshot": task_snapshot.clone(),
+                    "workspace_verification": task_lab["workspace_verification"],
+                },
+            ],
+        });
+
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let aggregate = AgentTaskScheduler::new(Arc::new(FilesystemSnapshotProvider {
+            change_workspace: true,
+            dispatched: Arc::clone(&dispatched),
+        }))
+        .with_harvest_context(
+            HarvestExecutionContext::from_lab_transport(primary_snapshot, transport.clone())
+                .expect("paired Lab transport"),
+        )
+        .run(AgentTaskPlan::new(
+            "multi-workspace-cook",
+            vec![filesystem_snapshot_request(task.path())],
+        ));
+        assert!(
+            dispatched.load(Ordering::SeqCst),
+            "task worktree reaches provider"
+        );
+        let patch = aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "patch")
+            .expect("task candidate is harvested");
+        assert_eq!(
+            patch.metadata["source_provenance"]["workspace_snapshot_identity"],
+            task_snapshot
+                .workspace_snapshot_identity
+                .expect("task identity")
+        );
+
+        let rejected = Arc::new(AtomicBool::new(false));
+        let failed = AgentTaskScheduler::new(Arc::new(FilesystemSnapshotProvider {
+            change_workspace: true,
+            dispatched: Arc::clone(&rejected),
+        }))
+        .with_harvest_context(
+            HarvestExecutionContext::from_lab_transport(snapshot(primary.path()), transport)
+                .expect("paired Lab transport"),
+        )
+        .run(AgentTaskPlan::new(
+            "unmatched-workspace-cook",
+            vec![filesystem_snapshot_request(unmatched.path())],
+        ));
+        assert!(
+            !rejected.load(Ordering::SeqCst),
+            "unmatched path fails before provider"
+        );
+        assert!(failed.outcomes[0]
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("observed")));
+    }
+
+    #[test]
     fn snapshot_baseline_replaces_dangling_linked_worktree_gitfile_before_handoff() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");

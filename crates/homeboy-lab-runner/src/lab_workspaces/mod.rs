@@ -167,7 +167,7 @@ pub(super) fn sync_extra_lab_workspaces(
     primary_local_path: &str,
     extra_workspaces: Vec<ExtraLabWorkspace>,
     workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
-) -> Result<Vec<LabWorkspaceMappingEntry>> {
+) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
     let primary = canonical_existing_dir(primary_local_path, "path")?;
     let mut seen = HashSet::from([primary]);
     let mut synced_entries = Vec::new();
@@ -194,7 +194,7 @@ pub(super) fn sync_extra_lab_workspaces(
         let mut entry = workspace_mapping_entry(&extra.role, &synced);
         entry.source_provenance = extra.source_provenance.clone();
         workspace_mapping.push(entry.clone());
-        synced_entries.push(entry);
+        synced_entries.push(synced);
     }
 
     Ok(synced_entries)

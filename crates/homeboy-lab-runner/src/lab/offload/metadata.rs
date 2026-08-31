@@ -766,6 +766,7 @@ pub(crate) fn lab_materialization_proof_metadata(
 /// legacy dispatch metadata, while the synced workspace binds verification.
 pub(crate) struct LabWorkspaceMetadataInputs<'a> {
     pub(crate) source_snapshot: &'a SourceSnapshot,
+    pub(crate) workspace_snapshots: &'a [SourceSnapshot],
     pub(crate) legacy_path_materialization_plan: &'a PathMaterializationPlan,
     pub(crate) primary_synced_workspace: &'a RunnerWorkspaceSyncOutput,
 }
@@ -812,6 +813,40 @@ pub(crate) fn attach_lab_workspace_metadata(
         "sync_excludes": source_snapshot.sync_excludes,
         "source_snapshot": source_snapshot,
         "primary_workspace": primary_workspace_plan,
+    });
+    lab_metadata["workspace_provenance"] = serde_json::json!({
+        "schema": "homeboy/lab-workspace-provenance/v1",
+        "entries": inputs.workspace_snapshots.iter().map(|snapshot| {
+            let source_path = Path::new(snapshot.local_path.as_deref().unwrap_or_default());
+            let content_hash = crate::workspace_content_hash(source_path, &snapshot.sync_excludes)?;
+            let content_manifest = crate::workspace_content_manifest_for_policy(
+                source_path,
+                &snapshot.sync_excludes,
+                permission_policy,
+            )?;
+            Ok(serde_json::json!({
+                "remote_path": snapshot.remote_path,
+                "materialization_mode": inputs.legacy_path_materialization_plan.entries.iter()
+                    .find(|entry| entry.remote_path == snapshot.remote_path.as_deref().unwrap_or_default())
+                    .map(|entry| entry.materialization_mode.as_str())
+                    .ok_or_else(|| Error::internal_unexpected("workspace provenance snapshot has no materialization plan entry"))?,
+                "source_snapshot": snapshot,
+                "workspace_verification": {
+                    "schema": "homeboy/lab-workspace-verification/v2",
+                    "identity": snapshot.workspace_snapshot_identity,
+                    "content_hash_algorithm": content_hash_algorithm,
+                    "permission_policy": permission_policy,
+                    "content_hash": content_hash,
+                    "content_manifest": content_manifest,
+                    "sync_excludes": snapshot.sync_excludes,
+                    "source_snapshot": snapshot,
+                    "primary_workspace": {
+                        "identity": snapshot.workspace_snapshot_identity,
+                        "remote_path": snapshot.remote_path,
+                    },
+                },
+            }))
+        }).collect::<Result<Vec<_>>>()?,
     });
     Ok(())
 }
