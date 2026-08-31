@@ -609,8 +609,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     let mut promotion = match promotion {
         Ok(promotion) => promotion,
         Err(error) => {
-            lifecycle_store
-                .finish_candidate_adoption(&record.run_id, Some(error.message.clone()))?;
+            lifecycle_store.finish_candidate_adoption(
+                &record.run_id,
+                Some(error.message.clone()),
+                false,
+            )?;
             return Err(error);
         }
     };
@@ -699,6 +702,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                     "candidate adoption feedback requested retry without a follow-up request"
                         .to_string(),
                 ),
+                false,
             )?;
             let report = cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
@@ -744,7 +748,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         };
         if !lifecycle_store.matches_current_environment()? {
             let message = "candidate adoption remediation requires the explicit lifecycle store to match the current Cook runtime root";
-            lifecycle_store.finish_candidate_adoption(&record.run_id, Some(message.to_string()))?;
+            lifecycle_store.finish_candidate_adoption(
+                &record.run_id,
+                Some(message.to_string()),
+                false,
+            )?;
             return Err(Error::validation_invalid_argument(
                 "stores",
                 message,
@@ -771,7 +779,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         )?;
         return match dispatch {
             CookFollowUpDispatch::Dispatched { run_id } => {
-                lifecycle_store.finish_candidate_adoption(&record.run_id, None)?;
+                lifecycle_store.finish_candidate_adoption(&record.run_id, None, false)?;
                 options.identity.initial_plan = recipe_store.load_recipe(cook_id)?
                     .attempts
                     .into_iter()
@@ -834,6 +842,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 lifecycle_store.finish_candidate_adoption(
                     &record.run_id,
                     Some("candidate remediation budget exhausted".to_string()),
+                    false,
                 )?;
                 Ok(report)
             }
@@ -849,7 +858,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                     invocation_latest_run_id: Some(record.run_id.as_str()),
                 });
                 persist_adoption_terminal_result(lifecycle_store, &record.run_id, &report.value)?;
-                lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason))?;
+                lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason), false)?;
                 Ok(report)
             }
         };
@@ -860,7 +869,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             // durable baseline proof and must not spend another provider attempt.
         } else {
             let reason = "candidate and immutable baseline failed the same required gate; repair the inherited infrastructure or gate environment before retrying adoption";
-            lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason.to_string()))?;
+            lifecycle_store.finish_candidate_adoption(
+                &record.run_id,
+                Some(reason.to_string()),
+                false,
+            )?;
             return Ok(cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: "baseline_red",
@@ -881,6 +894,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         lifecycle_store.finish_candidate_adoption(
             &record.run_id,
             Some("adopted candidate did not pass the original deterministic gates".to_string()),
+            false,
         )?;
         return Ok(cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
@@ -896,7 +910,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         }));
     }
     if options.finalization.no_finalize {
-        lifecycle_store.finish_candidate_adoption(&record.run_id, None)?;
+        lifecycle_store.finish_candidate_adoption(&record.run_id, None, true)?;
         return Ok(cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "green_no_finalize",
@@ -926,22 +940,22 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     ) {
         Ok(finalization) => finalization,
         Err(error) => {
-            lifecycle_store
-                .finish_candidate_adoption(&record.run_id, Some(error.message.clone()))?;
+            lifecycle_store.finish_candidate_adoption(
+                &record.run_id,
+                Some(error.message.clone()),
+                false,
+            )?;
             return Err(error);
         }
     };
     project_execution_placement(&mut finalization, &record.metadata);
-    lifecycle_store.finish_candidate_adoption(&record.run_id, None)?;
     let status = finalization["status"]
         .as_str()
         .unwrap_or("unknown")
         .to_string();
-    let exit_code = if matches!(status.as_str(), "review_ready" | "draft_published") {
-        0
-    } else {
-        1
-    };
+    let publication_succeeded = matches!(status.as_str(), "review_ready" | "draft_published");
+    lifecycle_store.finish_candidate_adoption(&record.run_id, None, publication_succeeded)?;
+    let exit_code = if publication_succeeded { 0 } else { 1 };
     Ok(cook_report(CookReportInput {
         cook_id: cook_id.to_string(),
         status: &status,

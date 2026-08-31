@@ -236,6 +236,7 @@ fn cook_alias_status_selects_latest_terminal_adoption_then_index_order() {
             &lifecycle_store,
             &run.run_id,
             (attempt != 1).then(|| format!("attempt {attempt} failed")),
+            false,
         )
         .expect("finish terminal adoption");
         runs.push(run);
@@ -465,7 +466,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     let adoption = finalizing.candidate_adoption.expect("attempt");
     assert_eq!(adoption.phase, "finalization");
     assert_eq!(adoption.active_gate, "finalize pull request");
-    finish_candidate_adoption_in_store(&lifecycle_store, &record.run_id, None)
+    finish_candidate_adoption_in_store(&lifecycle_store, &record.run_id, None, false)
         .expect("terminal completion");
     let completed = reconcile_status_in_store(
         &lifecycle_store,
@@ -475,6 +476,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     )
     .expect("completed status")
     .record;
+    assert_eq!(completed.state, AgentTaskRunState::Queued);
     let adoption = completed
         .candidate_adoption
         .expect("terminal attempt retained");
