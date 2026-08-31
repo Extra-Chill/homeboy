@@ -161,27 +161,6 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
     }
 }
 
-/// Operator-facing statement that an attached local Cook shares its client's
-/// lifetime.
-///
-/// `--detach-after-handoff` already documents the safe shape — with local
-/// placement the Cook is re-executed in its own session, so it survives a client
-/// that is interrupted or times out — but nothing said the default was the other
-/// one. An attached local Cook runs its whole provider stack inside the calling
-/// client's process tree, so a client that goes away takes the provider with it
-/// and leaves the durable run reporting `queued` with zero attempts and nothing
-/// executing it (#12570). This is diagnostics only: the default is unchanged and
-/// is still frequently the right one, so state the consequence rather than
-/// choosing differently.
-pub(crate) fn cook_attached_local_placement_disclosure(
-    provider_placement: Option<&str>,
-    detach_after_handoff: bool,
-) -> Option<String> {
-    (provider_placement == Some("local") && !detach_after_handoff).then(|| {
-        "cook: attached local placement — the provider runs in this client's process tree and will not survive it; pass --detach-after-handoff to re-execute the Cook in its own session".to_string()
-    })
-}
-
 /// Warn before a detached Cook becomes observable only through durable status.
 pub(crate) fn detached_cook_route_less_warning(
     resolution: &homeboy::core::notification_route::NotificationRouteResolution,
@@ -8857,11 +8836,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_cook_title, cook_attached_local_placement_disclosure, cook_continuation_status,
-        cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure, default_loop_title,
-        detached_cook_route_less_warning, durable_cook_identity_lines, existing_candidate_title,
-        preflight_continue_cook, project_preview_dirty_admission,
+        bounded_cook_title, cook_continuation_status, cook_provider_timeout_disclosure,
+        cook_report_with_continuation, cook_resolved_policy_disclosure,
+        cook_review_form_timeout_disclosure, default_loop_title, detached_cook_route_less_warning,
+        durable_cook_identity_lines, existing_candidate_title, preflight_continue_cook,
+        project_preview_dirty_admission,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
@@ -9058,31 +9037,6 @@ mod tests {
                 homeboy::agents::agent_task_service::MAX_REVIEW_FORM_TIMEOUT_MS / 1_000
             )
         );
-    }
-
-    /// The unsafe shape is the default one, so the submission preamble is the
-    /// only place an operator learns that this Cook dies with its client.
-    #[test]
-    fn attached_local_placement_is_disclosed_at_submission() {
-        assert_eq!(
-            cook_attached_local_placement_disclosure(Some("local"), false).as_deref(),
-            Some("cook: attached local placement — the provider runs in this client's process tree and will not survive it; pass --detach-after-handoff to re-execute the Cook in its own session")
-        );
-    }
-
-    /// A detached local Cook already survives its client, and a Lab-placed
-    /// provider never ran inside it. Warning there would be noise.
-    #[test]
-    fn a_detached_or_lab_placed_cook_is_not_warned_about_its_client() {
-        assert_eq!(
-            cook_attached_local_placement_disclosure(Some("local"), true),
-            None
-        );
-        assert_eq!(
-            cook_attached_local_placement_disclosure(Some("lab"), false),
-            None
-        );
-        assert_eq!(cook_attached_local_placement_disclosure(None, false), None);
     }
 
     #[test]
