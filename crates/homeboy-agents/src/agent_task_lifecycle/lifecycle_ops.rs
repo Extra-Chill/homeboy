@@ -7243,6 +7243,11 @@ pub fn record_promotion_in_store(
             .expect("promotions array")
             .push(promotion.clone());
         metadata.insert("latest_promotion".to_string(), promotion.clone());
+        // A promoted patch blocked by deterministic gates is still the durable
+        // candidate, but it cannot be reported as a successful completed run.
+        if promotion.get("status").and_then(Value::as_str) == Some("gate_failed") {
+            set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+        }
         if let Some(acceptance) = record.acceptance.as_mut() {
             let candidate = acceptance_candidate(&promotion);
             let base_sha = promotion
