@@ -186,6 +186,17 @@ impl RunnerContinuationProvider for RunnerContinuation {
         }
     }
 
+    fn runner_job_id_for_durable_run(
+        &self,
+        runner_id: &str,
+        durable_run_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(
+            super::lab::offload::accepted_runner_job_id(runner_id, durable_run_id)
+                .map(|job| job.id),
+        )
+    }
+
     fn is_runner_connected(&self, runner_id: &str) -> bool {
         // Preserve the original lifecycle semantics: only an affirmative
         // `connected == false` should be treated as disconnected. A status

@@ -32,6 +32,7 @@ enum TestRunnerReconciliation {
 
 struct ReconciliationProvider {
     result: Mutex<Option<TestRunnerReconciliation>>,
+    recovered_runner_job_id: Mutex<Option<String>>,
 }
 
 impl RunnerContinuationProvider for ReconciliationProvider {
@@ -59,6 +60,18 @@ impl RunnerContinuationProvider for ReconciliationProvider {
                 RunnerJobReconciliation::UnconfirmedAbsence
             }
         }
+    }
+
+    fn runner_job_id_for_durable_run(
+        &self,
+        _runner_id: &str,
+        _durable_run_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .recovered_runner_job_id
+            .lock()
+            .expect("recovered runner job")
+            .clone())
     }
 
     fn is_runner_connected(&self, _runner_id: &str) -> bool {
@@ -1336,6 +1349,7 @@ fn accepted_handoff_adopts_a_job_found_on_another_known_generation() {
             // This represents a 404 on the current generation followed by a
             // matching snapshot on another generation in the durable ledger.
             result: Mutex::new(Some(TestRunnerReconciliation::Snapshot(Box::new(snapshot)))),
+            recovered_runner_job_id: Mutex::new(None),
         }));
 
         let reconciled = reconcile_status(run_id).expect("adopted generation snapshot");
@@ -1354,6 +1368,7 @@ fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
         accepted_detached_handoff(run_id);
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
             result: Mutex::new(Some(TestRunnerReconciliation::ConfirmedAbsent(2))),
+            recovered_runner_job_id: Mutex::new(None),
         }));
 
         let terminal = reconcile_status(run_id).expect("terminal lost accepted job");
@@ -1381,6 +1396,7 @@ fn accepted_handoff_does_not_terminalize_unconfirmed_generation_absence() {
         accepted_detached_handoff(run_id);
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
             result: Mutex::new(Some(TestRunnerReconciliation::Unconfirmed)),
+            recovered_runner_job_id: Mutex::new(None),
         }));
 
         let retained = reconcile_status(run_id).expect("retain unconfirmed handoff");
@@ -1389,6 +1405,64 @@ fn accepted_handoff_does_not_terminalize_unconfirmed_generation_absence() {
         assert!(retained.metadata.get("lost_accepted_runner_job").is_none());
         assert_eq!(retained.metadata["provider_executions_consumed"], 0);
         assert!(retained.provider_handles.is_empty());
+    });
+}
+
+#[test]
+fn reserved_lab_admission_recovers_runner_job_after_client_loss() {
+    with_isolated_home(|_| {
+        let run_id = "recover-reserved-lab-admission";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("persist planned proxy before daemon admission");
+        record_lab_admission_reservation_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            "homeboy-lab",
+            "daemon-lease-1",
+            "reservation-job-1",
+            u64::MAX,
+        )
+        .expect("persist direct daemon reservation before client loss");
+        rewrite_record_for_test(run_id, |record| {
+            // The synchronous caller has exited and its last controller
+            // heartbeat is stale. Recovery must bind the admitted daemon job
+            // before the no-PID watchdog classifies this as ownerless.
+            record.updated_at = Some(
+                (chrono::Utc::now()
+                    - chrono::Duration::minutes(
+                        homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES,
+                    ))
+                .to_rfc3339(),
+            );
+        })
+        .expect("age interrupted caller heartbeat");
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(Some(TestRunnerReconciliation::Unconfirmed)),
+            recovered_runner_job_id: Mutex::new(Some("accepted-runner-job-1".to_string())),
+        }));
+
+        let recovered = reconcile_status(run_id).expect("recover admitted runner job");
+
+        assert_eq!(recovered.state, AgentTaskRunState::Running);
+        assert_eq!(recovered.runner_id(), Some("homeboy-lab"));
+        assert_eq!(recovered.runner_job_id(), Some("accepted-runner-job-1"));
+        assert_eq!(
+            recovered.metadata["handoff_acceptance"]["state"],
+            "accepted"
+        );
+        assert!(recovered.metadata.get("stale_running").is_none());
+        assert!(recovered.metadata.get("stale_running_reason").is_none());
     });
 }
 

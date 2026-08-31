@@ -5058,6 +5058,9 @@ pub fn reconcile_status_in_store(
     if reconcile_pending_runner_submission_intent_in_store(lifecycle_store, &resolved_run_id)? {
         record = lifecycle_store.read_record(&resolved_run_id)?;
     }
+    if recover_reserved_lab_runner_job_in_store(lifecycle_store, &resolved_run_id)? {
+        record = lifecycle_store.read_record(&resolved_run_id)?;
+    }
     if has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         let _ = expire_unaccepted_lab_handoff_in_store(lifecycle_store, &resolved_run_id)?;
         record = lifecycle_store.read_record(&resolved_run_id)?;

@@ -141,6 +141,17 @@ pub trait RunnerContinuationProvider: Send + Sync {
         }
     }
 
+    /// Recover an accepted runner job whose response did not reach the
+    /// controller. The durable run id is the daemon's idempotency key, so a
+    /// unique matching active job is sufficient to bind the handoff safely.
+    fn runner_job_id_for_durable_run(
+        &self,
+        _runner_id: &str,
+        _durable_run_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;
 

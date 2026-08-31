@@ -293,6 +293,67 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
     }
 }
 
+/// Bind a direct-daemon job whose accepted response was lost after the daemon
+/// admitted it. Direct Lab admission records the reservation before `/exec`,
+/// and the daemon indexes active jobs by the durable run id, so this lookup
+/// recovers only that exact admitted handoff without submitting replacement
+/// work.
+pub(crate) fn recover_reserved_lab_runner_job_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let run_id = sanitize_run_id(run_id);
+    let record = lifecycle_store.read_record(&run_id)?;
+    if record.runner_job_id().is_some() || !record.has_planned_runner_execution() {
+        return Ok(false);
+    }
+    let Some(runner_id) = record.runner_id().map(str::to_string) else {
+        return Ok(false);
+    };
+    if record
+        .metadata
+        .pointer("/lab_admission_reservation/state")
+        .and_then(Value::as_str)
+        != Some("reserved")
+        || record
+            .metadata
+            .pointer("/lab_admission_reservation/runner_id")
+            .and_then(Value::as_str)
+            != Some(runner_id.as_str())
+    {
+        return Ok(false);
+    }
+    let Some(runner_job_id) = super::runner_continuation::with_runner_continuation(|provider| {
+        provider.runner_job_id_for_durable_run(&runner_id, &run_id)
+    })
+    .ok()
+    .flatten() else {
+        return Ok(false);
+    };
+    let remote_workspace = record
+        .metadata
+        .get("remote_workspace")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let remote_command = record
+        .metadata
+        .get("remote_command")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+        .unwrap_or_default();
+    record_detached_lab_run_in_store(
+        lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: &run_id,
+            runner_id: &runner_id,
+            runner_job_id: &runner_job_id,
+            remote_workspace,
+            remote_command: &remote_command,
+        },
+    )?;
+    Ok(true)
+}
+
 /// Resolve a possibly accepted submission without replaying it. This is used
 /// only after the acceptance deadline or an operator cancellation request:
 /// those paths must never create new runner work.

@@ -36,6 +36,7 @@ mod tests;
 // Public API surface.
 pub use execute::execute_lab_offload;
 pub use hydration::hydrate_runner_workspace_dependencies;
+pub(crate) use inner::accepted_runner_job_id;
 pub use types::{
     LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
     LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
