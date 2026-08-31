@@ -1747,18 +1747,67 @@ pub fn read_batch_record_in_store(
     store.read_batch(batch_id)
 }
 
-pub fn provider_worktree_finalization_receipt(
-    batch_id: &str,
-    child_run_id: &str,
-) -> Result<Option<Value>> {
-    let batch = read_batch_record(batch_id)?;
-    Ok(batch.metadata["provider_worktree_finalizations"]
-        .get(child_run_id)
-        .filter(|receipt| receipt.is_object())
-        .cloned())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchProviderWorktreeFinalization {
+    Finalized,
+    Replayed,
+    Unsupported,
+    NotFound,
 }
 
-pub fn record_provider_worktree_finalization_receipt(
+pub fn finalize_provider_worktree_for_child(
+    batch_id: &str,
+    child_run_id: &str,
+    handle: &str,
+    lifecycle: &homeboy_core::worktree_provider::WorktreeProvisionLifecycle,
+    disposition: homeboy_core::worktree_provider::WorktreeTerminalDisposition,
+    config: &homeboy_core::defaults::HomeboyConfig,
+) -> Result<BatchProviderWorktreeFinalization> {
+    let batch = read_batch_record(batch_id)?;
+    let receipt_matches = batch.metadata["provider_worktree_finalizations"]
+        .get(child_run_id)
+        .filter(|receipt| receipt.is_object())
+        .is_some_and(|receipt| {
+            receipt["schema"] == "homeboy/agent-task-provider-worktree-finalization/v1"
+                && receipt["handle"] == handle
+                && receipt["owner_run_ref"] == lifecycle.owner_run_ref
+                && receipt["disposition"] == disposition.as_str()
+        });
+    match homeboy_core::worktree_provider::finalize_worktree_from_config(
+        handle,
+        lifecycle,
+        disposition,
+        config,
+    )? {
+        homeboy_core::worktree_provider::WorktreeFinalizationLookup::Finalized(finalized) => {
+            record_provider_worktree_finalization_receipt(
+                batch_id,
+                child_run_id,
+                json!({
+                    "schema": "homeboy/agent-task-provider-worktree-finalization/v1",
+                    "handle": handle,
+                    "owner_run_ref": lifecycle.owner_run_ref,
+                    "disposition": disposition.as_str(),
+                    "provider_id": finalized.provider_id,
+                }),
+            )?;
+            Ok(BatchProviderWorktreeFinalization::Finalized)
+        }
+        homeboy_core::worktree_provider::WorktreeFinalizationLookup::NotFound
+            if receipt_matches =>
+        {
+            Ok(BatchProviderWorktreeFinalization::Replayed)
+        }
+        homeboy_core::worktree_provider::WorktreeFinalizationLookup::NotFound => {
+            Ok(BatchProviderWorktreeFinalization::NotFound)
+        }
+        homeboy_core::worktree_provider::WorktreeFinalizationLookup::Unsupported => {
+            Ok(BatchProviderWorktreeFinalization::Unsupported)
+        }
+    }
+}
+
+fn record_provider_worktree_finalization_receipt(
     batch_id: &str,
     child_run_id: &str,
     receipt: Value,

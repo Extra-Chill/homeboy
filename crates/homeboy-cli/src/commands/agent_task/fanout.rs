@@ -551,6 +551,7 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     let exit_code = result.exit_code;
     let batch = batch::read_batch_record(&args.batch_id)?;
     let portfolio = run_portfolio(&batch)?;
+    finalize_resumed_provider_worktrees(&args.batch_id)?;
     Ok(batch_resume_result(
         result.value,
         exit_code,
@@ -1945,14 +1946,9 @@ fn finalize_fanout_provider_worktree(
     disposition: homeboy::core::worktree_provider::WorktreeTerminalDisposition,
     config: &homeboy::core::defaults::HomeboyConfig,
 ) -> Result<()> {
-    let receipt = provider_worktree_finalization_receipt(batch_id, child_run_id)?;
-    let receipt_matches = receipt.as_ref().is_some_and(|receipt| {
-        receipt["schema"] == "homeboy/agent-task-provider-worktree-finalization/v1"
-            && receipt["handle"] == handle
-            && receipt["owner_run_ref"] == owner
-            && receipt["disposition"] == disposition.as_str()
-    });
-    let finalization = homeboy::core::worktree_provider::finalize_worktree_from_config(
+    let finalization = batch::finalize_provider_worktree_for_child(
+        batch_id,
+        child_run_id,
         handle,
         &homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
             purpose: "agent_task_cook".to_string(),
@@ -1964,25 +1960,7 @@ fn finalize_fanout_provider_worktree(
         config,
     )?;
     match finalization {
-        homeboy::core::worktree_provider::WorktreeFinalizationLookup::Finalized(finalized) => {
-            record_provider_worktree_finalization_receipt(
-                batch_id,
-                child_run_id,
-                serde_json::json!({
-                    "schema": "homeboy/agent-task-provider-worktree-finalization/v1",
-                    "handle": handle,
-                    "owner_run_ref": owner,
-                    "disposition": disposition.as_str(),
-                    "provider_id": finalized.provider_id,
-                }),
-            )
-        }
-        homeboy::core::worktree_provider::WorktreeFinalizationLookup::NotFound
-            if receipt_matches =>
-        {
-            Ok(())
-        }
-        homeboy::core::worktree_provider::WorktreeFinalizationLookup::NotFound
+        batch::BatchProviderWorktreeFinalization::NotFound
             if configured_provider_workspace_creation()? =>
         {
             Err(
@@ -1991,24 +1969,11 @@ fn finalize_fanout_provider_worktree(
                 ),
             )
         }
-        homeboy::core::worktree_provider::WorktreeFinalizationLookup::NotFound
-        | homeboy::core::worktree_provider::WorktreeFinalizationLookup::Unsupported => Ok(()),
+        batch::BatchProviderWorktreeFinalization::Finalized
+        | batch::BatchProviderWorktreeFinalization::Replayed
+        | batch::BatchProviderWorktreeFinalization::Unsupported
+        | batch::BatchProviderWorktreeFinalization::NotFound => Ok(()),
     }
-}
-
-fn provider_worktree_finalization_receipt(
-    batch_id: &str,
-    child_run_id: &str,
-) -> Result<Option<Value>> {
-    batch::provider_worktree_finalization_receipt(batch_id, child_run_id)
-}
-
-fn record_provider_worktree_finalization_receipt(
-    batch_id: &str,
-    child_run_id: &str,
-    receipt: Value,
-) -> Result<()> {
-    batch::record_provider_worktree_finalization_receipt(batch_id, child_run_id, receipt)
 }
 
 /// HOOK — wave-completion notification. Intentionally not implemented here.
@@ -7049,7 +7014,7 @@ mod tests {
             let converged = std::fs::read_to_string(records).expect("converged finalizations");
             assert!(expected
                 .iter()
-                .all(|line| converged.matches(line).count() == 3));
+                .all(|line| converged.matches(line).count() == 4));
         });
     }
 
@@ -7089,7 +7054,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn batch_resume_accepts_missing_provider_workspace_only_with_durable_receipt() {
+    fn provider_finalization_missing_without_receipt_fails_and_continues_children() {
+        with_isolated_home(|_| {
+            let (_fixture, records, plan) = provider_finalization_fixture(false);
+            persist_provider_finalization_test_batch(&plan);
+            let missing = &plan.cooks[0];
+            let _missing = homeboy::core::test_support::EnvVarGuard::set(
+                "HOMEBOY_FAKE_PROVIDER_MISSING_HANDLE",
+                &missing.to_worktree,
+            );
+            let report = agent_task_service::AgentTaskCookBatchReport {
+                schema: "homeboy/agent-task-cook-batch/v1",
+                batch_id: plan.fanout_id.clone(),
+                status: "failed".to_string(),
+                total: 2,
+                queued: 0,
+                running: 0,
+                succeeded: 0,
+                failed: 2,
+                cancelled: 0,
+                timed_out: 0,
+                cooks: plan
+                    .cooks
+                    .iter()
+                    .map(|cook| agent_task_service::AgentTaskCookBatchCellReport {
+                        cook_id: cook.cook_id.clone(),
+                        initial_run_id: cook.run_id(),
+                        status: "failed".to_string(),
+                        exit_code: 1,
+                        result: None,
+                        error: None,
+                    })
+                    .collect(),
+            };
+
+            let error = finalize_provider_worktrees(&plan, &report)
+                .expect_err("first missing lookup has no finalization evidence");
+            assert!(
+                error.message.contains("not a Homeboy task worktree"),
+                "unexpected finalization error: {error:?}"
+            );
+            let records = std::fs::read_to_string(records).expect("later child finalization");
+            assert!(records.contains(&plan.cooks[1].to_worktree));
+            assert!(!records.contains(&missing.to_worktree));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_resume_accepts_missing_provider_workspace_with_durable_receipt() {
         with_isolated_home(|home| {
             install_fanout_agent_task_providers(home.path());
             let (_fixture, records, plan) = provider_finalization_fixture(false);
@@ -7108,36 +7121,6 @@ mod tests {
                 "HOMEBOY_FAKE_PROVIDER_MISSING_HANDLE",
                 durable_handle,
             );
-            record_provider_worktree_finalization_receipt(
-                &plan.fanout_id,
-                &cook.run_id(),
-                serde_json::json!({"schema": "untrusted/receipt"}),
-            )
-            .expect("replace receipt with malformed evidence");
-            let error = batch_resume(
-                AgentTaskFanoutBatchStatusArgs {
-                    batch_id: plan.fanout_id.clone(),
-                },
-                Placement::Auto,
-            )
-            .expect_err("first missing lookup has no finalization evidence");
-            assert!(
-                error.message.contains("not a Homeboy task worktree"),
-                "unexpected resume error: {error:?}"
-            );
-
-            record_provider_worktree_finalization_receipt(
-                &plan.fanout_id,
-                &cook.run_id(),
-                serde_json::json!({
-                    "schema": "homeboy/agent-task-provider-worktree-finalization/v1",
-                    "handle": durable_handle,
-                    "owner_run_ref": cook.run_id(),
-                    "disposition": "failed",
-                    "provider_id": "fixture",
-                }),
-            )
-            .expect("restore durable receipt");
             batch_resume(
                 AgentTaskFanoutBatchStatusArgs {
                     batch_id: plan.fanout_id.clone(),
