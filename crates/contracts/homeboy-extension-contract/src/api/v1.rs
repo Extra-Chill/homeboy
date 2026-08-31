@@ -40,7 +40,8 @@ pub struct ExtensionApiSchemaReference {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExtensionApiCapabilityDescriptor {
     pub id: String,
-    pub contract_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_schema: Option<ExtensionApiSchemaReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,7 +156,7 @@ mod tests {
             },
             capabilities: vec![ExtensionApiCapabilityDescriptor {
                 id: "test".to_string(),
-                contract_version: 1,
+                contract_version: Some("1".to_string()),
                 configuration_schema: None,
                 input_schema: None,
                 output_schema: Some(ExtensionApiSchemaReference {
@@ -189,7 +190,7 @@ mod tests {
                 },
                 "capabilities": [{
                     "id": "test",
-                    "contract_version": 1,
+                    "contract_version": "1",
                     "output_schema": { "schema": "homeboy/test-results/v1" }
                 }],
                 "readiness": {

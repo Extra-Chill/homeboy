@@ -55,9 +55,12 @@ pub fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
             .recipe_run_providers
             .iter()
             .filter_map(|provider| {
-                provider
-                    .declared_str("id")
-                    .map(|id| capability_descriptor(&format!("recipe-run-provider.{id}")))
+                provider.declared_str("id").map(|id| {
+                    versioned_capability_descriptor(
+                        &format!("recipe-run-provider.{id}"),
+                        provider.declared_str("version"),
+                    )
+                })
             }),
     );
     if extension.env_provider.is_some() {
@@ -185,9 +188,16 @@ pub fn negotiate_api(
 }
 
 fn capability_descriptor(id: &str) -> ExtensionApiCapabilityDescriptor {
+    versioned_capability_descriptor(id, None)
+}
+
+fn versioned_capability_descriptor(
+    id: &str,
+    contract_version: Option<String>,
+) -> ExtensionApiCapabilityDescriptor {
     ExtensionApiCapabilityDescriptor {
         id: id.to_string(),
-        contract_version: 1,
+        contract_version,
         configuration_schema: None,
         input_schema: None,
         output_schema: None,
@@ -221,6 +231,12 @@ mod tests {
                     "version": "1.2.3",
                     "test": { "extension_script": "test.sh" },
                     "executable": { "runtime": { "run_command": "fixture", "ready_check": "fixture --ready" } },
+                    "recipe_run_providers": [{
+                        "id": "fixture.recipe",
+                        "version": "2",
+                        "executable": "fixture-run",
+                        "command": ["fixture-run"]
+                    }],
                     "runtime": { "runtimes": { "php": { "version": ">=8.0" }, "node": { "version": ">=20" } } },
                     "toolchain_readiness": [
                         { "id": "zeta", "program": "zeta" },
@@ -240,7 +256,11 @@ mod tests {
                     .iter()
                     .map(|capability| capability.id.as_str())
                     .collect::<Vec<_>>(),
-                vec!["execute", "test"]
+                vec!["execute", "recipe-run-provider.fixture.recipe", "test"]
+            );
+            assert_eq!(
+                descriptor.capabilities[1].contract_version.as_deref(),
+                Some("2")
             );
             assert!(descriptor.readiness.runtime_probe);
             assert_eq!(descriptor.readiness.toolchain_probe_ids, ["alpha", "zeta"]);
