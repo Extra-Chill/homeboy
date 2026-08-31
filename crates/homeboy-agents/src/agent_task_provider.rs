@@ -70,6 +70,8 @@ pub use admission::{
     AGENT_TASK_PROVIDER_ADMISSION_PLAN_SCHEMA,
 };
 pub use catalog::*;
+#[cfg(test)]
+pub(crate) use command_runner::run_provider_readiness_invocation_with_test_timeout;
 pub use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, run_provider_readiness_invocation,
     validate_provider_immediate_failure_patterns, ProviderExecutorResolution,

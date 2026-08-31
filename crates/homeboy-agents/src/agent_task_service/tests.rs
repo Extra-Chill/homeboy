@@ -1177,10 +1177,13 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
                 "backend": "adversarial-readiness"
             }))
             .expect("provider fixture");
-        provider.readiness_invocation = Some(CommandInvocation {
-            argv: vec!["node".to_string(), script.display().to_string()],
-            ..CommandInvocation::default()
-        });
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
         assert_eq!(provider.backend, "adversarial-readiness");
         assert!(provider.readiness_invocation.is_some());
 
