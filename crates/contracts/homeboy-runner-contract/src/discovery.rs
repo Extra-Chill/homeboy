@@ -14,6 +14,10 @@ pub const RUNNER_READINESS_SCHEMA: &str = "homeboy/runner-readiness/v1";
 pub const RUNNER_INSPECTION_SCHEMA: &str = "homeboy/runner-inspection/v1";
 pub const RUNNER_API_HANDSHAKE_REQUEST_SCHEMA: &str = "homeboy/runner-api-handshake-request/v1";
 pub const RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA: &str = "homeboy/runner-api-handshake-response/v1";
+pub const RUNNER_API_LIST_REQUEST_SCHEMA: &str = "homeboy/runner-api-list-request/v1";
+pub const RUNNER_API_LIST_RESPONSE_SCHEMA: &str = "homeboy/runner-api-list-response/v1";
+pub const RUNNER_API_INSPECT_REQUEST_SCHEMA: &str = "homeboy/runner-api-inspect-request/v1";
+pub const RUNNER_API_INSPECT_RESPONSE_SCHEMA: &str = "homeboy/runner-api-inspect-response/v1";
 pub const RUNNER_API_V1: RunnerApiVersion = RunnerApiVersion { major: 1 };
 
 /// A transport-neutral Runner API major version.
@@ -71,6 +75,59 @@ pub struct RunnerApiHandshakeResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection: Option<RunnerInspection>,
     pub compatibility: RunnerApiCompatibility,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerApiOperationFailureCode {
+    InvalidRequestSchema,
+    UnsupportedApiVersion,
+    RunnerNotFound,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiOperationFailure {
+    pub code: RunnerApiOperationFailureCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiListRequest {
+    pub schema: String,
+    pub api_version: RunnerApiVersion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiListResponse {
+    pub schema: String,
+    pub api_version: RunnerApiVersion,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descriptors: Vec<RunnerDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RunnerApiOperationFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiInspectRequest {
+    pub schema: String,
+    pub api_version: RunnerApiVersion,
+    pub runner_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiInspectResponse {
+    pub schema: String,
+    pub api_version: RunnerApiVersion,
+    pub runner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection: Option<RunnerInspection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RunnerApiOperationFailure>,
 }
 
 /// The implementation kind backing a runner definition.
@@ -197,6 +254,63 @@ mod tests {
                         "code": "no_shared_api_version",
                         "message": "no shared version"
                     }]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn list_success_wire_shape_is_explicitly_versioned() {
+        let response = RunnerApiListResponse {
+            schema: RUNNER_API_LIST_RESPONSE_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            descriptors: vec![RunnerDescriptor {
+                schema: RUNNER_DESCRIPTOR_SCHEMA.to_string(),
+                runner_id: "local".to_string(),
+                kind: RunnerKind::Local,
+                server_id: None,
+                workspace_root: None,
+                concurrency_limit: None,
+            }],
+            failure: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("list response JSON"),
+            serde_json::json!({
+                "schema": RUNNER_API_LIST_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "descriptors": [{
+                    "schema": RUNNER_DESCRIPTOR_SCHEMA,
+                    "runner_id": "local",
+                    "kind": "local"
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn inspect_failure_wire_shape_omits_inspection() {
+        let response = RunnerApiInspectResponse {
+            schema: RUNNER_API_INSPECT_RESPONSE_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "missing".to_string(),
+            inspection: None,
+            failure: Some(RunnerApiOperationFailure {
+                code: RunnerApiOperationFailureCode::RunnerNotFound,
+                message: "Runner 'missing' was not found".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("inspect response JSON"),
+            serde_json::json!({
+                "schema": RUNNER_API_INSPECT_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "runner_id": "missing",
+                "failure": {
+                    "code": "runner_not_found",
+                    "message": "Runner 'missing' was not found"
                 }
             })
         );
