@@ -317,12 +317,14 @@ fn install_shared_assets_from_root(
     extension_dir: &Path,
     mode: SharedAssetMode,
 ) -> Result<()> {
-    if runtime_generation_boundary_active()? {
+    let root_manifest = source_root.join(ROOT_MANIFEST);
+    let shared_assets = shared_assets_for_root(source_root);
+    if root_manifest.is_file() && runtime_generation_boundary_active()? {
         // Once runtime generations are active, extension refreshes publish a
         // successor generation rather than writing through the stable link.
         homeboy_core::runtime_package::refresh_shared_assets(source_root)?;
     }
-    for shared_dir in shared_assets_for_root(source_root) {
+    for shared_dir in shared_assets {
         if matches!(
             shared_dir.as_str(),
             "agent-runtimes" | "agent-task-contracts" | "runtime-agent-ci"
@@ -461,10 +463,25 @@ pub(crate) fn install_linked_shared_assets(
         );
     }
 
+    if let Some(source_root) = runtime_package_source_root(source) {
+        return install_shared_assets_from_root(
+            source_root,
+            extension_dir,
+            SharedAssetMode::Symlink,
+        );
+    }
+
     if let Some(parent) = source.parent() {
         install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink)?;
     }
     Ok(())
+}
+
+fn runtime_package_source_root(source: &Path) -> Option<&Path> {
+    let runtime_packages = source.parent()?;
+    (runtime_packages.file_name()?.to_str()? == "agent-runtimes")
+        .then(|| runtime_packages.parent())
+        .flatten()
 }
 
 /// Scan a cloned repo for subdirectories that contain a matching manifest file.
