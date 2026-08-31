@@ -107,7 +107,7 @@ pub struct DependencyHydrationOutcome {
     pub provider_id: String,
     pub command: Vec<String>,
     pub reason: String,
-    pub duration_ms: u128,
+    pub duration_ms: u64,
     pub termination: DependencyHydrationTermination,
     pub status: DependencyHydrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -418,7 +418,7 @@ fn hydration_outcome(
         provider_id,
         command,
         reason: crate::redaction::redact_string(&reason),
-        duration_ms: duration.as_millis(),
+        duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         termination,
         status,
         exit_code,

@@ -748,6 +748,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_path",
+ "serde_path_to_error",
  "sha2",
  "shellexpand",
  "tempfile",

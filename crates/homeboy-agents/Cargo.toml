@@ -22,6 +22,7 @@ homeboy-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-runn
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_path_to_error = "0.1"
 serde_json_path = "0.7"
 chrono = "0.4"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }

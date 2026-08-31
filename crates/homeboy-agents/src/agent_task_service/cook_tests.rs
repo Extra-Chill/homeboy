@@ -19527,6 +19527,91 @@ fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
 }
 
 #[test]
+fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-13977";
+        let run_id = "cook-13977-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.finalization.head = Some("fix/8058".to_string());
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &options.identity.initial_plan,
+            "test",
+            &homeboy_core::Error::invalid_argument("test", "failed Cook attempt"),
+        )
+        .expect("fail attempt");
+        assert_eq!(
+            prepare_manual_finalization_identity(cook_id).expect("resolve failed attempt"),
+            run_id
+        );
+        seed_review_form_aggregate(run_id, &options.identity.initial_plan);
+
+        let promotion = promotion_with_existing_path(run_id, target.path());
+        let mut finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("manual finalization options");
+        finalization.manual_finalization = true;
+        finalization
+            .evidence
+            .verification
+            .dependency_hydration
+            .push(homeboy_core::deps::DependencyHydrationOutcome {
+                schema: "homeboy/dependency-hydration-outcome/v1".to_string(),
+                workspace: "manual_finalization_checkout".to_string(),
+                package_root: ".".to_string(),
+                provider_id: "fixture".to_string(),
+                command: vec!["fixture-install".to_string()],
+                reason: "deterministic fixture".to_string(),
+                duration_ms: 17,
+                termination: homeboy_core::deps::DependencyHydrationTermination::Completed,
+                status: homeboy_core::deps::DependencyHydrationStatus::Succeeded,
+                exit_code: Some(0),
+            });
+        let candidate = crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        };
+        let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut CaptureBackend {
+                candidate_state: Some(candidate.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("manual preflight");
+        assert_eq!(preflight.status, "validated");
+        persist_manual_finalization_intent(run_id, &preflight)
+            .expect("persist recoverable serialized intent");
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("read intent");
+        assert_eq!(
+            record.metadata["manual_finalization_intent"]["verification"]["dependency_hydration"]
+                [0]["duration_ms"],
+            17
+        );
+
+        let continuation = format!("homeboy agent-task finalize-pr --recover {run_id}");
+        assert_eq!(
+            continuation,
+            "homeboy agent-task finalize-pr --recover cook-13977-attempt-1"
+        );
+        let mut backend = CaptureBackend {
+            candidate_state: Some(candidate),
+            ..Default::default()
+        };
+        let published = recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut backend)
+            .expect("hydrate the exact intent and publish");
+        assert_eq!(published["status"], "review_ready");
+        assert!(backend.created);
+        assert!(!backend.committed && !backend.pushed);
+    });
+}
+
+#[test]
 fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers_once() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-13060";
