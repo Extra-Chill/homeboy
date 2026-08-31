@@ -2567,6 +2567,7 @@ fn prepare_component_worktree_workspace(
         task_url,
         run_id: run_id.map(str::to_string),
         cleanup_policy: cleanup_policy.clone(),
+        require_handoff_freshness: false,
     })?;
     let (root, cleanup, materialization) = match created {
         worktree_provider::WorktreeProviderCreateOutput::Native(created) => {

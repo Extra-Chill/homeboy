@@ -27,16 +27,17 @@ pub use types::{
     WorktreeBranchCleanupReport, WorktreeCleanupCandidate, WorktreeCleanupCounts,
     WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupSkipped, WorktreeCreateAction,
     WorktreeCreateEvidence, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeCreateReconciliation, WorktreeImportOptions, WorktreeImportOutput,
-    WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization, WorktreeInventoryCrossTab,
-    WorktreeInventoryLocalEvidence, WorktreeInventoryOptions, WorktreeInventoryOutput,
-    WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListOutput, WorktreeLivenessAuthority,
-    WorktreeOwnershipProbe, WorktreeQueueCreateFailure, WorktreeQueueCreateOptions,
-    WorktreeQueueCreateOutput, WorktreeQueueCreateRequest, WorktreeQueueCreateRow,
-    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeReconciliationAction,
-    WorktreeReconciliationAuthority, WorktreeReconciliationResult, WorktreeRemoveOptions,
-    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
-    TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+    WorktreeCreateReconciliation, WorktreeHandoffFreshness, WorktreeHandoffFreshnessProof,
+    WorktreeImportOptions, WorktreeImportOutput, WorktreeInventoryApplyRefusal,
+    WorktreeInventoryAuthorization, WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence,
+    WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeInventoryRecord,
+    WorktreeLeaseActivity, WorktreeListOutput, WorktreeLivenessAuthority, WorktreeOwnershipProbe,
+    WorktreeQueueCreateFailure, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
+    WorktreeQueueCreateRequest, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
+    WorktreeQueueLockHolder, WorktreeReconciliationAction, WorktreeReconciliationAuthority,
+    WorktreeReconciliationResult, WorktreeRemoveOptions, WorktreeRemoveOutput,
+    WorktreeSafetyReport, WorktreeStatusOutput, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
+    TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
 /// The managed handle a repo and branch pair resolves to. Creation slugifies the
@@ -793,6 +794,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                 task_url: request.task_url.clone(),
                 run_id: request.run_id.clone(),
                 cleanup_policy: None,
+                require_handoff_freshness: false,
             })
             .map(|created| created.record.worktree_path)
         };

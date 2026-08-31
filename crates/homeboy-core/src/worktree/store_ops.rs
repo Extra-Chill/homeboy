@@ -381,6 +381,15 @@ fn create_with_store_unlocked(
     {
         return Err(branch_ownership_error(&options.branch, registration));
     }
+    let handoff_base_ref = existing
+        .as_ref()
+        .map(|record| record.base_ref.as_str())
+        .or(options.from.as_deref())
+        .unwrap_or("HEAD");
+    let handoff_observation = options
+        .require_handoff_freshness
+        .then(|| prepare_handoff_freshness(&source_checkout, handoff_base_ref))
+        .transpose()?;
     if worktree_path.exists() {
         let record = existing.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -405,6 +414,9 @@ fn create_with_store_unlocked(
             })?;
         verify_linked_worktree_identity(&source_checkout, &worktree_path, &options.branch)?;
         return Ok(WorktreeCreateOutput {
+            handoff_freshness: handoff_observation
+                .map(|observation| complete_handoff_freshness(&record, observation))
+                .transpose()?,
             record,
             reconciliation: None,
         });
@@ -463,6 +475,9 @@ fn create_with_store_unlocked(
         pin_worktree_identity(&worktree_path)?;
         let current = create_evidence(&record, "registered".to_string())?;
         return Ok(WorktreeCreateOutput {
+            handoff_freshness: handoff_observation
+                .map(|observation| complete_handoff_freshness(&record, observation))
+                .transpose()?,
             record,
             reconciliation: Some(WorktreeCreateReconciliation {
                 action: WorktreeCreateAction::Restored,
@@ -512,8 +527,123 @@ fn create_with_store_unlocked(
     record.workspace_identity = Some(record.effective_workspace_identity()?);
     write_record_unlocked(store_dir, &record)?;
     Ok(WorktreeCreateOutput {
+        handoff_freshness: handoff_observation
+            .map(|observation| complete_handoff_freshness(&record, observation))
+            .transpose()?,
         record,
         reconciliation: None,
+    })
+}
+
+#[derive(Debug)]
+struct PendingHandoffFreshness {
+    resolved_base_ref: String,
+    resolved_base_sha: String,
+    remote_default_ref: String,
+    remote_default_sha: String,
+}
+
+fn prepare_handoff_freshness(source: &Path, base_ref: &str) -> Result<PendingHandoffFreshness> {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    git::run_git_with_env_timeout(
+        source,
+        &["fetch", "origin"],
+        "git fetch origin for worktree handoff",
+        &[],
+        TIMEOUT,
+    )?;
+    let advertised = git::run_git_with_env_timeout(
+        source,
+        &["ls-remote", "--symref", "origin", "HEAD"],
+        "git ls-remote origin HEAD for worktree handoff",
+        &[],
+        TIMEOUT,
+    )?;
+    let remote_head = advertised.lines().find_map(|line| {
+        line.strip_prefix("ref: refs/heads/")
+            .and_then(|value| value.strip_suffix("\tHEAD"))
+    });
+    let advertised_sha = advertised.lines().find_map(|line| {
+        let (sha, name) = line.split_once('\t')?;
+        (name == "HEAD"
+            && (40..=64).contains(&sha.len())
+            && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| sha.to_ascii_lowercase())
+    });
+    let (remote_head, advertised_sha) = remote_head.zip(advertised_sha).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "handoff_freshness",
+            "Remote origin did not advertise an unambiguous default branch and commit",
+            None,
+            Some(vec![
+                "Configure origin/HEAD or provide a reachable remote.".to_string()
+            ]),
+        )
+    })?;
+    let remote_default_ref = format!("refs/remotes/origin/{remote_head}");
+    let remote_default_sha = git::run_git_with_env_timeout(
+        source,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{remote_default_ref}^{{commit}}"),
+        ],
+        "resolve fetched remote default for worktree handoff",
+        &[],
+        TIMEOUT,
+    )?
+    .trim()
+    .to_ascii_lowercase();
+    if remote_default_sha != advertised_sha {
+        return Err(Error::validation_invalid_argument(
+            "handoff_freshness",
+            "Remote default changed during worktree handoff verification",
+            Some(remote_default_ref),
+            Some(vec!["Retry to verify one remote advertisement.".to_string()]),
+        ));
+    }
+    let resolved_base_sha = git::run_git_with_env_timeout(
+        source,
+        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
+        "resolve worktree handoff base",
+        &[],
+        TIMEOUT,
+    )?
+    .trim()
+    .to_ascii_lowercase();
+    Ok(PendingHandoffFreshness {
+        resolved_base_ref: base_ref.to_string(),
+        resolved_base_sha,
+        remote_default_ref,
+        remote_default_sha,
+    })
+}
+
+fn complete_handoff_freshness(
+    record: &TaskWorktreeRecord,
+    observation: PendingHandoffFreshness,
+) -> Result<WorktreeHandoffFreshness> {
+    let worktree_sha = git::run_git(
+        Path::new(&record.worktree_path),
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        "resolve worktree handoff HEAD",
+    )?
+    .trim()
+    .to_ascii_lowercase();
+    Ok(WorktreeHandoffFreshness {
+        status: "verified".to_string(),
+        proof: WorktreeHandoffFreshnessProof {
+            schema: "homeboy/worktree-handoff-freshness/v1".to_string(),
+            proof_id: uuid::Uuid::new_v4().to_string(),
+            handle: record.id.clone(),
+            worktree_sha,
+            resolved_base_ref: observation.resolved_base_ref,
+            resolved_base_sha: observation.resolved_base_sha,
+            remote_default_ref: observation.remote_default_ref,
+            remote_default_sha: observation.remote_default_sha.clone(),
+            remote_default_advertised_sha: observation.remote_default_sha,
+            verified_at: chrono::Utc::now().to_rfc3339(),
+        },
     })
 }
 

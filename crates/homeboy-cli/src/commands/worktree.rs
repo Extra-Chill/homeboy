@@ -65,6 +65,9 @@ enum WorktreeCommand {
         /// Cleanup policy for lifecycle cleanup
         #[arg(long, value_enum)]
         cleanup_policy: Option<CliCleanupPolicy>,
+        /// Require bounded remote freshness proof before allocating the worktree
+        #[arg(long)]
+        require_handoff_freshness: bool,
     },
     /// Import an existing exact Git worktree into the built-in lifecycle registry
     Import {
@@ -519,6 +522,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             task_url,
             run_id,
             cleanup_policy,
+            require_handoff_freshness,
         } => WorktreeOutput::Create(
             worktree_provider::create_worktree(WorktreeCreateOptions {
                 component_id,
@@ -527,6 +531,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                 task_url,
                 run_id,
                 cleanup_policy: cleanup_policy.map(Into::into),
+                require_handoff_freshness,
             })?
             .into(),
         ),

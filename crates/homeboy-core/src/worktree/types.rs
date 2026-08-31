@@ -353,6 +353,28 @@ pub struct WorktreeCreateOutput {
     pub record: TaskWorktreeRecord,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<WorktreeCreateReconciliation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_freshness: Option<WorktreeHandoffFreshness>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeHandoffFreshness {
+    pub status: String,
+    pub proof: WorktreeHandoffFreshnessProof,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeHandoffFreshnessProof {
+    pub schema: String,
+    pub proof_id: String,
+    pub handle: String,
+    pub worktree_sha: String,
+    pub resolved_base_ref: String,
+    pub resolved_base_sha: String,
+    pub remote_default_ref: String,
+    pub remote_default_sha: String,
+    pub remote_default_advertised_sha: String,
+    pub verified_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -625,6 +647,7 @@ pub struct WorktreeCreateOptions {
     pub task_url: Option<String>,
     pub run_id: Option<String>,
     pub cleanup_policy: Option<CleanupPolicy>,
+    pub require_handoff_freshness: bool,
 }
 
 #[derive(Debug, Clone)]
