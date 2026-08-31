@@ -26,7 +26,7 @@ function probe(responses) {
 	let index = 0;
 	return (command, args, options) => {
 		assert.equal(command, executable);
-		assert.ok(options.timeout <= 5_000);
+		assert.equal(options.timeout, 5_000);
 		assert.equal(options.maxBuffer, 16 * 1024);
 		const response = responses[index++];
 		assert.deepEqual(args.slice(-response.args.length), response.args);
