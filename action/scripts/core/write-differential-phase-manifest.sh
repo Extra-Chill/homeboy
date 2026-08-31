@@ -56,10 +56,10 @@ case "${execution_state}" in
       publication_error results "must be an object recording '${COMMAND}' as pass, fail, or timeout" "${results}"
     fi
     ;;
-  pr_closed)
+  pr_closed|pr_merged)
     results='{}'
     ;;
-  *) publication_error execution_state "must be 'completed' or 'pr_closed'" "${execution_state}" ;;
+  *) publication_error execution_state "must be 'completed', 'pr_closed', or 'pr_merged'" "${execution_state}" ;;
 esac
 
 mkdir -p "${output_dir}"

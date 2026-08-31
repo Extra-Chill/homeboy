@@ -6,73 +6,48 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../scope/flags.sh"
 
-# Check whether the current PR is still open.
-# Returns 0 (true) if the PR is open, 1 (false) if merged/closed/unknown.
-# Uses gh CLI when available, falls back to GitHub REST API via curl.
-# Requires: GITHUB_REPOSITORY and PR_NUMBER (or $1) in the environment.
-pr_is_active() {
+# Print the canonical lifecycle state for the current PR: open, closed, merged,
+# or unknown. GitHub represents merged pull requests as CLOSED plus mergedAt.
+pr_lifecycle_state() {
   local pr_number="${1:-${PR_NUMBER:-}}"
   local repo="${GITHUB_REPOSITORY:-}"
 
-  if [ -z "${pr_number}" ] || [ -z "${repo}" ]; then
-    # Can't check — assume active to avoid false cancellations
-    return 0
-  fi
+  [ -n "${pr_number}" ] && [ -n "${repo}" ] || { printf 'unknown'; return 0; }
 
-  local state=""
+  local observation=""
   if command -v gh >/dev/null 2>&1; then
-    state=$(gh pr view "${pr_number}" --repo "${repo}" --json state -q '.state' 2>/dev/null || true)
+    observation=$(gh pr view "${pr_number}" --repo "${repo}" --json state,mergedAt -q '[.state, .mergedAt] | @tsv' 2>/dev/null || true)
   fi
 
-  if [ -z "${state}" ]; then
+  if [ -z "${observation}" ]; then
     # Fallback to curl — use GH_TOKEN or GITHUB_TOKEN for auth
     local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
     if [ -n "${token}" ]; then
-      state=$(curl -sfL \
+      observation=$(curl -sfL \
         -H "Authorization: Bearer ${token}" \
         -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/${repo}/pulls/${pr_number}" 2>/dev/null \
-        | jq -r '.state // empty' 2>/dev/null || true)
+        | jq -r '[.state, .merged_at] | @tsv' 2>/dev/null || true)
     fi
   fi
 
+  local state merged_at
+  IFS=$'\t' read -r state merged_at <<< "${observation}"
   case "${state}" in
-    OPEN|open)
-      return 0
-      ;;
-    MERGED|CLOSED|merged|closed)
-      return 1
-      ;;
-    *)
-      # Unknown state — assume active to avoid false cancellations
-      return 0
-      ;;
+    OPEN|open) printf 'open' ;;
+    MERGED|merged) printf 'merged' ;;
+    CLOSED|closed) [ -n "${merged_at:-}" ] && printf 'merged' || printf 'closed' ;;
+    *) printf 'unknown' ;;
   esac
 }
 
-pr_state_raw() {
-  local pr_number="${1:-${PR_NUMBER:-}}"
-  local repo="${GITHUB_REPOSITORY:-}"
-
-  [ -n "${pr_number}" ] && [ -n "${repo}" ] || return 0
-
-  local state=""
-  if command -v gh >/dev/null 2>&1; then
-    state=$(gh pr view "${pr_number}" --repo "${repo}" --json state -q '.state' 2>/dev/null || true)
-  fi
-
-  if [ -z "${state}" ]; then
-    local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-    if [ -n "${token}" ]; then
-      state=$(curl -sfL \
-        -H "Authorization: Bearer ${token}" \
-        -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/${repo}/pulls/${pr_number}" 2>/dev/null \
-        | jq -r '.state // empty' 2>/dev/null || true)
-    fi
-  fi
-
-  printf '%s' "${state}"
+# Unknown deliberately remains fail-open to avoid cancelling a live PR on a
+# transient lookup failure.
+pr_is_active() {
+  case "$(pr_lifecycle_state "$@")" in
+    open|unknown) return 0 ;;
+    closed|merged) return 1 ;;
+  esac
 }
 
 write_multiline_output() {

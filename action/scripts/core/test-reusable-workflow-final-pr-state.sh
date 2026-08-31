@@ -17,28 +17,28 @@ SH
 chmod +x "${TMP_DIR}/bin/gh"
 
 assert_pr_state() {
-  local state="$1" expected="$2" label="$3"
+  local observation="$1" expected_active="$2" expected_reason="$3" expected_state="$4" label="$5"
   : > "${TMP_DIR}/output"
-  PR_STATE="${state}" PR_NUMBER=419 GITHUB_REPOSITORY=Extra-Chill/homeboy-action \
+  PR_STATE="${observation}" PR_NUMBER=419 GITHUB_REPOSITORY=Extra-Chill/homeboy-action \
     GITHUB_OUTPUT="${TMP_DIR}/output" PATH="${TMP_DIR}/bin:${PATH}" bash "${PROBE}" >/dev/null
-  if ! grep -Fxq "active=${expected}" "${TMP_DIR}/output"; then
-    printf 'FAIL: %s did not report active=%s\n' "${label}" "${expected}"
+  if ! grep -Fxq "active=${expected_active}" "${TMP_DIR}/output"; then
+    printf 'FAIL: %s did not report active=%s\n' "${label}" "${expected_active}"
     exit 1
   fi
-  expected_reason=active
-  [ "${expected}" = false ] && expected_reason=pr_closed
   if ! grep -Fxq "reason=${expected_reason}" "${TMP_DIR}/output"; then
     printf 'FAIL: %s did not report reason=%s\n' "${label}" "${expected_reason}"
     exit 1
   fi
+  grep -Fxq "state=${expected_state}" "${TMP_DIR}/output" \
+    || { printf 'FAIL: %s did not report state=%s\n' "${label}" "${expected_state}"; exit 1; }
   printf 'PASS: %s\n' "${label}"
 }
 
 # A closure can arrive while any candidate phase is completing; the finalizer
 # must suppress its synthetic verdict for both closed and merged PRs.
-assert_pr_state CLOSED false 'closed candidate suppresses finalization'
-assert_pr_state MERGED false 'merged candidate suppresses finalization'
-assert_pr_state OPEN true 'active candidate remains eligible for finalization'
+assert_pr_state CLOSED false pr_closed closed 'closed candidate suppresses finalization'
+assert_pr_state $'CLOSED\t2026-08-31T19:00:00Z' false pr_merged merged 'merged candidate suppresses finalization'
+assert_pr_state OPEN true active open 'active candidate remains eligible for finalization'
 
 python3 - "${ACTION}" <<'PY'
 import sys
@@ -49,6 +49,8 @@ probes = [step for step in action["runs"]["steps"] if step.get("id") in ("check-
 problems = []
 if action.get("outputs", {}).get("pr-state-reason", {}).get("value") != "${{ steps.check-pr-state.outputs.reason }}":
     problems.append("composite action does not expose its pre-execution PR lifecycle state")
+if action.get("outputs", {}).get("pr-state", {}).get("value") != "${{ steps.check-pr-state.outputs.state }}":
+    problems.append("composite action does not expose its typed pre-execution PR lifecycle state")
 if len(probes) != 2:
     problems.append("composite action must have initial and final PR-state probes")
 for probe in probes:
@@ -76,6 +78,8 @@ for job_name in ("reconcile", "reconcile-test-shards"):
         problems.append(f"{job_name} final PR state probe lacks its output id")
     if "always()" not in steps[probe].get("if", ""):
         problems.append(f"{job_name} final PR state probe does not run after cancelled dependencies")
+    if steps[probe].get("env", {}).get("GH_TOKEN") != "${{ github.token }}":
+        problems.append(f"{job_name} final PR state probe lacks an authenticated GitHub state lookup")
     for step in steps[probe + 1:]:
         condition = step.get("if", "")
         name = step.get("name", step.get("uses", "unnamed step"))
@@ -88,6 +92,8 @@ for job_name in ("reconcile", "reconcile-test-shards"):
         reconcile = next((step for step in steps if step.get("name") == "Reconcile provenance-bound phase evidence"), {})
         if reconcile.get("env", {}).get("PR_ACTIVE") != "${{ steps.final-pr-state.outputs.active }}":
             problems.append("differential reconciliation lacks the final PR lifecycle state")
+        if reconcile.get("env", {}).get("PR_STATE") != "${{ steps.final-pr-state.outputs.state }}":
+            problems.append("differential reconciliation lacks the typed final PR lifecycle state")
 
 if problems:
     print("\n".join(problems))
