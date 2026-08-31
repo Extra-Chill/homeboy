@@ -2594,13 +2594,15 @@ pub(super) fn run_provider_readiness_invocation_with_env_and_timeout(
     run_provider_readiness_invocation_with_timeout(
         provider,
         effective_config,
-        Duration::from_millis(invocation.timeout_ms),
+        credential_env,
+        timeout.min(Duration::from_millis(invocation.timeout_ms)),
     )
 }
 
 fn run_provider_readiness_invocation_with_timeout(
     provider: &AgentTaskExecutorProvider,
     effective_config: &Value,
+    credential_env: &[(String, String)],
     timeout: Duration,
 ) -> Result<ProviderReadinessInvocationResult, String> {
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
@@ -2881,7 +2883,7 @@ pub(crate) fn run_provider_readiness_invocation_with_test_timeout(
     effective_config: &Value,
     timeout: Duration,
 ) -> Result<ProviderReadinessInvocationResult, String> {
-    run_provider_readiness_invocation_with_timeout(provider, effective_config, timeout)
+    run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout)
 }
 
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
@@ -3403,10 +3405,13 @@ mod readiness_process_tests {
             "invocation": { "argv": ["ignored"] },
         }))
         .expect("provider parses");
-        provider.readiness_invocation = Some(CommandInvocation {
-            argv,
-            ..CommandInvocation::default()
-        });
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv,
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
         provider
     }
 

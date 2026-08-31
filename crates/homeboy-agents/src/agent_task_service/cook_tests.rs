@@ -4847,10 +4847,13 @@ fn compiled_cook_preserves_rotation_and_executes_the_first_ready_production_prov
             argv: vec!["node".to_string(), provider_command.display().to_string()],
             ..Default::default()
         };
-        provider.readiness_invocation = Some(homeboy_core::command_invocation::CommandInvocation {
-            argv: vec!["node".to_string(), readiness.display().to_string()],
-            ..Default::default()
-        });
+        provider.readiness_invocation = Some(
+            homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["node".to_string(), readiness.display().to_string()],
+                ..Default::default()
+            }
+            .into(),
+        );
         let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
             providers: vec![provider],
             ..Default::default()

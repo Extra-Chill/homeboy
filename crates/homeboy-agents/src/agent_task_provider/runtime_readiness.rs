@@ -767,6 +767,7 @@ mod tests {
             .readiness_invocation
             .as_mut()
             .expect("readiness invocation")
+            .command
             .argv
             .push(recovered.display().to_string());
         let mut cache = ProviderRuntimeReadinessCache::default();
@@ -974,6 +975,7 @@ mod tests {
             .readiness_invocation
             .as_mut()
             .expect("readiness invocation")
+            .command
             .argv
             .push(root.path().display().to_string());
         let cache = ProviderRuntimeReadinessCache::default();
@@ -1010,6 +1012,7 @@ mod tests {
             .readiness_invocation
             .as_mut()
             .expect("readiness invocation")
+            .command
             .argv
             .push(probes.display().to_string());
         let cache = ProviderRuntimeReadinessCache::default();

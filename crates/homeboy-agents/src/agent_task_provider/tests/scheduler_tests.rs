@@ -270,10 +270,13 @@ fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
         "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let p={:?};fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1));let ready=req.effective_config.model==='ready-model';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'',reason:ready?'':'blocked',cache_key:req.effective_config.model,identity:{{model:req.effective_config.model}}}}));",
         probe_count.display().to_string()
     ));
-    provider.readiness_invocation = Some(CommandInvocation {
-        argv: vec!["node".to_string(), readiness],
-        ..CommandInvocation::default()
-    });
+    provider.readiness_invocation = Some(
+        CommandInvocation {
+            argv: vec!["node".to_string(), readiness],
+            ..CommandInvocation::default()
+        }
+        .into(),
+    );
     let catalog = AgentTaskProviderCatalog {
         providers: vec![provider.clone()],
         ..Default::default()
@@ -1465,10 +1468,13 @@ fn launched_execution_uses_the_exact_credentials_bound_by_readiness() {
         }
     }))
     .expect("provider defaults");
-    provider.readiness_invocation = Some(homeboy_core::command_invocation::CommandInvocation {
-        argv: vec!["node".to_string(), readiness],
-        ..Default::default()
-    });
+    provider.readiness_invocation = Some(
+        homeboy_core::command_invocation::CommandInvocation {
+            argv: vec!["node".to_string(), readiness],
+            ..Default::default()
+        }
+        .into(),
+    );
 
     let aggregate = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
@@ -1502,10 +1508,13 @@ fn concurrent_launches_keep_each_readiness_bound_credential() {
         ))
     );
     let (_, mut provider) = request("concurrent-template", command);
-    provider.readiness_invocation = Some(homeboy_core::command_invocation::CommandInvocation {
-        argv: vec!["node".to_string(), readiness],
-        ..Default::default()
-    });
+    provider.readiness_invocation = Some(
+        homeboy_core::command_invocation::CommandInvocation {
+            argv: vec!["node".to_string(), readiness],
+            ..Default::default()
+        }
+        .into(),
+    );
     let mut tasks = Vec::new();
     let mut credentials = Vec::new();
     for index in 0..4 {

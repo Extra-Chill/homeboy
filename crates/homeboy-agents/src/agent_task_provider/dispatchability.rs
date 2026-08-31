@@ -1647,6 +1647,7 @@ mod tests {
             .readiness_invocation
             .as_mut()
             .expect("readiness invocation")
+            .command
             .argv
             .push(block_fallback.display().to_string());
         let catalog = catalog(provider);

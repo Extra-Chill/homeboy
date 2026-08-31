@@ -1249,14 +1249,17 @@ mod tests {
             "backend": "test"
         }))
         .expect("provider");
-        provider.readiness_invocation = Some(homeboy_core::command_invocation::CommandInvocation {
-            argv: vec![
-                "node".to_string(),
-                script.display().to_string(),
-                account.display().to_string(),
-            ],
-            ..Default::default()
-        });
+        provider.readiness_invocation = Some(
+            homeboy_core::command_invocation::CommandInvocation {
+                argv: vec![
+                    "node".to_string(),
+                    script.display().to_string(),
+                    account.display().to_string(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+        );
         let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
         let request = readiness_request("model");
         let readiness = executor.provider_route_readiness(&request);

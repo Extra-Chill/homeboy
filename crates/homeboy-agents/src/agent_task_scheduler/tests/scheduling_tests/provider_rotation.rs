@@ -1349,10 +1349,13 @@ mod provider_rotation_tests {
                 "backend": "test",
             }))
             .expect("provider");
-        provider.readiness_invocation = Some(homeboy_core::command_invocation::CommandInvocation {
-            argv: vec!["node".to_string(), script.display().to_string()],
-            ..Default::default()
-        });
+        provider.readiness_invocation = Some(
+            homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..Default::default()
+            }
+            .into(),
+        );
         let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
             providers: vec![provider],
             diagnostics: Vec::new(),
