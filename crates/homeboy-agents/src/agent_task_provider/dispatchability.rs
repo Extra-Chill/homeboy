@@ -18,6 +18,33 @@ pub struct AgentTaskProviderDispatchability {
     pub ready: bool,
     pub reason: String,
     pub checks: AgentTaskProviderDispatchabilityChecks,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configuration_diagnosis: Option<AgentTaskProviderConfigurationDiagnosis>,
+}
+
+/// A static provider contract defect that prevents dispatch. This keeps the
+/// provider owner attached to every consumer of the shared verdict.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskProviderConfigurationDiagnosis {
+    pub kind: &'static str,
+    pub message: String,
+    pub remediation: String,
+    pub owner: AgentTaskProviderOwner,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskProviderOwner {
+    pub provider_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_package_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +178,7 @@ pub fn evaluate_provider_dispatchability_with_config(
                     reason: None,
                 },
             },
+            configuration_diagnosis: None,
         }
     };
     let provider = match resolve_provider_for_backend(catalog.providers(), backend, selector) {
@@ -188,10 +216,15 @@ pub fn evaluate_provider_dispatchability_with_config(
         .collect::<Vec<_>>();
     let model_ready = model.is_none_or(|model| supported.is_empty() || supported.contains(&model));
     let credentials = provider_credential_readiness(provider);
+    let configuration_diagnosis = (provider_requires_live_auth_validation(provider)
+        && provider.readiness_invocation.is_none())
+    .then(|| missing_readiness_invocation_diagnosis(provider));
     let configuration = match validate_provider_immediate_failure_patterns(provider) {
         Ok(()) => AgentTaskProviderDispatchabilityCheck {
-            ready: true,
-            reason: None,
+            ready: configuration_diagnosis.is_none(),
+            reason: configuration_diagnosis
+                .as_ref()
+                .map(|diagnosis| diagnosis.message.clone()),
         },
         Err(reason) => AgentTaskProviderDispatchabilityCheck {
             ready: false,
@@ -308,7 +341,11 @@ pub fn evaluate_provider_dispatchability_with_config(
         (
             "configuration_invalid",
             false,
-            "provider immediate-failure configuration is invalid",
+            if configuration_diagnosis.is_some() {
+                "provider-owned authentication has no declared readiness invocation"
+            } else {
+                "provider immediate-failure configuration is invalid"
+            },
         )
     } else if !credentials.dispatchable {
         (
@@ -374,16 +411,38 @@ pub fn evaluate_provider_dispatchability_with_config(
                     && probe_runtime
                     && provider.readiness_invocation.is_none()
                 {
-                    vec![format!(
-                        "Update provider '{}' to declare a bounded readiness_invocation that validates its provider-owned authentication, or select a verified backend.",
-                        provider.id
-                    )]
+                    configuration_diagnosis
+                        .as_ref()
+                        .map(|diagnosis| vec![diagnosis.remediation.clone()])
+                        .unwrap_or_default()
                 } else {
                     runtime_remediation
                 },
             },
             configuration,
             runtime,
+        },
+        configuration_diagnosis,
+    }
+}
+
+fn missing_readiness_invocation_diagnosis(
+    provider: &super::AgentTaskExecutorProvider,
+) -> AgentTaskProviderConfigurationDiagnosis {
+    AgentTaskProviderConfigurationDiagnosis {
+        kind: "missing_readiness_invocation",
+        message: "provider-owned authentication requires a bounded readiness_invocation".to_string(),
+        remediation: format!(
+            "Update provider '{}' to declare a bounded readiness_invocation that validates its provider-owned authentication.",
+            provider.id
+        ),
+        owner: AgentTaskProviderOwner {
+            provider_id: provider.id.clone(),
+            runtime_id: provider.runtime_id.clone(),
+            extension_id: provider.extension_id.clone(),
+            runtime_package_source: provider.runtime_package_source.clone(),
+            runtime_path: provider.runtime_path.clone(),
+            extension_path: provider.extension_path.clone(),
         },
     }
 }
@@ -463,8 +522,10 @@ fn preflight_provider_dispatchability_with_config_and_probe(
     }
     let detail = verdict
         .checks
-        .credentials
+        .configuration
         .reason
+        .as_deref()
+        .or(verdict.checks.credentials.reason.as_deref())
         .as_deref()
         .or(verdict.checks.runtime.reason.as_deref())
         .filter(|reason| *reason != "not requested")
@@ -480,8 +541,9 @@ fn preflight_provider_dispatchability_with_config_and_probe(
     Err(homeboy_core::Error::validation_invalid_argument(
         "provider_dispatchability",
         format!(
-            "agent-task backend `{backend}` is not dispatchable: {}{detail}.{remediation}",
-            verdict.reason.trim_end_matches('.'),
+            "agent-task backend `{backend}` is not dispatchable ({state}): {reason}{detail}.{remediation}",
+            state = verdict.state,
+            reason = verdict.reason.trim_end_matches('.'),
         ),
         Some(backend.to_string()),
         Some(vec![serde_json::to_string(&verdict).unwrap_or_default()]),
@@ -585,7 +647,7 @@ mod tests {
 
         let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
 
-        assert_eq!(verdict.state, "credentials_unverified");
+        assert_eq!(verdict.state, "configuration_invalid");
         assert!(
             !verdict.ready,
             "unverified provider-owned auth must fail closed"
@@ -604,6 +666,12 @@ mod tests {
              verification — reporting it as verified is exactly the #13628 defect"
         );
         assert!(verdict.checks.credentials.remediation[0].contains("readiness_invocation"));
+        let diagnosis = verdict
+            .configuration_diagnosis
+            .expect("missing invocation has a typed diagnosis");
+        assert_eq!(diagnosis.kind, "missing_readiness_invocation");
+        assert_eq!(diagnosis.owner.provider_id, "revocable.agent-task-executor");
+        assert!(!diagnosis.remediation.contains("select a verified backend"));
     }
 
     #[test]
@@ -616,7 +684,7 @@ mod tests {
 
         let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, false);
 
-        assert_eq!(verdict.state, "credentials_present");
+        assert_eq!(verdict.state, "configuration_invalid");
         assert!(!verdict.ready);
         assert_eq!(
             verdict.checks.credentials.status,
