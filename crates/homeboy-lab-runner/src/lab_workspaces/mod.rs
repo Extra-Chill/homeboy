@@ -19,6 +19,7 @@ use super::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 use crate::rig_materialization::LabStackComponentMaterialization;
+use crate::workspace::git_output;
 
 pub(super) const LAB_EXTRA_WORKSPACES_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES";
 pub(super) const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON";
@@ -63,6 +64,10 @@ impl LabWorkspaceMappingEntry {
 
     pub(super) fn dependency_freshness(&self) -> Option<&serde_json::Value> {
         self.dependency_freshness.as_ref()
+    }
+
+    pub(super) fn sync_mode(&self) -> &str {
+        &self.sync_mode
     }
 }
 
@@ -176,7 +181,7 @@ pub(super) fn sync_extra_lab_workspaces(
             runner_id,
             RunnerWorkspaceSyncOptions {
                 path: local_path.display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Snapshot,
+                mode: extra_workspace_sync_mode(&local_path),
                 controller_routed_git: false,
                 changed_since_base: None,
                 git_fetch_refs: Vec::new(),
@@ -193,6 +198,17 @@ pub(super) fn sync_extra_lab_workspaces(
     }
 
     Ok(synced_entries)
+}
+
+fn extra_workspace_sync_mode(path: &Path) -> RunnerWorkspaceSyncMode {
+    if matches!(
+        git_output(path, &["rev-parse", "--is-inside-work-tree"]).as_deref(),
+        Ok("true")
+    ) {
+        RunnerWorkspaceSyncMode::SnapshotGit
+    } else {
+        RunnerWorkspaceSyncMode::Snapshot
+    }
 }
 
 pub(super) fn workspace_mapping_entry(
