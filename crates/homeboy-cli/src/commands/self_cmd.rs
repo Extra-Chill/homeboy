@@ -67,6 +67,9 @@ pub struct UpgradeAdmissionArgs {
     /// Exact version expected from the checksum-verified staged release.
     #[arg(long)]
     pub target_version: Option<String>,
+    /// Release tag or artifact selected by the installer for this candidate.
+    #[arg(long)]
+    pub selected_tag_or_artifact: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -171,9 +174,12 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                             None,
                         ));
                     }
-                    homeboy_upgrade::upgrade::ensure_verified_target_upgrade_admission(
-                        target_version,
-                    )?
+                    let target = homeboy_upgrade::upgrade::VerifiedTargetUpgrade::classify(
+                        args.legacy_identity.clone(),
+                        build_identity::current().display,
+                        args.selected_tag_or_artifact.clone(),
+                    );
+                    homeboy_upgrade::upgrade::ensure_verified_target_upgrade_admission(&target)?
                 }
                 None => homeboy_upgrade::upgrade::ensure_controller_upgrade_admission()?,
             };

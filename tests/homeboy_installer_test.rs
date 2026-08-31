@@ -29,7 +29,7 @@ fn archive(root: &Path, destination: &Path, fixture: ArchiveFixture) {
     let candidate = target.join("homeboy");
     write_executable(
         &candidate,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy %s\\n' \"${HOMEBOY_TEST_TARGET_VERSION:-0.351.3+fixture}\"; exit 0; fi\nif [ \"$1\" = self ] && [ \"$2\" = upgrade-admission ]; then\n  printf '%s|%s|%s\\n' \"$0\" \"$4\" \"$6\" > \"$HOMEBOY_TEST_EVIDENCE\"\n  printf 'admission\\n' >> \"$HOMEBOY_TEST_EVENTS\"\n  exit ${HOMEBOY_TEST_CANDIDATE_EXIT:-0}\nfi\nexit 64\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy %s\\n' \"${HOMEBOY_TEST_TARGET_VERSION:-0.351.3+fixture}\"; exit 0; fi\nif [ \"$1\" = self ] && [ \"$2\" = upgrade-admission ]; then\n  printf '%s|%s|%s|%s\\n' \"$0\" \"$4\" \"$6\" \"$8\" > \"$HOMEBOY_TEST_EVIDENCE\"\n  printf 'admission\\n' >> \"$HOMEBOY_TEST_EVENTS\"\n  exit ${HOMEBOY_TEST_CANDIDATE_EXIT:-0}\nfi\nexit 64\n",
     );
 
     let mut entries = vec![TARGET.to_string()];
@@ -136,6 +136,7 @@ fn run_installer(
         .env("HOMEBOY_TEST_EVIDENCE", &evidence)
         .env("HOMEBOY_TEST_EVENTS", &events)
         .env("HOMEBOY_TEST_BIN_DIR", &install_dir)
+        .env("HOMEBOY_UPGRADE_RELEASE_TAG", "v0.351.3")
         .env("HOMEBOY_UPGRADE_RELEASE_VERSION", "0.351.3")
         // Archive inspection must be independent of caller tar defaults.
         .env("TAR_OPTIONS", "--invalid-homeboy-installer-option")
@@ -157,6 +158,7 @@ fn installer_admits_a_staged_candidate_and_preserves_bytes_on_admission_failure(
     assert!(installed.contains("upgrade-admission"));
     assert!(evidence.contains("legacy-controller-identity"));
     assert!(evidence.contains("0.351.3"));
+    assert!(evidence.contains("v0.351.3"));
     assert!(evidence
         .split('|')
         .next()

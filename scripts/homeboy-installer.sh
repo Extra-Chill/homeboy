@@ -109,6 +109,7 @@ LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --versio
 set -- self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
 if [ -n "$TARGET_VERSION" ]; then
   set -- "$@" --target-version "$TARGET_VERSION"
+  set -- "$@" --selected-tag-or-artifact "$TAG"
 fi
 "$EXTRACTED_BIN" "$@"
 
