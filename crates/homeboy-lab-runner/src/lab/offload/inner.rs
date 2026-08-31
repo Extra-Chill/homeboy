@@ -1990,6 +1990,7 @@ pub(crate) fn run_lab_offload_inner(
         workspace_mapping,
         path_materialization_plan,
         source_snapshot,
+        workspace_snapshots,
         mut remapped_args,
         agent_task_run_id,
         runner_required_extensions,
@@ -2162,6 +2163,7 @@ pub(crate) fn run_lab_offload_inner(
         &mut lab_metadata,
         LabWorkspaceMetadataInputs {
             source_snapshot: &source_snapshot,
+            workspace_snapshots: &workspace_snapshots,
             legacy_path_materialization_plan: &path_materialization_plan,
             primary_synced_workspace: &synced,
         },

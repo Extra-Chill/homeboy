@@ -307,6 +307,7 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         &mut metadata,
         LabWorkspaceMetadataInputs {
             source_snapshot: &missing_source_path,
+            workspace_snapshots: &[missing_source_path.clone()],
             legacy_path_materialization_plan: &path_materialization_plan,
             primary_synced_workspace: &synced_workspace,
         },
@@ -317,6 +318,7 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         &mut metadata,
         LabWorkspaceMetadataInputs {
             source_snapshot: &snapshot,
+            workspace_snapshots: &[snapshot.clone()],
             legacy_path_materialization_plan: &path_materialization_plan,
             primary_synced_workspace: &synced_workspace,
         },

@@ -3193,6 +3193,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             &mut lab_metadata,
             crate::lab::offload::LabWorkspaceMetadataInputs {
                 source_snapshot: &stage.source_snapshot,
+                workspace_snapshots: &stage.workspace_snapshots,
                 legacy_path_materialization_plan: &stage.path_materialization_plan,
                 primary_synced_workspace: &stage.synced,
             },

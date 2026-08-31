@@ -142,6 +142,78 @@ impl HarvestExecutionContext {
             )
         })
     }
+
+    fn transport_for_workspace(
+        &self,
+        workspace: &Path,
+    ) -> Result<
+        (
+            homeboy_core::source_snapshot::SourceSnapshot,
+            serde_json::Value,
+        ),
+        HarvestError,
+    > {
+        let source_snapshot = self.source_snapshot()?;
+        let mut lab_offload = self.lab_offload()?;
+        let observed_path = workspace.display().to_string();
+        let entries = lab_offload
+            .pointer("/workspace_provenance/entries")
+            .and_then(serde_json::Value::as_array);
+        let Some(entries) = entries else {
+            return Ok((source_snapshot, lab_offload));
+        };
+        let matches = entries
+            .iter()
+            .filter(|entry| {
+                entry.get("remote_path").and_then(serde_json::Value::as_str)
+                    == Some(observed_path.as_str())
+            })
+            .collect::<Vec<_>>();
+        let [entry] = matches.as_slice() else {
+            let expected_paths = entries
+                .iter()
+                .filter_map(|entry| entry.get("remote_path").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(snapshot_harvest_error(
+                workspace,
+                format!(
+                    "workspace provenance mapping is ambiguous or missing (expected one of [{expected_paths}], observed {observed_path})"
+                ),
+            ));
+        };
+        let snapshot = entry
+            .get("source_snapshot")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| {
+                snapshot_harvest_error(
+                    workspace,
+                    "workspace provenance entry has invalid source snapshot".to_string(),
+                )
+            })?;
+        let verification = entry
+            .get("workspace_verification")
+            .cloned()
+            .ok_or_else(|| {
+                snapshot_harvest_error(
+                    workspace,
+                    "workspace provenance entry is missing verification".to_string(),
+                )
+            })?;
+        let materialization_mode = entry.get("materialization_mode").cloned().ok_or_else(|| {
+            snapshot_harvest_error(
+                workspace,
+                "workspace provenance entry is missing materialization mode".to_string(),
+            )
+        })?;
+        lab_offload["remote_workspace"] = serde_json::json!(observed_path);
+        lab_offload["sync_mode"] = materialization_mode;
+        lab_offload["source_snapshot"] =
+            serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+        lab_offload["workspace_verification"] = verification;
+        Ok((snapshot, lab_offload))
+    }
 }
 
 fn incomplete_transport_error(message: String) -> homeboy_core::Error {
@@ -264,8 +336,7 @@ pub(super) fn prepare_committed_harvest(
             "parent_snapshot": capability.parent_snapshot(),
         }))
     } else if snapshot_signaled {
-        let source_snapshot = context.source_snapshot()?;
-        let lab_offload = context.lab_offload()?;
+        let (source_snapshot, lab_offload) = context.transport_for_workspace(root)?;
         let provenance =
             homeboy_core::lab_workspace_provenance::with_lab_workspace_provenance(|p| {
                 p.verify_lab_workspace(
@@ -329,8 +400,7 @@ pub(super) fn prepare_committed_harvest(
         None
     };
     if !is_repository {
-        let source_snapshot = context.source_snapshot()?;
-        let lab_offload = context.lab_offload()?;
+        let (source_snapshot, lab_offload) = context.transport_for_workspace(root)?;
         homeboy_core::lab_workspace_provenance::with_lab_workspace_provenance(|p| {
             p.materialize_verified_lab_snapshot_git_baseline(
                 &root.display().to_string(),
