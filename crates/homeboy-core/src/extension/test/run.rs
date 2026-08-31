@@ -2615,15 +2615,21 @@ pub fn run_self_check_test_workflow_with_progress(
     source_path: &Path,
     component_label: String,
     json_summary: bool,
-    _test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
+    test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
     run_dir: Option<&RunDir>,
     observation: Option<&homeboy_core::observation::ActiveObservation>,
 ) -> homeboy_core::Result<TestRunWorkflowResult> {
+    let (suite_timeout_env, suite_timeout_value) = test_execution_plan.suite_timeout_env();
+    let execution_policy = extension::self_check::SelfCheckExecutionPolicy::bounded(
+        test_execution_plan.suite_timeout(),
+        vec![(suite_timeout_env.to_string(), suite_timeout_value)],
+    );
     let output = extension::self_check::run_self_checks_with_passthrough_and_progress(
         component,
         ExtensionCapability::Test,
         source_path,
         !json_summary,
+        Some(&execution_policy),
         run_dir,
         observation,
     )?;
@@ -5900,9 +5906,15 @@ printf 'not json\n'
 
     #[test]
     fn test_run_self_check_test_workflow() {
+        let _env_lock = homeboy_core::test_support::env_lock();
         let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(dir.path().join("test.sh"), "printf test-ok\n")
-            .expect("script should be written");
+        let prior_timeout = std::env::var_os("HOMEBOY_TEST_TIMEOUT_SECONDS");
+        std::env::set_var("HOMEBOY_TEST_TIMEOUT_SECONDS", "99");
+        std::fs::write(
+            dir.path().join("test.sh"),
+            "printf '%s' \"$HOMEBOY_TEST_TIMEOUT_SECONDS\" > timeout.txt\nprintf test-ok\n",
+        )
+        .expect("script should be written");
 
         let mut component = Component::new(
             "fixture".to_string(),
@@ -5936,6 +5948,106 @@ printf 'not json\n'
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.component, "fixture");
         assert!(result.summary.is_some());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("timeout.txt")).expect("recorded timeout"),
+            "42"
+        );
+        match prior_timeout {
+            Some(value) => std::env::set_var("HOMEBOY_TEST_TIMEOUT_SECONDS", value),
+            None => std::env::remove_var("HOMEBOY_TEST_TIMEOUT_SECONDS"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_check_timeout_reaps_descendants_and_reports_the_supplied_plan() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("test.sh"),
+            "#!/bin/sh\nprintf '%s' \"$HOMEBOY_TEST_TIMEOUT_SECONDS\" > timeout.txt\n(sh -c 'trap \"\" TERM; while :; do sleep 1; done') &\necho $! > descendant.pid\ntrap '' TERM\nwhile :; do sleep 1; done\n",
+        )
+        .expect("script should be written");
+        let mut component = Component::new(
+            "fixture".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "".to_string(),
+            None,
+        );
+        component.scripts = Some(ComponentScriptsConfig {
+            test: vec!["sh test.sh".to_string()],
+            ..Default::default()
+        });
+        let plan =
+            homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(1),
+            )
+            .expect("positive timeout");
+
+        let result = run_self_check_test_workflow(
+            &component,
+            dir.path(),
+            "fixture".to_string(),
+            true,
+            plan.clone(),
+        )
+        .expect("timed-out self-check becomes a workflow result");
+        let descendant = std::fs::read_to_string(dir.path().join("descendant.pid"))
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        let (output, exit_code) = super::super::report::from_main_workflow(result, &plan);
+
+        assert_eq!(exit_code, 124);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("timeout.txt")).expect("recorded timeout"),
+            "1"
+        );
+        assert!(
+            !homeboy_engine_primitives::command::process_is_running(descendant),
+            "timeout supervisor must reap descendant {descendant}"
+        );
+        assert!(output
+            .phase
+            .expect("timeout phase")
+            .summary
+            .contains("after 1s"));
+    }
+
+    #[test]
+    fn main_workflow_exports_its_supplied_test_plan() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let component = conditional_test_component(home.path(), source.path(), "local");
+            std::fs::write(
+                home.path()
+                    .join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"$HOMEBOY_TEST_TIMEOUT_SECONDS\" > '{}'\nexit 1\n",
+                    source.path().join("timeout.txt").display()
+                ),
+            )
+            .expect("extension script");
+            let mut args = fixture_workflow_args(&component);
+            args.test_execution_plan =
+                homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                    Duration::from_secs(42),
+                )
+                .expect("positive timeout");
+
+            let _ = run_main_test_workflow(
+                &component,
+                source.path(),
+                args,
+                &RunDir::create().expect("run dir"),
+            );
+
+            assert_eq!(
+                std::fs::read_to_string(source.path().join("timeout.txt"))
+                    .expect("recorded timeout"),
+                "42"
+            );
+        });
     }
 }
 

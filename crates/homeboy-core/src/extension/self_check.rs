@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
+use std::time::Duration;
 
 const SELF_CHECK_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
 
@@ -20,6 +21,20 @@ pub struct SelfCheckOutput {
     pub stderr: String,
     pub capture: SelfCheckCaptureMetadata,
     pub cargo_target: Option<homeboy_core::CargoTargetEvidence>,
+}
+
+/// Optional policy for a product boundary that owns a bounded self-check.
+/// Existing capability callers pass no policy and retain their historic
+/// unbounded behavior.
+pub(crate) struct SelfCheckExecutionPolicy {
+    timeout: Duration,
+    env: Vec<(String, String)>,
+}
+
+impl SelfCheckExecutionPolicy {
+    pub(crate) fn bounded(timeout: Duration, env: Vec<(String, String)>) -> Self {
+        Self { timeout, env }
+    }
 }
 
 #[cfg(test)]
@@ -36,6 +51,7 @@ pub(crate) fn run_self_checks_with_passthrough(
         passthrough,
         None,
         None,
+        None,
     )
 }
 
@@ -44,6 +60,7 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
     capability: ExtensionCapability,
     source_path: &Path,
     passthrough: bool,
+    execution_policy: Option<&SelfCheckExecutionPolicy>,
     run_dir: Option<&RunDir>,
     observation: Option<&ActiveObservation>,
 ) -> Result<SelfCheckOutput> {
@@ -112,8 +129,13 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
         if let Some(progress) = progress.as_mut() {
             progress.start(index)?;
         }
-        let output =
-            execute_self_check_command(command, &working_dir, passthrough, cargo_target.as_ref());
+        let output = execute_self_check_command(
+            command,
+            &working_dir,
+            passthrough,
+            cargo_target.as_ref(),
+            execution_policy,
+        );
         let stdout_artifact = if let Some(run_dir) = run_dir {
             write_command_artifact(run_dir, index, "stdout", &output.stdout.to_string_lossy())?
         } else {
@@ -175,8 +197,15 @@ fn execute_self_check_command(
     working_dir: &str,
     passthrough: bool,
     cargo_target: Option<&homeboy_core::ManagedCargoTarget>,
+    execution_policy: Option<&SelfCheckExecutionPolicy>,
 ) -> SelfCheckCommandOutput {
-    execute_local_self_check_command(command, working_dir, passthrough, cargo_target)
+    execute_local_self_check_command(
+        command,
+        working_dir,
+        passthrough,
+        cargo_target,
+        execution_policy,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +269,7 @@ fn execute_local_self_check_command(
     working_dir: &str,
     passthrough: bool,
     cargo_target: Option<&homeboy_core::ManagedCargoTarget>,
+    execution_policy: Option<&SelfCheckExecutionPolicy>,
 ) -> SelfCheckCommandOutput {
     #[cfg(windows)]
     let mut cmd = {
@@ -260,8 +290,15 @@ fn execute_local_self_check_command(
         cmd.env("CARGO_TARGET_DIR", cargo_target.target_dir());
         cmd.env("HOMEBOY_CARGO_TARGET_RESOLUTION", cargo_target.resolution());
     }
+    if let Some(policy) = execution_policy {
+        cmd.envs(policy.env.iter().map(|(key, value)| (key, value)));
+    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+
+    if let Some(policy) = execution_policy {
+        return execute_bounded_self_check_command(cmd, passthrough, policy);
+    }
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -313,6 +350,75 @@ fn execute_local_self_check_command(
                 exit_code: -1,
             }
         }
+    }
+}
+
+fn execute_bounded_self_check_command(
+    mut command: Command,
+    passthrough: bool,
+    policy: &SelfCheckExecutionPolicy,
+) -> SelfCheckCommandOutput {
+    use homeboy_engine_primitives::command::{ControllerChildGuard, SupervisedCommandTermination};
+
+    let guard = match ControllerChildGuard::prepare(&mut command) {
+        Ok(guard) => guard,
+        Err(error) => return self_check_spawn_error(error),
+    };
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return self_check_spawn_error(error),
+    };
+    if let Err(error) = guard.attach(&child) {
+        let _ = homeboy_engine_primitives::command::terminate_process_tree_and_reap(&mut child);
+        return self_check_spawn_error(error);
+    }
+    let supervised = match homeboy_engine_primitives::command::wait_with_bounded_output_supervised(
+        &mut child,
+        SELF_CHECK_CAPTURE_LIMIT_BYTES,
+        policy.timeout,
+        Duration::from_secs(1),
+        || false,
+        |_, _| Ok(()),
+    ) {
+        Ok(output) => output,
+        Err(error) => return self_check_spawn_error(error),
+    };
+    let output = supervised.output;
+    if passthrough {
+        let _ = std::io::stdout().write_all(&output.stdout);
+        let _ = std::io::stderr().write_all(&output.stderr);
+    }
+    let timed_out = supervised.termination == SupervisedCommandTermination::TimedOut;
+    SelfCheckCommandOutput {
+        stdout: BoundedCapture {
+            limit: output.capture.stdout.byte_limit,
+            seen: output.capture.stdout.bytes_seen as usize,
+            retained: output.stdout,
+        },
+        stderr: BoundedCapture {
+            limit: output.capture.stderr.byte_limit,
+            seen: output.capture.stderr.bytes_seen as usize,
+            retained: output.stderr,
+        },
+        success: !timed_out && output.status.success(),
+        exit_code: if timed_out {
+            124
+        } else {
+            output.status.code().unwrap_or(-1)
+        },
+    }
+}
+
+fn self_check_spawn_error(error: std::io::Error) -> SelfCheckCommandOutput {
+    SelfCheckCommandOutput {
+        stdout: BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES),
+        stderr: {
+            let mut capture = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
+            capture.push_bytes(format!("Command error: {error}").as_bytes());
+            capture
+        },
+        success: false,
+        exit_code: -1,
     }
 }
 
