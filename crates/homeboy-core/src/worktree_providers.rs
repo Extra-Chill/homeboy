@@ -1012,7 +1012,7 @@ pub fn resolve_apply_enabled_worktree_provider_by_id_from_config(
 /// safety state. Exact-identity and safety attestation callers need this
 /// observation boundary so Cook can attribute an owned promoted candidate
 /// before the normal dirty-worktree policy decides admission.
-fn resolve_apply_enabled_worktree_provider_by_id_unchecked_from_config(
+pub(crate) fn resolve_apply_enabled_worktree_provider_by_id_unchecked_from_config(
     handle: &str,
     provider_id: &str,
     config: &HomeboyConfig,
@@ -1701,7 +1701,7 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
     intent: &WorktreeProviderCreateIntent,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
-    provision_apply_enabled_worktree_provider_from_config_with_lifecycle(intent, None, config)
+    provision_apply_enabled_worktree_provider_from_config_with_lifecycle(intent, None, None, config)
 }
 
 /// Determine the provider that will own an ensure before the external command
@@ -2053,13 +2053,18 @@ fn escape_json_pointer_token(token: &str) -> String {
 fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
     intent: &WorktreeProviderCreateIntent,
     lifecycle: Option<&WorktreeProviderLifecycleIntent>,
+    selected_provider: Option<&str>,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
     // Purpose-owned callers select once using the creation capability contract.
     // Keep that exact identity through ensure and postcondition lookup.
-    let lifecycle_provider = lifecycle
-        .map(|_| select_apply_enabled_worktree_provider_from_config(intent, config))
-        .transpose()?;
+    let lifecycle_provider = match (lifecycle, selected_provider) {
+        (Some(_), Some(provider_id)) => Some(provider_id.to_string()),
+        (Some(_), None) => Some(select_apply_enabled_worktree_provider_from_config(
+            intent, config,
+        )?),
+        (None, _) => None,
+    };
     match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
         Ok(resolution) => {
             if let Some(lifecycle) = lifecycle {
@@ -2189,9 +2194,15 @@ fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
         ));
     }
     run_provider_ensure_command(provider_id, provider, &command)?;
-    let resolution =
-        resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)
-            .map_err(mark_bootstrap_postcondition_failure)?;
+    let resolution = match lifecycle_provider.as_deref() {
+        Some(provider_id) => resolve_apply_enabled_worktree_provider_by_id_unchecked_from_config(
+            &intent.handle,
+            provider_id,
+            config,
+        ),
+        None => resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None),
+    }
+    .map_err(mark_bootstrap_postcondition_failure)?;
     if intent.task_url.as_deref().is_some_and(|expected| {
         resolution
             .worktree
@@ -2235,6 +2246,21 @@ pub fn provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
     provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
         intent,
         Some(lifecycle),
+        None,
+        config,
+    )
+}
+
+pub fn provision_apply_enabled_worktree_provider_with_selected_lifecycle_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderProvision> {
+    provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
+        intent,
+        Some(lifecycle),
+        Some(provider_id),
         config,
     )
 }
@@ -2246,6 +2272,22 @@ pub fn finalize_apply_enabled_worktree_provider_from_config(
     lifecycle: &WorktreeProviderLifecycleIntent,
     disposition: WorktreeProviderTerminalDisposition,
     config: &HomeboyConfig,
+) -> Result<WorktreeProviderFinalization> {
+    finalize_apply_enabled_worktree_provider_with_effect_fence_from_config(
+        resolution,
+        lifecycle,
+        disposition,
+        config,
+        || Ok(()),
+    )
+}
+
+pub fn finalize_apply_enabled_worktree_provider_with_effect_fence_from_config(
+    resolution: &WorktreeProviderResolution,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    disposition: WorktreeProviderTerminalDisposition,
+    config: &HomeboyConfig,
+    before_effect: impl FnOnce() -> Result<()>,
 ) -> Result<WorktreeProviderFinalization> {
     let provider = config
         .worktree_providers
@@ -2292,6 +2334,7 @@ pub fn finalize_apply_enabled_worktree_provider_from_config(
                 .replace("{lifecycle_state}", disposition.lifecycle_state())
         })
         .collect::<Vec<_>>();
+    before_effect()?;
     run_provider_mutation_command(&resolution.provider_id, provider, &command, "finalize")?;
     Ok(WorktreeProviderFinalization {
         provider_id: resolution.provider_id.clone(),
@@ -5989,7 +6032,7 @@ mod tests {
         fs::write(
             &selected,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-12124\",\"path\":\"{}\",\"branch\":\"fix/12124\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else exit 1; fi\nelse\n  touch '{}'\n  git init -q -b fix/12124 '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-12124\",\"path\":\"{}\",\"branch\":\"fix/12124\",\"task_url\":\"https://github.com/Extra-Chill/homeboy/issues/12124\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else exit 1; fi\nelse\n  touch '{}'\n  git init -q -b fix/12124 '{}'\nfi\n",
                 selected_effect.display(),
                 workspace.display(),
                 selected_effect.display(),
@@ -6569,7 +6612,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  printf '%s\\n' \"$7\" >> '{}'\n  if mkdir '{}' 2>/dev/null; then\n    git init -b fix/9908 '{}' >/dev/null\n    rmdir '{}'\n  else\n    while [ -d '{}' ]; do sleep 0.01; done\n  fi\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"task_url\":\"https://github.com/Extra-Chill/homeboy/issues/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  printf '%s\\n' \"$7\" >> '{}'\n  if mkdir '{}' 2>/dev/null; then\n    git init -b fix/9908 '{}' >/dev/null\n    rmdir '{}'\n  else\n    while [ -d '{}' ]; do sleep 0.01; done\n  fi\nfi\n",
                 workspace.display(),
                 workspace.display(),
                 keys.display(),
@@ -6620,7 +6663,7 @@ mod tests {
                     dirty: "$.safety.dirty".to_string(),
                     unpushed: "$.safety.unpushed".to_string(),
                     primary: "$.safety.primary".to_string(),
-                    task_url: None,
+                    task_url: Some("$.task_url".to_string()),
                 }),
             },
         );
@@ -8692,7 +8735,7 @@ mod tests {
             handle: "fixture@cook-target".to_string(),
             path: workspace.path().display().to_string(),
             branch: "cook-target".to_string(),
-            task_url: None,
+            task_url: Some("$.task_url".to_string()),
             safety: WorktreeProviderHandleSafety {
                 dirty: true,
                 unpushed: false,
@@ -9969,7 +10012,7 @@ printf '{{"schema":"%s","provider_id":"fixture","handle":"%s","task_url":"%s","p
             dirty: "$.safety.dirty".to_string(),
             unpushed: "$.safety.unpushed".to_string(),
             primary: "$.safety.primary".to_string(),
-            task_url: None,
+            task_url: Some("$.task_url".to_string()),
         }
     }
 

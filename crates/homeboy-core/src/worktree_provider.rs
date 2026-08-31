@@ -824,6 +824,18 @@ impl WorktreeFinalizationProvider for NativeWorktreeProvider {
         lifecycle: &WorktreeProvisionLifecycle,
         disposition: WorktreeTerminalDisposition,
     ) -> Result<WorktreeFinalizationLookup> {
+        self.finalize_with_effect_fence(handle, lifecycle, disposition, || Ok(()))
+    }
+}
+
+impl NativeWorktreeProvider {
+    fn finalize_with_effect_fence(
+        &self,
+        handle: &str,
+        lifecycle: &WorktreeProvisionLifecycle,
+        disposition: WorktreeTerminalDisposition,
+        before_effect: impl FnOnce() -> Result<()>,
+    ) -> Result<WorktreeFinalizationLookup> {
         let Some(workspace) = worktree::resolve_workspace_ref_if_present(handle)? else {
             return Ok(WorktreeFinalizationLookup::NotFound);
         };
@@ -841,8 +853,12 @@ impl WorktreeFinalizationProvider for NativeWorktreeProvider {
                 None,
             ));
         }
-        let record =
-            worktree::finalize_provider_lifecycle(handle, &lifecycle.owner_run_ref, disposition)?;
+        let record = worktree::finalize_provider_lifecycle_with_effect_fence(
+            handle,
+            &lifecycle.owner_run_ref,
+            disposition,
+            before_effect,
+        )?;
         Ok(WorktreeFinalizationLookup::Finalized(
             WorktreeFinalization {
                 provider_id: "native".to_string(),
@@ -870,6 +886,59 @@ pub struct CommandWorktreeProvider<'a> {
 impl<'a> CommandWorktreeProvider<'a> {
     pub fn new(config: &'a HomeboyConfig) -> Self {
         Self { config }
+    }
+
+    fn finalize_with_provider_and_effect_fence(
+        &self,
+        handle: &str,
+        provider_id: &str,
+        lifecycle: &WorktreeProvisionLifecycle,
+        disposition: WorktreeTerminalDisposition,
+        before_effect: impl FnOnce() -> Result<()>,
+    ) -> Result<WorktreeFinalizationLookup> {
+        let resolution = match worktree_providers::resolve_apply_enabled_worktree_provider_by_id_unchecked_from_config(
+            handle,
+            provider_id,
+            self.config,
+        ) {
+            Ok(resolution) => resolution,
+            Err(error) if worktree_providers::is_worktree_provider_not_found(&error) => {
+                return Ok(WorktreeFinalizationLookup::NotFound);
+            }
+            Err(error) => return Err(error),
+        };
+        if worktree_providers::worktree_provider_lifecycle_finalizer_argv_from_config(
+            provider_id,
+            self.config,
+        )?
+        .is_none()
+        {
+            return Ok(WorktreeFinalizationLookup::Unsupported);
+        }
+        Ok(WorktreeFinalizationLookup::Finalized(
+            worktree_providers::finalize_apply_enabled_worktree_provider_with_effect_fence_from_config(
+                &resolution,
+                lifecycle,
+                disposition,
+                self.config,
+                before_effect,
+            )?,
+        ))
+    }
+
+    fn ensure_with_provider(
+        &self,
+        intent: &WorktreeProvisionIntent,
+        lifecycle: &WorktreeProvisionLifecycle,
+        provider_id: &str,
+    ) -> Result<WorktreeProvision> {
+        let provision = worktree_providers::provision_apply_enabled_worktree_provider_with_selected_lifecycle_from_config(
+            intent,
+            lifecycle,
+            provider_id,
+            self.config,
+        )?;
+        Ok(command_provision(provision))
     }
 }
 
@@ -1488,7 +1557,16 @@ impl<'a> WorktreeProviderRegistry<'a> {
                 NativeWorktreeProvider.ensure(intent, lifecycle)
             }
             Some(WorktreeProviderIdentity::Configured(_)) => {
-                CommandWorktreeProvider::new(self.config).ensure(intent, lifecycle)
+                let WorktreeProviderIdentity::Configured(provider_id) =
+                    selected_provider.expect("configured provider")
+                else {
+                    unreachable!()
+                };
+                CommandWorktreeProvider::new(self.config).ensure_with_provider(
+                    intent,
+                    lifecycle,
+                    provider_id,
+                )
             }
             None if configured_provisioning_declared(self.config) => {
                 CommandWorktreeProvider::new(self.config).ensure(intent, lifecycle)
@@ -1508,6 +1586,49 @@ impl<'a> WorktreeProviderRegistry<'a> {
             outcome => return Ok(outcome),
         }
         CommandWorktreeProvider::new(self.config).finalize(handle, lifecycle, disposition)
+    }
+
+    pub fn finalize_with_provider(
+        &self,
+        handle: &str,
+        provider: &WorktreeProviderIdentity,
+        lifecycle: &WorktreeProvisionLifecycle,
+        disposition: WorktreeTerminalDisposition,
+    ) -> Result<WorktreeFinalizationLookup> {
+        self.finalize_with_provider_and_effect_fence(
+            handle,
+            provider,
+            lifecycle,
+            disposition,
+            || Ok(()),
+        )
+    }
+
+    pub fn finalize_with_provider_and_effect_fence(
+        &self,
+        handle: &str,
+        provider: &WorktreeProviderIdentity,
+        lifecycle: &WorktreeProvisionLifecycle,
+        disposition: WorktreeTerminalDisposition,
+        before_effect: impl FnOnce() -> Result<()>,
+    ) -> Result<WorktreeFinalizationLookup> {
+        match provider {
+            WorktreeProviderIdentity::Native => NativeWorktreeProvider.finalize_with_effect_fence(
+                handle,
+                lifecycle,
+                disposition,
+                before_effect,
+            ),
+            WorktreeProviderIdentity::Configured(provider_id) => {
+                CommandWorktreeProvider::new(self.config).finalize_with_provider_and_effect_fence(
+                    handle,
+                    provider_id,
+                    lifecycle,
+                    disposition,
+                    before_effect,
+                )
+            }
+        }
     }
 
     pub fn create(
@@ -1580,6 +1701,13 @@ pub fn resolve_worktree_ownership(handle: &str) -> Result<WorktreeOwnership> {
 
 pub fn resolve_worktree_ownership_if_present(handle: &str) -> Result<Option<WorktreeOwnership>> {
     WorktreeProviderRegistry::new(&defaults::load_config()).resolve_if_present(handle)
+}
+
+pub fn resolve_worktree_ownership_if_present_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeOwnership>> {
+    WorktreeProviderRegistry::new(config).resolve_if_present(handle)
 }
 
 pub fn resolve_worktree_ownership_from_config(
@@ -1882,6 +2010,58 @@ pub fn finalize_worktree_from_config(
     config: &HomeboyConfig,
 ) -> Result<WorktreeFinalizationLookup> {
     WorktreeProviderRegistry::new(config).finalize(handle, lifecycle, disposition)
+}
+
+/// Resolve the provider that owns terminal finalization without applying the
+/// write-safety gates used for ordinary workspace mutation. Dirty terminal
+/// candidates must remain finalizable so their failure disposition is retained.
+pub fn resolve_worktree_finalization_provider_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeProviderIdentity>> {
+    if let WorktreeProviderLookup::Found(ownership) = NativeWorktreeProvider.resolve(handle)? {
+        return Ok(Some(ownership.provider));
+    }
+    match worktree_providers::observe_apply_enabled_worktree_provider_from_config(handle, config) {
+        Ok(resolution) => Ok(Some(WorktreeProviderIdentity::Configured(
+            resolution.provider_id,
+        ))),
+        Err(error) if worktree_providers::is_worktree_provider_not_found(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Finalize only through the provider durably selected before the mutation.
+pub fn finalize_worktree_with_provider_from_config(
+    handle: &str,
+    provider: &WorktreeProviderIdentity,
+    lifecycle: &WorktreeProvisionLifecycle,
+    disposition: WorktreeTerminalDisposition,
+    config: &HomeboyConfig,
+) -> Result<WorktreeFinalizationLookup> {
+    WorktreeProviderRegistry::new(config).finalize_with_provider(
+        handle,
+        provider,
+        lifecycle,
+        disposition,
+    )
+}
+
+pub fn finalize_worktree_with_provider_and_effect_fence_from_config(
+    handle: &str,
+    provider: &WorktreeProviderIdentity,
+    lifecycle: &WorktreeProvisionLifecycle,
+    disposition: WorktreeTerminalDisposition,
+    config: &HomeboyConfig,
+    before_effect: impl FnOnce() -> Result<()>,
+) -> Result<WorktreeFinalizationLookup> {
+    WorktreeProviderRegistry::new(config).finalize_with_provider_and_effect_fence(
+        handle,
+        provider,
+        lifecycle,
+        disposition,
+        before_effect,
+    )
 }
 
 pub fn worktree_finalization_not_found_error(handle: &str, config: &HomeboyConfig) -> Error {
@@ -2547,7 +2727,7 @@ mod tests {
             std::fs::write(
                 &script,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if [ -f '{state}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@command-lifecycle\",\"path\":\"{workspace}\",\"branch\":\"command-lifecycle\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else exit 1; fi\n  ;;\nplan)\n  printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"{workspace}\\\",\\\"branch\\\":\\\"$5\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\"\n  ;;\nensure)\n  git -C '{source}' worktree add -q -b command-lifecycle '{workspace}' main\n  touch '{state}'\n  ;;\ncleanup)\n  printf '%s\\n' '{{\"mode\":\"preview\"}}'\n  ;;\nfinalize)\n  key=\"${{10}}\"\n  if [ ! -f '{finalizations}' ] || ! grep -Fqx \"$key\" '{finalizations}'; then printf '%s\\n' \"$key\" >> '{finalizations}'; fi\n  ;;\nesac\n",
+                    "#!/bin/sh\ncase \"$1\" in\nresolve)\n  if [ -f '{state}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@command-lifecycle\",\"path\":\"{workspace}\",\"branch\":\"command-lifecycle\",\"task_url\":\"https://example.test/issues/8017\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else exit 1; fi\n  ;;\nplan)\n  printf '%s\\n' \"{{\\\"worktrees\\\":[{{\\\"handle\\\":\\\"$2\\\",\\\"path\\\":\\\"{workspace}\\\",\\\"branch\\\":\\\"$5\\\",\\\"task_url\\\":\\\"$6\\\",\\\"safety\\\":{{\\\"dirty\\\":false,\\\"unpushed\\\":false,\\\"primary\\\":false}}}}]}}\"\n  ;;\nensure)\n  git -C '{source}' worktree add -q -b command-lifecycle '{workspace}' main\n  touch '{state}'\n  ;;\ncleanup)\n  printf '%s\\n' '{{\"mode\":\"preview\"}}'\n  ;;\nfinalize)\n  key=\"${{10}}\"\n  if [ ! -f '{finalizations}' ] || ! grep -Fqx \"$key\" '{finalizations}'; then printf '%s\\n' \"$key\" >> '{finalizations}'; fi\n  ;;\nesac\n",
                     state = state.display(),
                     workspace = workspace.display(),
                     source = source.display(),
@@ -2599,7 +2779,7 @@ mod tests {
                         dirty: "$.safety.dirty".to_string(),
                         unpushed: "$.safety.unpushed".to_string(),
                         primary: "$.safety.primary".to_string(),
-                        task_url: None,
+                        task_url: Some("$.task_url".to_string()),
                     }),
                 },
             );

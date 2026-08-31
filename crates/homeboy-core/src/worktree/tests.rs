@@ -93,6 +93,14 @@ fn fixture_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
     }
 }
 
+fn succeeded_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
+    let mut record = fixture_record(source, worktree);
+    record.run_id = Some("completed-owner".to_string());
+    record.terminal_disposition = Some("succeeded".to_string());
+    record.lifecycle_revision = 1;
+    record
+}
+
 fn exact_terminal_proof(record: &TaskWorktreeRecord) -> TerminalWorkspaceAuthorityProof {
     let authority_set = vec!["controller".to_string()];
     TerminalWorkspaceAuthorityProof {
@@ -1255,7 +1263,7 @@ fn cleanup_marks_missing_worktree_record_removed() {
     let source = git_repo();
     let worktree = sibling_worktree_path(source.path(), "missing-cleanup");
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -1276,6 +1284,86 @@ fn cleanup_marks_missing_worktree_record_removed() {
     assert_eq!(output.counts.reconciliation_blockers, 1);
     assert!(output.skipped[0].reasons[0].contains("inventory --apply"));
     assert_eq!(updated.state, TaskWorktreeState::Active);
+}
+
+#[test]
+fn cleanup_and_remove_refuse_durable_live_workspace_owners_even_with_force() {
+    let data_root = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "durably-owned-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    let store = data_root.path().join("task-worktrees");
+    let mut record = fixture_record(source.path(), &worktree);
+    record.run_id = Some("completed-owner".to_string());
+    record.terminal_disposition = Some("succeeded".to_string());
+    record.lifecycle_revision = 1;
+    write_record(&store, &record).unwrap();
+    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root
+            .path()
+            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    );
+    let now = now_ms();
+    let owner = claims
+        .register_owner(
+            record.effective_workspace_identity().unwrap(),
+            "live-agent",
+            60_000,
+            now,
+        )
+        .unwrap();
+
+    for force in [false, true] {
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force,
+                dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(output.counts.removed, 0);
+        assert!(output.skipped[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("durable live owner")));
+        assert!(worktree.exists());
+    }
+    let error = remove_with_store(
+        WorktreeRemoveOptions {
+            id: record.id.clone(),
+            force: true,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+        },
+        &store,
+    )
+    .expect_err("direct removal must honor durable ownership");
+    assert!(error.message.contains("durable live owner"));
+
+    claims.release_owner(&owner, now + 1).unwrap();
+    let removed = remove_with_store(
+        WorktreeRemoveOptions {
+            id: record.id,
+            force: false,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+        },
+        &store,
+    )
+    .unwrap();
+    assert!(removed.removed);
+    assert_eq!(
+        removed.record.terminal_disposition.as_deref(),
+        Some("succeeded")
+    );
+    assert_eq!(removed.record.lifecycle_revision, 2);
+    assert!(!worktree.exists());
 }
 
 #[test]
@@ -1567,7 +1655,7 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
     let worktree = sibling_worktree_path(source.path(), "merged-branch-cleanup");
     merged_task_branch_with_stale_upstream(source.path(), &worktree);
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -1662,11 +1750,11 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
         &["worktree", "lock", &locked_worktree.to_string_lossy()],
     );
     let store = dir.path().join("store");
-    let mut locked_record = fixture_record(source.path(), &locked_worktree);
+    let mut locked_record = succeeded_record(source.path(), &locked_worktree);
     locked_record.id = "fixture@locked".to_string();
     locked_record.branch = "locked-task".to_string();
     let removable_worktree = sibling_worktree_path(source.path(), "cleanup-continues");
-    let mut removable_record = fixture_record(source.path(), &removable_worktree);
+    let mut removable_record = succeeded_record(source.path(), &removable_worktree);
     removable_record.id = "fixture@removable".to_string();
     write_record(&store, &locked_record).unwrap();
     write_record(&store, &removable_record).unwrap();
@@ -1717,8 +1805,8 @@ fn cleanup_separates_actionable_candidates_from_reconciliation_blockers() {
             &removable.to_string_lossy(),
         ],
     );
-    let removable_record = fixture_record(source.path(), &removable);
-    let mut missing_record = fixture_record(
+    let removable_record = succeeded_record(source.path(), &removable);
+    let mut missing_record = succeeded_record(
         source.path(),
         &sibling_worktree_path(source.path(), "mixed-missing"),
     );
@@ -1755,7 +1843,7 @@ fn cleanup_reports_unmerged_task_branch_without_deleting_by_default() {
     run_git(source.path(), &["checkout", "-q", "-"]);
     let worktree = sibling_worktree_path(source.path(), "unmerged-branch-cleanup");
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -1994,7 +2082,7 @@ fn cleanup_dry_run_reports_safe_candidate_without_removing() {
         ],
     );
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -2036,7 +2124,7 @@ fn cleanup_force_removes_dirty_worktree_after_homeboy_gates_pass() {
     );
     fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
     let store = dir.path().join("store");
-    let record = fixture_record(source.path(), &worktree);
+    let record = succeeded_record(source.path(), &worktree);
     write_record(&store, &record).unwrap();
 
     let output = cleanup_with_store(
@@ -2267,7 +2355,7 @@ fn queue_create_uses_provider_lifecycle_with_per_child_metadata() {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-12124\",\"path\":\"{}\",\"branch\":\"fix/12124\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi\nelif [ \"$1\" = ensure ]; then\n  printf 'ensure|%s|%s|%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\" \"$9\" >> '{}'\n  if [ ! -d '{}' ]; then git init -q -b fix/12124 '{}'; fi\nelse\n  printf 'finalize|%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-12124\",\"path\":\"{}\",\"branch\":\"fix/12124\",\"task_url\":\"https://github.com/Extra-Chill/homeboy/issues/12124\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'; else printf '%s\\n' '{{\"worktrees\":[]}}'; fi\nelif [ \"$1\" = ensure ]; then\n  printf 'ensure|%s|%s|%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" \"$8\" \"$9\" >> '{}'\n  if [ ! -d '{}' ]; then git init -q -b fix/12124 '{}'; fi\nelse\n  printf 'finalize|%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
                 workspace.display(),
                 workspace.display(),
                 records.display(),
@@ -2322,7 +2410,7 @@ fn queue_create_uses_provider_lifecycle_with_per_child_metadata() {
                     dirty: "$.safety.dirty".to_string(),
                     unpushed: "$.safety.unpushed".to_string(),
                     primary: "$.safety.primary".to_string(),
-                    task_url: None,
+                    task_url: Some("$.task_url".to_string()),
                 }),
             },
         );

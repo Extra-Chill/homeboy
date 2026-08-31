@@ -253,6 +253,15 @@ pub fn finalize_provider_lifecycle(
     owner_run_ref: &str,
     disposition: crate::worktree_provider::WorktreeTerminalDisposition,
 ) -> Result<TaskWorktreeRecord> {
+    finalize_provider_lifecycle_with_effect_fence(id, owner_run_ref, disposition, || Ok(()))
+}
+
+pub fn finalize_provider_lifecycle_with_effect_fence(
+    id: &str,
+    owner_run_ref: &str,
+    disposition: crate::worktree_provider::WorktreeTerminalDisposition,
+    before_effect: impl FnOnce() -> Result<()>,
+) -> Result<TaskWorktreeRecord> {
     with_task_worktree_registry_write_lock(|| {
         let store = metadata_dir()?;
         let mut record = read_record(&store, id)?;
@@ -291,6 +300,7 @@ pub fn finalize_provider_lifecycle(
             )
         })?;
         record.terminal_workspace_authority = None;
+        before_effect()?;
         store_ops::write_record_unlocked(&store, &record)?;
         Ok(record)
     })
@@ -518,27 +528,7 @@ pub(crate) fn with_task_worktree_registry_read_lock<T>(
         .get_or_init(|| RwLock::new(()))
         .read()
         .map_err(|_| Error::internal_unexpected("task worktree registry read gate poisoned"))?;
-    let store = metadata_dir()?;
-    let parent = store.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "task worktree store has no parent: {}",
-            store.display()
-        ))
-    })?;
-    let lock = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(parent.join("task-worktrees.lock"))
-    {
-        Ok(lock) => lock,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return operation(),
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some("open task worktree registry lock for read".to_string()),
-            ));
-        }
-    };
+    let lock = open_task_worktree_registry_lock()?;
     lock.lock_shared().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -573,12 +563,7 @@ fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
             store.display()
         ))
     })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
+    crate::engine::local_files::create_dir_all_durably(parent)?;
     OpenOptions::new()
         .create(true)
         .truncate(false)

@@ -572,7 +572,7 @@ impl WorkspaceClaimStore {
         count: u64,
     ) -> Result<()> {
         workspace.verify()?;
-        fs::create_dir_all(&self.root).map_err(io_error)?;
+        crate::engine::local_files::create_dir_all_durably(&self.root)?;
         fs::write(
             self.owner_release_failure_path(workspace),
             count.to_string(),
@@ -626,6 +626,26 @@ impl WorkspaceClaimStore {
                 .reconciliation
                 .as_ref()
                 == Some(claim))
+        })
+    }
+
+    /// Hold the workspace authority lock while a destructive reconciliation
+    /// mutation runs. Expiry cannot admit a new owner until this closure exits.
+    pub fn with_reconciliation_fence<T>(
+        &self,
+        claim: &WorkspaceClaim,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        claim.workspace.verify()?;
+        self.with_lock(&claim.workspace, || {
+            let state = self.read_or_empty(&claim.workspace)?;
+            if state.reconciliation.as_ref() != Some(claim) {
+                return Err(invalid(
+                    "workspace_claim",
+                    "reconciliation claim no longer matches durable authority",
+                ));
+            }
+            operation()
         })
     }
     /// Return whether this authority still has a live reconciliation claim or
@@ -742,7 +762,7 @@ impl WorkspaceClaimStore {
         workspace: &WorkspaceIdentity,
         operation: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
-        fs::create_dir_all(&self.root).map_err(io_error)?;
+        crate::engine::local_files::create_dir_all_durably(&self.root)?;
         sync_dir(&self.root)?;
         let lock = OpenOptions::new()
             .create(true)

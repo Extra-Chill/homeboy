@@ -215,7 +215,8 @@ pub(super) fn cleanup_with_store(
         };
         let branch_cleanup = branch_cleanup_report(&record)
             .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
-        let skip_reasons = cleanup_skip_reasons(&record, &safety, options.force);
+        let live_owner_count = live_workspace_owner_count(&record, store)?;
+        let skip_reasons = cleanup_skip_reasons(&record, &safety, options.force, live_owner_count);
         if !skip_reasons.is_empty() {
             skipped.push(WorktreeCleanupSkipped {
                 record,
@@ -293,14 +294,18 @@ fn cleanup_skip_reasons(
     record: &TaskWorktreeRecord,
     safety: &WorktreeSafetyReport,
     force: bool,
+    live_owner_count: usize,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
-    if record.terminal_disposition.as_deref() != Some("succeeded") {
-        if let Some(owner) = record.run_id.as_deref() {
-            reasons.push(format!(
-                "cleanup requires explicit succeeded finalization from lifecycle owner `{owner}`"
-            ));
-        }
+    if record.terminal_disposition.as_deref() != Some("succeeded") || record.run_id.is_none() {
+        reasons.push(record.run_id.as_deref().map_or_else(
+            || "cleanup requires explicit succeeded lifecycle finalization".to_string(),
+            |owner| {
+                format!(
+                    "cleanup requires explicit succeeded finalization from lifecycle owner `{owner}`"
+                )
+            },
+        ));
     }
     if safety.primary_checkout {
         reasons.push("refuses to remove primary checkout".to_string());
@@ -317,6 +322,11 @@ fn cleanup_skip_reasons(
         .any(|reason| reason == LIVE_CWD_REASON)
     {
         reasons.push(LIVE_CWD_REASON.to_string());
+    }
+    if live_owner_count > 0 {
+        reasons.push(format!(
+            "refuses to remove workspace held by {live_owner_count} durable live owner(s)"
+        ));
     }
     if !force {
         if safety.dirty {
@@ -1376,8 +1386,21 @@ pub(super) fn remove_with_store(
     options: WorktreeRemoveOptions,
     store_dir: &Path,
 ) -> Result<WorktreeRemoveOutput> {
+    with_task_worktree_registry_write_lock(|| remove_with_store_unlocked(options, store_dir))
+}
+
+fn remove_with_store_unlocked(
+    options: WorktreeRemoveOptions,
+    store_dir: &Path,
+) -> Result<WorktreeRemoveOutput> {
+    // The registry lease fences the complete decision and Git mutation. Always
+    // re-read under it so finalization that won the lease first is preserved.
     let mut record = read_record(store_dir, &options.id)?;
-    repair_record_source_checkout_if_needed(&mut record, store_dir)?;
+    if !Path::new(&record.source_checkout).exists() {
+        record.source_checkout = recovered_component_source_checkout(&record)?
+            .to_string_lossy()
+            .to_string();
+    }
     let safety = safety_report(&record)?;
     if !options.force && !safety.safe {
         return Err(Error::validation_invalid_argument(
@@ -1407,33 +1430,112 @@ pub(super) fn remove_with_store(
             Some(safety.reasons.clone()),
         ));
     }
+    let live_owner_count = live_workspace_owner_count(&record, store_dir)?;
+    if live_owner_count > 0 {
+        return Err(Error::validation_invalid_argument(
+            "workspace_claim",
+            format!("Task worktree is held by {live_owner_count} durable live owner(s)"),
+            Some(record.id.clone()),
+            None,
+        ));
+    }
 
-    if !safety.worktree_missing {
-        let mut args = vec!["worktree", "remove"];
-        if options.force {
-            args.push("--force");
+    let claims = workspace_claim_store_for_worktrees(store_dir)?;
+    let claim = claims.acquire(
+        record.effective_workspace_identity()?,
+        crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+        now_ms(),
+    )?;
+    let worktree_parent = Path::new(&record.worktree_path)
+        .parent()
+        .map(Path::to_path_buf);
+    let git_common_dir = git_common_dir(Path::new(&record.source_checkout))?;
+    let result = claims.with_reconciliation_fence(&claim, || {
+        if !safety.worktree_missing {
+            let mut args = vec!["worktree", "remove"];
+            if options.force {
+                args.push("--force");
+            }
+            args.push(&record.worktree_path);
+            git::run_git(
+                Path::new(&record.source_checkout),
+                &args,
+                "git worktree remove",
+            )?;
         }
-        args.push(&record.worktree_path);
-        git::run_git(
-            Path::new(&record.source_checkout),
-            &args,
-            "git worktree remove",
-        )?;
+        if let Some(parent) = &worktree_parent {
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+                })?;
+        }
+        let registrations = git_common_dir.join("worktrees");
+        let git_metadata_parent = if registrations.exists() {
+            registrations.as_path()
+        } else {
+            git_common_dir.as_path()
+        };
+        fs::File::open(git_metadata_parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(git_metadata_parent.display().to_string()),
+                )
+            })?;
+        let mut branch_cleanup = branch_cleanup_report(&record)
+            .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
+        if options.cleanup_branch {
+            branch_cleanup =
+                apply_branch_cleanup(&record, branch_cleanup, options.allow_unmerged_branch)?;
+        }
+        record.state = TaskWorktreeState::Removed;
+        record.lifecycle_revision = record.lifecycle_revision.checked_add(1).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lifecycle_revision",
+                "task worktree lifecycle revision overflowed during removal",
+                Some(record.id.clone()),
+                None,
+            )
+        })?;
+        write_record_unlocked(store_dir, &record)?;
+        Ok(WorktreeRemoveOutput {
+            record,
+            safety,
+            branch_cleanup,
+            removed: true,
+        })
+    });
+    let release = claims.release(&claim, now_ms());
+    match result {
+        Err(error) => Err(error),
+        Ok(output) => {
+            release?;
+            Ok(output)
+        }
     }
-    let mut branch_cleanup = branch_cleanup_report(&record)
-        .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
-    if options.cleanup_branch {
-        branch_cleanup =
-            apply_branch_cleanup(&record, branch_cleanup, options.allow_unmerged_branch)?;
-    }
-    record.state = TaskWorktreeState::Removed;
-    write_record(store_dir, &record)?;
-    Ok(WorktreeRemoveOutput {
-        record,
-        safety,
-        branch_cleanup,
-        removed: true,
-    })
+}
+
+fn live_workspace_owner_count(record: &TaskWorktreeRecord, store_dir: &Path) -> Result<usize> {
+    let claims = workspace_claim_store_for_worktrees(store_dir)?;
+    Ok(claims
+        .owner_status(&record.effective_workspace_identity()?, now_ms())?
+        .len())
+}
+
+fn workspace_claim_store_for_worktrees(
+    store_dir: &Path,
+) -> Result<crate::workspace_claim::WorkspaceClaimStore> {
+    let data_root = store_dir.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree store `{}` has no data root",
+            store_dir.display()
+        ))
+    })?;
+    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root.join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    ))
 }
 
 pub(super) fn branch_cleanup_report(
@@ -1823,9 +1925,7 @@ pub(super) fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Res
 
 pub(super) fn write_record_unlocked(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
     let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
-    fs::create_dir_all(store_dir).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
-    })?;
+    crate::engine::local_files::create_dir_all_durably(store_dir)?;
     let json = serde_json::to_string_pretty(record)
         .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
     let path = record_path(store_dir, &record.id);
