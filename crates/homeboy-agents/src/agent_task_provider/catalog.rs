@@ -11,6 +11,27 @@ use super::secrets::{
 };
 use super::*;
 use homeboy_engine_primitives::content_hash;
+use std::sync::OnceLock;
+
+static PROVIDER_EVIDENCE: OnceLock<Arc<Mutex<ProviderEvidenceStore>>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+pub(super) struct ProviderEvidenceStore {
+    pub(super) readiness: ProviderRuntimeReadinessCache,
+    pub(super) usage_caps: ProviderUsageCapRegistry,
+    pub(super) account_blocks: BTreeMap<String, AccountBlockEvidence>,
+    pub(super) next_generation: u64,
+}
+
+#[derive(Debug)]
+pub(super) struct AccountBlockEvidence {
+    pub(super) expires_at: chrono::DateTime<chrono::Utc>,
+    pub(super) generation: u64,
+}
+
+fn shared_provider_evidence() -> Arc<Mutex<ProviderEvidenceStore>> {
+    Arc::clone(PROVIDER_EVIDENCE.get_or_init(|| Arc::new(Mutex::new(Default::default()))))
+}
 
 /// The discovered catalog, keyed by the config root it was discovered from.
 ///
@@ -27,6 +48,7 @@ static PROVIDER_CATALOG: OnceLock<RwLock<Option<(PathBuf, AgentTaskProviderCatal
 pub struct ExtensionProviderAgentTaskExecutor {
     providers: Vec<AgentTaskExecutorProvider>,
     diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+    pub(super) evidence: Arc<Mutex<ProviderEvidenceStore>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +296,7 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers: catalog.providers,
             diagnostics: catalog.diagnostics,
+            evidence: shared_provider_evidence(),
         }
     }
 
@@ -282,6 +305,7 @@ impl ExtensionProviderAgentTaskExecutor {
         Self {
             providers,
             diagnostics: Vec::new(),
+            evidence: shared_provider_evidence(),
         }
     }
 

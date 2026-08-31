@@ -14,9 +14,8 @@ use crate::agent_task_dispatch_plan::{
 use crate::agent_task_lifecycle as lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
-    apply_provider_runner_secret_env_contracts, default_backend_for_component,
-    enforce_runtime_preflight_checks_for_plan, preflight_plan_provider_config_with_providers,
-    preflight_provider_credentials_for_backend, resolve_provider_for_backend,
+    default_backend_for_component, enforce_runtime_preflight_checks_for_plan,
+    preflight_plan_provider_config_with_providers, resolve_provider_for_backend,
     AgentTaskProviderCatalog, ProviderResolution,
 };
 use crate::agent_task_scheduler::{
@@ -158,6 +157,7 @@ pub struct AgentTaskInitialProviderRoute {
     pub backend: String,
     pub selector: Option<String>,
     pub model: Option<String>,
+    pub provider_config: Value,
     pub rotation: Option<AgentTaskProviderRotationPolicy>,
     pub rotation_selected_initial: bool,
 }
@@ -196,30 +196,18 @@ fn dispatch_with_provider_catalog(
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
     let backend_selection = request.backend_selection.clone();
-    // Credentials first: the selected backend's declared credentials are
-    // knowable before a plan exists, before a workspace is resolved, and before
-    // any provider execution is spent. Discovering a credential gap inside the
-    // provider costs an execution against the task budget and can terminate a
-    // Cook that other backends could have run (#11479).
-    preflight_provider_credentials_for_backend(
-        catalog.providers(),
-        &request.backend,
-        request.selector.as_deref(),
+    let plan = build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
+        catalog.provider_requires_cwd_git_checkout(backend, selector)
+    })?;
+    let plan = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &plan,
+        catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
     )?;
-    let mut plan =
-        build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
-            catalog.provider_requires_cwd_git_checkout(backend, selector)
-        })?;
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
     catalog.validate_selected_models(&plan)?;
     catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-        &plan,
-        catalog.providers(),
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )?;
     run_dispatch_plan(
         plan,
         request.run_id.as_deref(),
@@ -229,21 +217,19 @@ fn dispatch_with_provider_catalog(
     )
 }
 
-/// Validate every provider declaration needed to dispatch this request without
-/// running live runtime or workspace readiness probes.
+/// Validate the reachable provider routes needed to dispatch this request.
 pub fn preflight_dispatch_provider_admission(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
-    preflight_provider_credentials_for_backend(
-        catalog.providers(),
-        &request.backend,
-        request.selector.as_deref(),
-    )?;
-    let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
+    let plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    let plan = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &plan,
+        catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )?;
     catalog.validate_selected_models(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
@@ -260,29 +246,20 @@ pub fn dispatch_with_provider_requirements(
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
     let backend_selection = request.backend_selection.clone();
-    preflight_provider_credentials_for_backend(
-        AgentTaskProviderCatalog::discover().providers(),
-        &request.backend,
-        request.selector.as_deref(),
-    )?;
-    let mut plan = build_dispatch_plan_with_provider_requirements(
+    let plan = build_dispatch_plan_with_provider_requirements(
         &request,
         provider_requires_cwd_git_checkout,
     )?;
-    apply_provider_runner_secret_env_contracts(&mut plan);
-    AgentTaskProviderCatalog::discover().validate_selected_models(&plan)?;
-    enforce_runtime_preflight_checks_for_plan(&plan)?;
-    preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(
-        &plan,
-        &AgentTaskProviderCatalog::discover().providers,
-    )?;
     let catalog = AgentTaskProviderCatalog::discover();
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
+    let plan = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
         &plan,
-        catalog.providers(),
+        &catalog,
         &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
     )?;
+    catalog.validate_selected_models(&plan)?;
+    enforce_runtime_preflight_checks_for_plan(&plan)?;
+    preflight_dispatch_provider_secrets(&plan)?;
+    preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
     run_dispatch_plan(
         plan,
         request.run_id.as_deref(),
@@ -431,12 +408,18 @@ pub fn resolve_cook_initial_provider_route_with_catalog(
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<AgentTaskInitialProviderRoute> {
     let request = resolve_dispatch_request(command)?;
-    let mut route =
-        initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
-            &request,
-            catalog,
-            configured_rotation_policy(),
-        ));
+    let policy = request
+        .core
+        .resolved_provider_policy
+        .clone()
+        .unwrap_or_else(|| {
+            controller_resolved_execution_policy_with_sources(
+                &request,
+                catalog,
+                configured_rotation_policy(),
+            )
+        });
+    let mut route = initial_provider_route_from_policy(policy);
     // Provider configuration is the configured-model source used by Cook when
     // policy and CLI do not select one. Keep discovery on the same default.
     if route.model.is_none() {
@@ -465,6 +448,7 @@ pub fn initial_provider_route_from_policy(
     let mut backend = policy.backend;
     let mut selector = policy.selector;
     let mut model = policy.model;
+    let mut provider_config = Value::Null;
     let mut rotation = policy.rotation;
     if policy.rotation_starts_with_first_entry {
         if let Some(rotation) = rotation.as_mut() {
@@ -473,6 +457,7 @@ pub fn initial_provider_route_from_policy(
                 backend = first.backend.unwrap_or(backend);
                 selector = first.selector.or(selector);
                 model = first.model.or(model);
+                provider_config = first.provider_config;
             }
         }
     }
@@ -480,6 +465,7 @@ pub fn initial_provider_route_from_policy(
         backend,
         selector,
         model,
+        provider_config,
         rotation,
         rotation_selected_initial: policy.rotation_starts_with_first_entry,
     }
@@ -490,7 +476,7 @@ fn controller_resolved_execution_policy_with_sources(
     catalog: &AgentTaskProviderCatalog,
     rotation: Option<AgentTaskProviderRotationPolicy>,
 ) -> ResolvedAgentTaskProviderPolicy {
-    let runtime_identity = selected_runtime_identity(request, catalog);
+    let requested_runtime_identity = selected_runtime_identity(request, catalog);
     let explicit_backend = request
         .backend_selection
         .as_ref()
@@ -505,7 +491,7 @@ fn controller_resolved_execution_policy_with_sources(
                     .as_deref()
                     .is_none_or(|backend| backend == request.backend)
                     && entry.selector.as_deref().is_none_or(|selector| {
-                        runtime_identity
+                        requested_runtime_identity
                             .as_ref()
                             .is_some_and(|identity| identity.provider_id == selector)
                     })
@@ -513,6 +499,25 @@ fn controller_resolved_execution_policy_with_sources(
         }
         rotation
     });
+    let rotation_starts_with_first_entry = !explicit_backend && request.model.is_none();
+    let runtime_identity = if rotation_starts_with_first_entry {
+        if let Some(entry) = rotation
+            .as_ref()
+            .and_then(|rotation| rotation.entries.first())
+        {
+            let backend = entry.backend.as_deref().unwrap_or(&request.backend);
+            let selector = entry.selector.as_deref().or(request.selector.as_deref());
+            selected_runtime_identity_for_route(backend, selector, catalog).or_else(|| {
+                (backend == request.backend && selector == request.selector.as_deref())
+                    .then(|| requested_runtime_identity.clone())
+                    .flatten()
+            })
+        } else {
+            requested_runtime_identity.clone()
+        }
+    } else {
+        requested_runtime_identity
+    };
     ResolvedAgentTaskProviderPolicy {
         backend: request.backend.clone(),
         selector: request.selector.clone(),
@@ -527,7 +532,7 @@ fn controller_resolved_execution_policy_with_sources(
         rotation,
         // An explicit model is immutable for the initial invocation. Rotation
         // remains available for retries, but cannot silently replace it.
-        rotation_starts_with_first_entry: !explicit_backend && request.model.is_none(),
+        rotation_starts_with_first_entry,
         runtime_identity,
     }
 }
@@ -536,13 +541,25 @@ fn selected_runtime_identity(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
-    let ProviderResolution::Resolved(provider) = resolve_provider_for_backend(
-        catalog.providers(),
-        &request.backend,
-        request.selector.as_deref(),
-    ) else {
+    selected_runtime_identity_for_route(&request.backend, request.selector.as_deref(), catalog)
+}
+
+pub(crate) fn selected_runtime_identity_for_route(
+    backend: &str,
+    selector: Option<&str>,
+    catalog: &AgentTaskProviderCatalog,
+) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
+    let ProviderResolution::Resolved(provider) =
+        resolve_provider_for_backend(catalog.providers(), backend, selector)
+    else {
         return None;
     };
+    runtime_identity_for_provider(provider)
+}
+
+pub(crate) fn runtime_identity_for_provider(
+    provider: &crate::agent_task_provider::AgentTaskExecutorProvider,
+) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
     let plan = provider.extra.get("runtime_materialization_plan")?;
     let plan: homeboy_core::agent_runtime_manifest::AgentRuntimeMaterializationPlan =
         serde_json::from_value(plan.clone()).ok()?;
@@ -850,11 +867,14 @@ mod tests {
         let error = dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
             .expect_err("a missing declared credential must fail dispatch");
 
-        assert_eq!(error.details["field"], "provider_credentials");
+        assert_eq!(error.details["field"], "provider_dispatchability");
         assert!(
-            error.message.contains(&required),
+            error
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains(&required)),
             "the failure must name the credential: {}",
-            error.message
+            error.message,
         );
     }
 
@@ -867,8 +887,75 @@ mod tests {
         }))
         .expect("provider fixture")];
 
-        preflight_provider_credentials_for_backend(&providers, "local-shell", None)
-            .expect("a provider that declares no credential is dispatchable");
+        crate::agent_task_provider::preflight_provider_credentials_for_backend(
+            &providers,
+            "local-shell",
+            None,
+        )
+        .expect("a provider that declares no credential is dispatchable");
+    }
+
+    #[test]
+    fn generic_preflight_admits_a_ready_fallback_when_primary_credentials_are_missing() {
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let primary = serde_json::from_value(serde_json::json!({
+            "id": "test.primary",
+            "backend": "test",
+            "secret_env": [required],
+        }))
+        .expect("primary provider");
+        let fallback = serde_json::from_value(serde_json::json!({
+            "id": "test.fallback",
+            "backend": "test",
+        }))
+        .expect("fallback provider");
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![primary, fallback],
+            ..Default::default()
+        };
+        let request = AgentTaskDispatchRequest {
+            prompt: Some("run".to_string()),
+            prompt_is_literal: false,
+            tasks: Vec::new(),
+            cwd: None,
+            workspace: None,
+            repo: None,
+            component: None,
+            task_url: None,
+            backend: "test".to_string(),
+            selector: Some("test.primary".to_string()),
+            model: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            concurrency: 1,
+            run_id: None,
+            task_id: None,
+            core: DispatchCoreInputs {
+                resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
+                    backend: "test".to_string(),
+                    selector: Some("test.primary".to_string()),
+                    model: None,
+                    rotation: Some(AgentTaskProviderRotationPolicy {
+                        entries: vec![
+                            crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                selector: Some("test.fallback".to_string()),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }),
+                    rotation_starts_with_first_entry: false,
+                    retry: Default::default(),
+                    liveness_timeout_ms: None,
+                    runtime_identity: None,
+                }),
+                ..Default::default()
+            },
+            backend_selection: None,
+        };
+
+        preflight_dispatch_provider_admission(&request, &catalog)
+            .expect("the generic path admits the reachable fallback");
     }
 
     fn command_with_backend(backend: Option<&str>) -> AgentTaskDispatchCommand {

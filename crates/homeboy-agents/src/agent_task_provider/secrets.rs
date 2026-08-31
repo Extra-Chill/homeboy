@@ -14,6 +14,50 @@ pub(super) fn apply_provider_runner_secret_env_contracts_with_providers(
     }
 }
 
+pub(super) fn apply_provider_runner_secret_env_contract_for_request(
+    request: &mut AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    base_secret_env: &[String],
+) {
+    request.executor.secret_env = base_secret_env.to_vec();
+    request.executor.secret_env = provider_secret_env_plan(provider, request).secret_env_names();
+}
+
+pub(super) fn provider_request_secret_env_missing(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+) -> Vec<String> {
+    let names = provider_secret_env_plan(provider, request).secret_env_names();
+    secret_env_status_with_fallbacks(&names, &provider_secret_sources(provider, Some(request)))
+        .into_iter()
+        .filter(|status| !status.configured)
+        .map(|status| status.name)
+        .collect()
+}
+
+pub(super) fn provider_request_credential_identity(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+) -> Vec<(String, String)> {
+    let names = provider_secret_env_plan(provider, request).secret_env_names();
+    let sources = provider_secret_sources(provider, Some(request));
+    match resolve_secret_env_with_fallbacks(&names, &sources) {
+        Ok(values) => values
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name,
+                    homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes()),
+                )
+            })
+            .collect(),
+        Err(_) => names
+            .into_iter()
+            .map(|name| (name, "unresolved".to_string()))
+            .collect(),
+    }
+}
+
 pub fn provider_runner_secret_env_for_plan_with_providers(
     plan: &AgentTaskPlan,
     providers: &[AgentTaskExecutorProvider],

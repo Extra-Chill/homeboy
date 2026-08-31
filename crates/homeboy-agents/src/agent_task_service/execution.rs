@@ -118,8 +118,23 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
     if let Err(error) = validate_plan_structure(&plan) {
         return invalid_plan_report(plan_id, AgentTaskPlanValidationKind::InvalidInput, error);
     }
-    let mut plan = plan;
+    let plan = plan;
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &plan,
+        &catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let kind = if error.retryable == Some(true) {
+                AgentTaskPlanValidationKind::TemporaryCapacity
+            } else {
+                AgentTaskPlanValidationKind::MissingReadiness
+            };
+            return invalid_plan_report(plan_id, kind, error);
+        }
+    };
     if let Err(error) = validate_plan_provider_capabilities(&plan, &catalog) {
         return invalid_plan_report(
             plan_id,
@@ -127,7 +142,6 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
             error,
         );
     }
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
     for (kind, result) in [
         (
             AgentTaskPlanValidationKind::UnavailableCapability,
@@ -153,21 +167,6 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
             return invalid_plan_report(plan_id, kind, error);
         }
     }
-    if let Err(error) =
-        crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-            &plan,
-            catalog.providers(),
-            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-        )
-    {
-        let kind = if error.retryable == Some(true) {
-            AgentTaskPlanValidationKind::TemporaryCapacity
-        } else {
-            AgentTaskPlanValidationKind::MissingReadiness
-        };
-        return invalid_plan_report(plan_id, kind, error);
-    }
-
     AgentTaskPlanValidationReport {
         schema: AGENT_TASK_PLAN_VALIDATION_SCHEMA.to_string(),
         valid: true,
@@ -2423,20 +2422,21 @@ fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
 /// before a record is claimed Running. Workspace preparation remains after the
 /// claim because it creates controller-owned filesystem state.
 fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()> {
-    let mut plan = plan.clone();
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    // Re-admit from the persisted current route and its remaining chain. The
+    // scheduler receives the durable plan and performs the same advancement,
+    // so a TTL-bounded negative verdict never destroys recovery routes.
+    let plan = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        plan,
+        &catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )?;
     catalog.validate_selected_models(&plan)?;
     catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_plan_secret_env(&plan)?;
     crate::agent_task_provider::preflight_plan_provider_config_with_providers(
         &plan,
         catalog.providers(),
-    )?;
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-        &plan,
-        catalog.providers(),
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
     )
 }
 

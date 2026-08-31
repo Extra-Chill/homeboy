@@ -5809,69 +5809,6 @@ fn validate_provider_route(
     request: &dispatch_service::AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
-    match provider::resolve_provider_for_backend(
-        catalog.providers(),
-        &request.backend,
-        request.selector.as_deref(),
-    ) {
-        provider::ProviderResolution::Resolved(_) => {}
-        provider::ProviderResolution::SelectorMismatch { available_ids, .. } => {
-            return Err(Error::validation_invalid_argument(
-                "selector",
-                format!(
-                    "--selector does not select a provider for backend `{}`",
-                    request.backend
-                ),
-                request.selector.clone(),
-                Some(
-                    available_ids
-                        .iter()
-                        .map(|id| {
-                            format!("Pass --selector {id} with --backend {}.", request.backend)
-                        })
-                        .collect(),
-                ),
-            ));
-        }
-        provider::ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
-            return Err(Error::validation_invalid_argument(
-                "selector",
-                format!(
-                    "backend alias `{}` matches multiple providers",
-                    request.backend
-                ),
-                None,
-                Some(
-                    candidate_ids
-                        .iter()
-                        .map(|id| format!("Pass --selector {id}."))
-                        .collect(),
-                ),
-            ));
-        }
-        provider::ProviderResolution::NotFound => {
-            let available = catalog.backends();
-            return Err(Error::validation_invalid_argument(
-                "backend",
-                format!(
-                    "agent-task fanout backend `{}` has no installed provider",
-                    request.backend
-                ),
-                Some(request.backend.clone()),
-                Some(if available.is_empty() {
-                    vec![
-                        "Run `homeboy agent-task providers` to diagnose provider discovery."
-                            .to_string(),
-                    ]
-                } else {
-                    available
-                        .iter()
-                        .map(|candidate| format!("Pass --backend {candidate}."))
-                        .collect()
-                }),
-            ));
-        }
-    }
     dispatch_service::preflight_dispatch_provider_admission(request, catalog)
 }
 

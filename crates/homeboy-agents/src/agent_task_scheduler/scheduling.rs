@@ -37,6 +37,7 @@ pub(crate) struct AgentTaskScheduleSupport;
 pub(crate) struct UsageCapSkip {
     pub(crate) backend: String,
     pub(crate) selector: Option<String>,
+    pub(crate) model: Option<String>,
     pub(crate) reset_at: chrono::DateTime<chrono::Utc>,
     pub(crate) exhausted: bool,
 }
@@ -1223,7 +1224,7 @@ impl AgentTaskScheduleSupport {
     /// `metadata.provider_rotation` object overrides the plan-level
     /// `options.rotation` policy. Returns `None` when no policy with entries is
     /// configured so unconfigured behavior stays byte-for-byte unchanged.
-    pub(super) fn rotation_policy_for_request(
+    pub(crate) fn rotation_policy_for_request(
         request: &AgentTaskRequest,
         plan_rotation: Option<&AgentTaskProviderRotationPolicy>,
     ) -> Option<AgentTaskProviderRotationPolicy> {
@@ -1237,6 +1238,35 @@ impl AgentTaskScheduleSupport {
             .filter(|policy| !policy.entries.is_empty())
     }
 
+    pub(crate) fn initial_rotation_index(
+        request: &AgentTaskRequest,
+        policy: &AgentTaskProviderRotationPolicy,
+    ) -> usize {
+        policy.entries.first().is_some_and(|entry| {
+            entry
+                .backend
+                .as_deref()
+                .is_none_or(|backend| backend == request.executor.backend)
+                && entry
+                    .selector
+                    .as_deref()
+                    .is_none_or(|selector| request.executor.selector.as_deref() == Some(selector))
+                && entry
+                    .model
+                    .as_deref()
+                    .is_none_or(|model| request.executor.model() == Some(model))
+                && entry.provider_config.as_object().is_none_or(|overrides| {
+                    overrides.iter().all(|(key, value)| {
+                        request
+                            .executor
+                            .config
+                            .get(key)
+                            .is_some_and(|actual| actual == value)
+                    })
+                })
+        }) as usize
+    }
+
     /// Rotation triggers only on provider capacity failures (`provider`,
     /// `transient`, `timeout`, `stalled`, `rate_limited`, and
     /// `provider_account_blocked` classifications).
@@ -1247,12 +1277,13 @@ impl AgentTaskScheduleSupport {
         outcome: &AgentTaskOutcome,
         policy: &AgentTaskProviderRotationPolicy,
         rotation_index: usize,
+        rotations_used: usize,
         attempt: u32,
         max_provider_executions: u32,
         max_provider_rotations: u32,
     ) -> bool {
         rotation_index < policy.entries.len()
-            && rotation_index < max_provider_rotations as usize
+            && rotations_used < max_provider_rotations as usize
             && attempt < max_provider_executions
             && attempt < policy.max_total_attempts()
             && !matches!(
@@ -1296,7 +1327,7 @@ impl AgentTaskScheduleSupport {
     /// that must not reshape the initial attempt; only the missing model
     /// identity is needed for durable provenance. An explicit `--model` on the
     /// request always wins.
-    pub(super) fn apply_initial_rotation_entry_model(
+    pub(crate) fn apply_initial_rotation_entry_model(
         request: &mut AgentTaskRequest,
         entry: &AgentTaskProviderRotationEntry,
     ) {
@@ -1321,11 +1352,19 @@ impl AgentTaskScheduleSupport {
         }
     }
 
-    pub(super) fn apply_rotation_entry(
+    pub(crate) fn apply_rotation_entry(
         request: &mut AgentTaskRequest,
         entry: &AgentTaskProviderRotationEntry,
         policy: &AgentTaskProviderRotationPolicy,
     ) {
+        let route_changed = entry
+            .backend
+            .as_deref()
+            .is_some_and(|backend| backend != request.executor.backend)
+            || entry
+                .selector
+                .as_deref()
+                .is_some_and(|selector| request.executor.selector.as_deref() != Some(selector));
         let executor = &mut request.executor;
         if let Some(backend) = &entry.backend {
             executor.backend = backend.clone();
@@ -1335,6 +1374,15 @@ impl AgentTaskScheduleSupport {
         }
         if let Some(model) = &entry.model {
             executor.model = Some(model.clone());
+        }
+        if route_changed && entry.provider_config.get("provider").is_none() {
+            executor
+                .config
+                .as_object_mut()
+                .map(|config| config.remove("provider"));
+            if let Some(selection) = executor.runtime_selection.as_mut() {
+                selection.ai_provider_id = None;
+            }
         }
         if let Some(overrides) = entry.provider_config.as_object() {
             if !overrides.is_empty() {
@@ -1366,18 +1414,52 @@ impl AgentTaskScheduleSupport {
                 selection.ai_provider_id = Some(provider.to_string());
             }
         }
+        if route_changed {
+            request
+                .metadata
+                .as_object_mut()
+                .map(|metadata| metadata.remove("resolved_runtime_identity"));
+        }
         Self::apply_rotation_policy_limits(request, policy);
     }
 
     /// Copy the policy-level liveness limit into the request when the request
     /// does not already set it. Keeps a per-task override authoritative.
-    pub(super) fn apply_rotation_policy_limits(
+    pub(crate) fn apply_rotation_policy_limits(
         request: &mut AgentTaskRequest,
         policy: &AgentTaskProviderRotationPolicy,
     ) {
         if request.limits.liveness_timeout_ms.is_none() {
             request.limits.liveness_timeout_ms = policy.liveness_timeout_ms;
         }
+    }
+
+    /// Return provider routes in the exact order the scheduler can reach them.
+    /// The transition count is persisted by compile-time admission so readiness
+    /// routing and later execution share one rotation budget.
+    pub(crate) fn provider_route_candidates(
+        request: &AgentTaskRequest,
+        plan_rotation: Option<&AgentTaskProviderRotationPolicy>,
+        max_provider_rotations: u32,
+    ) -> Vec<(AgentTaskRequest, usize)> {
+        let policy = Self::rotation_policy_for_request(request, plan_rotation);
+        let mut candidate = request.clone();
+        let Some(policy) = policy.as_ref() else {
+            return vec![(candidate, 0)];
+        };
+        Self::apply_rotation_policy_limits(&mut candidate, policy);
+        if let Some(entry) = policy.entries.first() {
+            Self::apply_initial_rotation_entry_model(&mut candidate, entry);
+        }
+        let mut index = Self::initial_rotation_index(&candidate, policy);
+        let mut candidates = vec![(candidate.clone(), 0)];
+        let max_transitions = max_provider_rotations as usize;
+        while index < policy.entries.len() && candidates.len() <= max_transitions {
+            Self::apply_rotation_entry(&mut candidate, &policy.entries[index], policy);
+            index += 1;
+            candidates.push((candidate.clone(), candidates.len()));
+        }
+        candidates
     }
 
     /// Advance a scheduled task past any rotation entries whose provider
@@ -1397,25 +1479,28 @@ impl AgentTaskScheduleSupport {
         policy: Option<&AgentTaskProviderRotationPolicy>,
         usage_caps: &crate::agent_task_provider::ProviderUsageCapRegistry,
         now: chrono::DateTime<chrono::Utc>,
+        max_provider_rotations: u32,
+        capacity_key: &dyn Fn(&AgentTaskRequest) -> String,
     ) -> Vec<UsageCapSkip> {
         let mut skipped = Vec::new();
         let Some(policy) = policy else {
             return skipped;
         };
         loop {
-            let key = crate::agent_task_provider::provider_usage_cap_key(
-                &scheduled.request.executor.backend,
-                scheduled.request.executor.selector.as_deref(),
-            );
+            let key = capacity_key(&scheduled.request);
             let Some(reset_at) = usage_caps.active(&key, now) else {
                 break;
             };
             let backend = scheduled.request.executor.backend.clone();
             let selector = scheduled.request.executor.selector.clone();
-            if scheduled.rotation_index >= policy.entries.len() {
+            let model = scheduled.request.executor.model().map(str::to_string);
+            if scheduled.rotation_index >= policy.entries.len()
+                || scheduled.rotation_transitions_used >= max_provider_rotations as usize
+            {
                 skipped.push(UsageCapSkip {
                     backend,
                     selector,
+                    model,
                     reset_at,
                     exhausted: true,
                 });
@@ -1424,12 +1509,14 @@ impl AgentTaskScheduleSupport {
             skipped.push(UsageCapSkip {
                 backend,
                 selector,
+                model,
                 reset_at,
                 exhausted: false,
             });
             let entry = &policy.entries[scheduled.rotation_index];
             Self::apply_rotation_entry(&mut scheduled.request, entry, policy);
             scheduled.rotation_index += 1;
+            scheduled.rotation_transitions_used += 1;
         }
         skipped
     }
@@ -1483,6 +1570,26 @@ impl AgentTaskScheduleSupport {
             .insert(
                 "provider_rotation".to_string(),
                 serde_json::json!({ "attempts": attempts }),
+            );
+    }
+
+    pub(super) fn attach_readiness_skip_evidence(
+        outcome: &mut AgentTaskOutcome,
+        skipped: &[serde_json::Value],
+    ) {
+        if skipped.is_empty() {
+            return;
+        }
+        if !outcome.metadata.is_object() {
+            outcome.metadata = serde_json::json!({});
+        }
+        outcome
+            .metadata
+            .as_object_mut()
+            .expect("outcome metadata object")
+            .insert(
+                "provider_readiness_routing".to_string(),
+                serde_json::json!({ "skipped": skipped }),
             );
     }
 
@@ -1546,7 +1653,8 @@ impl AgentTaskScheduleSupport {
             .then_some({
                 if executions_used >= budget.max_provider_executions {
                     Some("total_executions")
-                } else if rotations_used > 0
+                } else if executions_used > 0
+                    && rotations_used > 0
                     && rotations_used >= budget.max_provider_rotations as usize
                 {
                     Some("provider_rotations")

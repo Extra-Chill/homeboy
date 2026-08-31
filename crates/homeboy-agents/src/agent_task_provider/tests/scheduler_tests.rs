@@ -2,7 +2,8 @@ use super::common::{request, script};
 use super::*;
 use crate::agent_task::AgentTaskArtifactDeclaration;
 use crate::agent_task_scheduler::{
-    AgentTaskAggregateStatus, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+    AgentTaskAggregateStatus, AgentTaskExecutionBudget, AgentTaskProviderRotationEntry,
+    AgentTaskProviderRotationPolicy,
 };
 use std::sync::{Arc, Mutex};
 
@@ -249,6 +250,78 @@ fn scheduler_dispatches_extension_provider_command() {
         AgentTaskOutcomeStatus::Succeeded
     );
     assert_eq!(aggregate.outcomes[0].outputs["issue_number"], json!(3447));
+}
+
+#[test]
+fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let marker = temp.path().join("executed.json");
+    let probe_count = temp.path().join("probe-count");
+    let command = format!(
+        "node {}",
+        script(&format!(
+            "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));fs.writeFileSync({:?},JSON.stringify({{model:req.executor.model,config:req.executor.config}}));process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded'}}));",
+            marker.display().to_string()
+        ))
+    );
+    let (mut task, mut provider) = request("cook-ready-fallback", command);
+    task.executor.model = Some("blocked-model".to_string());
+    let readiness = script(&format!(
+        "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let p={:?};fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1));let ready=req.effective_config.model==='ready-model';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'',reason:ready?'':'blocked',cache_key:req.effective_config.model,identity:{{model:req.effective_config.model}}}}));",
+        probe_count.display().to_string()
+    ));
+    provider.readiness_invocation = Some(CommandInvocation {
+        argv: vec!["node".to_string(), readiness],
+        ..CommandInvocation::default()
+    });
+    let catalog = AgentTaskProviderCatalog {
+        providers: vec![provider.clone()],
+        ..Default::default()
+    };
+    let mut plan = AgentTaskPlan::new("cook-production-readiness", vec![task]);
+    plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+        entries: vec![
+            AgentTaskProviderRotationEntry {
+                model: Some("blocked-model".to_string()),
+                ..Default::default()
+            },
+            AgentTaskProviderRotationEntry {
+                model: Some("ready-model".to_string()),
+                provider_config: json!({ "account": "ready-account" }),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 1);
+
+    preflight_plan_provider_dispatchability_with_providers(
+        &mut plan,
+        &catalog,
+        &mut ProviderRuntimeReadinessCache::default(),
+    )
+    .expect("Cook admits the first ready production route");
+    assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
+    assert_eq!(plan.tasks[0].executor.config["account"], "ready-account");
+
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::from_catalog(catalog),
+    ))
+    .run(plan);
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    let executed: Value = serde_json::from_slice(&std::fs::read(marker).expect("execution marker"))
+        .expect("execution identity");
+    assert_eq!(executed["model"], "ready-model");
+    assert_eq!(executed["config"]["account"], "ready-account");
+    assert_eq!(
+        aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
+        1
+    );
+    assert_eq!(
+        aggregate.outcomes[0].metadata["execution_budget"]["provider_rotations_used"],
+        1
+    );
 }
 
 #[test]

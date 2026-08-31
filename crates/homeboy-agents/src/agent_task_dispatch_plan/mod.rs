@@ -163,6 +163,15 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?;
     let policy = request.core.resolved_provider_policy.clone();
     let initial_route = policy.map(initial_provider_route_from_policy);
+    if let Some(overrides) = initial_route
+        .as_ref()
+        .and_then(|route| route.provider_config.as_object())
+    {
+        provider_config
+            .as_object_mut()
+            .expect("dispatch provider config object")
+            .extend(overrides.clone());
+    }
     let policy_backend = initial_route
         .as_ref()
         .map(|route| route.backend.clone())

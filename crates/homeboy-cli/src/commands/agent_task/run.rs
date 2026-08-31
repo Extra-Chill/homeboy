@@ -6841,8 +6841,6 @@ pub(crate) fn compile_cook_plan(
             task.executor.config["component_cwd"] = serde_json::json!(component_cwd);
         }
     }
-    homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
-        .validate_selected_models(&plan)?;
     record_cook_goal(&mut plan, args.goal.as_deref());
     if !args.provider_evidence_inputs.is_empty() {
         for task in &mut plan.tasks {
@@ -6853,6 +6851,17 @@ pub(crate) fn compile_cook_plan(
                 .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
         }
     }
+    // Admission must see Cook's pinned-route/rotation budget rather than the
+    // broader configured policy. Callers resolve again after admission to
+    // refresh the persisted effective-route disclosure.
+    resolve_cook_execution_budget(args, &mut plan)?;
+    let catalog = homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover();
+    homeboy::agents::agent_task_provider::preflight_plan_provider_dispatchability_with_providers(
+        &mut plan,
+        &catalog,
+        &mut homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )?;
+    catalog.validate_selected_models(&plan)?;
     Ok(plan)
 }
 

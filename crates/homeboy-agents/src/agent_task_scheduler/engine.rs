@@ -16,6 +16,21 @@ use super::*;
 /// dispatch goes through this single adapter shape so provider selection,
 /// outcome normalization, timeouts, and cancellation do not drift across seams.
 pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
+    /// Stable effective provider/account/config identity used for capacity
+    /// evidence. Production adapters include resolved credential fingerprints.
+    fn provider_route_capacity_key(&self, request: &AgentTaskRequest) -> String {
+        crate::agent_task_provider::provider_usage_cap_key_for_request(request)
+    }
+
+    /// Return the cached, model-scoped readiness known for this exact route.
+    /// The scheduler calls this before materialization and execution accounting.
+    fn provider_route_readiness(&self, _request: &AgentTaskRequest) -> ProviderRouteReadiness {
+        ProviderRouteReadiness::dispatchable()
+    }
+
+    /// Let the adapter retain provider-owned capacity evidence for later plans.
+    fn record_provider_outcome(&self, _request: &AgentTaskRequest, _outcome: &AgentTaskOutcome) {}
+
     fn execute(
         &self,
         request: AgentTaskRequest,
@@ -23,6 +38,35 @@ pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
     ) -> AgentTaskOutcome;
 
     fn cancel(&self, _task_id: &str) {}
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderRouteReadiness {
+    pub ready: bool,
+    pub state: String,
+    pub reason: String,
+    pub reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub classification: Option<String>,
+    pub retryable: bool,
+    pub remediation: Option<String>,
+    pub cache_identity: Option<String>,
+    pub provider_identity: Option<String>,
+}
+
+impl ProviderRouteReadiness {
+    pub fn dispatchable() -> Self {
+        Self {
+            ready: true,
+            state: "ready".to_string(),
+            reason: "route is dispatchable".to_string(),
+            reset_at: None,
+            classification: Some("ready".to_string()),
+            retryable: false,
+            remediation: None,
+            cache_identity: None,
+            provider_identity: None,
+        }
+    }
 }
 
 /// The one shape an executor takes once it reaches the scheduler.
@@ -242,7 +286,11 @@ impl AgentTaskScheduler {
             .drain(..)
             .map(|mut request| {
                 request.limits.execution_deadline_unix_ms = execution_deadline_unix_ms;
-                if let Some(policy) = plan_rotation.as_ref() {
+                let rotation_policy = AgentTaskScheduleSupport::rotation_policy_for_request(
+                    &request,
+                    plan_rotation.as_ref(),
+                );
+                if let Some(policy) = rotation_policy.as_ref() {
                     AgentTaskScheduleSupport::apply_rotation_policy_limits(&mut request, policy);
                     // Backfill the initial attempt's model from the first entry
                     // so a configured model default is persisted before the run
@@ -254,22 +302,20 @@ impl AgentTaskScheduler {
                         );
                     }
                 }
-                let rotation_index = plan_rotation
-                    .as_ref()
-                    .and_then(|policy| policy.entries.first())
-                    .is_some_and(|entry| {
-                        entry
-                            .backend
-                            .as_deref()
-                            .is_none_or(|backend| backend == request.executor.backend)
-                            && entry.selector.as_deref().is_none_or(|selector| {
-                                request.executor.selector.as_deref() == Some(selector)
-                            })
-                            && entry
-                                .model
-                                .as_deref()
-                                .is_none_or(|model| request.executor.model() == Some(model))
-                    }) as usize;
+                let rotation_index = rotation_policy.as_ref().map_or(0, |policy| {
+                    AgentTaskScheduleSupport::initial_rotation_index(&request, policy)
+                });
+                let rotation_transitions_used = request
+                    .metadata
+                    .pointer("/provider_readiness_routing/provider_rotations_used")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default() as usize;
+                let readiness_skips = request
+                    .metadata
+                    .pointer("/provider_readiness_routing/skipped")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
                 ScheduledTask {
                     workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                     request,
@@ -279,7 +325,9 @@ impl AgentTaskScheduler {
                     // so a failure must advance to the next entry rather than
                     // immediately repeat the exhausted provider route.
                     rotation_index,
+                    rotation_transitions_used,
                     rotation_attempts: Vec::new(),
+                    readiness_skips,
                     candidate_artifacts: Vec::new(),
                     retry_attempts: Vec::new(),
                     task_base_sha: None,
@@ -527,6 +575,8 @@ impl AgentTaskScheduler {
                     rotation_policy_for_skip.as_ref(),
                     &usage_caps,
                     chrono::Utc::now(),
+                    execution_budget.max_provider_rotations,
+                    &|request| self.executor.provider_route_capacity_key(request),
                 );
                 for skip in &usage_cap_skips {
                     events.push(event(
@@ -542,7 +592,11 @@ impl AgentTaskScheduler {
                     ));
                 }
                 if usage_cap_skips.last().is_some_and(|skip| skip.exhausted) {
-                    let outcome = usage_cap_exhausted_outcome(&scheduled, &usage_cap_skips);
+                    let outcome = usage_cap_exhausted_outcome(
+                        &scheduled,
+                        &usage_cap_skips,
+                        &execution_budget,
+                    );
                     events.push(event(
                         &scheduled.request.task_id,
                         AgentTaskState::Failed,
@@ -550,6 +604,79 @@ impl AgentTaskScheduler {
                         outcome.summary.clone(),
                     ));
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                    continue;
+                }
+                for skip in usage_cap_skips {
+                    scheduled.readiness_skips.push(serde_json::json!({
+                        "backend": skip.backend,
+                        "selector": skip.selector,
+                        "model": skip.model,
+                        "state": "usage_capped",
+                        "reason": "known provider usage cap is active",
+                        "reset_at": skip.reset_at.to_rfc3339(),
+                        "classification": "capacity",
+                        "retryable": true,
+                        "remediation": "wait for the provider usage cap to reset or switch account credentials",
+                    }));
+                }
+                let readiness_policy = AgentTaskScheduleSupport::rotation_policy_for_request(
+                    &scheduled.request,
+                    plan_rotation.as_ref(),
+                );
+                loop {
+                    let readiness = self.executor.provider_route_readiness(&scheduled.request);
+                    if readiness.ready {
+                        break;
+                    }
+                    let skip = serde_json::json!({
+                        "backend": scheduled.request.executor.backend,
+                        "selector": scheduled.request.executor.selector,
+                        "model": scheduled.request.executor.model(),
+                        "state": readiness.state,
+                        "reason": readiness.reason,
+                        "reset_at": readiness.reset_at.map(|reset_at| reset_at.to_rfc3339()),
+                        "classification": readiness.classification,
+                        "retryable": readiness.retryable,
+                        "remediation": readiness.remediation,
+                        "cache_identity": readiness.cache_identity,
+                        "provider_identity": readiness.provider_identity,
+                    });
+                    events.push(event(
+                        &scheduled.request.task_id,
+                        AgentTaskState::Queued,
+                        scheduled.attempt,
+                        Some(format!(
+                            "provider route unavailable: backend={}, model={}, state={}; skipping without spending an execution",
+                            scheduled.request.executor.backend,
+                            scheduled.request.executor.model().unwrap_or("not recorded"),
+                            skip["state"].as_str().unwrap_or("unavailable"),
+                        )),
+                    ));
+                    scheduled.readiness_skips.push(skip);
+                    let Some(policy) = readiness_policy.as_ref() else {
+                        let outcome =
+                            provider_readiness_exhausted_outcome(&scheduled, &execution_budget);
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        break;
+                    };
+                    if scheduled.rotation_index >= policy.entries.len()
+                        || scheduled.rotation_transitions_used
+                            >= execution_budget.max_provider_rotations as usize
+                    {
+                        let outcome =
+                            provider_readiness_exhausted_outcome(&scheduled, &execution_budget);
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        break;
+                    }
+                    AgentTaskScheduleSupport::apply_rotation_entry(
+                        &mut scheduled.request,
+                        &policy.entries[scheduled.rotation_index],
+                        policy,
+                    );
+                    scheduled.rotation_index += 1;
+                    scheduled.rotation_transitions_used += 1;
+                }
+                if completed_by_task.contains_key(&scheduled.request.task_id) {
                     continue;
                 }
                 let mut request = scheduled.request;
@@ -825,7 +952,9 @@ impl AgentTaskScheduler {
                     execution_deadline_unix_ms,
                     timeout_cancel_requested: false,
                     rotation_index: scheduled.rotation_index,
+                    rotation_transitions_used: scheduled.rotation_transitions_used,
                     rotation_attempts: scheduled.rotation_attempts,
+                    readiness_skips: scheduled.readiness_skips,
                     candidate_artifacts: scheduled.candidate_artifacts,
                     retry_attempts: scheduled.retry_attempts,
                     source_workspace_root,
@@ -987,13 +1116,13 @@ impl AgentTaskScheduler {
                         crate::agent_task_provider::reset_at_from_outcome(&outcome)
                     {
                         usage_caps.record(
-                            crate::agent_task_provider::provider_usage_cap_key(
-                                &running_task.request.executor.backend,
-                                running_task.request.executor.selector.as_deref(),
-                            ),
+                            self.executor
+                                .provider_route_capacity_key(&running_task.request),
                             reset_at,
                         );
                     }
+                    self.executor
+                        .record_provider_outcome(&running_task.request, &outcome);
                     // A fingerprinted, non-empty patch is a durable candidate.
                     // Let Cook admit and gate it before spending another full
                     // implementation-provider budget. Independent candidate
@@ -1019,6 +1148,7 @@ impl AgentTaskScheduler {
                                 &eligible,
                                 &policy,
                                 running_task.rotation_index,
+                                running_task.rotation_transitions_used,
                                 result.attempt,
                                 execution_budget.max_provider_executions,
                                 execution_budget.max_provider_rotations,
@@ -1147,7 +1277,9 @@ impl AgentTaskScheduler {
                             resource_wait: None,
                             attempt: next_attempt,
                             rotation_index: running_task.rotation_index,
+                            rotation_transitions_used: running_task.rotation_transitions_used,
                             rotation_attempts: running_task.rotation_attempts,
+                            readiness_skips: running_task.readiness_skips,
                             candidate_artifacts,
                             retry_attempts,
                             task_base_sha: running_task.task_base_sha,
@@ -1165,6 +1297,7 @@ impl AgentTaskScheduler {
                                 &outcome,
                                 policy,
                                 running_task.rotation_index,
+                                running_task.rotation_transitions_used,
                                 result.attempt,
                                 execution_budget.max_provider_executions,
                                 execution_budget.max_provider_rotations,
@@ -1271,7 +1404,11 @@ impl AgentTaskScheduler {
                                     resource_wait: None,
                                     attempt: next_attempt,
                                     rotation_index: running_task.rotation_index + 1,
+                                    rotation_transitions_used: running_task
+                                        .rotation_transitions_used
+                                        + 1,
                                     rotation_attempts,
+                                    readiness_skips: running_task.readiness_skips,
                                     candidate_artifacts,
                                     retry_attempts: running_task.retry_attempts,
                                     task_base_sha: running_task.task_base_sha,
@@ -1326,11 +1463,15 @@ impl AgentTaskScheduler {
                             &rotation_attempts,
                         );
                     }
+                    AgentTaskScheduleSupport::attach_readiness_skip_evidence(
+                        &mut outcome,
+                        &running_task.readiness_skips,
+                    );
                     AgentTaskScheduleSupport::attach_execution_budget_evidence(
                         &mut outcome,
                         &execution_budget,
                         result.attempt,
-                        running_task.rotation_index,
+                        running_task.rotation_transitions_used,
                         same_provider_retries_used,
                     );
                     let _ = release_scratch(
@@ -1565,8 +1706,12 @@ pub(super) struct ScheduledTask {
     pub(super) attempt: u32,
     /// Rotation entries already consumed for this task (0 = original executor).
     pub(super) rotation_index: usize,
+    /// Provider-route transitions already consumed, including readiness skips.
+    pub(super) rotation_transitions_used: usize,
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
     pub(super) rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
+    /// Ordered routes rejected before dispatch; these consume no execution.
+    pub(super) readiness_skips: Vec<serde_json::Value>,
     /// Patch candidates produced by earlier retry or rotation attempts.
     pub(super) candidate_artifacts: Vec<AgentTaskArtifact>,
     /// Structured diagnostics retained from failed retries before finalization.
@@ -1593,8 +1738,10 @@ pub(super) struct RunningTask {
     pub(super) timeout_cancel_requested: bool,
     /// Rotation entries already consumed for this task (0 = original executor).
     pub(super) rotation_index: usize,
+    pub(super) rotation_transitions_used: usize,
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
     pub(super) rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
+    pub(super) readiness_skips: Vec<serde_json::Value>,
     pub(super) candidate_artifacts: Vec<AgentTaskArtifact>,
     /// Structured diagnostics retained from failed retries before finalization.
     pub(super) retry_attempts: Vec<serde_json::Value>,
@@ -1988,6 +2135,25 @@ fn scratch_allocation_failure(task_id: String, error: String) -> AgentTaskOutcom
     }
 }
 
+fn attach_pre_dispatch_attempt_history(outcome: &mut AgentTaskOutcome, scheduled: &ScheduledTask) {
+    for retry_attempt in &scheduled.retry_attempts {
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.retry_attempt".to_string(),
+            message:
+                "previous retry attempt failed; its diagnostics and patch evidence are retained"
+                    .to_string(),
+            data: retry_attempt.clone(),
+        });
+    }
+    if !scheduled.rotation_attempts.is_empty() {
+        AgentTaskScheduleSupport::attach_rotation_evidence(outcome, &scheduled.rotation_attempts);
+        AgentTaskScheduleSupport::attach_rotation_exhaustion_diagnostic(
+            outcome,
+            &scheduled.rotation_attempts,
+        );
+    }
+}
+
 /// Terminal outcome for a task whose entire reachable rotation chain is
 /// presently over its usage cap. Built without ever dispatching a provider,
 /// so no attempt is spent chasing a provider Homeboy already knows will
@@ -1997,13 +2163,14 @@ fn scratch_allocation_failure(task_id: String, error: String) -> AgentTaskOutcom
 fn usage_cap_exhausted_outcome(
     scheduled: &ScheduledTask,
     skipped: &[UsageCapSkip],
+    budget: &AgentTaskExecutionBudget,
 ) -> AgentTaskOutcome {
     let earliest_reset_at = skipped
         .iter()
         .map(|skip| skip.reset_at)
         .min()
         .unwrap_or_else(chrono::Utc::now);
-    AgentTaskOutcome {
+    let mut outcome = AgentTaskOutcome {
         task_id: scheduled.request.task_id.clone(),
         status: AgentTaskOutcomeStatus::Failed,
         summary: Some(format!(
@@ -2022,12 +2189,93 @@ fn usage_cap_exhausted_outcome(
                 "skipped": skipped.iter().map(|skip| serde_json::json!({
                     "backend": skip.backend,
                     "selector": skip.selector,
+                    "model": skip.model,
                     "reset_at": skip.reset_at.to_rfc3339(),
                 })).collect::<Vec<_>>(),
             }),
         }],
         ..Default::default()
+    };
+    attach_pre_dispatch_attempt_history(&mut outcome, scheduled);
+    AgentTaskScheduleSupport::attach_execution_budget_evidence(
+        &mut outcome,
+        budget,
+        scheduled.attempt.saturating_sub(1),
+        scheduled.rotation_transitions_used,
+        scheduled.retry_attempts.len(),
+    );
+    outcome
+}
+
+fn provider_readiness_exhausted_outcome(
+    scheduled: &ScheduledTask,
+    budget: &AgentTaskExecutionBudget,
+) -> AgentTaskOutcome {
+    let classifications = scheduled
+        .readiness_skips
+        .iter()
+        .filter_map(|skip| {
+            skip.get("classification")
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<Vec<_>>();
+    let retryable = scheduled
+        .readiness_skips
+        .iter()
+        .any(|skip| skip.get("retryable").and_then(serde_json::Value::as_bool) == Some(true));
+    let failure_classification = if classifications.contains(&"capacity") {
+        AgentTaskFailureClassification::RateLimited
+    } else if classifications.contains(&"transient_failure") {
+        AgentTaskFailureClassification::Transient
+    } else if classifications
+        .iter()
+        .any(|classification| matches!(*classification, "account" | "auth_failure"))
+    {
+        AgentTaskFailureClassification::ProviderAccountBlocked
+    } else if classifications.contains(&"capability") {
+        AgentTaskFailureClassification::CapabilityMissing
+    } else {
+        AgentTaskFailureClassification::Provider
+    };
+    let mut outcome = AgentTaskOutcome {
+        task_id: scheduled.request.task_id.clone(),
+        status: AgentTaskOutcomeStatus::ProviderError,
+        summary: Some(
+            "all configured provider routes are unavailable from cached readiness evidence"
+                .to_string(),
+        ),
+        failure_classification: Some(failure_classification),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.provider_readiness_routes_exhausted".to_string(),
+            message: "all configured provider routes were skipped before dispatch".to_string(),
+            data: serde_json::json!({
+                "skipped": scheduled.readiness_skips,
+                "classifications": classifications.clone(),
+                "retryable": retryable,
+            }),
+        }],
+        ..Default::default()
+    };
+    if !outcome.metadata.is_object() {
+        outcome.metadata = serde_json::json!({});
     }
+    outcome.metadata["provider_readiness_exhaustion"] = serde_json::json!({
+        "classifications": classifications,
+        "retryable": retryable,
+    });
+    attach_pre_dispatch_attempt_history(&mut outcome, scheduled);
+    AgentTaskScheduleSupport::attach_readiness_skip_evidence(
+        &mut outcome,
+        &scheduled.readiness_skips,
+    );
+    AgentTaskScheduleSupport::attach_execution_budget_evidence(
+        &mut outcome,
+        budget,
+        scheduled.attempt.saturating_sub(1),
+        scheduled.rotation_transitions_used,
+        scheduled.retry_attempts.len(),
+    );
+    outcome
 }
 
 fn provider_worker_panic(task_id: String) -> AgentTaskOutcome {

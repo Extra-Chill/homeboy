@@ -39,7 +39,10 @@ use crate::agent_task_finalization::{
     RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
-use crate::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskState};
+use crate::agent_task_scheduler::{
+    AgentTaskAggregateStatus, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
+    AgentTaskProviderRotationPolicy, AgentTaskScheduler, AgentTaskState,
+};
 use homeboy_core::run_lifecycle_record::{
     ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
     RunLifecycleRecord,
@@ -4818,6 +4821,106 @@ fn cook_preflight_exposes_missing_readiness_invocation_diagnosis_without_provide
         assert_eq!(
             verdict["configuration_diagnosis"]["owner"]["extension_id"],
             "owned-extension"
+        );
+    });
+}
+
+#[test]
+fn compiled_cook_persists_and_executes_the_first_ready_production_provider_route() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("executed.json");
+        let transcript = temp.path().join("transcript.txt");
+        let readiness = temp.path().join("readiness.js");
+        let provider_command = temp.path().join("provider.js");
+        std::fs::write(
+            &readiness,
+            "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const ready=req.effective_config.model==='ready-model'&&req.effective_config.account==='ready-account';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'',reason:ready?'':'blocked',cache_key:req.effective_config.account||'blocked',identity:{account:req.effective_config.account||'blocked'}}));",
+        )
+        .expect("readiness script");
+        std::fs::write(
+            &provider_command,
+            format!(
+                "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const transcript={:?};fs.writeFileSync({:?},JSON.stringify({{model:req.executor.model,config:req.executor.config}}));fs.writeFileSync(transcript,'ready fallback executed');process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',artifacts:[{{schema:'homeboy/agent-task-artifact/v1',id:'transcript',kind:'transcript',name:'transcript',path:transcript}}]}}));",
+                transcript.display().to_string(), marker.display().to_string()
+            ),
+        )
+        .expect("provider script");
+        let mut provider = compile_provider("production.provider", "production");
+        provider.invocation = homeboy_core::command_invocation::CommandInvocation {
+            argv: vec!["node".to_string(), provider_command.display().to_string()],
+            ..Default::default()
+        };
+        provider.readiness_invocation = Some(homeboy_core::command_invocation::CommandInvocation {
+            argv: vec!["node".to_string(), readiness.display().to_string()],
+            ..Default::default()
+        });
+        let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        };
+        let mut command = compile_command("production", None, None);
+        command.core.resolved_provider_policy = Some(
+            crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                backend: "production".to_string(),
+                selector: None,
+                model: None,
+                rotation: Some(AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        AgentTaskProviderRotationEntry {
+                            model: Some("blocked-model".to_string()),
+                            ..Default::default()
+                        },
+                        AgentTaskProviderRotationEntry {
+                            model: Some("ready-model".to_string()),
+                            provider_config: serde_json::json!({ "account": "ready-account" }),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                rotation_starts_with_first_entry: true,
+                retry: Default::default(),
+                liveness_timeout_ms: None,
+                runtime_identity: None,
+            },
+        );
+        let mut options = compile_options("production-readiness-cook");
+        options.identity.initial_plan.options.execution_budget =
+            AgentTaskExecutionBudget::new(1, 0, 1);
+        let options = compile_cook_attempt_with_catalog_and_readiness_cache(
+            options,
+            command,
+            &catalog,
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("Cook compiles to its first ready route");
+        let plan = options.identity.initial_plan;
+        assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
+        assert_eq!(plan.tasks[0].executor.config["account"], "ready-account");
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(
+            crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(catalog),
+        ))
+        .run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::Succeeded,
+            "{aggregate:?}"
+        );
+        let executed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(marker).expect("execution marker"))
+                .expect("execution identity");
+        assert_eq!(executed["model"], "ready-model");
+        assert_eq!(executed["config"]["account"], "ready-account");
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
+            1
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["provider_rotations_used"],
+            1
         );
     });
 }

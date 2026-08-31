@@ -46,6 +46,53 @@ mod provider_rotation_tests {
         reset_at: chrono::DateTime<chrono::Utc>,
     }
 
+    struct ReadinessRoutingExecutor {
+        observed: Arc<Mutex<Vec<AgentTaskRequest>>>,
+        reset_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    impl AgentTaskExecutorAdapter for ReadinessRoutingExecutor {
+        fn provider_route_readiness(&self, request: &AgentTaskRequest) -> ProviderRouteReadiness {
+            match request.executor.model() {
+                Some("xai/grok-4.6") => ProviderRouteReadiness {
+                    ready: false,
+                    state: "provider_account_blocked".to_string(),
+                    reason: "account is blocked".to_string(),
+                    reset_at: None,
+                    classification: Some("account".to_string()),
+                    retryable: true,
+                    remediation: Some("switch account".to_string()),
+                    cache_identity: Some("account-a".to_string()),
+                    provider_identity: Some("provider-a".to_string()),
+                },
+                Some("zai-coding-plan/glm-5.3" | "opencode-go/kimi-k3") => ProviderRouteReadiness {
+                    ready: false,
+                    state: "usage_capped".to_string(),
+                    reason: "five-hour usage cap is active".to_string(),
+                    reset_at: Some(self.reset_at),
+                    classification: Some("capacity".to_string()),
+                    retryable: true,
+                    remediation: Some("wait for reset".to_string()),
+                    cache_identity: Some("account-b".to_string()),
+                    provider_identity: Some("provider-b".to_string()),
+                },
+                _ => ProviderRouteReadiness::dispatchable(),
+            }
+        }
+
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.observed
+                .lock()
+                .expect("observed requests")
+                .push(request.clone());
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
     impl AgentTaskExecutorAdapter for UsageCapAwareExecutor {
         fn execute(
             &self,
@@ -325,6 +372,9 @@ mod provider_rotation_tests {
         let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].executor.model = Some("primary-model".to_string());
+        plan.tasks[0].metadata = json!({
+            "resolved_runtime_identity": { "provider_id": "primary.provider" }
+        });
         plan.options.rotation = Some(rotation_policy(vec![
             AgentTaskProviderRotationEntry {
                 backend: Some("fallback-backend-a".to_string()),
@@ -360,6 +410,13 @@ mod provider_rotation_tests {
                 .get("provider")
                 .and_then(Value::as_str),
             Some("fallback-provider-a")
+        );
+        assert!(
+            observed[1]
+                .metadata
+                .get("resolved_runtime_identity")
+                .is_none(),
+            "a backend-changing fallback must resolve its own runtime identity"
         );
 
         let attempts = aggregate.outcomes[0]
@@ -853,7 +910,7 @@ mod provider_rotation_tests {
             deadline_unix_ms: None,
             max_provider_executions: 1,
             max_same_provider_retries: 0,
-            max_provider_rotations: 0,
+            max_provider_rotations: 3,
         };
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
 
@@ -970,6 +1027,211 @@ mod provider_rotation_tests {
         assert_eq!(
             aggregate.outcomes[0].metadata["execution_budget"]["same_provider_retries_used"], 0,
             "an explicitly non-retryable account rejection must rotate immediately"
+        );
+    }
+
+    #[test]
+    fn readiness_skips_blocked_and_capped_routes_before_the_first_provider_execution() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(Arc::new(ReadinessRoutingExecutor {
+            observed: Arc::clone(&observed),
+            reset_at: chrono::Utc::now() + chrono::Duration::hours(2),
+        }));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("xai/grok-4.6".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("zai-coding-plan/glm-5.3".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("opencode-go/kimi-k3".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    backend: Some("opencode".to_string()),
+                    model: Some("openai/gpt-5.6-terra".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        plan.options.execution_budget = AgentTaskExecutionBudget {
+            version: AgentTaskExecutionBudget::VERSION,
+            deadline_unix_ms: None,
+            max_provider_executions: 1,
+            max_same_provider_retries: 0,
+            max_provider_rotations: 3,
+        };
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::Succeeded,
+            "{aggregate:#?}"
+        );
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(observed.len(), 1, "only a dispatchable route executes");
+        assert_eq!(observed[0].executor.model(), Some("openai/gpt-5.6-terra"));
+        let skipped = aggregate.outcomes[0].metadata["provider_readiness_routing"]["skipped"]
+            .as_array()
+            .expect("ordered readiness skips");
+        assert_eq!(skipped.len(), 3);
+        assert_eq!(skipped[0]["model"], "xai/grok-4.6");
+        assert_eq!(skipped[0]["state"], "provider_account_blocked");
+        assert_eq!(skipped[1]["model"], "zai-coding-plan/glm-5.3");
+        assert_eq!(skipped[2]["model"], "opencode-go/kimi-k3");
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
+            1
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["provider_rotations_used"], 3,
+            "readiness routing records route transitions without spending executions"
+        );
+        assert!(aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation/attempts")
+            .is_none());
+    }
+
+    #[test]
+    fn readiness_exhaustion_records_zero_dispatch_budget_and_route_evidence() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(Arc::new(ReadinessRoutingExecutor {
+            observed: Arc::clone(&observed),
+            reset_at: chrono::Utc::now() + chrono::Duration::hours(2),
+        }));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                AgentTaskProviderRotationEntry {
+                    model: Some("xai/grok-4.6".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    model: Some("zai-coding-plan/glm-5.3".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    model: Some("opencode-go/kimi-k3".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        plan.options.execution_budget = AgentTaskExecutionBudget {
+            version: AgentTaskExecutionBudget::VERSION,
+            deadline_unix_ms: None,
+            max_provider_executions: 2,
+            max_same_provider_retries: 0,
+            max_provider_rotations: 2,
+        };
+        let aggregate = scheduler.run(plan);
+        assert!(observed.lock().expect("observed requests").is_empty());
+        assert!(aggregate
+            .events
+            .iter()
+            .all(|event| event.state != AgentTaskState::Running));
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.metadata["execution_budget"]["executions_used"], 0);
+        assert_eq!(
+            outcome.metadata["execution_budget"]["remaining_provider_executions"],
+            2
+        );
+        assert_eq!(
+            outcome.metadata["execution_budget"]["provider_rotations_used"],
+            2
+        );
+        assert!(outcome.metadata["execution_budget"]["exhausted"].is_null());
+        let skipped = outcome.metadata["provider_readiness_routing"]["skipped"]
+            .as_array()
+            .expect("readiness evidence");
+        assert_eq!(skipped.len(), 3);
+        assert_eq!(skipped[0]["classification"], "account");
+        assert_eq!(skipped[0]["remediation"], "switch account");
+        assert_eq!(skipped[0]["cache_identity"], "account-a");
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::RateLimited)
+        );
+        assert_eq!(
+            outcome.metadata["provider_readiness_exhaustion"]["retryable"],
+            true
+        );
+    }
+
+    #[test]
+    fn readiness_exhaustion_after_rotation_preserves_prior_execution_evidence() {
+        struct UnreadyAfterFirstExecution {
+            calls: AtomicUsize,
+        }
+
+        impl AgentTaskExecutorAdapter for UnreadyAfterFirstExecution {
+            fn provider_route_readiness(
+                &self,
+                _request: &AgentTaskRequest,
+            ) -> ProviderRouteReadiness {
+                if self.calls.load(Ordering::SeqCst) == 0 {
+                    ProviderRouteReadiness::dispatchable()
+                } else {
+                    ProviderRouteReadiness {
+                        ready: false,
+                        state: "usage_capped".to_string(),
+                        reason: "fallback is capped".to_string(),
+                        reset_at: None,
+                        classification: Some("capacity".to_string()),
+                        retryable: true,
+                        remediation: Some("wait".to_string()),
+                        cache_identity: Some("fallback-account".to_string()),
+                        provider_identity: Some("fallback-provider".to_string()),
+                    }
+                }
+            }
+
+            fn execute(
+                &self,
+                request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                AgentTaskOutcome {
+                    task_id: request.task_id,
+                    status: AgentTaskOutcomeStatus::ProviderError,
+                    failure_classification: Some(
+                        AgentTaskFailureClassification::ProviderAccountBlocked,
+                    ),
+                    ..Default::default()
+                }
+            }
+        }
+
+        let scheduler = AgentTaskScheduler::new(Arc::new(UnreadyAfterFirstExecution {
+            calls: AtomicUsize::new(0),
+        }));
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.metadata["execution_budget"]["executions_used"], 1);
+        assert_eq!(
+            outcome.metadata["provider_rotation"]["attempts"]
+                .as_array()
+                .expect("prior rotation attempts")
+                .len(),
+            1
         );
     }
 
