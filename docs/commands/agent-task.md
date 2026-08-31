@@ -1107,15 +1107,16 @@ missing-`--backend` error instead of failing with the same precondition (#12569)
 A supplied `--backend` still fails fast: that query names one backend and has no
 fuller picture to report.
 
-A `ready` verdict means "no reason found to block dispatch," not "confirmed to
-work." `dispatchability.checks.credentials.verified` distinguishes the two: it
-is `true` only when the routed provider declared its own live readiness probe
-(`readiness_invocation`) and that probe ran and passed. When it is `false`,
-`ready: true` reflects presence only — the declared credential material is
-readable somewhere, which is not proof it is still valid. A revoked or expired
-provider-owned credential (e.g. an OAuth refresh token) stays present on disk
-after revocation, so presence-only readiness must not be read as a live
-go/no-go signal for that class of credential (#13628).
+`dispatchability.checks.credentials.status` distinguishes `missing`, `present`,
+`unverified`, `verified`, `unusable`, and `not_required`. Readable credential
+material is only `present`: a revoked or expired provider-owned credential stays
+on disk after revocation. A provider that declares the `provider_owned_auth`
+capability is dispatchable only after its bounded `readiness_invocation` runs
+and passes, producing `verified`. A failed probe reports `unusable` and preserves
+the provider-owned reason and remediation; an absent probe reports `unverified`
+and tells the operator to update the provider or select a verified backend.
+Cook performs this live admission against the final provider configuration
+before scheduler reservation can consume provider-execution budget (#13628).
 
 ## Repo-Local Gate Tasks
 

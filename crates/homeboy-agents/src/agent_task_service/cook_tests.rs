@@ -4693,6 +4693,19 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                 compile_command("runtime", None, None),
                 "runtime readiness validation failed",
             ),
+            (
+                "unverified-provider-auth",
+                crate::agent_task_provider::AgentTaskProviderCatalog {
+                    providers: vec![serde_json::from_value(serde_json::json!({
+                        "id": "unverified.provider",
+                        "backend": "unverified",
+                        "capabilities": ["cli_runtime", "provider_owned_auth"]
+                    })).expect("unverified provider")],
+                    ..Default::default()
+                },
+                compile_command("unverified", None, None),
+                "no live validation route",
+            ),
         ];
 
         for (dimension, catalog, command, reason) in cases {
@@ -4729,6 +4742,33 @@ fn compile_cook_with_injected_catalog_proceeds_only_when_every_check_is_ready() 
             options.identity.initial_plan.tasks[0].executor.backend,
             "ready"
         );
+    });
+}
+
+#[test]
+fn compile_cook_admits_provider_owned_auth_only_after_live_verification() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut provider = compile_provider("verified.provider", "verified");
+        provider.capabilities = vec!["cli_runtime".to_string(), "provider_owned_auth".to_string()];
+        provider.readiness_invocation = Some(
+            serde_json::from_value(serde_json::json!({
+                "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"verified\",\"identity\":{}}'"]
+            }))
+            .expect("readiness invocation"),
+        );
+
+        let options = compile_cook_attempt_with_catalog_and_readiness_cache(
+            compile_options("verified-cook"),
+            compile_command("verified", None, None),
+            &crate::agent_task_provider::AgentTaskProviderCatalog {
+                providers: vec![provider],
+                ..Default::default()
+            },
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("verified provider-owned auth is admitted before scheduler reservation");
+
+        assert_eq!(options.identity.initial_plan.tasks.len(), 1);
     });
 }
 

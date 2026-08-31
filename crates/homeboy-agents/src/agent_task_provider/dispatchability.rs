@@ -2,8 +2,9 @@ use serde::Serialize;
 
 use super::{
     effective_provider_config, provider_credential_readiness, readiness_verdict,
-    resolve_provider_for_backend, validate_provider_immediate_failure_patterns,
-    AgentTaskProviderCatalog, ProviderResolution, ProviderRuntimeReadinessCache,
+    resolve_provider_for_backend, runtime_readiness::provider_requires_live_auth_validation,
+    validate_provider_immediate_failure_patterns, AgentTaskProviderCatalog, ProviderResolution,
+    ProviderRuntimeReadinessCache,
 };
 use crate::agent_task_scheduler::AgentTaskPlan;
 use serde_json::Value;
@@ -37,6 +38,7 @@ pub struct AgentTaskProviderDispatchabilityCheck {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentTaskProviderDispatchabilityCredentialCheck {
+    pub status: AgentTaskProviderCredentialStatus,
     pub ready: bool,
     pub missing: Vec<String>,
     /// `true` only when a provider-declared live readiness probe
@@ -48,6 +50,24 @@ pub struct AgentTaskProviderDispatchabilityCredentialCheck {
     /// provider-owned auth must not treat presence-only readiness as
     /// equivalent to a live-verified one.
     pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remediation: Vec<String>,
+}
+
+/// Credential evidence is deliberately more precise than a boolean. In
+/// particular, readable provider-owned auth is only `Present` until a bounded
+/// provider-declared readiness invocation proves it usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskProviderCredentialStatus {
+    NotRequired,
+    Missing,
+    Present,
+    Unverified,
+    Verified,
+    Unusable,
 }
 
 pub fn evaluate_provider_dispatchability(
@@ -109,11 +129,18 @@ pub fn evaluate_provider_dispatchability_with_config(
                     reason: None,
                 },
                 credentials: AgentTaskProviderDispatchabilityCredentialCheck {
+                    status: if credentials_ready {
+                        AgentTaskProviderCredentialStatus::Unverified
+                    } else {
+                        AgentTaskProviderCredentialStatus::Missing
+                    },
                     ready: credentials_ready,
                     missing: Vec::new(),
                     // A route that never resolved to one provider was never
                     // probed, so nothing here was live-verified.
                     verified: false,
+                    reason: Some("the provider route did not resolve, so credentials were not live-validated".to_string()),
+                    remediation: Vec::new(),
                 },
                 configuration: AgentTaskProviderDispatchabilityCheck {
                     ready: configuration_ready,
@@ -171,6 +198,7 @@ pub fn evaluate_provider_dispatchability_with_config(
             reason: Some(reason),
         },
     };
+    let mut runtime_remediation = Vec::new();
     let runtime = if probe_runtime && model_ready && credentials.dispatchable && configuration.ready
     {
         let config = effective_provider_config(config, model);
@@ -179,10 +207,29 @@ pub fn evaluate_provider_dispatchability_with_config(
                 ready: true,
                 reason: None,
             },
-            Ok(verdict) => AgentTaskProviderDispatchabilityCheck {
-                ready: false,
-                reason: Some(homeboy_core::redaction::redact_string(&verdict.reason)),
-            },
+            Ok(verdict) => {
+                if !verdict.remediation.trim().is_empty() {
+                    runtime_remediation
+                        .push(homeboy_core::redaction::redact_string(&verdict.remediation));
+                }
+                let classification = if verdict.classification.trim().is_empty() {
+                    "unknown"
+                } else {
+                    verdict.classification.trim()
+                };
+                let reason = if verdict.reason.trim().is_empty() {
+                    classification.to_string()
+                } else {
+                    format!(
+                        "{classification}: {}",
+                        homeboy_core::redaction::redact_string(&verdict.reason)
+                    )
+                };
+                AgentTaskProviderDispatchabilityCheck {
+                    ready: false,
+                    reason: Some(reason),
+                }
+            }
             Err(reason) => AgentTaskProviderDispatchabilityCheck {
                 ready: false,
                 reason: Some(homeboy_core::redaction::redact_string(&reason.message)),
@@ -203,6 +250,54 @@ pub fn evaluate_provider_dispatchability_with_config(
     // credential gets reported dispatchable (#13628).
     let credentials_verified =
         probe_runtime && provider.readiness_invocation.is_some() && runtime.ready;
+    let provider_owned_auth = provider_requires_live_auth_validation(provider);
+    let (credential_status, credential_reason) = if !credentials.dispatchable {
+        (AgentTaskProviderCredentialStatus::Missing, None)
+    } else if credentials_verified {
+        (AgentTaskProviderCredentialStatus::Verified, None)
+    } else if probe_runtime
+        && provider.readiness_invocation.is_some()
+        && !runtime.ready
+        && (!credentials.requirements.is_empty() || provider_owned_auth)
+    {
+        (
+            AgentTaskProviderCredentialStatus::Unusable,
+            runtime.reason.clone(),
+        )
+    } else if !provider_owned_auth && credentials.requirements.is_empty() {
+        (AgentTaskProviderCredentialStatus::NotRequired, None)
+    } else if !provider_owned_auth {
+        (
+            AgentTaskProviderCredentialStatus::Present,
+            Some("declared credential material is present".to_string()),
+        )
+    } else if !probe_runtime && credentials.requirements.is_empty() {
+        (
+            AgentTaskProviderCredentialStatus::Unverified,
+            Some(
+                "the provider owns authentication but declares no credential presence contract; live validation was not requested"
+                    .to_string(),
+            ),
+        )
+    } else if !probe_runtime {
+        (
+            AgentTaskProviderCredentialStatus::Present,
+            Some(
+                "provider-owned credential material is present; live validation was not requested"
+                    .to_string(),
+            ),
+        )
+    } else if provider.readiness_invocation.is_none() {
+        (
+            AgentTaskProviderCredentialStatus::Unverified,
+            Some(
+                "the provider declares provider-owned authentication but no live readiness invocation"
+                    .to_string(),
+            ),
+        )
+    } else {
+        (AgentTaskProviderCredentialStatus::Unverified, None)
+    };
     let (state, ready, reason) = if !model_ready {
         (
             "model_unavailable",
@@ -221,6 +316,28 @@ pub fn evaluate_provider_dispatchability_with_config(
             false,
             "required provider credentials are not configured",
         )
+    } else if provider_owned_auth && !probe_runtime {
+        (
+            if credentials.requirements.is_empty() {
+                "credentials_unverified"
+            } else {
+                "credentials_present"
+            },
+            false,
+            "provider-owned authentication must be live-validated before dispatch",
+        )
+    } else if provider_owned_auth && provider.readiness_invocation.is_none() {
+        (
+            "credentials_unverified",
+            false,
+            "provider-owned authentication has no live validation route",
+        )
+    } else if provider_owned_auth && !runtime.ready {
+        (
+            "credentials_unusable",
+            false,
+            "provider-owned authentication or its runtime is revoked or unusable",
+        )
     } else if probe_runtime && !runtime.ready {
         (
             "runtime_unavailable",
@@ -229,16 +346,10 @@ pub fn evaluate_provider_dispatchability_with_config(
         )
     } else if !probe_runtime {
         ("ready", true, "live runtime readiness was not requested")
-    } else if credentials_verified {
+    } else if !provider_owned_auth || credentials_verified {
         ("ready", true, "all dispatchability checks passed")
     } else {
-        (
-            "ready",
-            true,
-            "credentials and configuration are present, but the provider declares no live \
-             readiness probe to confirm them; presence is not proof a provider-owned credential \
-             is still valid",
-        )
+        unreachable!("provider-owned auth without verification is rejected above")
     };
     AgentTaskProviderDispatchability {
         state,
@@ -254,9 +365,22 @@ pub fn evaluate_provider_dispatchability_with_config(
                 reason: (!model_ready).then_some("unsupported selected model".to_string()),
             },
             credentials: AgentTaskProviderDispatchabilityCredentialCheck {
+                status: credential_status,
                 ready: credentials.dispatchable,
                 missing: credentials.missing,
                 verified: credentials_verified,
+                reason: credential_reason,
+                remediation: if provider_owned_auth
+                    && probe_runtime
+                    && provider.readiness_invocation.is_none()
+                {
+                    vec![format!(
+                        "Update provider '{}' to declare a bounded readiness_invocation that validates its provider-owned authentication, or select a verified backend.",
+                        provider.id
+                    )]
+                } else {
+                    runtime_remediation
+                },
             },
             configuration,
             runtime,
@@ -328,22 +452,36 @@ fn preflight_provider_dispatchability_with_config_and_probe(
         probe_runtime,
         cache,
     );
-    if verdict.ready {
+    if verdict.ready
+        || (!probe_runtime
+            && matches!(
+                verdict.state,
+                "credentials_present" | "credentials_unverified"
+            ))
+    {
         return Ok(verdict);
     }
     let detail = verdict
         .checks
-        .runtime
+        .credentials
         .reason
         .as_deref()
+        .or(verdict.checks.runtime.reason.as_deref())
         .filter(|reason| *reason != "not requested")
         .map(|reason| format!(": {reason}"))
+        .unwrap_or_default();
+    let remediation = verdict
+        .checks
+        .credentials
+        .remediation
+        .first()
+        .map(|remediation| format!(" Remediation: {remediation}"))
         .unwrap_or_default();
     Err(homeboy_core::Error::validation_invalid_argument(
         "provider_dispatchability",
         format!(
-            "agent-task backend `{backend}` is not dispatchable: {}{detail}",
-            verdict.reason,
+            "agent-task backend `{backend}` is not dispatchable: {}{detail}.{remediation}",
+            verdict.reason.trim_end_matches('.'),
         ),
         Some(backend.to_string()),
         Some(vec![serde_json::to_string(&verdict).unwrap_or_default()]),
@@ -435,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn presence_only_credentials_report_ready_but_not_verified() {
+    fn present_credentials_are_not_admitted_when_live_validation_is_unavailable() {
         let auth = tempfile::NamedTempFile::new().expect("auth file");
         // The credential material is present, exactly like a revoked-but-still-
         // on-disk refresh token (#13628): Homeboy can read it, but reading it
@@ -447,25 +585,44 @@ mod tests {
 
         let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
 
-        assert_eq!(verdict.state, "ready");
+        assert_eq!(verdict.state, "credentials_unverified");
         assert!(
-            verdict.ready,
-            "Homeboy has no contrary evidence, so dispatch must not be blocked"
+            !verdict.ready,
+            "unverified provider-owned auth must fail closed"
         );
         assert!(
             verdict.checks.credentials.ready,
             "the declared credential is present"
+        );
+        assert_eq!(
+            verdict.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Unverified
         );
         assert!(
             !verdict.checks.credentials.verified,
             "no provider-declared readiness probe ran, so this is presence only, not a live \
              verification — reporting it as verified is exactly the #13628 defect"
         );
-        assert!(
-            !verdict.reason.contains("all dispatchability checks passed"),
-            "the reason must not claim full validation when only presence was checked: {}",
-            verdict.reason
+        assert!(verdict.checks.credentials.remediation[0].contains("readiness_invocation"));
+    }
+
+    #[test]
+    fn static_status_distinguishes_present_provider_owned_credentials() {
+        let auth = tempfile::NamedTempFile::new().expect("auth file");
+        std::fs::write(auth.path(), r#"{"token":"present-token"}"#).expect("write auth");
+        let catalog = catalog(provider_with_present_but_unverifiable_credential(
+            auth.path(),
+        ));
+
+        let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, false);
+
+        assert_eq!(verdict.state, "credentials_present");
+        assert!(!verdict.ready);
+        assert_eq!(
+            verdict.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Present
         );
+        assert!(!verdict.checks.credentials.verified);
     }
 
     #[test]
@@ -500,6 +657,50 @@ mod tests {
              verification"
         );
         assert_eq!(verdict.reason, "all dispatchability checks passed");
+    }
+
+    #[test]
+    fn revoked_or_unusable_credentials_preserve_provider_remediation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let auth = root.path().join("auth.json");
+        let script = root.path().join("readiness.js");
+        std::fs::write(&auth, r#"{"token":"revoked-but-present-token"}"#).expect("write auth");
+        std::fs::write(
+            &script,
+            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'auth_failure',retryable:false,remediation:'Log out and sign in again.',reason:'refresh token revoked',cache_key:'k',identity:{}}));",
+        )
+        .expect("readiness script");
+        let mut provider = provider_with_present_but_unverifiable_credential(&auth);
+        provider.readiness_invocation = Some(CommandInvocation {
+            argv: vec!["node".to_string(), script.display().to_string()],
+            ..CommandInvocation::default()
+        });
+        let catalog = catalog(provider);
+
+        let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
+
+        assert_eq!(verdict.state, "credentials_unusable");
+        assert!(!verdict.ready);
+        assert_eq!(
+            verdict.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Unusable
+        );
+        assert_eq!(
+            verdict.checks.credentials.reason.as_deref(),
+            Some("auth_failure: refresh token revoked")
+        );
+        assert_eq!(
+            verdict.checks.credentials.remediation,
+            vec!["Log out and sign in again."]
+        );
+
+        let error = preflight_provider_dispatchability(&catalog, "revocable", None, None)
+            .expect_err("revoked credential must fail before dispatch");
+        assert!(error.message.contains("refresh token revoked"), "{error}");
+        assert!(
+            error.message.contains("Log out and sign in again"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -609,7 +810,7 @@ mod tests {
         assert_eq!(blocked.state, "runtime_unavailable");
         assert_eq!(
             blocked.checks.runtime.reason.as_deref(),
-            Some("token=[REDACTED]")
+            Some("configuration: token=[REDACTED]")
         );
 
         let ready = evaluate_provider_dispatchability_with_config(

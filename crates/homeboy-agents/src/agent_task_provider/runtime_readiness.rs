@@ -31,6 +31,9 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
             continue;
         };
         if provider.readiness_invocation.is_none() {
+            if provider_requires_live_auth_validation(provider) {
+                return Err(unverified_provider_auth_error(provider));
+            }
             validate_provider_immediate_failure_patterns(provider).map_err(|message| {
                 Error::validation_invalid_argument(
                     "immediate_failure_patterns",
@@ -62,6 +65,28 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
         }
     }
     Ok(())
+}
+
+pub(crate) fn provider_requires_live_auth_validation(provider: &AgentTaskExecutorProvider) -> bool {
+    provider
+        .capabilities
+        .iter()
+        .any(|capability| capability == "provider_owned_auth")
+}
+
+pub(crate) fn unverified_provider_auth_error(provider: &AgentTaskExecutorProvider) -> Error {
+    Error::validation_invalid_argument(
+        "provider_runtime_readiness",
+        format!(
+            "agent-task backend '{}' is not dispatchable: provider-owned authentication has no live validation route. Update provider '{}' to declare a bounded readiness_invocation that validates its provider-owned authentication, or select a verified backend",
+            provider.backend, provider.id
+        ),
+        Some(provider.backend.clone()),
+        Some(vec![format!(
+            "Update provider '{}' to declare a bounded readiness_invocation that validates its provider-owned authentication, or select a verified backend.",
+            provider.id
+        )]),
+    )
 }
 
 pub(crate) fn readiness_verdict(
@@ -178,6 +203,10 @@ fn readiness_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
     use homeboy_core::command_invocation::CommandInvocation;
 
     fn provider(script: &std::path::Path, count: &std::path::Path) -> AgentTaskExecutorProvider {
@@ -259,5 +288,58 @@ mod tests {
 
         assert_eq!(first.cache_key, second.cache_key);
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+    }
+
+    #[test]
+    fn provider_owned_auth_without_a_probe_fails_plan_admission() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "unverified.provider",
+            "backend": "unverified",
+            "capabilities": ["cli_runtime", "provider_owned_auth"]
+        }))
+        .expect("provider fixture");
+        let plan = AgentTaskPlan::new(
+            "unverified-plan",
+            vec![AgentTaskRequest {
+                schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "task".to_string(),
+                group_key: None,
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "unverified".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: "test".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
+                metadata: Value::Null,
+            }],
+        );
+
+        let error = preflight_plan_provider_runtime_readiness_with_providers(
+            &plan,
+            &[provider],
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect_err("provider-owned auth requires a live probe");
+
+        assert!(
+            error.message.contains("no live validation route"),
+            "{error}"
+        );
+        assert!(error.message.contains("readiness_invocation"), "{error}");
     }
 }
