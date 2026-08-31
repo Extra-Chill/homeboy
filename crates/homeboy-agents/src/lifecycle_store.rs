@@ -5,8 +5,6 @@ use std::time::Duration;
 
 #[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value};
 
@@ -823,6 +821,25 @@ impl AgentTaskLifecycleStore {
         read_record_bounded_in_store(self, run_id)
     }
 
+    /// Read one record and its mirrored aggregate from the same read-only
+    /// SQLite observation. A missing mirror is returned as `None`; callers must
+    /// not pair that record with the independently materialized aggregate cache.
+    pub fn read_record_with_aggregate_bounded(
+        &self,
+        run_id: &str,
+    ) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
+        let store = self.open_observation_readonly()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!("agent-task run record not found: {run_id}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        record_and_aggregate_from_run(&run)
+    }
+
     pub fn write_record(&self, record: &AgentTaskRunRecord) -> Result<()> {
         self.write_record_with_aggregate(
             record,
@@ -964,7 +981,7 @@ impl AgentTaskLifecycleStore {
             Some(aggregate.clone()),
         )?;
         #[cfg(test)]
-        if INTERRUPT_AFTER_TERMINAL_COMMIT.swap(false, Ordering::SeqCst) {
+        if INTERRUPT_AFTER_TERMINAL_COMMIT.replace(false) {
             return Err(Error::internal_io(
                 "injected interruption after terminal lifecycle commit",
                 Some(record.run_id.clone()),
@@ -1053,9 +1070,9 @@ thread_local! {
     /// One-shot write failure owned by the test thread that armed it. A global
     /// atomic let unrelated parallel tests consume each other's fault (#11897).
     static FAIL_NEXT_RECORD_WRITE: Cell<bool> = const { Cell::new(false) };
+    /// One-shot post-commit failure owned by the test thread that armed it.
+    static INTERRUPT_AFTER_TERMINAL_COMMIT: Cell<bool> = const { Cell::new(false) };
 }
-#[cfg(test)]
-static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 
 /// A crashed notifier cannot release its provisional claim. A bounded lease
 /// keeps that crash window from permanently suppressing a detached resume.
@@ -1285,7 +1302,7 @@ pub(super) fn fail_next_record_write_for_test() {
 
 #[cfg(test)]
 pub(super) fn interrupt_after_terminal_commit_for_test() {
-    INTERRUPT_AFTER_TERMINAL_COMMIT.store(true, Ordering::SeqCst);
+    INTERRUPT_AFTER_TERMINAL_COMMIT.set(true);
 }
 
 fn write_record_with_aggregate_without_workspace_authority(
@@ -1815,6 +1832,12 @@ pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
     record_from_run_with_schema_policy(run, true)
 }
 
+fn record_and_aggregate_from_run(
+    run: &RunRecord,
+) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
+    Ok((record_from_run(run)?, aggregate_from_run(run)?))
+}
+
 /// Read a durable record without enforcing the supported-schema guard.
 ///
 /// Record health reconciliation exists to migrate legacy schemas, so it is the
@@ -1894,12 +1917,17 @@ fn read_mirrored_aggregate_in_store(
     let Some(run) = store.get_run(run_id)? else {
         return Ok(None);
     };
-    let Some(value) = run.metadata_json.get("agent_task_aggregate") else {
+    aggregate_from_run(&run)
+}
+
+fn aggregate_from_run(run: &RunRecord) -> Result<Option<AgentTaskAggregate>> {
+    let Some(value) = run
+        .metadata_json
+        .get("agent_task_aggregate")
+        .filter(|value| !value.is_null())
+    else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
     serde_json::from_value(value.clone())
         .map(Some)
         .map_err(|error| {

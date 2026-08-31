@@ -6210,7 +6210,7 @@ pub fn artifacts_in_store(
 ///
 /// It intentionally never calls [`status`], which can reconcile a live runner.
 /// The observation-store record read uses its read-only 750ms SQLite busy bound;
-/// aggregate failure is represented in `unavailable_sources` so callers can
+/// aggregate absence is represented in `unavailable_sources` so callers can
 /// still render the durable identity and phase they did obtain.
 #[derive(Debug, Clone)]
 pub struct AgentTaskDurableLocalRead {
@@ -6238,8 +6238,8 @@ pub fn durable_local_read_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskDurableLocalRead> {
-    let record = status_in_store(lifecycle_store, run_id)?;
-    durable_local_read_record_in_store(lifecycle_store, record)
+    let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
+    durable_local_read_record_in_store(lifecycle_store, &run_id)
 }
 
 /// Read one concrete durable record without resolving a Cook ID through its
@@ -6253,39 +6253,31 @@ pub fn exact_durable_local_read_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskDurableLocalRead> {
-    let record = lifecycle_store.read_record_bounded(&sanitize_run_id(run_id))?;
-    durable_local_read_record_in_store(lifecycle_store, record)
+    durable_local_read_record_in_store(lifecycle_store, &sanitize_run_id(run_id))
 }
 
 fn durable_local_read_record_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
-    record: AgentTaskRunRecord,
+    run_id: &str,
 ) -> Result<AgentTaskDurableLocalRead> {
-    let aggregate = match lifecycle_store.read_aggregate_bounded(&record.run_id) {
-        Ok(aggregate) => Some(aggregate),
-        Err(error) => {
-            return Ok(AgentTaskDurableLocalRead {
-                record,
-                aggregate: None,
-                unavailable_sources: vec![AgentTaskDurableReadUnavailable {
-                    source: "aggregate",
-                    reason_code: if error.details["reason_code"] == "durable_read.oversized" {
-                        "durable_read.oversized"
-                    } else {
-                        "durable_read.unavailable"
-                    },
-                    detail: format!(
-                        "The controller-local aggregate was unavailable within the durable read; the record below remains authoritative partial evidence: {}",
-                        error.message
-                    ),
-                }],
-            });
-        }
-    };
+    let (record, mirrored_aggregate) =
+        lifecycle_store.read_record_with_aggregate_bounded(run_id)?;
+    if let Some(aggregate) = mirrored_aggregate {
+        return Ok(AgentTaskDurableLocalRead {
+            record,
+            aggregate: Some(aggregate),
+            unavailable_sources: Vec::new(),
+        });
+    }
     Ok(AgentTaskDurableLocalRead {
         record,
-        aggregate,
-        unavailable_sources: Vec::new(),
+        aggregate: None,
+        unavailable_sources: vec![AgentTaskDurableReadUnavailable {
+            source: "aggregate",
+            reason_code: "durable_read.authoritative_aggregate_absent",
+            detail: "The authoritative SQLite observation has no mirrored aggregate; aggregate.json was not consulted because it cannot be paired atomically with this record."
+                .to_string(),
+        }],
     })
 }
 
