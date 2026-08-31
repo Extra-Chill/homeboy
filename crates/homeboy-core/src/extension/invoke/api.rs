@@ -9,7 +9,8 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiOperationFailure, ExtensionApiOperationFailureCode, ExtensionApiResolveRequest,
     COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNING_FIXES_CAPABILITY_ID,
     EXTENSION_API_INVOKE_REQUEST_SCHEMA, EXTENSION_API_INVOKE_RESPONSE_SCHEMA,
-    EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_V1, REFACTOR_FILE_CAPABILITY_PREFIX,
+    EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_V1, FINGERPRINT_FILE_CAPABILITY_PREFIX,
+    REFACTOR_FILE_CAPABILITY_PREFIX,
 };
 use homeboy_extension_contract::ExtensionManifest;
 
@@ -166,6 +167,9 @@ fn capability_script<'a>(extension: &'a ExtensionManifest, capability_id: &str) 
     match capability_id {
         COMPILER_WARNINGS_CAPABILITY_ID => extension.compiler_warnings_script(),
         COMPILER_WARNING_FIXES_CAPABILITY_ID => extension.compiler_warning_fixes_script(),
+        capability if capability.starts_with(FINGERPRINT_FILE_CAPABILITY_PREFIX) => {
+            extension.fingerprint_script()
+        }
         capability if capability.starts_with(REFACTOR_FILE_CAPABILITY_PREFIX) => {
             extension.refactor_script()
         }

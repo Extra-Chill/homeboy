@@ -10,6 +10,8 @@ pub const COMPILER_WARNINGS_INPUT_SCHEMA: &str = "homeboy/compiler-warnings-inpu
 pub const COMPILER_WARNINGS_OUTPUT_SCHEMA: &str = "homeboy/compiler-warnings-output/v1";
 pub const COMPILER_WARNING_FIXES_INPUT_SCHEMA: &str = "homeboy/compiler-warning-fixes-input/v1";
 pub const COMPILER_WARNING_FIXES_OUTPUT_SCHEMA: &str = "homeboy/compiler-warning-fixes-output/v1";
+pub const FINGERPRINT_INPUT_SCHEMA: &str = "homeboy/fingerprint-input/v1";
+pub const FINGERPRINT_OUTPUT_SCHEMA: &str = "homeboy/fingerprint-output/v1";
 pub const REFACTOR_ANALYSIS_INPUT_SCHEMA: &str = "homeboy/refactor-analysis-input/v1";
 pub const REFACTOR_ANALYSIS_OUTPUT_SCHEMA: &str = "homeboy/refactor-analysis-output/v1";
 

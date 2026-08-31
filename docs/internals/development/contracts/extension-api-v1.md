@@ -124,10 +124,12 @@ codes. Process failures optionally include `process` evidence with the exit
 code, bounded stdout and stderr, and parsed stdout when it was valid JSON. The
 optional field is omitted for existing successful invocation responses.
 
-The `compiler-warnings`, `compiler-warning-fixes`, and
-`refactor.<file-extension>` capabilities are adopters. Their descriptors
+The `compiler-warnings`, `compiler-warning-fixes`, `fingerprint.<file-extension>`,
+and `refactor.<file-extension>` capabilities are adopters. Their descriptors
 reference versioned input and output schemas; audit and refactor consume
 invocation responses rather than loading manifests or running scripts directly.
+Fingerprint scripts consume `homeboy/fingerprint-input/v1` and produce
+`homeboy/fingerprint-output/v1`.
 Refactor commands remain extension-owned JSON payloads under the shared
 `homeboy/refactor-analysis-input/v1` and `homeboy/refactor-analysis-output/v1`
 schema references. Component-linked providers take precedence when they offer

@@ -4,8 +4,8 @@
 //! hook references, unused/ignored parameters, call sites, dead-code markers,
 //! aggregate literals, construction seams, and policy-flow facts — plus the top-level
 //! `FingerprintOutput` envelope. Pure serde types with no dependencies. The
-//! `code_audit` engine consumes these; `extension::fingerprint` re-exports them
-//! and owns the script-runner that produces them.
+//! `code_audit` engine consumes these; Extension API invocation projects script
+//! output into this contract.
 //!
 //! Semantic-fact producers must omit facts located in inline test regions.
 //! Core intentionally does not infer language-specific inline-test syntax. It

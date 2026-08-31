@@ -6,7 +6,6 @@ pub mod bench;
 pub mod build;
 pub mod catalog;
 pub mod component_script;
-pub mod fingerprint;
 pub mod grammar;
 pub mod invoke;
 pub mod lifecycle;
