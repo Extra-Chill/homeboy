@@ -738,6 +738,11 @@ impl AgentTaskScheduler {
                 )
                 .map(|remaining| task_timeout_ms.min(remaining))
                 .unwrap_or(task_timeout_ms);
+                // The scheduler and provider must share one resolved budget.
+                // Without this assignment an inherited/default timeout can
+                // cancel the scheduler while the provider never sees the
+                // actual amount of time it has left to finish cleanly.
+                request.limits.timeout_ms = Some(task_timeout_ms);
                 request.limits.execution_deadline_unix_ms = execution_deadline_unix_ms;
                 let tx = tx.clone();
                 let attempt = scheduled.attempt;
@@ -1023,6 +1028,7 @@ impl AgentTaskScheduler {
                         // Cancellation was requested at the deadline and this
                         // result proves the provider no longer owns the checkout.
                         // Harvest above is therefore race-free.
+                        super::mark_timeout_workspace_candidates_incomplete(&mut outcome);
                         let recovered = outcome.artifacts.iter().any(is_actionable_patch_artifact);
                         outcome.status = if recovered && !rotation_takes_over {
                             AgentTaskOutcomeStatus::CandidateRecoverable
@@ -1067,6 +1073,7 @@ impl AgentTaskScheduler {
                     if candidate_ready_for_convergence
                         && outcome.status == AgentTaskOutcomeStatus::Timeout
                     {
+                        super::mark_timeout_workspace_candidates_incomplete(&mut outcome);
                         outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
                         outcome.summary = Some(
                             "provider reported a timeout after producing a recoverable candidate; promote the fingerprinted patch through controller gates".to_string(),

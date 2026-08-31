@@ -121,6 +121,50 @@ pub(super) fn harvest_uncommitted_patch(
     Ok(())
 }
 
+/// A deadline can interrupt an otherwise valid workspace diff before the
+/// provider has completed its result contract. Keep that distinction on the
+/// durable artifact: it is recoverable evidence, never an implicitly complete
+/// provider result.
+pub(super) fn mark_timeout_workspace_candidates_incomplete(outcome: &mut AgentTaskOutcome) {
+    let mut recovered = 0;
+    for artifact in &mut outcome.artifacts {
+        if !is_actionable_patch_artifact(artifact)
+            || artifact
+                .metadata
+                .get("change_source")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|source| {
+                    !matches!(source, "uncommitted_attempt_workspace" | "local_commits")
+                })
+        {
+            continue;
+        }
+        if !artifact.metadata.is_object() {
+            artifact.metadata = serde_json::json!({});
+        }
+        let metadata = artifact
+            .metadata
+            .as_object_mut()
+            .expect("patch artifact metadata object");
+        metadata.insert("incomplete".to_string(), serde_json::json!(true));
+        metadata.insert(
+            "recovery_required".to_string(),
+            serde_json::json!(["fresh_review", "deterministic_gates"]),
+        );
+        recovered += 1;
+    }
+    if recovered == 0 {
+        return;
+    }
+    if !outcome.metadata.is_object() {
+        outcome.metadata = serde_json::json!({});
+    }
+    outcome.metadata["timeout_recovery"] = serde_json::json!({
+        "incomplete": true,
+        "recoverable_candidate_count": recovered,
+    });
+}
+
 fn persist_attempt_patch_artifacts(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
