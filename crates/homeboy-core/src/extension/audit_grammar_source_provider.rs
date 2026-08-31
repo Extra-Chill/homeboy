@@ -14,15 +14,16 @@ use std::path::PathBuf;
 use homeboy_core::code_audit::grammar_source_provider::{
     register_grammar_source_provider, GrammarSourceProvider,
 };
+use homeboy_extension_contract::api::v1::FINGERPRINT_FILE_CAPABILITY_PREFIX;
 
 struct ExtensionGrammarSourceProvider;
 
 impl GrammarSourceProvider for ExtensionGrammarSourceProvider {
     fn grammar_dir(&self, file_extension: &str) -> Option<PathBuf> {
-        let matched = crate::extension::resolve::find_installed_file_extension(
-            file_extension,
-            crate::extension::resolve::FileExtensionCapability::Fingerprint,
-        )?;
+        let capability_id = format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}{file_extension}");
+        let extension_id =
+            crate::extension::resolve::find_installed_capability_provider(&capability_id)?;
+        let matched = crate::extension::catalog::load_extension(&extension_id).ok()?;
         matched.extension_path.map(PathBuf::from)
     }
 }

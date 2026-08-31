@@ -341,10 +341,7 @@ pub(crate) fn generate_duplicate_function_fixes(
         };
 
         let manifest = if use_extract_shared {
-            homeboy_core::extension::resolve::find_installed_file_extension(
-                ext,
-                homeboy_core::extension::resolve::FileExtensionCapability::Refactor,
-            )
+            crate::move_items::find_refactor_extension_for_extension(ext)
         } else {
             None
         };

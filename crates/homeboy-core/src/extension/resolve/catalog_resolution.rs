@@ -4,7 +4,6 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiCatalogEntry, ExtensionApiCatalogEntryStatus, ExtensionApiCatalogRequest,
     EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_V1,
 };
-use homeboy_extension_contract::ExtensionCapability;
 
 pub(super) struct CapabilityCatalog {
     entries: Vec<ExtensionApiCatalogEntry>,
@@ -46,16 +45,12 @@ impl CapabilityCatalog {
         Ok(entry)
     }
 
-    pub(super) fn provides(
-        &self,
-        entry: &ExtensionApiCatalogEntry,
-        capability: ExtensionCapability,
-    ) -> bool {
+    pub(super) fn provides(&self, entry: &ExtensionApiCatalogEntry, capability_id: &str) -> bool {
         entry.descriptor.as_ref().is_some_and(|descriptor| {
             descriptor
                 .capabilities
                 .iter()
-                .any(|provided| provided.id == capability.label())
+                .any(|provided| provided.id == capability_id)
         })
     }
 
@@ -64,14 +59,14 @@ impl CapabilityCatalog {
     pub(super) fn candidates<'a>(
         &self,
         extension_ids: impl Iterator<Item = &'a String>,
-        capability: ExtensionCapability,
+        capability_id: &str,
     ) -> (Vec<String>, Vec<(String, String)>) {
         let mut matching = Vec::new();
         let mut failures = Vec::new();
 
         for extension_id in extension_ids {
             match self.entry(extension_id) {
-                Some(entry) if self.provides(entry, capability) => {
+                Some(entry) if self.provides(entry, capability_id) => {
                     matching.push(extension_id.clone());
                 }
                 Some(entry) if entry.status == ExtensionApiCatalogEntryStatus::Invalid => failures
@@ -96,6 +91,18 @@ impl CapabilityCatalog {
         matching.sort();
         failures.sort_by(|left, right| left.0.cmp(&right.0));
         (matching, failures)
+    }
+
+    pub(super) fn providers(&self, capability_id: &str) -> Vec<String> {
+        let mut providers = self
+            .entries
+            .iter()
+            .filter(|entry| entry.status == ExtensionApiCatalogEntryStatus::Available)
+            .filter(|entry| self.provides(entry, capability_id))
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        providers.sort();
+        providers
     }
 
     fn entry(&self, extension_id: &str) -> Option<&ExtensionApiCatalogEntry> {

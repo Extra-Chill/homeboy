@@ -92,6 +92,11 @@ diagnostics from one v1 catalog snapshot. Explicit ownership,
 over those stable descriptors; execution-context assembly loads the selected
 manifest only for internal script paths and settings.
 
+File-type providers use open capability IDs: `fingerprint.<extension>` and
+`refactor.<extension>`. Resolution matches those IDs in the same catalog and
+returns only the selected extension ID. Manifest paths and script declarations
+remain private execution details.
+
 ## Readiness
 
 `extension::catalog::readiness_api_batch` returns readiness evidence for explicit
