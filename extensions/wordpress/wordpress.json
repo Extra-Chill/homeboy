@@ -903,6 +903,7 @@
   "executable": {
     "runtime": {
       "setup_command": "bash {{extension_path}}/scripts/build/setup.sh",
+      "setup_timeout_seconds": 900,
       "ready_check": "bash {{extension_path}}/scripts/doctor/wp-codebox-doctor.sh doctor",
       "run_command": "bash {{extension_path}}/scripts/test/test-runner.sh"
     }
