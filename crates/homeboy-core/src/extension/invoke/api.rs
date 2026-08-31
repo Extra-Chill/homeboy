@@ -64,71 +64,31 @@ pub fn invoke_api(request: &ExtensionApiInvokeRequest) -> ExtensionApiInvokeResp
     };
     let script_path = std::path::Path::new(extension_path).join(script);
 
-    let mut child = match spawn_capability(&script_path, &request.working_directory) {
-        Ok(child) => child,
-        Err(error) => {
-            return failure(
-                ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
-                format!(
-                    "Failed to start capability '{}' for extension '{}': {error}",
-                    request.capability_id, request.extension_id
-                ),
-            );
-        }
-    };
     let input = request.input.to_string();
-    if let Err(error) = child
-        .stdin
-        .take()
-        .ok_or_else(|| "capability stdin was unavailable".to_string())
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(input.as_bytes())
-                .map_err(|error| error.to_string())
-        })
-    {
-        let _ = child.kill();
-        let message = format!(
-            "Failed to send input to capability '{}' for extension '{}': {error}",
-            request.capability_id, request.extension_id
-        );
-        return match wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES) {
-            Ok(output) => failure_with_process(
-                ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
-                message,
-                process_evidence(&output),
-            ),
-            Err(_) => failure(
-                ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
-                message,
-            ),
-        };
-    }
-    let output = match wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES) {
+    let output = match execute_capability_process(
+        &script_path,
+        &request.working_directory,
+        Some(input.as_bytes()),
+        &[],
+        &request.extension_id,
+        &request.capability_id,
+    ) {
         Ok(output) => output,
-        Err(error) => {
-            return failure(
-                ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
-                format!(
-                    "Failed to collect capability '{}' output for extension '{}': {error}",
-                    request.capability_id, request.extension_id
+        Err(execution_failure) => {
+            return match execution_failure.process {
+                Some(process) => failure_with_process(
+                    ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
+                    execution_failure.message,
+                    process,
                 ),
-            );
+                None => failure(
+                    ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
+                    execution_failure.message,
+                ),
+            };
         }
     };
     let evidence = process_evidence(&output);
-    if !output.status.success() {
-        return failure_with_process(
-            ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
-            format!(
-                "Capability '{}' failed for extension '{}': {}",
-                request.capability_id,
-                request.extension_id,
-                evidence.stderr.trim()
-            ),
-            evidence,
-        );
-    }
     let value = match evidence.parsed_output.clone() {
         Some(value) => value,
         None => {
@@ -154,13 +114,80 @@ pub fn invoke_api(request: &ExtensionApiInvokeRequest) -> ExtensionApiInvokeResp
     }
 }
 
-fn process_evidence(output: &BoundedCommandOutput) -> ExtensionApiInvocationProcessEvidence {
+pub(super) fn process_evidence(
+    output: &BoundedCommandOutput,
+) -> ExtensionApiInvocationProcessEvidence {
     ExtensionApiInvocationProcessEvidence {
         exit_code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         parsed_output: serde_json::from_slice(&output.stdout).ok(),
     }
+}
+
+pub(super) struct CapabilityExecutionFailure {
+    pub message: String,
+    pub process: Option<ExtensionApiInvocationProcessEvidence>,
+}
+
+/// Execute one capability process with common spawn retry and bounded capture.
+pub(super) fn execute_capability_process(
+    script_path: &std::path::Path,
+    working_directory: &str,
+    input: Option<&[u8]>,
+    environment: &[(String, String)],
+    extension_id: &str,
+    capability_id: &str,
+) -> Result<BoundedCommandOutput, CapabilityExecutionFailure> {
+    let mut child = spawn_capability(script_path, working_directory, environment, input.is_some())
+        .map_err(|error| CapabilityExecutionFailure {
+            message: format!(
+                "Failed to start capability '{capability_id}' for extension '{extension_id}': {error}"
+            ),
+            process: None,
+        })?;
+    if let Some(input) = input {
+        if let Err(error) = child
+            .stdin
+            .take()
+            .ok_or_else(|| "capability stdin was unavailable".to_string())
+            .and_then(|mut stdin| stdin.write_all(input).map_err(|error| error.to_string()))
+        {
+            let _ = child.kill();
+            let message = format!(
+                "Failed to send input to capability '{capability_id}' for extension '{extension_id}': {error}"
+            );
+            return match wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES) {
+                Ok(output) => Err(CapabilityExecutionFailure {
+                    message,
+                    process: Some(process_evidence(&output)),
+                }),
+                Err(_) => Err(CapabilityExecutionFailure {
+                    message,
+                    process: None,
+                }),
+            };
+        }
+    }
+    let output = wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|error| {
+        CapabilityExecutionFailure {
+            message: format!(
+                "Failed to collect capability '{capability_id}' output for extension '{extension_id}': {error}"
+            ),
+            process: None,
+        }
+    })?;
+    if !output.status.success() {
+        let process = process_evidence(&output);
+        return Err(CapabilityExecutionFailure {
+            message: format!(
+                "Capability '{capability_id}' failed for extension '{extension_id}': {}",
+                process.stderr.trim()
+            ),
+            process: Some(process),
+        });
+    }
+    Ok(output)
 }
 
 fn capability_script<'a>(extension: &'a ExtensionManifest, capability_id: &str) -> Option<&'a str> {
@@ -204,16 +231,21 @@ fn failure_with_process(
 fn spawn_capability(
     script_path: &std::path::Path,
     working_directory: &str,
+    environment: &[(String, String)],
+    pipe_stdin: bool,
 ) -> std::io::Result<std::process::Child> {
     let mut last_error = None;
     for attempt in 0..3 {
-        match Command::new(script_path)
+        let mut command = Command::new(script_path);
+        command
             .current_dir(working_directory)
-            .stdin(Stdio::piped())
+            .envs(environment.iter().map(|(key, value)| (key, value)))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+            .stderr(Stdio::piped());
+        if pipe_stdin {
+            command.stdin(Stdio::piped());
+        }
+        match command.spawn() {
             Ok(child) => return Ok(child),
             Err(error) if is_transient_spawn_error(&error) && attempt < 2 => {
                 last_error = Some(error);

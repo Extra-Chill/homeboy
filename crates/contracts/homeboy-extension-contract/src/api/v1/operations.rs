@@ -7,7 +7,9 @@ use super::{
     ExtensionApiVersion,
 };
 
+mod environment;
 mod invocation;
+pub use environment::*;
 pub use invocation::*;
 
 pub const EXTENSION_API_CATALOG_REQUEST_SCHEMA: &str = "homeboy/extension-api-catalog-request/v1";

@@ -20,6 +20,7 @@ mod api;
 mod context;
 pub(crate) mod env_provider;
 mod environment;
+mod environment_api;
 mod runner;
 mod runtime_helper;
 mod scenario_runner;
@@ -27,7 +28,7 @@ mod scope;
 mod settings;
 mod tool;
 
-use crate::extension::catalog::{load_extension, load_extension_from_dir};
+use crate::extension::catalog::load_extension;
 use homeboy_core::extension::resolve::ExtensionExecutionContext;
 use homeboy_extension_contract::exec_context;
 use homeboy_extension_contract::manifest_action_config::RuntimeConfig;
@@ -37,13 +38,14 @@ use homeboy_extension_contract::ExtensionManifest;
 pub use action::execute_action;
 pub use api::invoke_api;
 pub use context::ResolvedExtensionInvocationContext;
-pub use env_provider::{
-    declared_secret_names, resolve_installed, resolve_installed_all, EnvProviderCommandPayload,
-    EnvProviderContribution, ENV_PROVIDER_COMMAND_PAYLOAD_ENV,
-};
+pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
 pub(crate) use environment::prepare_capability_run;
 use environment::{
     build_action_env, build_exec_env, execute_extension_command, execute_extension_runtime,
+};
+pub use environment_api::{
+    declared_environment_secret_names as declared_secret_names, resolve_environment_api,
+    EnvironmentResolutionContext,
 };
 use homeboy_core::extension::readiness::extension_ready_status;
 pub(crate) use runner::{read_extension_phase_timings, tail_lines};
@@ -215,7 +217,8 @@ fn persist_setup_runtime_env(extension: &ExtensionManifest, extension_id: &str) 
 
     match env_provider::env_vars(
         &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
-        extension,
+        extension_id,
+        Some(extension_dir),
         extension_dir,
         &base_env,
     ) {
@@ -466,27 +469,23 @@ pub(crate) fn build_capability_env_with_additional_providers(
 
     let mut provider_env = env.clone();
     provider_env.extend(extra_env.iter().cloned());
-    if let Ok(extension) = load_extension_from_dir(extension_path) {
+    env.extend(env_provider::env_vars(
+        &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
+        extension_name,
+        Some(extension_path),
+        component_path,
+        &provider_env,
+    )?);
+    for (extension_id, provider_path) in additional_env_provider_paths {
         env.extend(env_provider::env_vars(
             &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
                 "homeboy",
             ),
-            &extension,
+            extension_id,
+            Some(provider_path),
             component_path,
             &provider_env,
         )?);
-    }
-    for (_extension_id, provider_path) in additional_env_provider_paths {
-        if let Ok(extension) = load_extension_from_dir(provider_path) {
-            env.extend(env_provider::env_vars(
-                &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
-                    "homeboy",
-                ),
-                &extension,
-                component_path,
-                &provider_env,
-            )?);
-        }
     }
     env.extend(extra_env.iter().cloned());
     Ok(env)
