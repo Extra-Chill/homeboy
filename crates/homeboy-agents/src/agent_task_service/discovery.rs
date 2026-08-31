@@ -463,8 +463,7 @@ fn liveness_summary_for_records(
         ..Default::default()
     };
     for record in records {
-        let liveness =
-            classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+        let liveness = liveness_for_record(record, now);
         match liveness {
             AgentTaskLiveness::Active => summary.active += 1,
             AgentTaskLiveness::Stale => summary.stale += 1,
@@ -476,6 +475,15 @@ fn liveness_summary_for_records(
         }
     }
     summary
+}
+
+/// Classify one record with the same ownership rules used by active discovery
+/// and controller-upgrade admission.
+pub fn liveness_for_record(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AgentTaskLiveness {
+    classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now)
 }
 
 /// Read-only controller-upgrade admission derived from the same liveness model
@@ -526,8 +534,7 @@ pub(crate) fn controller_upgrade_admission_for_records(
         // metadata remains from the process that produced it.
         .filter(|record| !record.state.is_terminal())
         .filter_map(|record| {
-            let liveness =
-                classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now);
+            let liveness = liveness_for_record(record, now);
             let runner_unverified = record.runner_job_id().is_some()
                 && matches!(
                     liveness,
