@@ -1,7 +1,6 @@
 use homeboy_core::error::{Error, Result};
-use homeboy_engine_primitives::local_files;
+use homeboy_extension_contract::manifest_action_config::SettingConfig;
 use std::collections::HashMap;
-use std::path::Path;
 
 pub(super) fn serialize_settings(settings: &HashMap<String, serde_json::Value>) -> Result<String> {
     serde_json::to_string(settings).map_err(|e| {
@@ -12,46 +11,18 @@ pub(super) fn serialize_settings(settings: &HashMap<String, serde_json::Value>) 
     })
 }
 
-pub(crate) fn load_extension_manifest_from_dir(extension_path: &Path) -> Result<serde_json::Value> {
-    let extension_name = extension_path
-        .file_name()
-        .ok_or_else(|| Error::internal_io("Extension path has no file name".to_string(), None))?
-        .to_string_lossy();
-    let manifest_path = extension_path.join(format!("{}.json", extension_name));
-
-    if !manifest_path.exists() {
-        return Err(Error::internal_io(
-            format!("Extension manifest not found: {}", manifest_path.display()),
-            None,
-        ));
-    }
-
-    let content =
-        local_files::read_file(&manifest_path, &format!("read {}", manifest_path.display()))?;
-
-    serde_json::from_str(&content)
-        .map_err(|e| Error::validation_invalid_json(e, Some("parse manifest".to_string()), None))
-}
-
-pub(crate) fn build_settings_json_from_manifest(
-    manifest: &serde_json::Value,
+pub(crate) fn build_settings_json(
+    manifest_settings: &[SettingConfig],
     extension_settings: &[(String, serde_json::Value)],
     settings_overrides: &[(String, String)],
     settings_json_overrides: &[(String, serde_json::Value)],
 ) -> Result<String> {
     let mut settings = serde_json::json!({});
 
-    // Load defaults from manifest — preserve original JSON types.
-    if let Some(manifest_settings) = manifest.get("settings") {
-        if let Some(settings_array) = manifest_settings.as_array() {
-            if let serde_json::Value::Object(ref mut obj) = settings {
-                for setting in settings_array {
-                    if let Some(id) = setting.get("id").and_then(|v| v.as_str()) {
-                        if let Some(default) = setting.get("default") {
-                            obj.insert(id.to_string(), default.clone());
-                        }
-                    }
-                }
+    if let serde_json::Value::Object(ref mut obj) = settings {
+        for setting in manifest_settings {
+            if let Some(default) = &setting.default {
+                obj.insert(setting.id.clone(), default.clone());
             }
         }
     }

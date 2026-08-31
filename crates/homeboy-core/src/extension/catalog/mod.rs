@@ -88,6 +88,15 @@ pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
     load_extension_in_root(&paths::homeboy()?, id)
 }
 
+/// Load one extension manifest from an already-resolved extension directory.
+pub fn load_extension_from_dir(extension_dir: &Path) -> Result<ExtensionManifest> {
+    let id = extension_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::internal_io("Extension path has no file name".to_string(), None))?;
+    load_extension_at(id, extension_dir).map_err(|failure| manifest_failure_error(&failure))
+}
+
 /// Load a manifest from an injected config root when one is supplied, and from
 /// the ambient process root otherwise.
 ///
@@ -487,6 +496,35 @@ mod tests {
     fn test_load_extension() {
         crate::test_support::with_isolated_home(|_| {
             assert!(load_extension("missing-extension").is_err());
+        });
+    }
+
+    #[test]
+    fn explicit_directory_loading_is_canonical_and_path_authoritative() {
+        crate::test_support::with_isolated_home(|home| {
+            let ambient_dir = home.path().join(".config/homeboy/extensions/fixture");
+            std::fs::create_dir_all(&ambient_dir).unwrap();
+            std::fs::write(
+                ambient_dir.join("fixture.json"),
+                r#"{"name":"Ambient","version":"1.0.0"}"#,
+            )
+            .unwrap();
+
+            let explicit_root = tempfile::TempDir::new().unwrap();
+            let explicit_dir = explicit_root.path().join("fixture");
+            std::fs::create_dir_all(&explicit_dir).unwrap();
+            let manifest_path = explicit_dir.join("fixture.json");
+            std::fs::write(&manifest_path, r#"{"name":"Explicit","version":"2.0.0"}"#).unwrap();
+
+            let manifest = load_extension_from_dir(&explicit_dir).unwrap();
+            assert_eq!(manifest.id, "fixture");
+            assert_eq!(manifest.name, "Explicit");
+            assert_eq!(manifest.version, "2.0.0");
+            assert_eq!(manifest.extension_path.as_deref(), explicit_dir.to_str());
+
+            std::fs::write(&manifest_path, "{not json").unwrap();
+            let error = load_extension_from_dir(&explicit_dir).unwrap_err();
+            assert_eq!(error.details["category"], "manifest_json_malformed");
         });
     }
 

@@ -23,7 +23,7 @@ pub mod trace;
 
 pub(crate) use homeboy_core::extension::resolve::{extension_guidance_hints, stderr_tail};
 
-pub(crate) use invoke::build_settings_json_from_manifest;
+pub(crate) use invoke::build_settings_json;
 
 #[cfg(test)]
 mod tests;
