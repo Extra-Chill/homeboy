@@ -1101,7 +1101,7 @@ fn parse_runner_diff_installed(stdout: &str) -> homeboy::core::Result<Vec<Instal
 }
 
 fn installed_extension_diff(summary: ExtensionInventoryEntry) -> InstalledExtensionDiff {
-    let checkout_head_revision = git::head_sha_short(Path::new(&summary.path));
+    let checkout_head_revision = git::head_sha(Path::new(&summary.path));
     let manifest_path = manifest_path_for_summary(&summary);
     let source_url = read_source_url_metadata(&summary.path);
     let source_path = source_url.as_deref().and_then(local_source_path);
@@ -2594,6 +2594,48 @@ mod tests {
             installed_extension_diff_status(None, Some("abc1234"), Some("abc1234")),
             "unknown"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_extension_diff_is_current_for_a_linked_git_worktree() {
+        with_isolated_home(|home| {
+            let extension_id = "worktree-runtime";
+            let worktree = home.path().join("worktree");
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            fs::create_dir_all(&worktree).expect("worktree");
+            fs::write(
+                worktree.join(format!("{extension_id}.json")),
+                r#"{"name":"Worktree Runtime","version":"1.0.0"}"#,
+            )
+            .expect("manifest");
+            assert!(git(&worktree, &["init", "--quiet"]));
+            assert!(git(&worktree, &["add", "."]));
+            assert!(git(
+                &worktree,
+                &[
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "user.name=Test",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "initial"
+                ]
+            ));
+            fs::create_dir_all(&extensions_dir).expect("extensions dir");
+            symlink(&worktree, extensions_dir.join(extension_id)).expect("extension link");
+
+            let summary = extension_inventory(None, ExtensionReadinessMode::Cached)
+                .into_iter()
+                .find(|summary| summary.id == extension_id)
+                .expect("worktree extension summary");
+            let diff = installed_extension_diff(summary);
+
+            assert_eq!(diff.status, "current");
+            assert_eq!(diff.installed_source_revision, diff.checkout_head_revision);
+        });
     }
 
     #[test]
