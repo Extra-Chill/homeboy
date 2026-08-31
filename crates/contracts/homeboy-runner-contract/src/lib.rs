@@ -34,7 +34,9 @@ pub use session::{
     RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
     RunnerTunnelProcessStartIdentity,
 };
-pub use workspace::{RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode};
+pub use workspace::{
+    ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

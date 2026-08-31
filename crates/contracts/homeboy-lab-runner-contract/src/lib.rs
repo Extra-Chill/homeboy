@@ -33,6 +33,11 @@ pub use homeboy_runner_contract::{
     is_internal_control_env, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 /// Compatibility exports for established Lab runner consumers. Generic runner
+/// workspace state is canonical in `homeboy-runner-contract`.
+pub use homeboy_runner_contract::{
+    ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
+};
+/// Compatibility exports for established Lab runner consumers. Generic runner
 /// artifact results are canonical in `homeboy-runner-contract`.
 pub use homeboy_runner_contract::{RunnerArtifactRef, RunnerMutationArtifacts};
 /// Compatibility exports for established Lab runner consumers. Generic runner
@@ -53,24 +58,12 @@ pub use homeboy_runner_contract::{
 pub use homeboy_runner_contract::{
     RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
 };
-/// Compatibility exports for established Lab runner consumers. Generic runner
-/// workspace state is canonical in `homeboy-runner-contract`.
-pub use homeboy_runner_contract::{
-    RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
-};
 pub use placement::Placement;
 pub use provider_source_types::AgentTaskProviderRunnerSource;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-
-/// File + byte counts for a workspace sync.
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
-pub struct ByteFileCounts {
-    pub files: usize,
-    pub bytes: u64,
-}
 
 /// Options controlling how a runner workspace is synced before a job runs.
 #[derive(Debug, Clone, Default)]
