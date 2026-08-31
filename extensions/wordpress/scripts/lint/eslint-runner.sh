@@ -158,15 +158,17 @@ fi
 ESLINT_BIN="${EXTENSION_PATH}/node_modules/.bin/eslint"
 ESLINT_CONFIG="${EXTENSION_PATH}/eslint.runner.config.mjs"
 
-# Validate tools exist
-if [ ! -f "$ESLINT_BIN" ]; then
-    echo "Warning: ESLint not found at $ESLINT_BIN, skipping JavaScript linting"
-    exit 0
-fi
+# A hydrated extension can retain the .bin launcher while losing its package
+# tree. Rebuild the extension-owned runtime from its lockfile before linting.
+# Bootstrap failures use exit 2 so Homeboy reports infrastructure, not project
+# findings.
+# shellcheck source=ensure-eslint-runtime.sh
+source "${SCRIPT_DIR}/ensure-eslint-runtime.sh"
+homeboy_ensure_eslint_runtime "$EXTENSION_PATH" || exit $?
 
 if [ ! -f "$ESLINT_CONFIG" ]; then
-    echo "Warning: ESLint runner config not found at $ESLINT_CONFIG, skipping JavaScript linting"
-    exit 0
+    echo "bootstrap failure: ESLint runner config not found at $ESLINT_CONFIG" >&2
+    exit 2
 fi
 
 # Auto-detect text domain from plugin/theme header (shared helper)
@@ -226,6 +228,13 @@ set -e
 # when it cannot produce JSON rather than discarding the only actionable error.
 if [ -z "$json_output" ] && [ -s "$ESLINT_JSON_STDERR" ]; then
     cat "$ESLINT_JSON_STDERR" >&2
+fi
+
+# ESLint reserves exit codes above 1 for operational failures. Do not turn one
+# into a later generic lint exit: it has no project findings to classify.
+if [ "$json_exit" -ge 2 ]; then
+    echo "bootstrap failure: ESLint could not execute its configured runtime (exit ${json_exit})" >&2
+    exit 2
 fi
 
 # Write ESLint lint findings sidecar for homeboy baseline and drill-down.
