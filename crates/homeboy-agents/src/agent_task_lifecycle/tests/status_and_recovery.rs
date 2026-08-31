@@ -2433,6 +2433,14 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
 
     record_promotion_in_store(&lifecycle_store, run_id, gate_failed)
         .expect("gate failure recorded");
+    let gate_failed_record = lifecycle_store
+        .read_record(run_id)
+        .expect("gate failure lifecycle state");
+    assert_eq!(
+        gate_failed_record.state,
+        AgentTaskRunState::CandidateRecoverable,
+        "a promoted candidate blocked by gates remains recoverable rather than successful"
+    );
     let updated = record_promotion_in_store(&lifecycle_store, run_id, corrected.clone())
         .expect("correction recorded");
 
@@ -2451,6 +2459,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
             .len(),
         2
     );
+    assert_eq!(updated.state, AgentTaskRunState::CandidateRecoverable);
 }
 
 #[test]

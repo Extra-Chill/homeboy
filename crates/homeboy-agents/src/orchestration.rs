@@ -1845,6 +1845,32 @@ mod tests {
     }
 
     #[test]
+    fn gate_failed_promotion_projects_a_recoverable_candidate_not_success() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.state = crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
+        record.lifecycle.execution.state =
+            homeboy_core::run_lifecycle_record::RunExecutionState::CandidateRecoverable;
+        record.metadata["latest_promotion"]["status"] = json!("gate_failed");
+        record.metadata["latest_promotion"]["deterministic_gates"] = json!([
+            { "id": "test", "status": "failed" }
+        ]);
+        record.metadata["cook_finalization"] = serde_json::Value::Null;
+
+        let resource = project_record(&record, None).expect("project gate failure");
+
+        assert_eq!(resource.state, ControlPlaneRunState::CandidateRecoverable);
+        assert_eq!(
+            resource
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.state.as_str()),
+            Some("gate_failed")
+        );
+        assert_eq!(resource.gates[0].state, "failed");
+        assert!(resource.publication.is_none());
+    }
+
+    #[test]
     fn injected_plan_is_used_once_for_retry_eligibility() {
         let mut failed = record(AGENT_TASK_RUN);
         failed.state = crate::agent_task_lifecycle::AgentTaskRunState::Failed;
