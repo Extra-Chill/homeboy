@@ -427,6 +427,12 @@ pub fn finish_candidate_adoption_in_store(
         }
         .to_string();
         attempt.phase = "terminal".to_string();
+        // A recovered immutable candidate has replaced the failed attempt's
+        // execution result. Keep the pre-execution marker as provenance, but
+        // do not leave it as the run's terminal state after its gates passed.
+        if error.is_none() {
+            set_run_state(record, AgentTaskRunState::Succeeded);
+        }
         record.updated_at = Some(now);
         true
     })?;
@@ -512,7 +518,12 @@ pub fn candidate_adoption_recovery_outcome(
             }
             None => false,
         };
-    let eligible_failed_preexecution = record.state == AgentTaskRunState::Failed
+    let successful_adoption = record
+        .candidate_adoption
+        .as_ref()
+        .is_some_and(|adoption| adoption.state == "completed" && adoption.terminal_error.is_none());
+    let eligible_failed_preexecution = (record.state == AgentTaskRunState::Failed
+        || successful_adoption)
         && record.metadata["provider_executions_consumed"] == 0
         && record.provider_handles.is_empty()
         && no_runner_job_recorded(record)

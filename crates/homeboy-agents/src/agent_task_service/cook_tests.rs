@@ -6046,6 +6046,28 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
             .as_ref()
             .is_some_and(|promotion| promotion.finalization_eligible(false)));
         assert!(backend.committed && backend.pushed && backend.created);
+
+        let record = agent_task_lifecycle::reconcile_status(&fixture.run_id)
+            .expect("successful adoption supersedes the historical refusal");
+        assert_eq!(
+            record.state,
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+        );
+        assert_eq!(
+            record.lifecycle.execution.state,
+            RunExecutionState::Succeeded
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["candidate_adoption_recovery"]["reason"],
+            "dirty_destination_first_provider_admission",
+            "the initial refusal remains authenticated adoption provenance"
+        );
+        assert!(candidate_adoption_source_in_store(
+            &test_lifecycle_store(),
+            &record,
+            &fixture.options.identity.initial_plan.tasks[0]
+        )
+        .is_ok());
     });
 }
 
