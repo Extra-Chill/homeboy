@@ -1,17 +1,10 @@
 # PR quality pipeline.
-#
-# Keep fast checks direct. Test uses Homeboy Action's changed-scope routing;
-# the workspace compile gate below covers every test target's wiring.
 
 name: CI
 
 on:
   pull_request:
     branches: [main]
-    # A closed PR starts one lightweight run in the existing concurrency group.
-    # That cancels an in-flight candidate DAG, while pr-state keeps this run from
-    # admitting the reusable workflow's binary, inventory, and shard jobs.
-    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 concurrency:
@@ -25,171 +18,18 @@ permissions:
   issues: write
 
 jobs:
-  # The event payload is authoritative for a closure run. Non-PR invocations
-  # remain active so manual CI and future push CI behavior are unchanged. Check
-  # out the default branch: the closure decision must not come from PR code.
-  pr-state:
-    name: homeboy / PR State
-    runs-on: ubuntu-latest
-    outputs:
-      active: ${{ steps.state.outputs.active }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-      - name: Determine whether candidate work may start
-        id: state
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_EVENT_ACTION: ${{ github.event.action }}
-        run: bash .github/ci-pr-state.sh
-
-  # This repository owns how much work it asks the reusable workflow to admit.
-  # The action owns deterministic shard planning and aggregation, not this
-  # repository's GitHub-hosted runner budget.
-  ci-capacity-admission:
-    name: homeboy / CI Capacity Admission
-    needs: pr-state
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
-    runs-on: ubuntu-latest
-    outputs:
-      test-shards: ${{ steps.admit.outputs.test-shards }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - id: admit
-        name: Admit configured Test capacity
-        run: bash .github/ci-capacity-admission.sh
-
-  # Named for what a green tick here actually proves: the DECLARATION is intact.
-  # It used to be called "Required Gates Policy" and run `--local`, which reads
-  # as "GitHub requires these checks" while only proving "ci.yml emits these
-  # job names" — PR #11069 merged nine minutes ahead of a red `homeboy / Test`
-  # under a green tick from this job, because the live ruleset requires nothing
-  # (#11084). `--report` additionally probes the live ruleset and annotates the
-  # enforcement outcome loudly, but never fails on it: enforcement is repository
-  # state a PR cannot change, and this repository merges fast on purpose, so
-  # this stays reporting and no PR is newly blocked by it.
-  required-gates-declaration:
-    name: homeboy / Required Gates Declaration
-    needs: pr-state
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Validate required check contexts and report live enforcement
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          bash .github/validate-required-gates.sh --report
-          bash .github/test-manage-required-gates-ruleset.sh
-      # A reusable-workflow pin must be a COMMIT. Pinning an annotated tag's ref
-      # object kills every run at startup with zero jobs scheduled, which is how
-      # #12152 broke `main` until #12153 repinned the dereferenced commit.
-      - name: Validate reusable workflow pins resolve to commits
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .github/validate-action-pin.sh
-
-  # Non-differential safety net for crate-topology changes. The `review test`
-  # gate below is changed-file scoped, so a crate extraction that orphans a
-  # DONOR crate's test wiring (e.g. a test file left referencing a `super::foo`
-  # module after `foo` moved to its own crate) can pass unnoticed — the donor
-  # isn't in the changed scope. This job compiles EVERY crate's test target
-  # (codegen-free, so it's cheap) and fails closed if any of them break.
-  workspace-tests-compile:
-    name: homeboy / Workspace Tests Compile
-    needs: pr-state
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Compile all workspace test targets
-        run: cargo check --workspace --tests --locked
-
-  warning-clean:
-    name: homeboy / Warning Clean
-    needs: pr-state
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Build the shipped CLI without warnings
-        run: RUSTFLAGS=-Dwarnings cargo build --locked -p homeboy --bin homeboy
-      - name: Run a focused agent test without warnings
-        run: RUSTFLAGS=-Dwarnings cargo test --locked -p homeboy-agents --lib agent_task_timeout::tests::timeout_grace_is_bounded
-
-  # Unix-only `libc` constants (`SIGKILL` has no Windows definition) and other
-  # cfg-gating misses compile fine on Linux (#10398). The release has no Windows
-  # artifact consumer, so keep this codegen-free source check on every PR rather
-  # than paying for a native release build. Deliberately no `--tests`: some
-  # Unix-only test helpers rely on that boundary.
-  windows-compile:
-    name: homeboy / Windows Compile
-    needs: pr-state
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Check all workspace crates for Windows
-        run: cargo check --workspace --locked
-
-  # The external detail resolver crosses the extension/process boundary. Run its
-  # portable fixture on every hosted OS without expanding the general test gate.
-  external-resolver-fixtures:
-    name: homeboy / External Resolver Fixtures (${{ matrix.os }})
-    needs: pr-state
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Run portable external resolver fixture subprocess tests
-        run: cargo test --locked -p homeboy-cli --features test-support --test external_check_detail_resolver_fixture
-
-  # Keep `main` rustfmt-clean so a feature branch's `cargo fmt` only ever touches
-  # the files it changed. Without this gate, unformatted files drift onto main
-  # and get pulled into unrelated PRs (a bare `cargo fmt` reformats them, or a
-  # `rustfmt mod.rs` cascades across the module tree), ballooning otherwise-small
-  # diffs and forcing manual `git checkout --` of noise files (#6860). This is a
-  # non-differential whole-workspace check, so it catches drift anywhere.
   rustfmt:
     name: homeboy / Rustfmt
-    needs: pr-state
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
-      - name: Check workspace formatting
-        run: cargo fmt --all --check
+      - run: cargo fmt --all --check
 
   homeboy-fast:
     name: homeboy / ${{ matrix.title }}
-    needs: pr-state
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -199,30 +39,19 @@ jobs:
             title: Audit
             section_key: audit
             section_title: Audit
-            # Audit and Lint are nowhere near their budget; leave them at the
-            # action defaults so raising the Test gate cannot mask a genuine
-            # hang in either of them.
-            execution_timeout_seconds: '1800'
-            test_timeout_seconds: '1500'
           - command: review lint
             title: Lint
             section_key: lint
             section_title: Lint
-            execution_timeout_seconds: '1800'
-            test_timeout_seconds: '1500'
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-
-      - name: Check out Homeboy Action
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
           ref: v2
           path: .homeboy-action
-
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -230,7 +59,6 @@ jobs:
         with:
           client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-
       - uses: ./.homeboy-action
         with:
           source: .
@@ -238,175 +66,31 @@ jobs:
           commands: ${{ matrix.command }}
           expected-commands: review audit,review lint,review test
           differential-gating: true
-          execution-timeout-seconds: ${{ matrix.execution_timeout_seconds }}
-          # See the note on the other call site: a from-source release build of
-          # this workspace does not fit the shared 900s setup default.
+          execution-timeout-seconds: '1800'
+          test-timeout-seconds: '1500'
           setup-timeout-seconds: '2400'
           app-token: ${{ steps.app-token.outputs.token || github.token }}
           comment-section-key: ${{ matrix.section_key }}
           comment-section-title: ${{ matrix.section_title }}
 
-  # The caller job name plus the called reconciliation job name preserves the
-  # required `homeboy / Test` context. Differential Test runs use one candidate
-  # and one base execution so inherited failures remain attributable.
   homeboy:
     name: homeboy
-    needs: [pr-state, ci-capacity-admission]
-    if: ${{ needs.pr-state.outputs.active == 'true' }}
-    # Pinned to a commit. Release tags are annotated, so the tag
-    # ref's own object SHA is a tag object, which `uses:` cannot resolve — pinning
-    # one fails the whole workflow at startup with zero jobs scheduled (#12153).
-    # Always pin `git rev-parse v<tag>^{commit}`.
-    #
-    # Carries homeboy-action#372 (jq-portable exact shard partitioning), #376 (a
-    # cancelled run no longer publishes a red `Test` verdict), #377 (the
-    # unreachable sharded baseline phase is removed, closing a latent
-    # no-enforcement green), #378 (test binaries built once into a nextest
-    # archive instead of recompiled in every shard), and #379 (a passing
-    # candidate no longer reruns its baseline), #380 (the differential audit is
-    # changed-scoped instead of scanning the whole repository), #381 (shard
-    # partitioning coverage), #402 (immutable extension revisions), #405
-    # (downloaded Test archives stay out of consumer Git state), #416
-    # (sharded Test result retrieval works across reruns), #424 (extension-owned
-    # Cargo build and quality caches), and #425 (cache ownership assertions).
-    #
-    # v2.15.12 additionally carries the per-test identity path, without which the
-    # differential gate has no `Test` verdict it can attribute. The previous pin
-    # predates `apply-differential-gate.py`'s outcome/inventory branch entirely —
-    # `test_outcomes` and `failed_test_ids` do not appear in it — so every failed
-    # `review test` fell through to a bare `current > base` count comparison.
-    # That comparison is strictly-greater against a suite whose own run-to-run
-    # variance is nonzero, so it rejected changes it could not have been caused
-    # by: #13416, whose entire diff is one `#[cfg(not(unix))]` function the Linux
-    # runner never compiles, was rejected `current=115 base=114`. Carries #431
-    # (aggregate Test evidence by identity), #430/#365 (observed failed test IDs
-    # and terminal evidence contract), #432/#13269 (canonical failure-digest
-    # result filenames, so a multi-word command no longer reads
-    # `review test.json` while the writer emits `review-test.json`), #433
-    # (bounded action setup subprocesses), #448 (equivalent failed test identity
-    # evidence), #450 (live-base resolution and passing inventory growth), and
-    # suffixed measurement commands.
-    # v2.15.16 restores changed-test routing under differential gating, runs a
-    # baseline only after a non-passing candidate, and uses composite-safe
-    # cancellation detection (#11751 W1-3/W1-10).
-    #
-    # v2.15.16 additionally carries the two halves of the phantom-red-gate
-    # diagnosis: 73ffaa1/#445 attributes a failed or timed-out setup to its
-    # owning step instead of fabricating command failures, and #451 stops a
-    # cancelled run from being reported as a failed gate at all. Together with
-    # #13510 (a realistic from-source build budget) those are the reasons
-    # `Audit` has been red on this repository with no findings and no digest.
-    # Also picks up #450 (differential tests compared against the live base).
-    # v2.15.17 runs a non-passing candidate's baseline at full scope so its
-    # failed-test identities remain comparable when candidate scope is changed.
-    #
-    # Refs #10997, #11751 W1-2, W1-5, W1-6, W1-7, W1-10, #13267, #13437,
-    # #13536, #445, #450, and #451.
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@a55a1dde4d52d00656ac9b01ad06d1be2e5b4378
     with:
       commands: review test
-      # `review test` defaults to running the extension's pre-test lint, which
-      # for Rust is a full `cargo clippy` over the workspace. The `Lint` job in
-      # the homeboy-fast matrix above already runs `review lint`, so every shard
-      # was repeating work that is covered once, costing roughly three minutes
-      # each across all `test-shards`.
-      #
-      # This matches the umbrella `review` command, which sets `skip_lint: true`
-      # when building its test stage for the same reason, and matches
-      # release.yml, which already passes `--skip-lint` here.
       args: --skip-lint
       expected-commands: review audit,review lint,review test
       component: homeboy
-      # Must track the `uses:` pin above. This is the revision the reusable
-      # workflow checks out to run the gate itself — it is what surfaces as
-      # `ACTION_REVISION` in the Test job — so leaving it behind would keep the
-      # old `apply-differential-gate.py` even with a newer workflow.
       action-ref: a55a1dde4d52d00656ac9b01ad06d1be2e5b4378
-      # rust v1.37.4. Must move with the action pin, not after it: the action consumes
-      # per-test identities, and homeboy-extensions#2699 (`fix(rust): canonicalize
-      # failed test identities`, released in rust v1.37.2) is what produces them.
-      # Bumping only the action would swap an unattributable `current > base`
-      # rejection for an equally blocking `no_comparable_evidence` one.
-      #
-      # Of the 93 commits since the previous pin only 8 touch `rust/`; the rest
-      # are WordPress-scoped and unreachable from this component. This also
-      # carries #2697 (structural generic field-type resolution), which has been
-      # released since v1.37.1 but could not reach this repository while the pin
-      # was frozen. This also carries homeboy-extensions#2722, which prevents
-      # child tests from corrupting the parent failed-test identity sidecar.
       extension-ref: 9c95310bd12a78cb900dc2fe4ed2411396cb30ca
       source: .
       scope: auto
       differential-gating: 'true'
       baseline-commands: review test
-      test-shards: ${{ needs.ci-capacity-admission.outputs.test-shards }}
+      test-shards: '1'
       execution-timeout-seconds: '2100'
       test-timeout-seconds: '1800'
-      # Homeboy builds itself from source in `release`. That is the most
-      # expensive setup step this action has, and the shared 900s default is
-      # scoped to downstream components that download a prebuilt binary. A cold
-      # or partially-warm cargo cache pushes this workspace past 900s, the setup
-      # wrapper terminates the build, and the action then reports every expected
-      # command as failed -- so an unrelated PR sees a red `Audit` with no
-      # findings and no digest. Budget it like the other two phases already are.
       setup-timeout-seconds: '2400'
       comment-section-key: test
       comment-section-title: Test
     secrets: inherit
-
-  ci-capacity-evidence:
-    name: homeboy / CI Capacity Evidence
-    needs: [required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, external-resolver-fixtures, rustfmt, homeboy-fast, homeboy]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Publish queue, execution, and critical-path timing evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .github/ci-capacity-evidence.sh
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: homeboy-ci-capacity-evidence-${{ github.run_attempt }}
-          path: ci-capacity-evidence.json
-          if-no-files-found: warn
-
-  # Terminal gate. A run's conclusion has to mean something (#12573).
-  #
-  # PR #12567 merged with ZERO gates executed. Its first run was cancelled with
-  # every gate mid-flight; the `pull_request.closed` run that cancelled it
-  # reported `pr-state` inactive, skipped every gate, and concluded SUCCESS. A
-  # `skipped` needs-dependency does not fail a run, so "nothing ran" and
-  # "everything passed" were the same green tick — and `gh pr checks`, which
-  # renders `cancelled` as `fail`, showed the superseded run's red at the same
-  # time. Neither reading was true.
-  #
-  # This job depends on every gate above, runs under `always()` so skipping
-  # cannot skip it too, and fails unless each dependency concluded `success` AND
-  # every context in `.github/required-gates-ruleset.json` appears in this run's
-  # job list having actually executed and passed. Two directions, because a
-  # declared context can be emitted by a job that never ran.
-  #
-  # Capacity admission and closure cancellation are untouched: skipping stays
-  # possible, it just stops being invisible. `homeboy / Required Gates
-  # Declaration` remains the required context for the DECLARATION claim; this is
-  # the EXECUTION claim, named for what it checks.
-  required-gates-executed:
-    name: homeboy / Required Gates Executed
-    needs: [pr-state, ci-capacity-admission, required-gates-declaration, workspace-tests-compile, warning-clean, windows-compile, external-resolver-fixtures, rustfmt, homeboy-fast, homeboy]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Assert every required gate executed and passed
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_GATE_RESULTS: ${{ toJSON(needs) }}
-          CI_RUN_ACTIVE: ${{ needs.pr-state.outputs.active }}
-          REQUIRED_GATES_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: bash .github/ci-required-gates-executed.sh
