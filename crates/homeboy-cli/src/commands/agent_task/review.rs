@@ -2150,7 +2150,7 @@ fn providers_with_catalog(
                 "identity": "agent-task providers",
                 "state": provider_report_state(route.as_ref(), all_providers, Some(&dispatchability)),
                 "risk": if diagnostics.is_empty() { Vec::new() } else { vec![format!("{} discovery diagnostic(s)", diagnostics.len())] },
-                "next_action": route.as_ref().map(ProviderRoute::next_command).unwrap_or(full_command.clone()),
+                "next_action": provider_next_command(route.as_ref(), Some(&dispatchability)).unwrap_or(full_command.clone()),
                 "selection_choices": selection_choices(route.as_ref()),
             },
             "truncation": {
@@ -2168,11 +2168,12 @@ fn providers_with_catalog(
             // not dispatchable reports the credential it is missing here so the
             // remediation survives the `--full` serde presentation too (#11479).
             "credential_readiness": credential_readiness_report(&shown_providers),
-            "dispatchability": serde_json::to_value(dispatchability).unwrap_or(Value::Null),
+            "dispatchability": serde_json::to_value(&dispatchability).unwrap_or(Value::Null),
             "readiness_validation": readiness_validation_projection(
                 validated_provider_identity,
                 validated_provider,
                 route.as_ref(),
+                Some(&dispatchability),
                 args.validate_readiness,
                 declared_backends,
             ),
@@ -2270,6 +2271,9 @@ fn compact_provider(
         "runtime_id": provider.runtime_id.as_deref().map(|value| bounded_text(value, 160)),
         "extension_id": provider.extension_id.as_deref().map(|value| bounded_text(value, 160)),
         "status": provider_status(provider, dispatchability),
+        // Keep the row's state in the same vocabulary as the top-level
+        // dispatchability verdict; `status` remains the filterable availability tier.
+        "state": dispatchability.state,
         "reason": readiness.reason().map(|value| bounded_text(&value, 128))
             .or_else(|| dispatchability.checks.credentials.reason.as_deref().map(|value| bounded_text(value, 128)))
             .or_else(|| (!dispatchability.ready).then(|| bounded_text(&dispatchability.reason, 128))),
@@ -2382,6 +2386,36 @@ impl ProviderRoute {
     }
 }
 
+fn provider_next_command(
+    route: Option<&ProviderRoute>,
+    dispatchability: Option<
+        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    >,
+) -> Option<String> {
+    let route = route?;
+    if dispatchability
+        .and_then(|verdict| verdict.configuration_diagnosis.as_ref())
+        .is_some_and(|diagnosis| diagnosis.kind == "missing_readiness_invocation")
+    {
+        if let ProviderRoute::Resolved {
+            backend,
+            provider_id,
+            ..
+        } = route
+        {
+            // Re-running live validation cannot repair a missing contract. Show
+            // the owner-bearing static record instead of suggesting a command
+            // known to fail in the same way.
+            return Some(format!(
+                "homeboy agent-task providers --full --backend {} --selector {}",
+                shell_arg(backend),
+                shell_arg(provider_id)
+            ));
+        }
+    }
+    Some(route.next_command())
+}
+
 fn resolve_provider_route(
     args: &ProvidersArgs,
     catalog: &AgentTaskProviderCatalog,
@@ -2455,11 +2489,19 @@ fn resolve_provider_route_for(
                     ),
                 });
             }
+            let dispatchable = evaluate_provider_dispatchability(
+                catalog,
+                &route.backend,
+                Some(&provider.id),
+                route.model.as_deref(),
+                probe_runtime,
+            )
+            .ready;
             Some(ProviderRoute::Resolved {
                 backend: route.backend,
                 provider_id: provider.id.clone(),
                 model: route.model,
-                dispatchable: provider_credential_readiness(provider).dispatchable,
+                dispatchable,
             })
         }
         ProviderResolution::AmbiguousExtensionAlias { mut candidate_ids } => {
@@ -2690,10 +2732,26 @@ fn declared_backend_readiness(
                         .find(|provider| &provider.id == provider_id),
                     _ => None,
                 });
+            let dispatchability = route.as_ref().and_then(|route| match route {
+                ProviderRoute::Resolved {
+                    backend,
+                    provider_id,
+                    model,
+                    ..
+                } => Some(evaluate_provider_dispatchability(
+                    catalog,
+                    backend,
+                    Some(provider_id),
+                    model.as_deref(),
+                    true,
+                )),
+                _ => None,
+            });
             let mut value = readiness_validation_projection(
                 identity.as_ref(),
                 provider,
                 route.as_ref(),
+                dispatchability.as_ref(),
                 true,
                 None,
             );
@@ -2728,6 +2786,9 @@ fn readiness_validation_projection(
     identity: Option<&(String, String)>,
     provider: Option<&AgentTaskExecutorProvider>,
     route: Option<&ProviderRoute>,
+    dispatchability: Option<
+        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    >,
     validation_requested: bool,
     declared_backends: Option<Vec<Value>>,
 ) -> Value {
@@ -2765,7 +2826,7 @@ fn readiness_validation_projection(
         "static_configuration": "declared",
         "live_dispatch": live_dispatch_readiness(provider, validation_requested),
         "route_state": route.map(ProviderRoute::state),
-        "next_command": route.map(ProviderRoute::next_command),
+        "next_command": provider_next_command(route, dispatchability),
         "reason": match route { Some(ProviderRoute::Blocked { reason, .. }) => Some(reason), _ => None },
         "selection_choices": selection_choices(route),
         // One entry per declared backend, each carrying this same projection
@@ -3773,6 +3834,7 @@ mod tests {
                 .find(|backend| backend["backend"] == "failing")
                 .expect("failing backend readiness");
             assert_eq!(failing["validated"], false);
+            assert_eq!(failing["route_state"], "configuration_unavailable");
             assert!(
                 failing["reason"]
                     .as_str()
@@ -3787,6 +3849,20 @@ mod tests {
             assert_eq!(ready["validated"], true);
             assert_eq!(ready["effective_provider_id"], "ready.provider");
             assert_eq!(ready["live_dispatch"], "validated");
+            assert_eq!(ready["route_state"], "ready");
+            let rows = output["providers"].as_array().expect("provider rows");
+            assert_eq!(
+                rows.iter()
+                    .find(|provider| provider["id"] == "failing.provider")
+                    .expect("failing provider row")["state"],
+                "runtime_unavailable"
+            );
+            assert_eq!(
+                rows.iter()
+                    .find(|provider| provider["id"] == "ready.provider")
+                    .expect("ready provider row")["state"],
+                "ready"
+            );
             assert_eq!(
                 validation["ready_backends"],
                 serde_json::json!(["ready"]),
@@ -3954,7 +4030,7 @@ mod tests {
     }
 
     #[test]
-    fn providers_report_resolved_route_credentials_missing() {
+    fn providers_report_resolved_route_configuration_invalid_before_missing_credentials() {
         crate::test_support::with_isolated_home(|_| {
             save_provider_policy(None, None);
             let mut args = providers_args();
@@ -3966,11 +4042,11 @@ mod tests {
             .expect("provider report")
             .0;
 
-            assert_eq!(output["operator_summary"]["state"], "credentials_missing");
+            assert_eq!(output["operator_summary"]["state"], "configuration_invalid");
             assert_eq!(
                 render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
                 Some(
-                    "Agent task providers\nStatus: credentials_missing\nProviders shown: 1\nNext: homeboy agent-task providers --backend claude-code --selector claude-code.agent-task-executor --validate-readiness".to_string()
+                    "Agent task providers\nStatus: configuration_invalid\nProviders shown: 1\nNext: homeboy agent-task providers --full --backend claude-code --selector claude-code.agent-task-executor".to_string()
                 )
             );
         });
@@ -4301,9 +4377,16 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(provider_status(&provider, &present), "present");
+        assert_eq!(provider_status(&provider, &present), "unavailable");
         assert!(provider_matches_status(&provider, &present, "unavailable"));
-        assert_eq!(compact_provider(&provider, &present)["status"], "present");
+        assert_eq!(
+            compact_provider(&provider, &present)["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            compact_provider(&provider, &present)["state"],
+            "configuration_invalid"
+        );
         assert_eq!(
             compact_provider(&provider, &present)["dispatchability"]["checks"]["credentials"]
                 ["status"],
@@ -4317,8 +4400,65 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(provider_status(&provider, &unverified), "unverified");
-        assert_eq!(unverified.state, "credentials_unverified");
+        assert_eq!(provider_status(&provider, &unverified), "unavailable");
+        assert_eq!(unverified.state, "configuration_invalid");
+        assert_eq!(
+            compact_provider(&provider, &unverified)["dispatchability"]["checks"]["credentials"]
+                ["status"],
+            "unverified"
+        );
+    }
+
+    #[test]
+    fn missing_readiness_invocation_has_a_source_owned_static_diagnosis_and_safe_next_action() {
+        crate::test_support::with_isolated_home(|_| {
+            save_provider_policy(None, None);
+            let mut provider: AgentTaskExecutorProvider =
+                serde_json::from_value(serde_json::json!({
+                    "id": "contract.owner.provider",
+                    "backend": "contract-owner",
+                    "capabilities": ["provider_owned_auth"],
+                }))
+                .expect("provider fixture");
+            provider.runtime_id = Some("contract-runtime".to_string());
+            provider.extension_id = Some("contract-extension".to_string());
+            provider.runtime_package_source = Some("extension-package".to_string());
+            let mut args = providers_args();
+            args.backend = Some("contract-owner".to_string());
+
+            let output = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect("static contract diagnosis")
+                .0;
+
+            assert_eq!(output["operator_summary"]["state"], "configuration_invalid");
+            assert_eq!(output["providers"][0]["state"], "configuration_invalid");
+            assert_eq!(
+                output["providers"][0]["dispatchability"]["checks"]["credentials"]["status"],
+                "unverified"
+            );
+            assert_eq!(
+                output["dispatchability"]["configuration_diagnosis"]["kind"],
+                "missing_readiness_invocation"
+            );
+            assert_eq!(
+                output["dispatchability"]["configuration_diagnosis"]["owner"]["extension_id"],
+                "contract-extension"
+            );
+            assert_eq!(
+                output["operator_summary"]["next_action"],
+                "homeboy agent-task providers --full --backend contract-owner --selector contract.owner.provider"
+            );
+            assert!(!output["operator_summary"]["next_action"]
+                .as_str()
+                .expect("next action")
+                .contains("--validate-readiness"));
+            assert_eq!(
+                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
+                Some(
+                    "Agent task providers\nStatus: configuration_invalid\nProviders shown: 1\nNext: homeboy agent-task providers --full --backend contract-owner --selector contract.owner.provider".to_string()
+                )
+            );
+        });
     }
 
     #[test]
@@ -4386,8 +4526,14 @@ mod tests {
             "resolved.provider".to_string(),
         );
 
-        let projection =
-            readiness_validation_projection(Some(&identity), Some(&provider), None, true, None);
+        let projection = readiness_validation_projection(
+            Some(&identity),
+            Some(&provider),
+            None,
+            None,
+            true,
+            None,
+        );
 
         assert_eq!(projection["effective_backend"], "resolved-backend");
         assert_eq!(projection["effective_provider_id"], "resolved.provider");
@@ -4410,8 +4556,8 @@ mod tests {
                 .expect("provider envelope")
                 .0;
 
-            assert_eq!(output["dispatchability"]["state"], "credentials_missing");
-            assert_eq!(output["operator_summary"]["state"], "credentials_missing");
+            assert_eq!(output["dispatchability"]["state"], "configuration_invalid");
+            assert_eq!(output["operator_summary"]["state"], "configuration_invalid");
             assert_eq!(output["dispatchability"]["checks"]["route"]["ready"], true);
             assert_eq!(
                 output["dispatchability"]["checks"]["credentials"]["ready"],

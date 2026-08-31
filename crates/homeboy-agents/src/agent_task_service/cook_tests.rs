@@ -4704,7 +4704,7 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                     ..Default::default()
                 },
                 compile_command("unverified", None, None),
-                "no live validation route",
+                "configuration_invalid",
             ),
         ];
 
@@ -4769,6 +4769,53 @@ fn compile_cook_admits_provider_owned_auth_only_after_live_verification() {
         .expect("verified provider-owned auth is admitted before scheduler reservation");
 
         assert_eq!(options.identity.initial_plan.tasks.len(), 1);
+    });
+}
+
+#[test]
+fn cook_preflight_exposes_missing_readiness_invocation_diagnosis_without_provider_switching() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut provider = compile_provider("owned-auth.provider", "owned-auth");
+        provider.capabilities = vec!["provider_owned_auth".to_string()];
+        provider.runtime_id = Some("owned-runtime".to_string());
+        provider.extension_id = Some("owned-extension".to_string());
+
+        let error = compile_cook_attempt_with_catalog_and_readiness_cache(
+            compile_options("missing-readiness-cook"),
+            compile_command("owned-auth", None, None),
+            &crate::agent_task_provider::AgentTaskProviderCatalog {
+                providers: vec![provider],
+                ..Default::default()
+            },
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+        .expect_err("a provider-owned auth contract without a probe cannot start Cook");
+
+        assert_eq!(error.details["field"], "provider_dispatchability");
+        assert!(error.message.contains("configuration"), "{error}");
+        assert!(error.message.contains("readiness_invocation"), "{error}");
+        assert!(
+            !error.message.contains("select a verified backend"),
+            "Cook must diagnose the owning provider contract, not suggest switching: {error}"
+        );
+        let verdict = error.details["tried"]
+            .as_array()
+            .and_then(|hints| hints.first())
+            .and_then(|hint| hint.as_str())
+            .and_then(|hint| serde_json::from_str::<serde_json::Value>(hint).ok())
+            .expect("the shared typed dispatchability diagnosis is attached to Cook preflight");
+        assert_eq!(
+            verdict["configuration_diagnosis"]["kind"],
+            "missing_readiness_invocation"
+        );
+        assert_eq!(
+            verdict["configuration_diagnosis"]["owner"]["runtime_id"],
+            "owned-runtime"
+        );
+        assert_eq!(
+            verdict["configuration_diagnosis"]["owner"]["extension_id"],
+            "owned-extension"
+        );
     });
 }
 
