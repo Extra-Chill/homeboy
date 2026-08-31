@@ -544,7 +544,10 @@ pub fn run_upgrade_with_method(
                 (vec![], vec![])
             } else {
                 operation.set_phase("refreshing installed extensions");
-                update_all_extensions(operation.id())
+                let (updated, skipped) = update_all_extensions(operation.id());
+                let status = extension_component_status(true, false, &updated, &skipped);
+                operation.mark_extensions(&status.status, &status.summary);
+                (updated, skipped)
             };
             let promotion_lease = acquire_controller_upgrade_lease(
                 &mut operation,
@@ -554,6 +557,7 @@ pub fn run_upgrade_with_method(
             let (runners_updated, runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
+                operation.set_phase("refreshing configured runners");
                 super::with_runner_upgrade(|p| {
                     p.upgrade_configured_runners_with_explicit_source_path(
                         force,
@@ -734,7 +738,10 @@ pub fn run_upgrade_with_method(
     // mismatches and inconsistent audit findings.
     let (extensions_updated, extension_skips) = if upgrade_completed && !skip_extensions {
         operation.set_phase("refreshing installed extensions");
-        update_all_extensions(operation.id())
+        let (updated, skipped) = update_all_extensions(operation.id());
+        let status = extension_component_status(true, false, &updated, &skipped);
+        operation.mark_extensions(&status.status, &status.summary);
+        (updated, skipped)
     } else if skip_extensions {
         operation.mark_extensions("skipped", "extension refresh skipped");
         (vec![], vec![])
