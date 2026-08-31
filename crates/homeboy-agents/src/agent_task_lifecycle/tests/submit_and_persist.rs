@@ -735,6 +735,19 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
         false
     );
     assert_eq!(terminal.metadata["cook_progress"]["exit_code"], 1);
+
+    let repeated = record_cook_progress_in_store(
+        &lifecycle_store,
+        run_id,
+        "durable_identity",
+        1,
+        Some("restarted Cook"),
+    )
+    .expect("retain exact terminal result after restart");
+    assert_eq!(
+        repeated.metadata["cook_progress"],
+        terminal.metadata["cook_progress"]
+    );
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

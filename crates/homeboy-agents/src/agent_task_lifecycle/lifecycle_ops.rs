@@ -3717,6 +3717,14 @@ pub fn record_cook_progress_with_activity_in_store(
         {
             let metadata = record.ensure_metadata_object();
             let previous = metadata.get("cook_progress").cloned();
+            if previous
+                .as_ref()
+                .and_then(|progress| progress.get("terminal_status"))
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                return true;
+            }
             let mut progress = json!({
                 "phase": phase,
                 "attempt": attempt,

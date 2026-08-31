@@ -1931,7 +1931,8 @@ impl CookSideEffectService for NoChangeSideEffects {
 fn run_intentional_no_change_cook(
     evidence_policy: bool,
     verdict: &str,
-) -> (AgentTaskRunResult<AgentTaskCookReport>, String) {
+    with_candidate: bool,
+) -> (AgentTaskRunResult<AgentTaskCookReport>, String, CookRequest) {
     let policy = if evidence_policy {
         "evidence"
     } else {
@@ -1974,6 +1975,31 @@ fn run_intentional_no_change_cook(
         }
     });
     aggregate.outcomes[0].metadata["intentional_no_change_verified"] = Value::Bool(true);
+    let _candidate_patch = if with_candidate {
+        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        let file = tempfile::NamedTempFile::new().expect("candidate patch file");
+        std::fs::write(file.path(), patch).expect("write candidate patch");
+        aggregate.outcomes[0]
+            .artifacts
+            .push(crate::agent_task::AgentTaskArtifact {
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                path: Some(file.path().display().to_string()),
+                size_bytes: Some(patch.len() as u64),
+                sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
+                    patch.as_bytes(),
+                )),
+                metadata: serde_json::json!({
+                    "producer_attempt": 1,
+                    "base_ref": "main",
+                    "provider_backend": "fixture",
+                }),
+                ..Default::default()
+            });
+        Some(file)
+    } else {
+        None
+    };
     aggregate.outcomes[0].evidence_refs = vec![crate::agent_task::AgentTaskEvidenceRef {
         kind: "transcript".to_string(),
         uri: "provider://review/transcript".to_string(),
@@ -1984,6 +2010,7 @@ fn run_intentional_no_change_cook(
 
     let promotions = Arc::new(AtomicUsize::new(0));
     let finalizations = Arc::new(AtomicUsize::new(0));
+    let resume_options = options.clone();
     let result = run_cook(CookContext {
         side_effects: Some(Box::new(NoChangeSideEffects {
             promotions: Arc::clone(&promotions),
@@ -1996,13 +2023,13 @@ fn run_intentional_no_change_cook(
     assert_eq!(finalizations.load(Ordering::SeqCst), 0);
     assert_eq!(result.value.attempts.len(), 1);
     assert!(result.value.attempts[0].promotion.is_none());
-    (result, run_id)
+    (result, run_id, resume_options)
 }
 
 #[test]
 fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id) = run_intentional_no_change_cook(true, "no_change");
+        let (result, run_id, _) = run_intentional_no_change_cook(true, "no_change", false);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.status, "intentional_no_change");
         assert_eq!(
@@ -2035,7 +2062,7 @@ fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_polic
 #[test]
 fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id) = run_intentional_no_change_cook(false, "no_change");
+        let (result, run_id, options) = run_intentional_no_change_cook(false, "no_change", false);
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.status, "no_candidate");
         assert_eq!(
@@ -2074,13 +2101,36 @@ fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy(
             persisted.metadata["cook_progress"]["terminal_status"],
             "no_candidate"
         );
+
+        let restarted = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("restore terminal no-candidate report");
+        assert_eq!(restarted.exit_code, 1);
+        assert_eq!(restarted.value.status, "no_candidate");
+        assert_eq!(
+            agent_task_lifecycle::exact_record(&run_id)
+                .unwrap()
+                .metadata["cook_progress"]["terminal_status"],
+            "no_candidate"
+        );
+
+        let observed = match claim_disposition(
+            "batch-13966",
+            &options,
+            AgentTaskCookBatchControl::daemon_owned(),
+        ) {
+            ClaimDisposition::AlreadyTerminal(cell) => cell,
+            disposition => panic!("expected terminal batch observation, got {disposition:?}"),
+        };
+        assert_eq!(observed.status, "no_candidate");
+        assert_eq!(observed.exit_code, 1);
     });
 }
 
 #[test]
 fn finalizing_patch_cook_accepts_verified_already_satisfied_verdict() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id) = run_intentional_no_change_cook(false, "already_satisfied");
+        let (result, run_id, options) =
+            run_intentional_no_change_cook(false, "already_satisfied", false);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.status, "intentional_no_change");
         let persisted = agent_task_lifecycle::exact_record(&run_id).expect("persisted terminal");
@@ -2092,13 +2142,29 @@ fn finalizing_patch_cook_accepts_verified_already_satisfied_verdict() {
             persisted.metadata["cook_progress"]["terminal_status"],
             "intentional_no_change"
         );
+
+        let restarted = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("restore terminal intentional-no-change report");
+        assert_eq!(restarted.exit_code, 0);
+        assert_eq!(restarted.value.status, "intentional_no_change");
+
+        let observed = match claim_disposition(
+            "batch-13966",
+            &options,
+            AgentTaskCookBatchControl::daemon_owned(),
+        ) {
+            ClaimDisposition::AlreadyTerminal(cell) => cell,
+            disposition => panic!("expected terminal batch observation, got {disposition:?}"),
+        };
+        assert_eq!(observed.status, "intentional_no_change");
+        assert_eq!(observed.exit_code, 0);
     });
 }
 
 #[test]
-fn finalizing_patch_cook_refuses_verified_blocked_verdict() {
+fn finalizing_patch_cook_refuses_verified_blocked_verdict_with_selectable_candidate() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id) = run_intentional_no_change_cook(false, "blocked");
+        let (result, run_id, _) = run_intentional_no_change_cook(false, "blocked", true);
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.status, "no_candidate");
         let persisted = agent_task_lifecycle::exact_record(&run_id).expect("persisted terminal");
