@@ -149,7 +149,7 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
     std::fs::write(
         &candidate,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nprintf '%s|%s|%s\\n' \"$1\" \"$4\" \"$6\" > {}\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nprintf '%s|%s|%s|%s\\n' \"$1\" \"$4\" \"$6\" \"$8\" > {}\nexit 0\n",
             quote_path(&evidence.display().to_string())
         ),
     )
@@ -163,7 +163,10 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
         .expect("new candidate, not the old controller, admits replacement");
     assert_eq!(
         std::fs::read_to_string(&evidence).expect("admission evidence"),
-        "self|homeboy 0.351.0+old|0.352.0\n"
+        format!(
+            "self|homeboy 0.351.0+old|0.352.0|source candidate {}\n",
+            candidate.display()
+        )
     );
 
     std::fs::write(

@@ -380,7 +380,12 @@ fn verify_source_candidate_target_admission(
     let legacy_identity = installed_binary
         .and_then(|path| candidate_legacy_identity(path).ok())
         .unwrap_or_else(|| "unavailable".to_string());
-    run_verified_target_admission(built_binary, candidate_version, &legacy_identity)
+    run_verified_target_admission(
+        built_binary,
+        candidate_version,
+        &legacy_identity,
+        &format!("source candidate {}", built_binary.display()),
+    )
 }
 
 fn source_workspace_package_version(workspace_root: &Path) -> Result<String> {
@@ -422,6 +427,7 @@ fn run_verified_target_admission(
     candidate: &Path,
     target_version: &str,
     legacy_identity: &str,
+    selected_tag_or_artifact: &str,
 ) -> Result<()> {
     upgrade_phase("running verified source candidate admission");
     let output = Command::new(candidate)
@@ -432,6 +438,8 @@ fn run_verified_target_admission(
             legacy_identity,
             "--target-version",
             target_version,
+            "--selected-tag-or-artifact",
+            selected_tag_or_artifact,
         ])
         .output()
         .map_err(|error| {
