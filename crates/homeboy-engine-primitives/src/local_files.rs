@@ -161,6 +161,11 @@ fn write_file_atomic_with_owner_only(
             Some(operation.to_string()),
         )
     })?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
 
     let filename = path.file_name().ok_or_else(|| {
         Error::internal_io(
@@ -172,11 +177,7 @@ fn write_file_atomic_with_owner_only(
     let tmp_path = unique_temp_path(parent, filename.to_string_lossy().as_ref());
 
     if owner_only {
-        if let Err(error) =
-            write_file_owner_only(&tmp_path, content, &format!("{} (write temp)", operation))
-        {
-            return Err(error);
-        }
+        write_file_owner_only(&tmp_path, content, &format!("{} (write temp)", operation))?;
     } else {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -263,6 +264,11 @@ fn write_json_file_with_owner_only<T: Serialize>(
     let parent = path.parent().ok_or_else(|| {
         Error::internal_unexpected(format!("path has no parent: {}", path.display()))
     })?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     create_dir_all_durably(parent)?;
     let json = serde_json::to_string_pretty(value).map_err(|error| {
         Error::internal_json(error.to_string(), Some(path.display().to_string()))
@@ -470,5 +476,23 @@ mod tests {
             fs::read_to_string(path).unwrap(),
             "{\n  \"name\": \"homeboy\"\n}\n"
         );
+    }
+
+    #[test]
+    fn atomic_writer_accepts_a_relative_filename() {
+        let filename = format!(
+            ".homeboy-local-files-relative-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = Path::new(&filename);
+
+        write_file_atomic(path, "relative content", "relative atomic write").unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "relative content");
+        fs::remove_file(path).unwrap();
     }
 }

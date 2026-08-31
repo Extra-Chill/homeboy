@@ -2028,20 +2028,17 @@ pub fn record_provider_worktree_finalization_deferred(
     lifecycle_status: &str,
 ) -> Result<()> {
     AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, |batch| {
-        let operations = batch
+        let deferrals = batch
             .metadata
             .as_object_mut()
             .expect("batch metadata is validated as an object")
-            .entry("provider_worktree_finalizations")
+            .entry("provider_worktree_finalization_deferrals")
             .or_insert_with(|| json!({}));
-        if operations[child_run_id]["status"] != "completed" {
-            operations[child_run_id] = json!({
-                "schema": "homeboy/agent-task-provider-worktree-finalization/v2",
-                "status": "deferred",
-                "lifecycle_status": lifecycle_status,
-                "recorded_at": chrono::Utc::now().to_rfc3339(),
-            });
-        }
+        deferrals[child_run_id] = json!({
+            "schema": "homeboy/agent-task-provider-worktree-finalization-deferral/v1",
+            "lifecycle_status": lifecycle_status,
+            "recorded_at": chrono::Utc::now().to_rfc3339(),
+        });
         Ok(())
     })?;
     Ok(())

@@ -542,7 +542,8 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
 /// repeated resume calls converge without duplicate PRs (#9525).
 fn batch_resume(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> CmdResult<Value> {
     let batch_id = args.batch_id.clone();
-    supervisor::with_portfolio_resume_lock(&batch_id, || batch_resume_locked(args, placement))
+    let _fence = supervisor::acquire_fanout_ownership_fence(&batch_id)?;
+    batch_resume_locked(args, placement)
 }
 
 fn batch_resume_locked(
@@ -1658,6 +1659,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher_and_placement(
     attempt_dispatcher: &CookAttemptDispatcherFactory,
     placement: Placement,
 ) -> CmdResult<Value> {
+    let _fence = supervisor::acquire_fanout_ownership_fence(&plan.fanout_id)?;
     run_batch_cook_fanout_plan_with_attempt_dispatcher_claim(
         plan,
         attempt_dispatcher,
@@ -1739,6 +1741,7 @@ fn run_batch_cook_fanout_plan_with_placement(
     plan: BatchCookFanoutPlan,
     placement: Placement,
 ) -> CmdResult<Value> {
+    let _fence = supervisor::acquire_fanout_ownership_fence(&plan.fanout_id)?;
     run_batch_cook_fanout_plan_with_executor_claim(
         plan,
         Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
@@ -1979,9 +1982,16 @@ fn finalize_resumed_provider_worktrees(
                 })
                 .or_else(|| child.state.is_terminal().then_some(child.state));
             let Some(state) = state else { return Ok(()) };
-            let deferred_status = batch.metadata["provider_worktree_finalizations"][&child.run_id]
-                ["lifecycle_status"]
-                .as_str();
+            let deferred_status = batch.metadata["provider_worktree_finalization_deferrals"]
+                [&child.run_id]["lifecycle_status"]
+                .as_str()
+                .or_else(|| {
+                    // Compatibility for records written before deferral became
+                    // orthogonal to the exact provider mutation intent.
+                    batch.metadata["provider_worktree_finalizations"][&child.run_id]
+                        ["lifecycle_status"]
+                        .as_str()
+                });
             let live_terminal_status = live.as_ref().and_then(|record| {
                 record
                     .metadata
@@ -2106,7 +2116,12 @@ fn portfolio_vetoes_success_cleanup(
                 .values()
                 .find(|child| child.run_id == child_run_id)
         })
-        .is_some_and(|child| child.blocker.is_some()))
+        .is_some_and(|child| {
+            child.blocker.is_some()
+                || child.next_action.as_ref().is_some_and(|action| {
+                    !matches!(action, supervisor::AgentTaskFanoutPortfolioAction::None)
+                })
+        }))
 }
 
 fn finalize_fanout_provider_worktree(
@@ -2573,6 +2588,9 @@ fn cook_batch_inner(
         .iter()
         .any(|cook| !cook.private_verify.is_empty());
     let persisted = args.run_plan && !args.preview;
+    let _fence = persisted
+        .then(|| supervisor::acquire_fanout_ownership_fence(&plan.fanout_id))
+        .transpose()?;
     let claim = persisted
         .then(|| claim_fanout_run_batch_coordinator(&plan, placement))
         .transpose()?;
@@ -7421,7 +7439,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn publication_then_dirty_resume_vetoes_destructive_success_cleanup() {
+    fn failed_pr_update_then_observation_vetoes_destructive_success_cleanup() {
         with_isolated_home(|home| {
             install_fanout_agent_task_providers(home.path());
             let (fixture, records, mut plan) = provider_finalization_fixture(false);
@@ -7454,25 +7472,86 @@ mod tests {
                 [supervisor::AgentTaskFanoutPortfolioChild {
                     child_id: cook.cook_id.clone(),
                     tracker_ref: "homeboy://test/publication".into(),
-                    run_id: "replaced-predecessor".into(),
+                    run_id: cook.run_id(),
                     source_sha: None,
                     base_sha: None,
                     head_sha: Some("published".into()),
                     evidence_generation: 0,
                     finding_fingerprints: Default::default(),
                     finding_fingerprint_recency: Default::default(),
-                    blocker: Some(supervisor::AgentTaskFanoutPortfolioBlocker {
-                        code: "unsafe_worktree".into(),
-                        detail: "dirty candidate worktree is retained without overwrite".into(),
-                        evidence_ref: "homeboy://test/dirty".into(),
-                    }),
-                    next_action: Some(
-                        supervisor::AgentTaskFanoutPortfolioAction::InspectBlockedCandidate,
-                    ),
+                    blocker: None,
+                    next_action: None,
                 }],
             );
-            portfolio.revision = 1;
-            supervisor::write_portfolio(&portfolio).unwrap();
+            struct FailedPrAdapter(supervisor::AgentTaskFanoutPortfolioObservation);
+            impl supervisor::FanoutPortfolioAdapter for FailedPrAdapter {
+                fn observe(
+                    &mut self,
+                    _child: &supervisor::AgentTaskFanoutPortfolioChild,
+                ) -> Result<supervisor::AgentTaskFanoutPortfolioObservation> {
+                    Ok(self.0.clone())
+                }
+                fn rebase_candidate(
+                    &mut self,
+                    _child: &supervisor::AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn recreate_candidate(
+                    &mut self,
+                    _child: &supervisor::AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn rerun_gates_and_review(
+                    &mut self,
+                    _child: &supervisor::AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn finalize_or_update_pr(
+                    &mut self,
+                    _child: &supervisor::AgentTaskFanoutPortfolioChild,
+                    _force_with_lease: bool,
+                ) -> Result<()> {
+                    Err(Error::internal_unexpected("fixture PR update failed"))
+                }
+            }
+            portfolio
+                .run(
+                    &mut FailedPrAdapter(supervisor::AgentTaskFanoutPortfolioObservation {
+                        child_id: cook.cook_id.clone(),
+                        tracker: supervisor::AgentTaskFanoutTrackerState::Open,
+                        provider: supervisor::AgentTaskFanoutProviderState::Succeeded,
+                        worktree: supervisor::AgentTaskFanoutWorktreeState::Clean,
+                        candidate: supervisor::AgentTaskFanoutCandidateState {
+                            source_sha: Some("source".into()),
+                            base_sha: Some("base".into()),
+                            head_sha: Some("published".into()),
+                            current_base_sha: Some("base".into()),
+                            remote_head_sha: None,
+                            publication_receipt_current: false,
+                            can_rebase: true,
+                            can_recreate: true,
+                        },
+                        gates: supervisor::AgentTaskFanoutEvidenceState::Current,
+                        acceptance: supervisor::AgentTaskFanoutEvidenceState::Current,
+                        pr: supervisor::AgentTaskFanoutPrState::Missing,
+                        findings: Vec::new(),
+                    }),
+                    &supervisor::IndependentFanoutDependencies,
+                )
+                .expect("failed PR action is durably re-observed");
+            assert_eq!(
+                supervisor::read_portfolio(&plan.fanout_id)
+                    .unwrap()
+                    .children[&cook.cook_id]
+                    .blocker
+                    .as_ref()
+                    .unwrap()
+                    .code,
+                "adapter_action_failed"
+            );
             let before = std::fs::read_to_string(&records).unwrap();
             let _destructive = homeboy::core::test_support::EnvVarGuard::set(
                 "HOMEBOY_FAKE_PROVIDER_REMOVE_HANDLE",
@@ -7489,7 +7568,7 @@ mod tests {
             );
             let batch = batch::read_batch_record(&plan.fanout_id).unwrap();
             assert_eq!(
-                batch.metadata["provider_worktree_finalizations"][&cook.run_id()]
+                batch.metadata["provider_worktree_finalization_deferrals"][&cook.run_id()]
                     ["lifecycle_status"],
                 "portfolio_retention_blocker"
             );
@@ -7556,6 +7635,16 @@ mod tests {
                     Ok(())
                 })
                 .expect("simulate crash before receipt publication");
+            batch::record_provider_worktree_finalization_deferred(
+                &plan.fanout_id,
+                &cook.run_id(),
+                "portfolio_retention_blocker",
+            )
+            .expect("record blocker without replacing exact mutation intent");
+            let deferred = batch::read_batch_record(&plan.fanout_id).unwrap();
+            let pending = &deferred.metadata["provider_worktree_finalizations"][&cook.run_id()];
+            assert_eq!(pending["status"], "pending");
+            assert_eq!(pending["mutation_attempted"], true);
             std::fs::remove_dir_all(fixture.path().join("workspace"))
                 .expect("destructive provider removed workspace");
             let _missing = homeboy::core::test_support::EnvVarGuard::set(

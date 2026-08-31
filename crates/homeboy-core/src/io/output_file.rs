@@ -94,10 +94,7 @@ where
     let cleanup = || {
         let _ = std::fs::remove_file(&temp);
     };
-    let mut file = match create(&temp) {
-        Ok(file) => file,
-        Err(error) => return Err(error),
-    };
+    let mut file = create(&temp)?;
     if let Err(error) = write(&mut file, contents) {
         drop(file);
         cleanup();
