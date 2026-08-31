@@ -8,10 +8,17 @@ export function selectedScenarioIds(raw = '') {
   return [...new Set(String(raw).split(',').map((id) => id.trim()).filter(Boolean))];
 }
 
-export function rigWorkloadInputs(raw = '', selectedIds = [], pluginSlug = '', componentPath = '') {
+export function rigWorkloadInputs(
+  raw = '',
+  selectedIds = [],
+  pluginSlug = '',
+  componentPath = '',
+  rigPackageRoot = '',
+) {
   const selected = new Set(selectedIds);
   const workloads = [];
   const mounts = [];
+  let rigPackageMounted = false;
 
   for (const source of String(raw).split(path.delimiter).map((entry) => entry.trim()).filter(Boolean)) {
     const filename = path.basename(source);
@@ -20,31 +27,44 @@ export function rigWorkloadInputs(raw = '', selectedIds = [], pluginSlug = '', c
       continue;
     }
 
-    const componentRelativeFile = relativeComponentFile(source, componentPath);
-    const relativeFile = componentRelativeFile || `.homeboy/bench-rig/${filename}`;
+    const componentRelativeFile = relativeRootFile(source, componentPath);
+    const packageRelativeFile = relativeRootFile(source, rigPackageRoot);
+    const relativeFile = componentRelativeFile
+      || (packageRelativeFile && `.homeboy/bench-rig/${packageRelativeFile}`)
+      || `.homeboy/bench-rig/${filename}`;
     workloads.push({
       id,
       source: 'rig',
       overridesDiscovered: true,
       run: [{ type: 'php', file: relativeFile }],
     });
-    mounts.push({
-      source,
-      target: `/wordpress/wp-content/plugins/${pluginSlug}/${relativeFile}`,
-      type: 'file',
-      mode: 'readonly',
-    });
+    if (componentRelativeFile || !packageRelativeFile) {
+      mounts.push({
+        source,
+        target: `/wordpress/wp-content/plugins/${pluginSlug}/${relativeFile}`,
+        type: 'file',
+        mode: 'readonly',
+      });
+    } else if (!rigPackageMounted) {
+      mounts.push({
+        source: rigPackageRoot,
+        target: `/wordpress/wp-content/plugins/${pluginSlug}/.homeboy/bench-rig`,
+        type: 'directory',
+        mode: 'readonly',
+      });
+      rigPackageMounted = true;
+    }
   }
 
   return { workloads, mounts };
 }
 
-function relativeComponentFile(source, componentPath) {
-  if (!componentPath) {
+function relativeRootFile(source, root) {
+  if (!root) {
     return undefined;
   }
 
-  const relative = path.relative(canonicalPath(componentPath), canonicalPath(source));
+  const relative = path.relative(canonicalPath(root), canonicalPath(source));
   if (!relative || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
     return undefined;
   }
