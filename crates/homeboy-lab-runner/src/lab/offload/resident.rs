@@ -3,9 +3,12 @@
 use super::*;
 use homeboy_core::runner_execution_envelope::{
     PathMaterializationEntry, PathMaterializationPlan, PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
-    PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT, PATH_MATERIALIZATION_STATUS_VALIDATED,
+    PATH_MATERIALIZATION_STATUS_VALIDATED,
 };
 use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
+use homeboy_lab_contract::path_materialization::{
+    primary_workspace_existing_remote, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_runner_resident_lab_offload(
@@ -214,9 +217,7 @@ pub(crate) fn runner_resident_path_materialization_plan(
     runner_workspace_root: &str,
     source_syncs: &[ManagedRunnerSourceRefreshOutput],
 ) -> PathMaterializationPlan {
-    let mut entries = vec![PathMaterializationEntry::primary_workspace_existing_remote(
-        runner_workspace_root,
-    )];
+    let mut entries = vec![primary_workspace_existing_remote(runner_workspace_root)];
     entries.extend(source_syncs.iter().map(|source| {
         PathMaterializationEntry::new(
             format!("managed_source:{}", source.id),

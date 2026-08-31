@@ -21,6 +21,7 @@ use homeboy_core::api_jobs::RemoteRunnerJobResult;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope;
 use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
+use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 
 use super::super::execution::{exec_worker_local_until_cancelled_with_progress, RunnerExecOptions};
 use super::broker::{
@@ -1451,13 +1452,16 @@ fn runner_exec_options_from_envelope(
     execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
     runner_job_id: String,
 ) -> Result<RunnerExecOptions> {
+    let lab_runner_workload =
+        lab_runner_workload_from_execution_envelope(&envelope).map_err(|error| {
+            Error::validation_invalid_argument("runner_workload", error.to_string(), None, None)
+        })?;
     let dispatch = envelope.dispatch.ok_or_else(|| {
         Error::internal_unexpected("runner execution envelope is missing dispatch payload")
     })?;
     let secret_env_plan = envelope.secret_env.unwrap_or_default();
     let secret_env_names = secret_env_plan.secret_env_names();
-    let required_extensions = envelope
-        .lab_runner_workload
+    let required_extensions = lab_runner_workload
         .as_ref()
         .map(|workload| workload.required_extensions.clone())
         .unwrap_or_default();
@@ -1487,7 +1491,7 @@ fn runner_exec_options_from_envelope(
         accepted_extension_settings: Vec::new(),
         require_paths: dispatch.require_paths,
         extension_env_providers: dispatch.extension_env_providers,
-        lab_runner_workload: envelope.lab_runner_workload,
+        lab_runner_workload,
         run_id,
         run_id_owns_generic_exec: false,
         detach_after_handoff: false,

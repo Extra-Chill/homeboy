@@ -8,6 +8,8 @@ use super::labels::{
 
 pub const LAB_RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
 
+pub use homeboy_runner_contract::JobArtifactMetadata;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabRunnerWorkload {
     pub schema: String,
@@ -157,42 +159,6 @@ pub struct LabRunnerWorkloadResultRefs {
     pub mirror_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
-}
-
-/// Canonical artifact pointer shared by Lab workloads, runner execution
-/// records, and the runner job model.
-///
-/// This is the single artifact-pointer shape. `JobArtifactMetadata`
-/// used to be a separate `{id, name, path, url}` struct here that was a strict
-/// field-subset of the api-jobs `JobArtifactMetadata`, so crossing between them
-/// meant a field-by-field rebuild that silently dropped `mime`, `size_bytes`
-/// and `sha256`. The type lives in this crate because `homeboy-api-jobs-contract`
-/// already depends on `homeboy-lab-contract`; defining it the other way round
-/// would be a dependency cycle.
-///
-/// Every added field is `Option` + `skip_serializing_if`, so a value carrying
-/// only the old four fields serializes byte-identically to the pre-collapse
-/// wire shape, and pre-collapse JSON still deserializes. Neither struct used
-/// `deny_unknown_fields`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct JobArtifactMetadata {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_base64: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
 }
 
 impl LabRunnerWorkloadCommandFamily {
