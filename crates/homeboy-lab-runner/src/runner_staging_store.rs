@@ -753,11 +753,13 @@ pub fn resolve_runner_staging_transport(
             None,
         )
     })?;
-    let capabilities = production_capabilities(&session)?;
+    let broker_token = broker_submit_token_for_runner(runner_id)?;
+    let capabilities = production_capabilities(&session, broker_token.as_deref())?;
     Ok(ProductionRunnerStagingTransport {
         runner_id: runner_id.to_string(),
         session,
         capabilities,
+        broker_token,
     })
 }
 
@@ -765,6 +767,7 @@ pub struct ProductionRunnerStagingTransport {
     runner_id: String,
     session: RunnerSession,
     capabilities: Vec<String>,
+    broker_token: Option<String>,
 }
 
 impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
@@ -799,10 +802,11 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
             })?;
         let response = match self.session.mode {
             RunnerTunnelMode::DirectSsh => {
-                let data = crate::execution::daemon_api_post_json_for_session(
+                let data = crate::execution::daemon_api_post_json_for_session_with_broker_token(
                     &self.session,
                     "/runner/staging",
                     &body,
+                    self.broker_token.as_deref(),
                 )?;
                 crate::execution::canonical_daemon_body(&data, "sealed staging daemon response")
                     .cloned()?
@@ -828,7 +832,7 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
                     "/runner/staging",
                     body,
                     "submit sealed runner staging",
-                    broker_submit_token_for_runner(&self.runner_id)?.as_deref(),
+                    self.broker_token.as_deref(),
                 )?
             }
         };
@@ -843,15 +847,23 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
     }
 }
 
-fn production_capabilities(session: &RunnerSession) -> Result<Vec<String>> {
+fn production_capabilities(
+    session: &RunnerSession,
+    broker_token: Option<&str>,
+) -> Result<Vec<String>> {
     let runner_id = &session.runner_id;
     let response = match session.mode {
-        RunnerTunnelMode::DirectSsh => crate::execution::daemon_api_post_json_for_session(
-            session,
-            "/runner/staging/capabilities",
-            &serde_json::json!({ "runner_id": runner_id }),
-        )
-        .map_err(|error| staging_capability_error(runner_id, error))?,
+        RunnerTunnelMode::DirectSsh => {
+            let data = crate::execution::daemon_api_post_json_for_session_with_broker_token(
+                session,
+                "/runner/staging/capabilities",
+                &serde_json::json!({ "runner_id": runner_id }),
+                broker_token,
+            )
+            .map_err(|error| staging_capability_error(runner_id, error))?;
+            crate::execution::canonical_daemon_body(&data, "sealed staging capabilities response")
+                .cloned()?
+        }
         RunnerTunnelMode::Reverse => {
             let broker_url = session.broker_url.as_deref().ok_or_else(|| {
                 Error::validation_invalid_argument(
@@ -873,7 +885,7 @@ fn production_capabilities(session: &RunnerSession) -> Result<Vec<String>> {
                 "/runner/staging/capabilities",
                 serde_json::json!({ "runner_id": runner_id }),
                 "read sealed staging capabilities",
-                broker_submit_token_for_runner(runner_id)?.as_deref(),
+                broker_token,
             )
             .map_err(|error| staging_capability_error(runner_id, error))?
         }
@@ -1336,7 +1348,7 @@ mod tests {
             write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).expect("response");
         });
         let session = production_session(RunnerTunnelMode::DirectSsh, &format!("http://{address}"));
-        let error = production_capabilities(&session).expect_err("old runner refusal");
+        let error = production_capabilities(&session, None).expect_err("old runner refusal");
         assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
         assert_eq!(
             error.details["missing_capabilities"][0],
@@ -1345,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn production_direct_and_reverse_transports_dispatch_the_versioned_endpoint() {
+    fn production_staging_requests_propagate_paired_bearer_tokens_across_transports() {
         let request = envelope();
         let receipt = RemoteRunnerStagingReceipt {
             schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
@@ -1362,8 +1374,14 @@ mod tests {
             },
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 2);
+        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 4);
+        let broker_token = "paired-staging-token".to_string();
         let direct_session = production_session(RunnerTunnelMode::DirectSsh, &endpoint);
+        assert!(
+            production_capabilities(&direct_session, Some(&broker_token))
+                .expect("direct capabilities")
+                .contains(&REMOTE_RUNNER_STAGING_CAPABILITY.to_string())
+        );
         let mut direct = ProductionRunnerStagingTransport {
             runner_id: "runner-1".to_string(),
             session: direct_session,
@@ -1372,6 +1390,7 @@ mod tests {
                 REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
                 REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
             ],
+            broker_token: Some(broker_token.clone()),
         };
         assert_eq!(
             submit_remote_runner_staging(&mut direct, &request).expect("direct"),
@@ -1379,6 +1398,11 @@ mod tests {
         );
 
         let reverse_session = production_session(RunnerTunnelMode::Reverse, &endpoint);
+        assert!(
+            production_capabilities(&reverse_session, Some(&broker_token))
+                .expect("reverse capabilities")
+                .contains(&REMOTE_RUNNER_STAGING_CAPABILITY.to_string())
+        );
         let mut reverse = ProductionRunnerStagingTransport {
             runner_id: "runner-1".to_string(),
             session: reverse_session,
@@ -1387,13 +1411,28 @@ mod tests {
                 REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
                 REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
             ],
+            broker_token: Some(broker_token.clone()),
         };
         assert_eq!(
             submit_remote_runner_staging(&mut reverse, &request).expect("reverse"),
             receipt
         );
         let paths = seen.lock().expect("paths");
-        assert_eq!(paths.as_slice(), ["/runner/staging", "/runner/staging"]);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|(path, _, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "/runner/staging/capabilities",
+                "/runner/staging",
+                "/runner/staging/capabilities",
+                "/runner/staging",
+            ]
+        );
+        assert!(paths.iter().all(|(_, canonical, authorization)| {
+            canonical == &broker_token && authorization == &format!("Bearer {broker_token}")
+        }));
     }
 
     fn production_session(mode: RunnerTunnelMode, endpoint: &str) -> RunnerSession {
@@ -1424,7 +1463,7 @@ mod tests {
 
     fn staging_endpoint(
         receipt: RemoteRunnerStagingReceipt,
-        seen: Arc<Mutex<Vec<String>>>,
+        seen: Arc<Mutex<Vec<(String, String, String)>>>,
         count: usize,
     ) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -1446,7 +1485,7 @@ mod tests {
                     .position(|window| window == b"\r\n\r\n")
                     .expect("headers")
                     + 4;
-                let headers = std::str::from_utf8(&request[..header_end]).expect("headers");
+                let headers = String::from_utf8(request[..header_end].to_vec()).expect("headers");
                 let length = headers
                     .lines()
                     .find_map(|line| {
@@ -1465,10 +1504,27 @@ mod tests {
                     .lines()
                     .next()
                     .expect("line");
-                seen.lock()
-                    .expect("record")
-                    .push(first.split_whitespace().nth(1).expect("path").to_string());
-                let body = serde_json::json!({ "success": true, "data": { "body": { "receipt": receipt } } }).to_string();
+                let path = first.split_whitespace().nth(1).expect("path").to_string();
+                let header = |name: &str| {
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':')
+                                .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                                .map(|(_, value)| value.trim().to_string())
+                        })
+                        .unwrap_or_default()
+                };
+                seen.lock().expect("record").push((
+                    path.clone(),
+                    header(homeboy_core::broker_auth::BROKER_TOKEN_HEADER),
+                    header("authorization"),
+                ));
+                let body = if path == "/runner/staging/capabilities" {
+                    serde_json::json!({ "success": true, "data": { "body": { "capabilities": [REMOTE_RUNNER_STAGING_CAPABILITY] } } }).to_string()
+                } else {
+                    serde_json::json!({ "success": true, "data": { "body": { "receipt": receipt } } }).to_string()
+                };
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).expect("response");
             }
         });
