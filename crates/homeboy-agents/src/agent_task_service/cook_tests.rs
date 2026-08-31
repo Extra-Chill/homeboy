@@ -5565,6 +5565,119 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
 }
 
 #[test]
+fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publication() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new_without_recovery(
+            "cook-13976-dirty-adopt",
+            2,
+            1,
+            false,
+            None,
+        );
+        std::fs::write(fixture.source.join("recovered.txt"), "operator candidate\n")
+            .expect("write dirty candidate");
+        let mut invalid_input = Error::validation_invalid_argument(
+            "to_worktree",
+            "explicit Cook checkout must be clean before its first provider execution",
+            Some(fixture.source.display().to_string()),
+            None,
+        );
+        invalid_input.details["dirty_candidate_adoption"] = serde_json::json!({
+            "workspace": fixture.source,
+            "reason": "first_provider_admission",
+        });
+        super::super::materialize_initial_cook_attempt(&fixture.options)
+            .expect("materialize dirty-destination Cook attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &fixture.run_id,
+            &fixture.options.identity.initial_plan,
+            "cook_pre_execution",
+            &invalid_input,
+        )
+        .expect("persist dirty-destination invalid_input failure");
+
+        let record = agent_task_lifecycle::reconcile_status(&fixture.run_id)
+            .expect("read dirty-destination failure");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["failure_classification"],
+            "invalid_input"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["candidate_adoption_recovery"]["reason"],
+            "dirty_destination_first_provider_admission"
+        );
+        let context = cook_report(CookReportInput {
+            cook_id: fixture.cook_id.clone(),
+            status: "pre_execution_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some(&fixture.run_id),
+        })
+        .value
+        .failure_context
+        .expect("dirty recovery actions");
+        assert_eq!(
+            context
+                .legal_actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["commit_candidate", "review_candidate", "adopt_candidate"]
+        );
+
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&fixture.source)
+                .output()
+                .expect("run generated commit step");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "test"]);
+        fixture.candidate = git_output(&fixture.source, &["rev-parse", "HEAD"])
+            .expect("resolve committed candidate");
+        std::fs::write(
+            &fixture.provider,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} reset --hard --quiet FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                target = fixture.target.display(),
+                candidate = fixture.candidate,
+            ),
+        )
+        .expect("bind promotion provider to committed candidate");
+
+        let review = agent_task_lifecycle::durable_local_read(&fixture.run_id)
+            .expect("generated review action reads the durable failure");
+        assert!(review.aggregate.is_some());
+
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(fixture.run_id.clone()),
+            ..Default::default()
+        };
+        let adopted = fixture
+            .adopt(|_| Ok(None), Arc::new(ReviewFormOnlyExecutor), &mut backend)
+            .expect("generated adopt action accepts the advertised recovery");
+
+        assert_eq!(adopted.exit_code, 0, "{:#?}", adopted.value);
+        assert_eq!(adopted.value.status, "review_ready");
+        assert!(adopted.value.attempts[0]
+            .promotion
+            .as_ref()
+            .is_some_and(|promotion| promotion.finalization_eligible(false)));
+        assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
 fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary repository");
@@ -5913,6 +6026,44 @@ impl CandidateAdoptionFixture {
         no_finalize: bool,
         dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
     ) -> Self {
+        Self::new_with_execution_budget_and_recovery(
+            cook_id,
+            max_attempts,
+            max_provider_executions,
+            max_same_provider_retries,
+            no_finalize,
+            dispatcher,
+            true,
+        )
+    }
+
+    fn new_without_recovery(
+        cook_id: &str,
+        max_attempts: u32,
+        max_same_provider_retries: u32,
+        no_finalize: bool,
+        dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+    ) -> Self {
+        Self::new_with_execution_budget_and_recovery(
+            cook_id,
+            max_attempts,
+            max_attempts,
+            max_same_provider_retries,
+            no_finalize,
+            dispatcher,
+            false,
+        )
+    }
+
+    fn new_with_execution_budget_and_recovery(
+        cook_id: &str,
+        max_attempts: u32,
+        max_provider_executions: u32,
+        max_same_provider_retries: u32,
+        no_finalize: bool,
+        dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+        authenticate_recovery: bool,
+    ) -> Self {
         let temp = tempfile::tempdir().expect("temporary adoption repositories");
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -6024,7 +6175,9 @@ impl CandidateAdoptionFixture {
             run_id,
             options,
         };
-        fixture.authenticate_pre_provider_recovery();
+        if authenticate_recovery {
+            fixture.authenticate_pre_provider_recovery();
+        }
         fixture
     }
 

@@ -5587,6 +5587,13 @@ fn dirty_candidate_adoption_recovery_actions(
     run_id: &str,
 ) -> Option<CookRecoveryActions> {
     let record = record?;
+    let task = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)?
+        .plan
+        .tasks
+        .first()?;
     if record.metadata["provider_executions_consumed"]
         .as_u64()
         .unwrap_or_default()
@@ -5594,6 +5601,9 @@ fn dirty_candidate_adoption_recovery_actions(
         || record.metadata["pre_execution_failure"]["details"]["dirty_candidate_adoption"]["reason"]
             != "first_provider_admission"
     {
+        return None;
+    }
+    if agent_task_lifecycle::candidate_adoption_recovery_outcome(record, task).is_none() {
         return None;
     }
     let workspace = record.metadata["pre_execution_failure"]["details"]["dirty_candidate_adoption"]

@@ -1088,7 +1088,7 @@ fn explicit_candidate_adopts_only_durable_pre_provider_transport_failures() {
         assert!(
             error
                 .message
-                .contains("explicit durable pre-provider transport recovery eligibility"),
+                .contains("explicit durable pre-provider recovery eligibility"),
             "{}",
             error.message
         );

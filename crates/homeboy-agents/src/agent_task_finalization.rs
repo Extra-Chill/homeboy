@@ -1468,7 +1468,9 @@ fn validate_durable_publication_eligibility(
         && candidate_ref.is_some_and(is_git_commit_identity)
         && candidate_ref == candidate_head
         && adoption_model.is_some_and(is_concrete_model)
-        && recovery.is_some_and(crate::agent_task_lifecycle::is_pre_provider_transport_recovery)
+        && recovery.is_some_and(|recovery| {
+            crate::agent_task_lifecycle::candidate_adoption_recovery_eligibility(recovery).is_some()
+        })
         && !promotion.gate_results.is_empty()
         && promotion
             .gate_results
