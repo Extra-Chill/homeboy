@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
+#[cfg(test)]
 use homeboy_core::error::Result;
 use homeboy_extension_contract::api::v1::{
     ExtensionApiCapabilityDescriptor, ExtensionApiCatalogDiagnostic,
@@ -20,21 +22,31 @@ use homeboy_extension_contract::api::v1::{
     EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA,
     EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA,
     EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA, EXTENSION_API_READINESS_REQUEST_SCHEMA,
-    EXTENSION_API_READINESS_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
+    EXTENSION_API_READINESS_RESPONSE_SCHEMA, EXTENSION_API_RECIPE_RUN_PLAN_REQUEST_SCHEMA,
+    EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
     EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1, FINGERPRINT_FILE_CAPABILITY_PREFIX,
     FINGERPRINT_INPUT_SCHEMA, FINGERPRINT_OUTPUT_SCHEMA, FORMAT_FILE_CAPABILITY_PREFIX,
-    REFACTOR_ANALYSIS_INPUT_SCHEMA, REFACTOR_ANALYSIS_OUTPUT_SCHEMA,
-    REFACTOR_FILE_CAPABILITY_PREFIX,
+    RECIPE_RUN_PROVIDER_CAPABILITY_PREFIX, REFACTOR_ANALYSIS_INPUT_SCHEMA,
+    REFACTOR_ANALYSIS_OUTPUT_SCHEMA, REFACTOR_FILE_CAPABILITY_PREFIX,
 };
-use homeboy_extension_contract::{evaluate_core_compatibility, ExtensionCapability};
+use homeboy_extension_contract::{
+    evaluate_core_compatibility, ExtensionCapability, ExtensionManifest,
+};
 
-use super::{discover_extensions, load_extension, DiscoveredExtension};
+#[cfg(test)]
+use super::load_extension;
+use super::{discover_extensions, DiscoveredExtension};
 
 const SUPPORTED_API_VERSIONS: &[ExtensionApiVersion] = &[EXTENSION_API_V1];
 
 /// Project an installed manifest into the stable Extension API v1 descriptor.
+#[cfg(test)]
 fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
     let extension = load_extension(extension_id)?;
+    Ok(api_descriptor_from_manifest(&extension))
+}
+
+fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDescriptor {
     let mut capabilities = [
         ExtensionCapability::Lint,
         ExtensionCapability::Test,
@@ -75,9 +87,11 @@ fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
             .iter()
             .filter_map(|provider| {
                 provider.declared_str("id").map(|id| {
-                    versioned_capability_descriptor(
-                        &format!("recipe-run-provider.{id}"),
+                    versioned_schema_capability_descriptor(
+                        &format!("{RECIPE_RUN_PROVIDER_CAPABILITY_PREFIX}{id}"),
                         provider.declared_str("version"),
+                        EXTENSION_API_RECIPE_RUN_PLAN_REQUEST_SCHEMA,
+                        EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA,
                     )
                 })
             }),
@@ -172,7 +186,7 @@ fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
         .collect::<Vec<_>>();
     runtimes.sort_by(|left, right| left.id.cmp(&right.id));
 
-    Ok(ExtensionApiDescriptor {
+    ExtensionApiDescriptor {
         schema: EXTENSION_API_DESCRIPTOR_SCHEMA.to_string(),
         api_version: EXTENSION_API_V1,
         identity: ExtensionApiIdentity {
@@ -194,15 +208,23 @@ fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
             .requires
             .as_ref()
             .and_then(|requirements| requirements.homeboy.clone()),
-    })
+    }
 }
 
 /// Negotiate a client's supported API versions against one installed extension.
+#[cfg(test)]
 fn negotiate_api(
     extension_id: &str,
     request: &ExtensionApiHandshakeRequest,
 ) -> Result<ExtensionApiHandshakeResponse> {
     let descriptor = api_descriptor(extension_id)?;
+    Ok(negotiate_descriptor(descriptor, request))
+}
+
+fn negotiate_descriptor(
+    descriptor: ExtensionApiDescriptor,
+    request: &ExtensionApiHandshakeRequest,
+) -> ExtensionApiHandshakeResponse {
     let supported_versions = SUPPORTED_API_VERSIONS.to_vec();
     let valid_schema = request.schema == EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA;
     let selected_version = valid_schema
@@ -255,61 +277,65 @@ fn negotiate_api(
     } else {
         ExtensionApiCompatibilityStatus::Incompatible
     };
-    Ok(ExtensionApiHandshakeResponse {
+    ExtensionApiHandshakeResponse {
         schema: EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA.to_string(),
         supported_versions,
         selected_version,
         descriptor: selected_version.map(|_| descriptor),
         compatibility: ExtensionApiCompatibility { status, failures },
-    })
+    }
 }
 
-/// List every installed extension through the stable v1 catalog contract.
-pub fn list_api(request: &ExtensionApiCatalogRequest) -> ExtensionApiCatalogResponse {
+pub(crate) struct ExtensionCatalogSnapshot {
+    pub response: ExtensionApiCatalogResponse,
+    pub manifests: BTreeMap<String, Box<ExtensionManifest>>,
+}
+
+/// Capture public catalog entries and their private manifests from one discovery pass.
+pub(crate) fn snapshot_api(request: &ExtensionApiCatalogRequest) -> ExtensionCatalogSnapshot {
     if let Some(failure) = validate_operation_request(
         &request.schema,
         EXTENSION_API_CATALOG_REQUEST_SCHEMA,
         request.api_version,
     ) {
-        return ExtensionApiCatalogResponse {
-            schema: EXTENSION_API_CATALOG_RESPONSE_SCHEMA.to_string(),
-            api_version: EXTENSION_API_V1,
-            entries: Vec::new(),
-            failure: Some(failure),
+        return ExtensionCatalogSnapshot {
+            response: ExtensionApiCatalogResponse {
+                schema: EXTENSION_API_CATALOG_RESPONSE_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                entries: Vec::new(),
+                failure: Some(failure),
+            },
+            manifests: BTreeMap::new(),
         };
     }
 
+    let mut manifests = BTreeMap::new();
     let entries = discover_extensions()
         .into_iter()
         .map(|extension| match extension {
             DiscoveredExtension::Valid(extension) => {
                 let id = extension.id.clone();
-                match negotiate_api(
-                    &id,
+                let handshake = negotiate_descriptor(
+                    api_descriptor_from_manifest(&extension),
                     &ExtensionApiHandshakeRequest {
                         schema: EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA.to_string(),
                         supported_versions: vec![request.api_version],
                     },
-                ) {
-                    Ok(handshake) => {
-                        let status = if handshake.compatibility.status
-                            == ExtensionApiCompatibilityStatus::Compatible
-                        {
-                            ExtensionApiCatalogEntryStatus::Available
-                        } else {
-                            ExtensionApiCatalogEntryStatus::Incompatible
-                        };
-                        ExtensionApiCatalogEntry {
-                            id,
-                            status,
-                            descriptor: handshake.descriptor,
-                            compatibility: Some(handshake.compatibility),
-                            diagnostic: None,
-                        }
-                    }
-                    Err(error) => {
-                        invalid_catalog_entry(id, "catalog_projection_failed", error.message)
-                    }
+                );
+                let status = if handshake.compatibility.status
+                    == ExtensionApiCompatibilityStatus::Compatible
+                {
+                    ExtensionApiCatalogEntryStatus::Available
+                } else {
+                    ExtensionApiCatalogEntryStatus::Incompatible
+                };
+                manifests.insert(id.clone(), extension);
+                ExtensionApiCatalogEntry {
+                    id,
+                    status,
+                    descriptor: handshake.descriptor,
+                    compatibility: Some(handshake.compatibility),
+                    diagnostic: None,
                 }
             }
             DiscoveredExtension::Invalid(failure) => {
@@ -318,12 +344,20 @@ pub fn list_api(request: &ExtensionApiCatalogRequest) -> ExtensionApiCatalogResp
         })
         .collect();
 
-    ExtensionApiCatalogResponse {
-        schema: EXTENSION_API_CATALOG_RESPONSE_SCHEMA.to_string(),
-        api_version: EXTENSION_API_V1,
-        entries,
-        failure: None,
+    ExtensionCatalogSnapshot {
+        response: ExtensionApiCatalogResponse {
+            schema: EXTENSION_API_CATALOG_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            entries,
+            failure: None,
+        },
+        manifests,
     }
+}
+
+/// List every installed extension through the stable v1 catalog contract.
+pub fn list_api(request: &ExtensionApiCatalogRequest) -> ExtensionApiCatalogResponse {
+    snapshot_api(request).response
 }
 
 /// Select installed providers for a capability, preferring component-linked extensions.
@@ -680,6 +714,17 @@ fn schema_capability_descriptor(
         ),
         artifact_schemas: Vec::new(),
     }
+}
+
+fn versioned_schema_capability_descriptor(
+    id: &str,
+    contract_version: Option<String>,
+    input_schema: &str,
+    output_schema: &str,
+) -> ExtensionApiCapabilityDescriptor {
+    let mut descriptor = schema_capability_descriptor(id, input_schema, output_schema);
+    descriptor.contract_version = contract_version;
+    descriptor
 }
 
 #[cfg(test)]

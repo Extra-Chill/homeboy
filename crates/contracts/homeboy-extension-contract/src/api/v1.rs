@@ -341,4 +341,39 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn recipe_run_plan_wire_shape_exposes_only_safe_identity_and_literal_argv() {
+        let response = ExtensionApiRecipeRunPlanResponse {
+            schema: EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            plan: Some(ExtensionApiRecipeRunPlan {
+                provider_id: "fixture.recipe-run".to_string(),
+                provider_version: "1.2.3".to_string(),
+                owning_extension: "fixture".to_string(),
+                command: vec![
+                    "fixture-run".to_string(),
+                    "--recipe".to_string(),
+                    "recipe.json".to_string(),
+                ],
+            }),
+            available_provider_ids: Vec::new(),
+            selection_failure: None,
+            failure: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("recipe run plan JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "plan": {
+                    "provider_id": "fixture.recipe-run",
+                    "provider_version": "1.2.3",
+                    "owning_extension": "fixture",
+                    "command": ["fixture-run", "--recipe", "recipe.json"]
+                }
+            })
+        );
+    }
 }
