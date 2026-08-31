@@ -27,7 +27,7 @@ pub(super) fn provider_request_secret_env_missing(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
 ) -> Vec<String> {
-    let names = provider_secret_env_plan(provider, request).secret_env_names();
+    let names = provider_secret_env(provider, Some(request));
     secret_env_status_with_fallbacks(&names, &provider_secret_sources(provider, Some(request)))
         .into_iter()
         .filter(|status| !status.configured)
@@ -39,9 +39,7 @@ pub(super) fn provider_request_credential_identity(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
 ) -> Vec<(String, String)> {
-    let names = provider_secret_env_plan(provider, request).secret_env_names();
-    let sources = provider_secret_sources(provider, Some(request));
-    match resolve_secret_env_with_fallbacks(&names, &sources) {
+    match provider_request_credential_env(request, provider) {
         Ok(values) => values
             .into_iter()
             .map(|(name, value)| {
@@ -51,11 +49,22 @@ pub(super) fn provider_request_credential_identity(
                 )
             })
             .collect(),
-        Err(_) => names
+        Err(_) => provider_secret_env(provider, Some(request))
             .into_iter()
             .map(|name| (name, "unresolved".to_string()))
             .collect(),
     }
+}
+
+pub(super) fn provider_request_credential_env(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+) -> std::result::Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
+    // A readiness probe verifies provider authentication, not arbitrary task or
+    // runtime-tool secrets that execution may need later.
+    let names = provider_secret_env(provider, Some(request));
+    let sources = provider_secret_sources(provider, Some(request));
+    resolve_secret_env_with_fallbacks(&names, &sources)
 }
 
 pub fn provider_runner_secret_env_for_plan_with_providers(

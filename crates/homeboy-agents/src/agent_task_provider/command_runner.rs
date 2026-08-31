@@ -2513,6 +2513,14 @@ pub fn run_provider_readiness_invocation(
     provider: &AgentTaskExecutorProvider,
     effective_config: &Value,
 ) -> Result<ProviderReadinessInvocationResult, String> {
+    run_provider_readiness_invocation_with_env(provider, effective_config, &[])
+}
+
+pub(crate) fn run_provider_readiness_invocation_with_env(
+    provider: &AgentTaskExecutorProvider,
+    effective_config: &Value,
+    credential_env: &[(String, String)],
+) -> Result<ProviderReadinessInvocationResult, String> {
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
         return Ok(ProviderReadinessInvocationResult {
             ready: true,
@@ -2579,6 +2587,13 @@ fn run_provider_readiness_invocation_with_timeout(
         }
     }
     command.envs(allowlist);
+    // Request-scoped resolved values override ambient allowlisted credentials.
+    // They are inherited only by this contained probe and are never serialized.
+    command.envs(
+        credential_env
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -2665,12 +2680,66 @@ fn run_provider_readiness_invocation_with_timeout(
             provider.id
         ));
     }
-    serde_json::from_value(result_value).map_err(|_| {
-        format!(
-            "provider '{}' readiness invocation returned an invalid result",
-            provider.id
-        )
-    })
+    let mut result: ProviderReadinessInvocationResult = serde_json::from_value(result_value)
+        .map_err(|_| {
+            format!(
+                "provider '{}' readiness invocation returned an invalid result",
+                provider.id
+            )
+        })?;
+    redact_readiness_credentials(&mut result, credential_env);
+    Ok(result)
+}
+
+fn redact_readiness_credentials(
+    result: &mut ProviderReadinessInvocationResult,
+    credential_env: &[(String, String)],
+) {
+    let credentials = credential_env
+        .iter()
+        .filter_map(|(_, value)| {
+            (!value.is_empty()).then(|| {
+                (
+                    value.as_str(),
+                    format!(
+                        "[REDACTED:{}]",
+                        homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes())
+                    ),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    for (credential, _) in &credentials {
+        result.classification = result.classification.replace(credential, "[REDACTED]");
+        result.reason = result.reason.replace(credential, "[REDACTED]");
+        result.remediation = result.remediation.replace(credential, "[REDACTED]");
+    }
+    for (credential, hashed) in &credentials {
+        result.cache_key = result.cache_key.replace(credential, hashed);
+        redact_json_credential(&mut result.identity, credential, hashed);
+    }
+}
+
+fn redact_json_credential(value: &mut Value, credential: &str, replacement: &str) {
+    match value {
+        Value::String(text) => *text = text.replace(credential, replacement),
+        Value::Array(items) => {
+            for item in items {
+                redact_json_credential(item, credential, replacement);
+            }
+        }
+        Value::Object(entries) => {
+            let prior = std::mem::take(entries);
+            for (key, mut item) in prior {
+                redact_json_credential(&mut item, credential, replacement);
+                entries.insert(key.replace(credential, replacement), item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) if value.to_string() == credential => {
+            *value = Value::String(replacement.to_string());
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
 use super::command_runner::{
-    run_provider_readiness_invocation, validate_provider_immediate_failure_patterns,
+    run_provider_readiness_invocation_with_env, validate_provider_immediate_failure_patterns,
     ProviderReadinessInvocationResult,
 };
 use super::resolution::select_provider;
@@ -155,7 +155,17 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
             )
         })?;
         let config = effective_provider_config(&task.executor.config, task.executor.model());
-        let verdict = readiness_verdict(provider, &config, cache)?;
+        let credential_env = super::secrets::provider_request_credential_env(task, provider)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "provider_runtime_readiness",
+                    error.message,
+                    Some(provider.backend.clone()),
+                    None,
+                )
+            })?;
+        let verdict =
+            readiness_verdict_with_credentials(provider, &config, &credential_env, cache)?;
         if !verdict.ready {
             return Err(readiness_error(provider, &config, &verdict));
         }
@@ -185,21 +195,26 @@ pub(crate) fn unverified_provider_auth_error(provider: &AgentTaskExecutorProvide
     )
 }
 
+#[cfg(test)]
 pub(crate) fn readiness_verdict(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> Result<ProviderReadinessInvocationResult> {
-    readiness_verdict_with_credential_identity(provider, config, &[], cache)
+    readiness_verdict_with_credentials(provider, config, &[], cache)
 }
 
-pub(crate) fn readiness_verdict_with_credential_identity(
+pub(crate) fn readiness_verdict_with_credentials(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
-    credential_identity: &[(String, String)],
+    credential_env: &[(String, String)],
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> Result<ProviderReadinessInvocationResult> {
     let base_key = readiness_request_key(provider, config)?;
+    let credential_identity = credential_env
+        .iter()
+        .map(|(name, value)| (name, content_hash::sha256_hex(value.as_bytes())))
+        .collect::<Vec<_>>();
     let request_key = content_hash::sha256_hex(
         &serde_json::to_vec(&(base_key, credential_identity))
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
@@ -280,7 +295,7 @@ pub(crate) fn readiness_verdict_with_credential_identity(
     let _permit = acquire_probe_permit();
     let mut result = Err("provider readiness invocation did not run".to_string());
     for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
-        result = run_provider_readiness_invocation(provider, config);
+        result = run_provider_readiness_invocation_with_env(provider, config, credential_env);
         if !matches!(
             &result,
             Ok(verdict)

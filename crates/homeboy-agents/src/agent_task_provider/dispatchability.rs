@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use super::{
     effective_provider_config, executor::effective_provider_for_request,
-    provider_credential_readiness, readiness_verdict_with_credential_identity,
+    provider_credential_readiness, readiness_verdict_with_credentials,
     resolve_provider_for_backend, runtime_readiness::provider_requires_live_auth_validation,
     validate_provider_immediate_failure_patterns, AgentTaskProviderCatalog, ProviderResolution,
     ProviderRuntimeReadinessCache,
@@ -140,7 +140,7 @@ pub fn evaluate_provider_dispatchability_with_config(
     probe_runtime: bool,
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> AgentTaskProviderDispatchability {
-    evaluate_provider_dispatchability_with_config_and_identity(
+    evaluate_provider_dispatchability_with_config_and_credentials(
         catalog,
         backend,
         selector,
@@ -156,14 +156,14 @@ pub fn evaluate_provider_dispatchability_with_config(
     clippy::too_many_arguments,
     reason = "dispatchability preserves each route input"
 )]
-fn evaluate_provider_dispatchability_with_config_and_identity(
+fn evaluate_provider_dispatchability_with_config_and_credentials(
     catalog: &AgentTaskProviderCatalog,
     backend: &str,
     selector: Option<&str>,
     model: Option<&str>,
     config: &Value,
     probe_runtime: bool,
-    credential_identity: &[(String, String)],
+    credential_env: &[(String, String)],
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> AgentTaskProviderDispatchability {
     let candidate_providers = catalog
@@ -277,12 +277,7 @@ fn evaluate_provider_dispatchability_with_config_and_identity(
     let (runtime, runtime_evidence) =
         if probe_runtime && model_ready && credentials.dispatchable && configuration.ready {
             let config = effective_provider_config(config, model);
-            match readiness_verdict_with_credential_identity(
-                provider,
-                &config,
-                credential_identity,
-                cache,
-            ) {
+            match readiness_verdict_with_credentials(provider, &config, credential_env, cache) {
                 Ok(verdict) => {
                     let remediation = (!verdict.remediation.trim().is_empty())
                         .then(|| homeboy_core::redaction::redact_string(&verdict.remediation));
@@ -568,9 +563,24 @@ pub(crate) fn evaluate_request_dispatchability(
         };
         return verdict;
     }
-    let credential_identity =
-        super::secrets::provider_request_credential_identity(request, &provider);
-    evaluate_provider_dispatchability_with_config_and_identity(
+    let credential_env = match super::secrets::provider_request_credential_env(request, &provider) {
+        Ok(credential_env) => credential_env,
+        Err(_) => {
+            let mut verdict = unavailable_request_dispatchability(
+                "provider credentials could not be resolved for live validation",
+            );
+            verdict.state = "credentials_unusable";
+            verdict.checks.route = AgentTaskProviderDispatchabilityCheck {
+                ready: true,
+                reason: Some(provider.id.clone()),
+            };
+            verdict.checks.credentials.status = AgentTaskProviderCredentialStatus::Unusable;
+            verdict.checks.credentials.reason =
+                Some("credential material could not be resolved".to_string());
+            return verdict;
+        }
+    };
+    evaluate_provider_dispatchability_with_config_and_credentials(
         &AgentTaskProviderCatalog {
             providers: vec![provider],
             diagnostics: Vec::new(),
@@ -581,7 +591,7 @@ pub(crate) fn evaluate_request_dispatchability(
         request.executor.model(),
         &request.executor.config,
         true,
-        &credential_identity,
+        &credential_env,
         cache,
     )
 }
@@ -1563,5 +1573,59 @@ mod tests {
             admitted.tasks[0].metadata["provider_readiness_routing"]["skipped"][1]["state"],
             "credentials_missing"
         );
+    }
+
+    #[test]
+    fn live_verification_receives_the_selected_fallback_credential() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let credential = root.path().join("account.json");
+        let count = root.path().join("count");
+        let script = root.path().join("readiness.js");
+        std::fs::write(&credential, r#"{"token":"fallback-account"}"#)
+            .expect("fallback credential");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');const token=process.env.TEST_ACCOUNT_TOKEN||'';const ready=token==='fallback-account';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:token,reason:token,cache_key:token,identity:{account:token}}));",
+        )
+        .expect("readiness script");
+        let mut provider = provider(&script, &count);
+        provider.capabilities = vec!["provider_owned_auth".to_string()];
+        provider.provider_defaults = serde_json::from_value(json!({
+            "conditional-account": {
+                "secret_env": ["TEST_ACCOUNT_TOKEN"],
+                "secret_env_sources": {
+                    "TEST_ACCOUNT_TOKEN": {
+                        "source": "json-file",
+                        "path": credential,
+                        "field": "token"
+                    }
+                }
+            }
+        }))
+        .expect("provider defaults");
+        let mut task = request("model");
+        task.executor.config = json!({"provider":"conditional-account"});
+        task.executor
+            .secret_env
+            .push(format!("UNRELATED_TASK_SECRET_{}", uuid::Uuid::new_v4()));
+
+        let verdict = evaluate_request_dispatchability(
+            &catalog(provider),
+            &task,
+            &mut ProviderRuntimeReadinessCache::default(),
+        );
+
+        assert!(verdict.ready, "{verdict:?}");
+        assert_eq!(
+            verdict.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Verified
+        );
+        assert_eq!(
+            std::fs::read_to_string(count).expect("probe count"),
+            "probe\n"
+        );
+        assert!(!serde_json::to_string(&verdict)
+            .expect("serialized verdict")
+            .contains("fallback-account"));
     }
 }

@@ -111,7 +111,7 @@ pub use runtime_preflight_checks::{
     RuntimePreflightReadiness,
 };
 pub(crate) use runtime_readiness::{
-    effective_provider_config, readiness_request_key, readiness_verdict_with_credential_identity,
+    effective_provider_config, readiness_request_key, readiness_verdict_with_credentials,
 };
 pub use runtime_readiness::{
     preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,
