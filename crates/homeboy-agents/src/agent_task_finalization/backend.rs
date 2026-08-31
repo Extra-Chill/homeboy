@@ -869,12 +869,18 @@ fn validate_adoption_merge_proof(
     }
     let Some(proof) = adoption_merge.filter(|proof| !proof.is_null()) else {
         if parents.len() == 2 {
-            return Err(Error::validation_invalid_argument(
-                "run_id",
-                "two-parent promoted candidate is missing its required adoption merge proof",
-                None,
-                None,
-            ));
+            let committed_tree = git_output(
+                &options.path,
+                &["rev-parse", &format!("{}^{{tree}}", fingerprint.head)],
+            )?;
+            if committed_tree == fingerprint.tree {
+                return Err(Error::validation_invalid_argument(
+                    "run_id",
+                    "two-parent promoted candidate is missing its required adoption merge proof",
+                    None,
+                    None,
+                ));
+            }
         }
         return Ok(());
     };
