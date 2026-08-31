@@ -99,23 +99,32 @@ where
         Err(error) => return Err(error),
     };
     if let Err(error) = write(&mut file, contents) {
+        drop(file);
         cleanup();
         return Err(error);
     }
     if options.trailing_newline == TrailingNewline::Ensure && !contents.ends_with(b"\n") {
         if let Err(error) = write(&mut file, b"\n") {
+            drop(file);
             cleanup();
             return Err(error);
         }
     }
     if let Err(error) = sync(&file) {
+        drop(file);
         cleanup();
         return Err(error);
     }
     drop(file);
 
     match rename(&temp, target) {
-        Ok(()) => sync_parent(target.parent().unwrap_or_else(|| Path::new("."))),
+        Ok(()) => {
+            let parent = target
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            sync_parent(parent)
+        }
         Err(err) => {
             let _ = std::fs::remove_file(&temp);
             Err(err)
@@ -178,6 +187,36 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "{}\n");
     }
 
+    #[test]
+    fn atomic_writer_fsyncs_dot_for_a_bare_relative_target() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = Path::new("output.json");
+        write_output_file_atomically_with(
+            path,
+            b"published",
+            OutputWriteOptions::file(),
+            |relative| {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(dir.path().join(relative))
+            },
+            |file, bytes| file.write_all(bytes),
+            |file| file.sync_all(),
+            |from, to| std::fs::rename(dir.path().join(from), dir.path().join(to)),
+            |parent| {
+                assert_eq!(parent, Path::new("."));
+                std::fs::File::open(dir.path())?.sync_all()
+            },
+        )
+        .expect("a published bare relative output must not fail its parent fsync");
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(path)).unwrap(),
+            "published"
+        );
+    }
+
     fn assert_injected_staging_failure_removes_temp(fail_write: bool, fail_sync: bool) {
         let dir = tempfile::tempdir().expect("temp dir");
         let output_path = dir.path().join("output.json");
@@ -185,7 +224,7 @@ mod tests {
             &output_path,
             b"{}",
             OutputWriteOptions::artifact(),
-            |path| std::fs::File::create(path),
+            |path| OpenOptions::new().write(true).create_new(true).open(path),
             move |file, bytes| {
                 if fail_write {
                     Err(std::io::Error::other("injected write failure"))

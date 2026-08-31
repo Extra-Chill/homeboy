@@ -5,10 +5,11 @@
 //! consumes its answer while reconciling otherwise independent children.
 
 use chrono::Utc;
+use fs4::fs_std::FileExt;
 use homeboy_core::{paths, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
 
 pub const AGENT_TASK_FANOUT_PORTFOLIO_SCHEMA: &str = "homeboy/agent-task-fanout-portfolio/v1";
 pub const AGENT_TASK_FANOUT_PORTFOLIO_STATUS_SCHEMA: &str =
@@ -600,14 +601,39 @@ fn adapter_blocker(
 pub fn write_portfolio(portfolio: &AgentTaskFanoutPortfolio) -> Result<()> {
     let path = portfolio_path(&portfolio.fanout_id)?;
     let parent = path.parent().expect("portfolio path has parent");
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-    })?;
+    homeboy_core::engine::local_files::create_dir_all_durably(parent)?;
     let raw = serde_json::to_string_pretty(portfolio).map_err(|error| {
         Error::internal_json(error.to_string(), Some(portfolio.fanout_id.clone()))
     })?;
-    fs::write(&path, raw)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+    homeboy_core::io::write_output_file_atomically(
+        &path,
+        raw,
+        homeboy_core::io::OutputWriteOptions::file(),
+    )
+    .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+}
+
+/// Serialize every mutating resume for one fanout. This lock is deliberately
+/// outside the batch receipt lock: resume may take that narrower lock while
+/// persisting exact effects, but no receipt path acquires this lock in reverse.
+pub fn with_portfolio_resume_lock<T>(
+    fanout_id: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let path = portfolio_path(fanout_id)?.with_extension("resume.lock");
+    let parent = path.parent().expect("portfolio resume lock has parent");
+    homeboy_core::engine::local_files::create_dir_all_durably(parent)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    lock.lock_exclusive()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let result = operation();
+    let _ = FileExt::unlock(&lock);
+    result
 }
 
 pub fn read_portfolio(fanout_id: &str) -> Result<AgentTaskFanoutPortfolio> {
@@ -800,6 +826,8 @@ fn portfolio_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
     fn child(id: &str) -> AgentTaskFanoutPortfolioChild {
         AgentTaskFanoutPortfolioChild {
             child_id: id.into(),
@@ -1039,6 +1067,107 @@ mod tests {
             assert_eq!(second.advanced, vec!["stale"]);
             assert_eq!(second.blocked, vec!["dirty"]);
             assert_eq!(adapter.actions.last(), Some(&"pr:stale".to_string()));
+        });
+    }
+
+    #[test]
+    fn concurrent_resumes_serialize_mutation_persistence_and_cleanup() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            write_portfolio(&AgentTaskFanoutPortfolio::new(
+                "concurrent-resumes",
+                [child("child")],
+            ))
+            .unwrap();
+            let observation = Arc::new(Mutex::new(observation("child")));
+            let mutations = Arc::new(Mutex::new(0_u8));
+            let cleanups = Arc::new(Mutex::new(0_u8));
+            let cleanup_receipt = Arc::new(Mutex::new(false));
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let release_rx = Arc::new(Mutex::new(release_rx));
+
+            struct SharedAdapter {
+                observation: Arc<Mutex<AgentTaskFanoutPortfolioObservation>>,
+                mutations: Arc<Mutex<u8>>,
+            }
+            impl FanoutPortfolioAdapter for SharedAdapter {
+                fn observe(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                ) -> Result<AgentTaskFanoutPortfolioObservation> {
+                    Ok(self.observation.lock().unwrap().clone())
+                }
+                fn rebase_candidate(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn recreate_candidate(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn rerun_gates_and_review(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                ) -> Result<()> {
+                    unreachable!()
+                }
+                fn finalize_or_update_pr(
+                    &mut self,
+                    _child: &AgentTaskFanoutPortfolioChild,
+                    _force_with_lease: bool,
+                ) -> Result<()> {
+                    *self.mutations.lock().unwrap() += 1;
+                    self.observation.lock().unwrap().pr = AgentTaskFanoutPrState::Merged;
+                    Ok(())
+                }
+            }
+
+            let spawn_resume = |index: u8, wait_for_release: bool| {
+                let observation = Arc::clone(&observation);
+                let mutations = Arc::clone(&mutations);
+                let cleanups = Arc::clone(&cleanups);
+                let cleanup_receipt = Arc::clone(&cleanup_receipt);
+                let entered_tx = entered_tx.clone();
+                let release_rx = Arc::clone(&release_rx);
+                std::thread::spawn(move || {
+                    with_portfolio_resume_lock("concurrent-resumes", || {
+                        entered_tx.send(index).unwrap();
+                        if wait_for_release {
+                            release_rx.lock().unwrap().recv().unwrap();
+                        }
+                        let mut portfolio = read_portfolio("concurrent-resumes")?;
+                        portfolio.run(
+                            &mut SharedAdapter {
+                                observation,
+                                mutations,
+                            },
+                            &IndependentFanoutDependencies,
+                        )?;
+                        let mut receipt = cleanup_receipt.lock().unwrap();
+                        if !*receipt {
+                            *cleanups.lock().unwrap() += 1;
+                            *receipt = true;
+                        }
+                        Ok(())
+                    })
+                })
+            };
+            let first = spawn_resume(0, true);
+            assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+            let second = spawn_resume(1, false);
+            assert!(entered_rx.recv_timeout(Duration::from_millis(100)).is_err());
+            release_tx.send(()).unwrap();
+            assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+            for thread in [first, second] {
+                thread.join().unwrap().unwrap();
+            }
+            assert_eq!(*mutations.lock().unwrap(), 1);
+            assert_eq!(*cleanups.lock().unwrap(), 1);
+            assert_eq!(read_portfolio("concurrent-resumes").unwrap().revision, 4);
         });
     }
 
