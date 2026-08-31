@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.5] - 2026-08-31
+
+### Changed
+- Migrate runner list to API v1
+- Bound default operator payloads
+
 ## [0.367.4] - 2026-08-31
 
 ### Changed
