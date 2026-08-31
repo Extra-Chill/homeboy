@@ -6824,6 +6824,7 @@ mod tests {
                 task_url: plan.cooks[0].task_url.clone(),
                 run_id: Some(plan.cooks[0].run_id()),
                 cleanup_policy: Some(homeboy::core::worktree::CleanupPolicy::RemoveWhenSafe),
+                require_handoff_freshness: false,
             })
             .expect("native destination");
             let report = agent_task_service::AgentTaskCookBatchReport {

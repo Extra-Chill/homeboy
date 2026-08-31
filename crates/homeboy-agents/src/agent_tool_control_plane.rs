@@ -539,6 +539,7 @@ mod tools {
             task_url: optional_string(input, &["task_url"]).map(str::to_string),
             run_id: optional_string(input, &["run_id", "task_ref"]).map(str::to_string),
             cleanup_policy: None,
+            require_handoff_freshness: false,
         })
         .map_err(|error| AgentTaskDiagnostic {
             class: "agent_tool.homeboy_error".to_string(),

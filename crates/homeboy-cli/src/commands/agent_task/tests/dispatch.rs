@@ -2781,6 +2781,7 @@ fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
                 task_url: None,
                 run_id: None,
                 cleanup_policy: None,
+                require_handoff_freshness: false,
             })
             .expect("create managed worktree");
         let cwd = created.record.worktree_path.clone();

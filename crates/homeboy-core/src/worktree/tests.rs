@@ -389,6 +389,7 @@ fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateO
             task_url: Some("https://example.com/tasks/restore".to_string()),
             run_id: None,
             cleanup_policy: None,
+            require_handoff_freshness: false,
         },
     )
 }
@@ -595,6 +596,112 @@ fn create_returns_existing_matching_task_worktree_idempotently() {
         assert_eq!(existing.record, created.record);
         assert!(created.reconciliation.is_none());
         assert!(existing.reconciliation.is_none());
+    });
+}
+
+fn add_bare_origin(home: &Path, source: &Path) -> PathBuf {
+    let remote = home.join("remote.git");
+    fs::create_dir_all(&remote).expect("remote directory");
+    run_git(&remote, &["init", "--bare", "-q"]);
+    run_git(source, &["branch", "-M", "main"]);
+    run_git(
+        source,
+        &["remote", "add", "origin", &remote.to_string_lossy()],
+    );
+    run_git(source, &["push", "-q", "-u", "origin", "main"]);
+    run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    remote
+}
+
+#[test]
+fn create_can_issue_remote_verified_handoff_freshness() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, mut options) = registered_create_fixture(home.path(), "fresh-fixture");
+        add_bare_origin(home.path(), &source);
+        options.from = Some("origin/main".to_string());
+        options.require_handoff_freshness = true;
+
+        let created = create(options).expect("create with freshness proof");
+        let freshness = created.handoff_freshness.expect("freshness evidence");
+
+        assert_eq!(freshness.status, "verified");
+        assert_eq!(freshness.proof.handle, created.record.id);
+        assert_eq!(freshness.proof.resolved_base_ref, "origin/main");
+        assert_eq!(
+            freshness.proof.remote_default_sha,
+            freshness.proof.remote_default_advertised_sha
+        );
+        assert_eq!(
+            freshness.proof.worktree_sha,
+            freshness.proof.resolved_base_sha
+        );
+    });
+}
+
+#[test]
+fn freshness_required_create_fetches_an_advanced_remote_base() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, mut options) = registered_create_fixture(home.path(), "advanced-fixture");
+        let remote = add_bare_origin(home.path(), &source);
+        let updater = home.path().join("updater");
+        run_git(
+            home.path(),
+            &[
+                "clone",
+                "-q",
+                &remote.to_string_lossy(),
+                &updater.to_string_lossy(),
+            ],
+        );
+        run_git(&updater, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&updater, &["config", "user.name", "Homeboy Test"]);
+        fs::write(updater.join("advanced.txt"), "advanced\n").expect("advanced file");
+        run_git(&updater, &["add", "."]);
+        run_git(&updater, &["commit", "-q", "-m", "advance remote"]);
+        run_git(&updater, &["push", "-q", "origin", "main"]);
+        let advanced_sha = git::run_git(&updater, &["rev-parse", "HEAD"], "advanced sha")
+            .unwrap()
+            .trim()
+            .to_string();
+
+        options.from = Some("origin/main".to_string());
+        options.require_handoff_freshness = true;
+        let created = create(options).expect("create from refreshed base");
+        let proof = created.handoff_freshness.expect("freshness").proof;
+
+        assert_eq!(proof.resolved_base_sha, advanced_sha);
+        assert_eq!(proof.worktree_sha, advanced_sha);
+    });
+}
+
+#[test]
+fn freshness_failure_refuses_before_worktree_allocation() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, mut options) = registered_create_fixture(home.path(), "failed-fixture");
+        let missing = home.path().join("missing-remote.git");
+        run_git(
+            &source,
+            &["remote", "add", "origin", &missing.to_string_lossy()],
+        );
+        options.from = Some("origin/main".to_string());
+        options.require_handoff_freshness = true;
+        let branch = options.branch.clone();
+        let expected_path = source.parent().unwrap().join("failed-fixture@fix-restore");
+
+        create(options).expect_err("unverifiable remote must fail closed");
+
+        assert!(!expected_path.exists());
+        assert!(git::run_git(
+            &source,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}")
+            ],
+            "branch absence"
+        )
+        .is_err());
     });
 }
 

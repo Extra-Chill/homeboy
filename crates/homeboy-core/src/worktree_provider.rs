@@ -772,6 +772,7 @@ impl WorktreeProvisionProvider for NativeWorktreeProvider {
                     worktree::CleanupPolicy::PreserveOnFailure
                 }
             }),
+            require_handoff_freshness: false,
         })?;
         Ok(WorktreeProvision {
             destination: WorktreeProvisionDestination {
@@ -2591,6 +2592,7 @@ mod tests {
                     task_url: None,
                     run_id: None,
                     cleanup_policy: None,
+                    require_handoff_freshness: false,
                 },
                 &config,
             )
