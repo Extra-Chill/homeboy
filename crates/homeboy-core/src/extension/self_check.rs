@@ -297,7 +297,11 @@ fn execute_local_self_check_command(
     cmd.stderr(Stdio::piped());
 
     if let Some(policy) = execution_policy {
-        return execute_bounded_self_check_command(cmd, passthrough, policy);
+        return execute_bounded_self_check_command(
+            cmd,
+            policy,
+            passthrough.then(homeboy_engine_primitives::command::parent_stream_passthrough),
+        );
     }
 
     let mut child = match cmd.spawn() {
@@ -355,8 +359,8 @@ fn execute_local_self_check_command(
 
 fn execute_bounded_self_check_command(
     mut command: Command,
-    passthrough: bool,
     policy: &SelfCheckExecutionPolicy,
+    passthrough: Option<homeboy_engine_primitives::command::StreamChunkObserver>,
 ) -> SelfCheckCommandOutput {
     use homeboy_engine_primitives::command::{ControllerChildGuard, SupervisedCommandTermination};
 
@@ -372,11 +376,12 @@ fn execute_bounded_self_check_command(
         let _ = homeboy_engine_primitives::command::terminate_process_tree_and_reap(&mut child);
         return self_check_spawn_error(error);
     }
-    let supervised = match homeboy_engine_primitives::command::wait_with_bounded_output_supervised(
+    let supervised = match homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_passthrough(
         &mut child,
         SELF_CHECK_CAPTURE_LIMIT_BYTES,
         policy.timeout,
         Duration::from_secs(1),
+        passthrough,
         || false,
         |_, _| Ok(()),
     ) {
@@ -384,10 +389,6 @@ fn execute_bounded_self_check_command(
         Err(error) => return self_check_spawn_error(error),
     };
     let output = supervised.output;
-    if passthrough {
-        let _ = std::io::stdout().write_all(&output.stdout);
-        let _ = std::io::stderr().write_all(&output.stderr);
-    }
     let timed_out = supervised.termination == SupervisedCommandTermination::TimedOut;
     SelfCheckCommandOutput {
         stdout: BoundedCapture {
@@ -455,6 +456,7 @@ mod tests {
     use super::*;
     use homeboy_core::component::{Component, ComponentScriptsConfig};
     use std::ffi::OsString;
+    use std::sync::{Arc, Mutex};
 
     struct EnvRestore {
         name: &'static str,
@@ -738,5 +740,38 @@ mod tests {
         assert!(output.stderr.len() <= output.capture.stderr.limit_bytes);
         assert!(output.stdout.contains("stdout-line"));
         assert!(output.stderr.contains("stderr-line"));
+    }
+
+    #[test]
+    fn bounded_self_check_passthrough_tees_live_chunks_without_duplication() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let passthrough: homeboy_engine_primitives::command::StreamChunkObserver = {
+            let chunks = Arc::clone(&chunks);
+            Arc::new(move |chunk, stderr| {
+                assert!(!stderr, "fixture writes only stdout");
+                chunks
+                    .lock()
+                    .expect("tee sink lock")
+                    .extend_from_slice(chunk);
+            })
+        };
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf live-output"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = execute_bounded_self_check_command(
+            command,
+            &SelfCheckExecutionPolicy::bounded(Duration::from_secs(1), Vec::new()),
+            Some(passthrough),
+        );
+
+        assert!(output.success);
+        assert_eq!(output.stdout.to_string_lossy(), "live-output");
+        assert_eq!(
+            String::from_utf8(chunks.lock().expect("tee sink lock").clone())
+                .expect("tee output is utf-8"),
+            "live-output"
+        );
     }
 }

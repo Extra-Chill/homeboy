@@ -5908,8 +5908,8 @@ printf 'not json\n'
     fn test_run_self_check_test_workflow() {
         let _env_lock = homeboy_core::test_support::env_lock();
         let dir = tempfile::tempdir().expect("temp dir");
-        let prior_timeout = std::env::var_os("HOMEBOY_TEST_TIMEOUT_SECONDS");
-        std::env::set_var("HOMEBOY_TEST_TIMEOUT_SECONDS", "99");
+        let _timeout =
+            homeboy_core::test_support::EnvVarGuard::set("HOMEBOY_TEST_TIMEOUT_SECONDS", "99");
         std::fs::write(
             dir.path().join("test.sh"),
             "printf '%s' \"$HOMEBOY_TEST_TIMEOUT_SECONDS\" > timeout.txt\nprintf test-ok\n",
@@ -5952,10 +5952,6 @@ printf 'not json\n'
             std::fs::read_to_string(dir.path().join("timeout.txt")).expect("recorded timeout"),
             "42"
         );
-        match prior_timeout {
-            Some(value) => std::env::set_var("HOMEBOY_TEST_TIMEOUT_SECONDS", value),
-            None => std::env::remove_var("HOMEBOY_TEST_TIMEOUT_SECONDS"),
-        }
     }
 
     #[cfg(unix)]

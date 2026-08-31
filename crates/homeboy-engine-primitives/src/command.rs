@@ -1,6 +1,6 @@
 //! Command execution primitives with consistent error handling.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::RawFd;
 use std::process::{Child, Command, ExitStatus, Output};
@@ -26,6 +26,22 @@ const PROCESS_TREE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 static CHILD_SUBREAPER_ENABLED: std::sync::OnceLock<io::Result<()>> = std::sync::OnceLock::new();
 
 pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
+pub type StreamChunkObserver = Arc<dyn Fn(&[u8], bool) + Send + Sync + 'static>;
+
+/// Stream a supervised child's chunks to the matching parent stream.
+pub fn parent_stream_passthrough() -> StreamChunkObserver {
+    Arc::new(|chunk, stderr| {
+        if stderr {
+            let mut sink = io::stderr();
+            let _ = sink.write_all(chunk);
+            let _ = sink.flush();
+        } else {
+            let mut sink = io::stdout();
+            let _ = sink.write_all(chunk);
+            let _ = sink.flush();
+        }
+    })
+}
 
 /// Whether this build can isolate a spawned command into a terminable process
 /// tree. Callers that require fail-closed child identity persistence must check
@@ -544,14 +560,37 @@ pub fn wait_with_bounded_output_supervised(
     timeout: Duration,
     heartbeat_interval: Duration,
     is_cancelled: impl FnMut() -> bool,
+    on_heartbeat: impl FnMut(Duration, &str) -> io::Result<()>,
+) -> io::Result<SupervisedCommandOutput> {
+    wait_with_bounded_output_supervised_with_passthrough(
+        child,
+        byte_limit,
+        timeout,
+        heartbeat_interval,
+        None,
+        is_cancelled,
+        on_heartbeat,
+    )
+}
+
+/// Like [`wait_with_bounded_output_supervised`], with an optional immediate
+/// stream tee that does not change bounded capture or supervision behavior.
+pub fn wait_with_bounded_output_supervised_with_passthrough(
+    child: &mut Child,
+    byte_limit: usize,
+    timeout: Duration,
+    heartbeat_interval: Duration,
+    passthrough: Option<StreamChunkObserver>,
+    is_cancelled: impl FnMut() -> bool,
     mut on_heartbeat: impl FnMut(Duration, &str) -> io::Result<()>,
 ) -> io::Result<SupervisedCommandOutput> {
-    wait_with_bounded_output_supervised_with_progress(
+    wait_with_bounded_output_supervised_with_progress_and_passthrough(
         child,
         byte_limit,
         timeout,
         None,
         heartbeat_interval,
+        passthrough,
         is_cancelled,
         |heartbeat| on_heartbeat(heartbeat.elapsed, &heartbeat.output_tail),
     )
@@ -567,6 +606,30 @@ pub fn wait_with_bounded_output_supervised_with_progress(
     timeout: Duration,
     no_progress_timeout: Option<Duration>,
     heartbeat_interval: Duration,
+    is_cancelled: impl FnMut() -> bool,
+    on_heartbeat: impl FnMut(SupervisedCommandHeartbeat) -> io::Result<()>,
+) -> io::Result<SupervisedCommandOutput> {
+    wait_with_bounded_output_supervised_with_progress_and_passthrough(
+        child,
+        byte_limit,
+        timeout,
+        no_progress_timeout,
+        heartbeat_interval,
+        None,
+        is_cancelled,
+        on_heartbeat,
+    )
+}
+
+/// Supervise a command with optional structured progress and an immediate
+/// bounded-output stream tee.
+pub fn wait_with_bounded_output_supervised_with_progress_and_passthrough(
+    child: &mut Child,
+    byte_limit: usize,
+    timeout: Duration,
+    no_progress_timeout: Option<Duration>,
+    heartbeat_interval: Duration,
+    passthrough: Option<StreamChunkObserver>,
     mut is_cancelled: impl FnMut() -> bool,
     mut on_heartbeat: impl FnMut(SupervisedCommandHeartbeat) -> io::Result<()>,
 ) -> io::Result<SupervisedCommandOutput> {
@@ -575,17 +638,19 @@ pub fn wait_with_bounded_output_supervised_with_progress(
     let live_output = Arc::new(Mutex::new(LiveOutputTail::new(byte_limit)));
     let stdout_handle = stdout.map({
         let live_output = Arc::clone(&live_output);
+        let passthrough = passthrough.clone();
         move |stream| {
             thread::spawn(move || {
-                capture_tail_with_live_snapshot(stream, byte_limit, true, live_output)
+                capture_tail_with_live_snapshot(stream, byte_limit, true, live_output, passthrough)
             })
         }
     });
     let stderr_handle = stderr.map({
         let live_output = Arc::clone(&live_output);
+        let passthrough = passthrough.clone();
         move |stream| {
             thread::spawn(move || {
-                capture_tail_with_live_snapshot(stream, byte_limit, false, live_output)
+                capture_tail_with_live_snapshot(stream, byte_limit, false, live_output, passthrough)
             })
         }
     });
@@ -751,6 +816,7 @@ fn capture_tail_with_live_snapshot(
     byte_limit: usize,
     stdout: bool,
     live_output: Arc<Mutex<LiveOutputTail>>,
+    passthrough: Option<StreamChunkObserver>,
 ) -> io::Result<BoundedStreamCapture> {
     let mut capture = TailCapture::new(byte_limit);
     let mut pending = Vec::new();
@@ -760,6 +826,9 @@ fn capture_tail_with_live_snapshot(
         let count = reader.read(&mut buffer)?;
         if count == 0 {
             break;
+        }
+        if let Some(passthrough) = &passthrough {
+            passthrough(&buffer[..count], !stdout);
         }
         capture.push(&buffer[..count]);
         if let Ok(mut live) = live_output.lock() {
@@ -1409,6 +1478,48 @@ mod tests {
         assert_eq!(captured.metadata.bytes_retained, 5);
         assert_eq!(captured.metadata.byte_limit, 5);
         assert!(captured.metadata.truncated);
+    }
+
+    #[test]
+    fn live_passthrough_keeps_the_same_bounded_capture() {
+        let chunks = Arc::new(Mutex::new(Vec::<(bool, Vec<u8>)>::new()));
+        let passthrough: StreamChunkObserver = {
+            let chunks = Arc::clone(&chunks);
+            Arc::new(move |chunk, stderr| {
+                chunks
+                    .lock()
+                    .expect("tee sink lock")
+                    .push((stderr, chunk.to_vec()));
+            })
+        };
+        let plain = capture_tail_with_live_snapshot(
+            io::Cursor::new(b"first-second".to_vec()),
+            6,
+            true,
+            Arc::new(Mutex::new(LiveOutputTail::new(6))),
+            None,
+        )
+        .expect("capture without passthrough");
+        let tee = capture_tail_with_live_snapshot(
+            io::Cursor::new(b"first-second".to_vec()),
+            6,
+            true,
+            Arc::new(Mutex::new(LiveOutputTail::new(6))),
+            Some(passthrough),
+        )
+        .expect("capture with passthrough");
+
+        assert_eq!(tee.bytes, plain.bytes);
+        assert_eq!(tee.metadata.bytes_seen, plain.metadata.bytes_seen);
+        assert_eq!(tee.metadata.bytes_retained, plain.metadata.bytes_retained);
+        assert_eq!(tee.metadata.byte_limit, plain.metadata.byte_limit);
+        assert_eq!(tee.metadata.truncated, plain.metadata.truncated);
+        assert_eq!(tee.metadata.sha256, plain.metadata.sha256);
+        assert_eq!(tee.bytes, b"second");
+        assert_eq!(
+            chunks.lock().expect("tee sink lock").as_slice(),
+            &[(false, b"first-second".to_vec())]
+        );
     }
 
     #[test]
