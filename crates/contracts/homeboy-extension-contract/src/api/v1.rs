@@ -5,6 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+mod operations;
+
+pub use operations::*;
+
 pub const EXTENSION_API_DESCRIPTOR_SCHEMA: &str = "homeboy/extension-api-descriptor/v1";
 pub const EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA: &str =
     "homeboy/extension-api-handshake-request/v1";
@@ -201,6 +205,33 @@ mod tests {
                     "runtimes": [{ "id": "php", "version": ">=8.0" }]
                 },
                 "requires_homeboy": ">=0.1.0"
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_failure_wire_shape_is_typed() {
+        let response = ExtensionApiResolveResponse {
+            schema: EXTENSION_API_RESOLVE_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            descriptor: None,
+            capability: None,
+            compatibility: None,
+            failure: Some(ExtensionApiOperationFailure {
+                code: ExtensionApiOperationFailureCode::CapabilityNotProvided,
+                message: "Extension 'fixture' does not provide 'deploy'".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("resolve response JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_RESOLVE_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "failure": {
+                    "code": "capability_not_provided",
+                    "message": "Extension 'fixture' does not provide 'deploy'"
+                }
             })
         );
     }
