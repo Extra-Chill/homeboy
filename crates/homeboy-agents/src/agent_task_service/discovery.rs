@@ -275,6 +275,23 @@ pub fn discover_runs_with_options(
     discovery_report(filter, options, records, record_health)
 }
 
+/// [`discover_runs_with_options`] against an explicitly injected lifecycle
+/// store. Reconciliation uses this to verify the same durable projection it
+/// just changed rather than consulting ambient storage.
+pub(crate) fn discover_runs_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    filter: AgentTaskDiscoveryFilter,
+) -> Result<AgentTaskDiscoveryReport> {
+    let (records, record_health) =
+        agent_task_lifecycle::read_records_with_health_in_store(lifecycle_store)?;
+    discovery_report(
+        filter,
+        AgentTaskDiscoveryOptions::default(),
+        records,
+        record_health,
+    )
+}
+
 /// Find the newest run matching list filters without treating a bounded display
 /// snapshot as the complete search corpus.
 pub fn discover_filtered_latest_run(
