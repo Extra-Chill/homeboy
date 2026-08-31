@@ -876,18 +876,8 @@ fn inherit_promotion_gates(
         .deterministic_gates
         .iter()
         .map(|gate| {
-            let [shell, flag, command] = gate.command.as_slice() else {
-                return Err(Error::validation_invalid_argument(
-                    "latest_promotion.deterministic_gates.command",
-                    "green promotion reuse requires each retained gate to preserve its exact shell command",
-                    None,
-                    None,
-                ));
-            };
+            let invocation = gate.invocation()?;
             if gate.id.trim().is_empty()
-                || shell != "sh"
-                || flag != "-lc"
-                || command.trim().is_empty()
                 || gate.candidate_checkout.as_ref() != Some(&candidate)
             {
                 return Err(Error::validation_invalid_argument(
@@ -899,9 +889,7 @@ fn inherit_promotion_gates(
             }
             Ok((
                 gate.id.clone(),
-                homeboy_engine_primitives::content_hash::nul_separated_digest(
-                    gate.command.iter().map(String::as_str),
-                ),
+                invocation.identity_digest()?,
             ))
         })
         .collect::<Result<Vec<_>>>()?;

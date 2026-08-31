@@ -348,11 +348,13 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     // Resolve the caller input to the commit object before durable ownership is
     // claimed, then use that immutable SHA for every subsequent operation.
     let candidate_sha = resolve_candidate_revision(&source_worktree, candidate_ref)?;
-    let gate_identity = if options.gates.verify.is_empty() {
-        "promotion verification".to_string()
-    } else {
-        options.gates.verify.join(" && ")
-    };
+    let gate_identity = serde_json::to_string(&serde_json::json!({
+        "verify": options.gates.verify,
+        "private_verify": options.gates.private_verify,
+        "test_execution_plan": options.gates.test_execution_plan,
+    }))
+    .map(|contract| homeboy_engine_primitives::content_hash::sha256_hex(contract.as_bytes()))
+    .map_err(|error| Error::internal_json(error.to_string(), None))?;
     let persisted_adoption_result = record
         .candidate_adoption
         .as_ref()

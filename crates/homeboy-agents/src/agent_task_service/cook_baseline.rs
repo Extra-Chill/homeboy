@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::agent_task_gate::{
-    failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateBaselineComparison,
-    AgentTaskGateDifferentialResult, AgentTaskGateStatus,
+    failure_fingerprint, run_declared_test_with_timeout, run_gate_command_with_timeout,
+    AgentTaskGateBaselineComparison, AgentTaskGateDifferentialResult, AgentTaskGateInvocation,
+    AgentTaskGateStatus,
 };
 use crate::agent_task_promotion::{normalize_promotion_patch, AgentTaskPromotionReport};
 use crate::agent_task_scheduler::AgentTaskPlan;
@@ -418,24 +419,40 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                 });
                 continue;
             };
-            let command = gate.command.last().cloned().unwrap_or_default();
+            let invocation = gate.invocation()?;
             let baseline_run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
             let baseline = (|| {
                 let runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
                     &baseline_run_dir,
                     &homeboy_core::engine::invocation::InvocationRequirements::default(),
                 )?;
-                run_gate_command_with_timeout(
-                    &baseline_gate_workspace,
-                    index + 1,
-                    &command,
-                    gate.visibility,
-                    gate.reveal_policy,
-                    &runtime.context().tmp_dir,
-                    timeout,
-                    &gate.environment.replay_policy(),
-                    &package_artifacts,
-                )
+                match &invocation {
+                    AgentTaskGateInvocation::LegacyShell { command } => {
+                        run_gate_command_with_timeout(
+                            &baseline_gate_workspace,
+                            index + 1,
+                            command,
+                            gate.visibility,
+                            gate.reveal_policy,
+                            &runtime.context().tmp_dir,
+                            timeout,
+                            &gate.environment.replay_policy(),
+                            &package_artifacts,
+                        )
+                    }
+                    AgentTaskGateInvocation::DeclaredTest { plan } => {
+                        run_declared_test_with_timeout(
+                            &baseline_gate_workspace,
+                            index + 1,
+                            plan,
+                            gate.visibility,
+                            gate.reveal_policy,
+                            &runtime.context().tmp_dir,
+                            &gate.environment.replay_policy(),
+                            &package_artifacts,
+                        )
+                    }
+                }
             })();
             if let Ok(baseline) = &baseline {
                 if baseline.environment.package_artifacts != gate.environment.package_artifacts {
@@ -1073,6 +1090,95 @@ mod tests {
                 .expect("comparison")
                 .result,
             AgentTaskGateDifferentialResult::BaselineRed
+        );
+    }
+
+    #[test]
+    fn differential_gate_comparison_replays_a_declared_plan_without_shell_projection() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("repository");
+        git_output(temp.path(), &["init", "-b", "main"]).expect("init");
+        git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
+        git_output(temp.path(), &["config", "user.email", "test@example.test"]).expect("email");
+        std::fs::write(temp.path().join("marker"), "base\n").expect("base marker");
+        git_output(temp.path(), &["add", "marker"]).expect("add");
+        git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
+        let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
+        std::fs::write(temp.path().join("marker"), "candidate\n").expect("candidate marker");
+
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let homeboy = bin.join("homeboy");
+        std::fs::write(
+            &homeboy,
+            "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\ncat marker >&2\nexit 1\n",
+        )
+        .expect("homeboy adapter");
+        let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&homeboy, permissions).unwrap();
+
+        let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+            1,
+        )
+        .expect("plan");
+        let mut promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "gate_failed",
+            "source": {"kind": "aggregate", "task_id": "task"},
+            "to_worktree": "fixture",
+            "target": {"worktree": "fixture", "path": temp.path()},
+            "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+            "deterministic_gates": [],
+            "operator_notification": {"status": "blocked", "message": "red"}
+        }))
+        .expect("promotion");
+        let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
+            "declared",
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+            ],
+            1,
+            "",
+            "candidate\n",
+            None,
+            HomeboyGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            crate::agent_task_gate::AgentTaskGateEnvironment {
+                inherited: vec![crate::agent_task_gate::AgentTaskGateEnvironmentVariable {
+                    name: "PATH".to_string(),
+                    value: bin.display().to_string(),
+                }],
+                ..Default::default()
+            },
+        );
+        gate.invocation = Some(AgentTaskGateInvocation::DeclaredTest { plan: plan.clone() });
+        gate.test_execution_outcome =
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Failed);
+        promotion.deterministic_gates.push(gate);
+
+        compare_gate_failures_to_verified_base(
+            &mut promotion,
+            temp.path(),
+            temp.path(),
+            &base,
+            std::time::Duration::from_secs(5),
+            |_compared, _total| Ok(()),
+        )
+        .expect("typed baseline replay");
+
+        let gate = &promotion.deterministic_gates[0];
+        assert_eq!(
+            gate.invocation().expect("typed invocation"),
+            AgentTaskGateInvocation::DeclaredTest { plan }
+        );
+        assert_eq!(
+            gate.baseline_comparison.as_ref().unwrap().result,
+            AgentTaskGateDifferentialResult::CandidateRegression
         );
     }
 }

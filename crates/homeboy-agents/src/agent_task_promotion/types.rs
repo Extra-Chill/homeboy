@@ -159,7 +159,10 @@ impl AgentTaskPromotionReport {
             AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::VerifiedNoChanges
         ) && self.deterministic_gates.iter().any(|gate| {
             gate.visibility == HomeboyGateVisibility::Visible
-                && gate.command.as_slice() == ["sh", "-lc", command]
+                && gate
+                    .invocation()
+                    .map(|invocation| invocation.reviewer_command() == command)
+                    .unwrap_or(false)
                 && durable_gate_passed(gate)
                 && self.gate_candidate_identity_matches(gate)
         })
