@@ -63,6 +63,20 @@ pub(super) fn release_skip_plan(
     None
 }
 
+/// A later workflow already published the release that descends from this
+/// workflow's source commit. This run must defer rather than mutate stale state.
+pub(super) fn superseded_release_plan(component_id: &str, tag: &str) -> ReleasePlan {
+    skipped_release_plan(
+        component_id,
+        "release-superseded",
+        &format!("Release {tag} already published by the authoritative release workflow"),
+        &format!(
+            "Release {tag} descends from this workflow's source commit and is authoritative on the remote release branch. This stale workflow deferred without creating a release commit, tag, or GitHub Release."
+        ),
+        None,
+    )
+}
+
 /// Build the exact `homeboy release` command the operator should run to force a
 /// release, echoing the flags already passed on the current invocation. This is
 /// what the issue asks for: when `--skip-checks` was used and the only blocker
@@ -127,7 +141,7 @@ fn skipped_release_plan(
 
 #[cfg(test)]
 mod tests {
-    use super::release_skip_plan;
+    use super::{release_skip_plan, superseded_release_plan};
     use crate::release::types::{
         ReleaseBumpPolicyOptions, ReleaseOptions, ReleaseSemverRecommendation,
     };
@@ -320,6 +334,22 @@ mod tests {
             hint.contains("homeboy release sample-plugin-code --head"),
             "hint should provide an actionable command: {hint}"
         );
+    }
+
+    #[test]
+    fn superseded_release_plan_is_a_neutral_stale_checkout_diagnostic() {
+        let plan = superseded_release_plan("demo", "v1.2.3");
+
+        assert!(!plan.enabled());
+        assert_eq!(
+            plan.plan.steps[0]
+                .inputs
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some("release-superseded")
+        );
+        assert!(plan.plan.hints[0].contains("authoritative"));
+        assert!(plan.plan.hints[0].contains("stale workflow deferred"));
     }
 
     fn semver_recommendation(recommended: &str, requested: &str) -> ReleaseSemverRecommendation {

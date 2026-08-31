@@ -9,8 +9,8 @@ use super::plan_steps::{build_preflight_steps, build_release_steps_with_reconcil
 use super::planning_changelog::{build_changelog_plan, generate_changelog_entries};
 use super::planning_policy::release_skip_plan;
 use super::planning_semver::{
-    build_semver_recommendation, current_version_tag_at_head, current_version_tag_name,
-    release_version_baseline, validate_current_version_tag_reachable,
+    authoritative_descendant_release_tag, build_semver_recommendation, current_version_tag_at_head,
+    current_version_tag_name, release_version_baseline, validate_current_version_tag_reachable,
     validate_release_version_floor,
 };
 use super::planning_worktree::validate_release_worktree;
@@ -44,6 +44,17 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
 
     let release_scope = ReleaseScope::resolve(&component, component_id)?;
     let version_info = v.capture(version::read_component_version(&component), "version");
+    if !options.pipeline.head {
+        if let Some(info) = version_info.as_ref() {
+            if let Some(tag) = authoritative_descendant_release_tag(&release_scope, &info.version)?
+            {
+                return Ok(super::planning_policy::superseded_release_plan(
+                    component_id,
+                    &tag,
+                ));
+            }
+        }
+    }
     if let Some(ref info) = version_info {
         if let Some(message) = v
             .capture(
@@ -724,6 +735,68 @@ mod tests {
         // now knows origin/master is ahead while HEAD stays at v1.0.0.
         git(&local, &["fetch", "origin"]);
         local
+    }
+
+    #[test]
+    fn stale_descendant_release_plans_a_neutral_superseded_skip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let stale = temp.path().join("stale");
+        let owner = temp.path().join("owner");
+        let remote_path = remote.to_string_lossy().to_string();
+
+        git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_path],
+        );
+        git(temp.path(), &["clone", &remote_path, "seed"]);
+        git(&seed, &["config", "user.email", "homeboy@example.test"]);
+        git(&seed, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(
+            seed.join("homeboy.json"),
+            r#"{"id":"fixture","type":"fixture","version_targets":[{"file":"VERSION","pattern":"([0-9]+\\.[0-9]+\\.[0-9]+)"}]}"#,
+        )
+        .expect("config");
+        std::fs::write(seed.join("VERSION"), "0.1.0\n").expect("version");
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "release: v0.1.0"]);
+        git(&seed, &["tag", "v0.1.0"]);
+        git(&seed, &["push", "--tags", "origin", "main"]);
+        git(temp.path(), &["clone", &remote_path, "stale"]);
+        git(temp.path(), &["clone", &remote_path, "owner"]);
+        git(&owner, &["config", "user.email", "homeboy@example.test"]);
+        git(&owner, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(owner.join("VERSION"), "0.1.1\n").expect("release version");
+        git(&owner, &["add", "VERSION"]);
+        git(&owner, &["commit", "-qm", "release: v0.1.1"]);
+        git(&owner, &["tag", "v0.1.1"]);
+        git(&owner, &["push", "--tags", "origin", "main"]);
+
+        let plan = plan(
+            "fixture",
+            &ReleaseOptions {
+                path_override: Some(stale.to_string_lossy().to_string()),
+                bump_type: "patch".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("stale release must defer without error");
+
+        assert!(!plan.enabled());
+        assert_eq!(
+            plan.plan.steps[0]
+                .inputs
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some("release-superseded")
+        );
+        assert_eq!(
+            std::fs::read_to_string(stale.join("VERSION"))
+                .expect("unmutated stale version")
+                .trim(),
+            "0.1.0"
+        );
     }
 
     #[test]

@@ -991,7 +991,12 @@ fn release_command_exit_code(
     deploy_exit_code: i32,
     post_release_exit: i32,
 ) -> i32 {
-    if skipped_reason.is_some() {
+    // A stale workflow that proves a descendant release is already authoritative
+    // has completed its coordination responsibility successfully. Other skips
+    // remain distinct non-zero no-ops for callers that requested a release.
+    if skipped_reason == Some("release-superseded") {
+        0
+    } else if skipped_reason.is_some() {
         SKIPPED_RELEASE_EXIT_CODE
     } else if release_step_exit != 0 {
         release_step_exit
@@ -1762,6 +1767,14 @@ mod tests {
         assert_eq!(
             release_command_exit_code(Some("release-already-at-head"), 0, 0, 3),
             SKIPPED_RELEASE_EXIT_CODE
+        );
+    }
+
+    #[test]
+    fn superseded_release_is_a_successful_noop() {
+        assert_eq!(
+            release_command_exit_code(Some("release-superseded"), 1, 1, 3),
+            0
         );
     }
 
