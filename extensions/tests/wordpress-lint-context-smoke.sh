@@ -287,4 +287,50 @@ HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 
 assert_contains "$TMP_DIR/phpstan-full.out" "PHPStan full fake passed"
 
+mkdir -p "$FAKE_EXTENSION/scripts/lint"
+cat > "$FAKE_EXTENSION/scripts/lint/eslint-runner.sh" <<'BASH'
+#!/usr/bin/env bash
+echo "simulated ESLint bootstrap failure" >&2
+exit 2
+BASH
+chmod +x "$FAKE_EXTENSION/scripts/lint/eslint-runner.sh"
+cat > "$COMPONENT_DIR/assets.js" <<'JS'
+const examplePlugin = true;
+JS
+
+set +e
+HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
+HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
+HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_LINT_FILE="assets.js" \
+    bash "$RUNNER" > "$TMP_DIR/eslint-bootstrap.out" 2>&1
+eslint_bootstrap_status=$?
+set -e
+
+if [ "$eslint_bootstrap_status" -ne 2 ]; then
+    echo "Expected aggregate lint to preserve ESLint bootstrap exit 2" >&2
+    cat "$TMP_DIR/eslint-bootstrap.out" >&2
+    exit 1
+fi
+assert_contains "$TMP_DIR/eslint-bootstrap.out" "simulated ESLint bootstrap failure"
+
+rm "$FAKE_EXTENSION/scripts/lint/eslint-runner.sh"
+set +e
+HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
+HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
+HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_LINT_FILE="assets.js" \
+    bash "$RUNNER" > "$TMP_DIR/eslint-missing.out" 2>&1
+eslint_missing_status=$?
+set -e
+
+if [ "$eslint_missing_status" -ne 2 ]; then
+    echo "Expected missing ESLint runner to fail as bootstrap infrastructure" >&2
+    cat "$TMP_DIR/eslint-missing.out" >&2
+    exit 1
+fi
+assert_contains "$TMP_DIR/eslint-missing.out" "bootstrap failure: ESLint runner not found"
+
 echo "wordpress lint context smoke passed"

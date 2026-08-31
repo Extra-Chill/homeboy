@@ -159,9 +159,8 @@ ESLINT_BIN="${EXTENSION_PATH}/node_modules/.bin/eslint"
 ESLINT_CONFIG="${EXTENSION_PATH}/eslint.runner.config.mjs"
 
 # A hydrated extension can retain the .bin launcher while losing its package
-# tree. Rebuild the extension-owned runtime from its lockfile before linting.
-# Bootstrap failures use exit 2 so Homeboy reports infrastructure, not project
-# findings.
+# tree. Bootstrap failures use exit 2 so Homeboy reports infrastructure, not
+# project findings.
 # shellcheck source=ensure-eslint-runtime.sh
 source "${SCRIPT_DIR}/ensure-eslint-runtime.sh"
 homeboy_ensure_eslint_runtime "$EXTENSION_PATH" || exit $?
