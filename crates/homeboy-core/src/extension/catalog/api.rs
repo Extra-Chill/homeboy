@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use homeboy_core::error::Result;
 use homeboy_extension_contract::api::v1::{
     ExtensionApiCapabilityDescriptor, ExtensionApiCatalogDiagnostic,
@@ -10,11 +12,14 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiReadinessDescriptor, ExtensionApiReadinessMode, ExtensionApiReadinessRequest,
     ExtensionApiReadinessResponse, ExtensionApiReadinessState, ExtensionApiReadinessStatus,
     ExtensionApiResolveRequest, ExtensionApiResolveResponse, ExtensionApiRuntimeRequirement,
-    ExtensionApiVersion, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
-    EXTENSION_API_CATALOG_RESPONSE_SCHEMA, EXTENSION_API_DESCRIPTOR_SCHEMA,
-    EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA, EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA,
-    EXTENSION_API_READINESS_REQUEST_SCHEMA, EXTENSION_API_READINESS_RESPONSE_SCHEMA,
-    EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
+    ExtensionApiVersion, COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNINGS_INPUT_SCHEMA,
+    COMPILER_WARNINGS_OUTPUT_SCHEMA, COMPILER_WARNING_FIXES_CAPABILITY_ID,
+    COMPILER_WARNING_FIXES_INPUT_SCHEMA, COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
+    EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_CATALOG_RESPONSE_SCHEMA,
+    EXTENSION_API_DESCRIPTOR_SCHEMA, EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA,
+    EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA, EXTENSION_API_READINESS_REQUEST_SCHEMA,
+    EXTENSION_API_READINESS_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
+    EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
 };
 use homeboy_extension_contract::{evaluate_core_compatibility, ExtensionCapability};
 
@@ -23,7 +28,7 @@ use super::{discover_extensions, load_extension, DiscoveredExtension};
 const SUPPORTED_API_VERSIONS: &[ExtensionApiVersion] = &[EXTENSION_API_V1];
 
 /// Project an installed manifest into the stable Extension API v1 descriptor.
-pub fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
+fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
     let extension = load_extension(extension_id)?;
     let mut capabilities = [
         ExtensionCapability::Lint,
@@ -74,6 +79,20 @@ pub fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
     );
     if extension.env_provider.is_some() {
         capabilities.push(capability_descriptor("environment"));
+    }
+    if extension.compiler_warnings_script().is_some() {
+        capabilities.push(schema_capability_descriptor(
+            COMPILER_WARNINGS_CAPABILITY_ID,
+            COMPILER_WARNINGS_INPUT_SCHEMA,
+            COMPILER_WARNINGS_OUTPUT_SCHEMA,
+        ));
+    }
+    if extension.compiler_warning_fixes_script().is_some() {
+        capabilities.push(schema_capability_descriptor(
+            COMPILER_WARNING_FIXES_CAPABILITY_ID,
+            COMPILER_WARNING_FIXES_INPUT_SCHEMA,
+            COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
+        ));
     }
     capabilities.extend(
         extension
@@ -130,7 +149,7 @@ pub fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
 }
 
 /// Negotiate a client's supported API versions against one installed extension.
-pub fn negotiate_api(
+fn negotiate_api(
     extension_id: &str,
     request: &ExtensionApiHandshakeRequest,
 ) -> Result<ExtensionApiHandshakeResponse> {
@@ -258,8 +277,45 @@ pub fn list_api(request: &ExtensionApiCatalogRequest) -> ExtensionApiCatalogResp
     }
 }
 
+/// Select installed providers for a capability, preferring component-linked extensions.
+pub fn capability_provider_ids(root: &Path, capability_id: &str) -> Vec<String> {
+    let catalog = list_api(&ExtensionApiCatalogRequest {
+        schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+    });
+    let mut providers = catalog
+        .entries
+        .into_iter()
+        .filter(|entry| entry.status == ExtensionApiCatalogEntryStatus::Available)
+        .filter(|entry| {
+            entry.descriptor.as_ref().is_some_and(|descriptor| {
+                descriptor
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.id == capability_id)
+            })
+        })
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    providers.sort();
+
+    if let Some(component_extensions) = homeboy_core::component::discover_from_portable(root)
+        .and_then(|component| component.extensions)
+    {
+        let linked = providers
+            .iter()
+            .filter(|id| component_extensions.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !linked.is_empty() {
+            return linked;
+        }
+    }
+    providers
+}
+
 /// Resolve one explicitly named installed extension capability through v1.
-pub fn resolve_api(request: &ExtensionApiResolveRequest) -> ExtensionApiResolveResponse {
+pub(crate) fn resolve_api(request: &ExtensionApiResolveRequest) -> ExtensionApiResolveResponse {
     if let Some(failure) = validate_operation_request(
         &request.schema,
         EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
@@ -355,11 +411,6 @@ pub fn resolve_api(request: &ExtensionApiResolveRequest) -> ExtensionApiResolveR
         compatibility: Some(compatibility),
         failure: None,
     }
-}
-
-/// Read cached readiness or run one installed extension's declared probe through v1.
-pub fn readiness_api(request: &ExtensionApiReadinessRequest) -> ExtensionApiReadinessResponse {
-    readiness_api_for_discovered(request, &discover_extensions())
 }
 
 /// Serve several v1 readiness requests from one catalog discovery pass.
@@ -466,7 +517,7 @@ fn readiness_api_for_discovered(
     }
 }
 
-fn validate_operation_request(
+pub(crate) fn validate_operation_request(
     actual_schema: &str,
     expected_schema: &str,
     api_version: ExtensionApiVersion,
@@ -559,6 +610,29 @@ fn versioned_capability_descriptor(
     }
 }
 
+fn schema_capability_descriptor(
+    id: &str,
+    input_schema: &str,
+    output_schema: &str,
+) -> ExtensionApiCapabilityDescriptor {
+    ExtensionApiCapabilityDescriptor {
+        id: id.to_string(),
+        contract_version: None,
+        configuration_schema: None,
+        input_schema: Some(
+            homeboy_extension_contract::api::v1::ExtensionApiSchemaReference {
+                schema: input_schema.to_string(),
+            },
+        ),
+        output_schema: Some(
+            homeboy_extension_contract::api::v1::ExtensionApiSchemaReference {
+                schema: output_schema.to_string(),
+            },
+        ),
+        artifact_schemas: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +677,10 @@ mod tests {
         }
     }
 
+    fn readiness_response(request: &ExtensionApiReadinessRequest) -> ExtensionApiReadinessResponse {
+        readiness_api_for_discovered(request, &discover_extensions())
+    }
+
     #[test]
     fn descriptor_normalizes_manifest_capabilities_and_requirements() {
         crate::test_support::with_isolated_home(|_| {
@@ -612,6 +690,10 @@ mod tests {
                     "name": "Fixture",
                     "version": "1.2.3",
                     "test": { "extension_script": "test.sh" },
+                    "scripts": {
+                        "compiler_warnings": "warnings.sh",
+                        "compiler_warning_fixes": "warning-fixes.sh"
+                    },
                     "executable": { "runtime": { "run_command": "fixture", "ready_check": "fixture --ready" } },
                     "recipe_run_providers": [{
                         "id": "fixture.recipe",
@@ -638,11 +720,36 @@ mod tests {
                     .iter()
                     .map(|capability| capability.id.as_str())
                     .collect::<Vec<_>>(),
-                vec!["execute", "recipe-run-provider.fixture.recipe", "test"]
+                vec![
+                    COMPILER_WARNING_FIXES_CAPABILITY_ID,
+                    COMPILER_WARNINGS_CAPABILITY_ID,
+                    "execute",
+                    "recipe-run-provider.fixture.recipe",
+                    "test"
+                ]
             );
             assert_eq!(
-                descriptor.capabilities[1].contract_version.as_deref(),
+                descriptor.capabilities[3].contract_version.as_deref(),
                 Some("2")
+            );
+            let warnings = descriptor
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == COMPILER_WARNINGS_CAPABILITY_ID)
+                .expect("compiler warnings capability");
+            assert_eq!(
+                warnings
+                    .input_schema
+                    .as_ref()
+                    .map(|schema| schema.schema.as_str()),
+                Some(COMPILER_WARNINGS_INPUT_SCHEMA)
+            );
+            assert_eq!(
+                warnings
+                    .output_schema
+                    .as_ref()
+                    .map(|schema| schema.schema.as_str()),
+                Some(COMPILER_WARNINGS_OUTPUT_SCHEMA)
             );
             assert!(descriptor.readiness.runtime_probe);
             assert_eq!(descriptor.readiness.toolchain_probe_ids, ["alpha", "zeta"]);
@@ -889,7 +996,7 @@ mod tests {
                 }),
             );
 
-            let cached = readiness_api(&readiness_request(
+            let cached = readiness_response(&readiness_request(
                 "fixture",
                 ExtensionApiReadinessMode::Cached,
             ));
@@ -898,7 +1005,7 @@ mod tests {
                 ExtensionApiReadinessState::Unknown
             );
 
-            let probed = readiness_api(&readiness_request(
+            let probed = readiness_response(&readiness_request(
                 "fixture",
                 ExtensionApiReadinessMode::Probe,
             ));
@@ -907,7 +1014,7 @@ mod tests {
                 ExtensionApiReadinessState::Ready
             );
 
-            let cached = readiness_api(&readiness_request(
+            let cached = readiness_response(&readiness_request(
                 "fixture",
                 ExtensionApiReadinessMode::Cached,
             ));
@@ -927,7 +1034,7 @@ mod tests {
             std::fs::create_dir_all(&broken_dir).expect("broken extension directory");
             std::fs::write(broken_dir.join("broken.json"), "{").expect("broken manifest");
 
-            let response = readiness_api(&readiness_request(
+            let response = readiness_response(&readiness_request(
                 "broken",
                 ExtensionApiReadinessMode::Cached,
             ));

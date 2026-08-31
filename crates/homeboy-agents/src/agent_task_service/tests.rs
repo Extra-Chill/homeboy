@@ -2000,6 +2000,42 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
 }
 
 #[test]
+fn record_scoped_reconciliation_stays_with_its_explicit_lifecycle_store() {
+    with_isolated_home(|home| {
+        let run_id = "queued-in-explicit-store";
+        let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(
+            home.path().join("explicit-lifecycle"),
+        );
+        agent_task_lifecycle::submit_plan_in_store(
+            &lifecycle_store,
+            &discovery_plan(),
+            Some(run_id),
+        )
+        .expect("submitted in explicit store");
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+                record.updated_at = None;
+                true
+            })
+            .expect("stale explicit record");
+
+        let repaired = reconcile_run_in_store(&lifecycle_store, run_id, false)
+            .expect("explicit-store reconciliation");
+        assert_eq!(repaired.reconciled, 1, "{repaired:?}");
+        assert_eq!(repaired.runs[0].action, "reconciled");
+        assert_eq!(
+            lifecycle_store
+                .read_record(run_id)
+                .expect("terminal explicit record")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+        assert!(agent_task_lifecycle::exact_record(run_id).is_err());
+    });
+}
+
+#[test]
 fn upgrade_admission_keeps_ownerless_queued_runner_record_on_runner_plane_without_idle_evidence() {
     with_isolated_home(|_| {
         let run_id = "queued-without-idle-runner-evidence";

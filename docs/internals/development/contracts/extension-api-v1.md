@@ -27,6 +27,8 @@ The wire schemas are:
 - `homeboy/extension-api-resolve-response/v1`
 - `homeboy/extension-api-readiness-request/v1`
 - `homeboy/extension-api-readiness-response/v1`
+- `homeboy/extension-api-invoke-request/v1`
+- `homeboy/extension-api-invoke-response/v1`
 
 Additive optional fields may be added within v1. Changes to identity,
 capability meaning, compatibility decisions, or required fields require a new
@@ -92,10 +94,10 @@ manifest only for internal script paths and settings.
 
 ## Readiness
 
-`extension::catalog::readiness_api` returns readiness evidence for one explicit
-installed extension ID. Callers choose `cached` to read matching evidence
-without running extension code or `probe` to execute the declared runtime probe
-within Homeboy's existing timeout and recursion guards.
+`extension::catalog::readiness_api_batch` returns readiness evidence for explicit
+installed extension IDs from one discovery pass. Callers choose `cached` to read
+matching evidence without running extension code or `probe` to execute declared
+runtime probes within Homeboy's existing timeout and recursion guards.
 
 The response distinguishes `ready`, `not_ready`, `unknown`, and `timed_out` and
 preserves cache age, probe duration, timeout, diagnostic, and follow-up command
@@ -106,6 +108,26 @@ CLI extension inventory and startup command-health discovery consume v1 catalog
 and readiness responses. Their legacy presentation fields remain CLI adapters;
 core no longer maintains a parallel `ExtensionSummary` projection.
 
+## Read-Only Invocation
+
+`extension::invoke::invoke_api` synchronously executes one explicitly selected
+non-mutating capability after resolving it through v1. Requests carry the
+extension ID, capability ID, JSON input, and an explicit working directory.
+Core keeps script paths private, bounds captured output, and accepts only JSON
+stdout. Resolution, process, and output failures use typed operation failure
+codes.
+
+The `compiler-warnings` and `compiler-warning-fixes` capabilities are the first
+adopters. Their descriptors reference versioned input and output schemas; audit
+and refactor consume invocation responses rather than loading manifests or
+running scripts directly. Component-linked providers take precedence when they
+offer the requested capability, with installed providers as the deterministic
+fallback.
+
+This synchronous operation is intentionally limited to analysis. It does not
+perform durable mutation and therefore has no idempotency, cancellation,
+reconciliation, activity, or terminal-result lifecycle.
+
 ## Contract Classification
 
 `homeboy-extension-contract` predates the stable API and contains several kinds
@@ -115,14 +137,14 @@ stability.
 
 | Classification | Modules | Direction |
 | --- | --- | --- |
-| Stable Extension API | `api` | Versioned public descriptor and handshake envelopes. |
+| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, and read-only invocation envelopes. |
 | Stable API candidates | `capability`, `core_compat`, `exec_context`, `runtime_helper`, `sidecar_config` | Reuse or reference from future v1 operations after their wire semantics are reviewed. |
 | Extension-owned domain contracts | `action_types`, `agent_task_executor_declaration`, `autofix_config`, `bench_artifact`, `bench_diagnostics`, `bench_distribution`, `bench_gate`, `bench_metric_preset`, `bench_responsiveness`, `bench_result`, `bench_results`, `bench_stage`, `ci_config`, `ci_context`, `external_check_detail_resolver`, `external_storage_retention`, `fuzz_config`, `lint_result`, `lint_results`, `notification_transport_config`, `source_metadata_repair`, `test_analysis`, `test_drift`, `test_duration`, `test_inventory_config`, `test_parsing`, `test_result`, `test_results`, `test_workflow`, `trace_config`, `trace_parsing`, `trace_preview`, `trace_results`, `trace_spec`, `update_output`, `worktree_retention` | Remain portable domain schemas; the Extension API references their schema IDs rather than absorbing their fields. |
 | Manifest and implementation detail | `extension_contract_producer`, `hook_event`, `manifest`, `manifest_action_config`, `manifest_artifact_cleanup`, `manifest_capabilities`, `manifest_capability_config`, `manifest_deploy_config`, `manifest_test_config`, `manifest_toolchain_config`, `runner_contract`, `version` | Inputs and helpers used to build or execute descriptors. They are not a stable service API. |
 
 ## Next Operations
 
-The descriptor handshake deliberately does not define invocation lifecycle.
-Subsequent v1 slices will add idempotent invoke, cancel, reconcile, activity,
-and terminal-result contracts anchored to canonical control-plane
-references from issue #13697.
+The read-only invocation operation deliberately does not define a durable
+invocation lifecycle. Subsequent v1 slices will add idempotent mutation, cancel,
+reconcile, activity, and terminal-result contracts anchored to canonical
+control-plane references from issue #13697.
