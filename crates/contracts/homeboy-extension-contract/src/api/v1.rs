@@ -235,4 +235,44 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn readiness_status_wire_shape_preserves_probe_evidence() {
+        let response = ExtensionApiReadinessResponse {
+            schema: EXTENSION_API_READINESS_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: "fixture".to_string(),
+            status: Some(ExtensionApiReadinessStatus {
+                state: ExtensionApiReadinessState::TimedOut,
+                ready: None,
+                reason: Some("ready_check_timeout".to_string()),
+                detail: None,
+                cache_age_seconds: Some(0),
+                probe_duration_ms: Some(30_000),
+                timeout_ms: Some(30_000),
+                follow_up_command: Some(
+                    "homeboy extension show fixture --live-readiness".to_string(),
+                ),
+            }),
+            failure: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("readiness response JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_READINESS_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "extension_id": "fixture",
+                "status": {
+                    "state": "timed_out",
+                    "ready": null,
+                    "reason": "ready_check_timeout",
+                    "cache_age_seconds": 0,
+                    "probe_duration_ms": 30_000,
+                    "timeout_ms": 30_000,
+                    "follow_up_command": "homeboy extension show fixture --live-readiness"
+                }
+            })
+        );
+    }
 }

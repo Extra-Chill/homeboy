@@ -11,14 +11,14 @@ use homeboy_extension_contract::ExtensionManifest;
 
 mod api;
 mod manifest;
-mod summary;
 
-pub use api::{api_descriptor, list_api, negotiate_api, resolve_api};
+pub use api::{
+    api_descriptor, list_api, negotiate_api, readiness_api, readiness_api_batch, resolve_api,
+};
 pub use manifest::{
     deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
     structured_sidecars,
 };
-pub use summary::{list_summaries, list_summaries_with, ActionSummary, ExtensionSummary};
 
 pub const EXTENSION_RELINK_ACTION_ID: &str = "extension.relink";
 pub const EXTENSION_UNINSTALL_ACTION_ID: &str = "extension.uninstall";

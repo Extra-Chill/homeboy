@@ -25,6 +25,8 @@ The wire schemas are:
 - `homeboy/extension-api-catalog-response/v1`
 - `homeboy/extension-api-resolve-request/v1`
 - `homeboy/extension-api-resolve-response/v1`
+- `homeboy/extension-api-readiness-request/v1`
+- `homeboy/extension-api-readiness-response/v1`
 
 Additive optional fields may be added within v1. Changes to identity,
 capability meaning, compatibility decisions, or required fields require a new
@@ -82,6 +84,22 @@ Component-aware owner election remains application policy over this primitive.
 The v1 wire contract does not serialize Homeboy's internal `Component` or
 `Project` models.
 
+## Readiness
+
+`extension::catalog::readiness_api` returns readiness evidence for one explicit
+installed extension ID. Callers choose `cached` to read matching evidence
+without running extension code or `probe` to execute the declared runtime probe
+within Homeboy's existing timeout and recursion guards.
+
+The response distinguishes `ready`, `not_ready`, `unknown`, and `timed_out` and
+preserves cache age, probe duration, timeout, diagnostic, and follow-up command
+evidence. Missing and invalid installations use the same typed operation
+failures as catalog and resolve.
+
+CLI extension inventory and startup command-health discovery consume v1 catalog
+and readiness responses. Their legacy presentation fields remain CLI adapters;
+core no longer maintains a parallel `ExtensionSummary` projection.
+
 ## Contract Classification
 
 `homeboy-extension-contract` predates the stable API and contains several kinds
@@ -99,6 +117,6 @@ stability.
 ## Next Operations
 
 The descriptor handshake deliberately does not define invocation lifecycle.
-Subsequent v1 slices will add idempotent invoke, cancel, reconcile, readiness,
-activity, and terminal-result contracts anchored to canonical control-plane
+Subsequent v1 slices will add idempotent invoke, cancel, reconcile, activity,
+and terminal-result contracts anchored to canonical control-plane
 references from issue #13697.

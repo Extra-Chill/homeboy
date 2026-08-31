@@ -21,13 +21,18 @@ use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
-use homeboy::extension::catalog::{list_summaries_with, ExtensionSummary};
 use homeboy_agents::agent_task_service::cook_continue_command;
-use homeboy_core::extension::catalog::load_all_extensions;
+use homeboy_core::extension::catalog::{is_extension_linked, load_all_extensions};
 use homeboy_core::extension::readiness::ExtensionReadinessMode;
 #[cfg(test)]
 use homeboy_core::extension::readiness::READY_CHECK_SKIPPED_REASON;
+use homeboy_core::extension::resolve::is_extension_compatible;
 use homeboy_extension_contract::{
+    api::v1::{
+        ExtensionApiCatalogDiagnosticCode, ExtensionApiCatalogEntry, ExtensionApiCatalogRequest,
+        ExtensionApiReadinessState, ExtensionApiReadinessStatus,
+        EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_V1,
+    },
     CliConfig, ExtensionCapability, ExtensionManifest as InstalledExtensionManifest,
 };
 use homeboy_upgrade::upgrade;
@@ -2193,13 +2198,22 @@ fn collect_extension_cli_info_metadata_only() -> ExtensionCliDiscovery {
 }
 
 fn collect_extension_cli_info_with(readiness: ExtensionReadinessMode) -> ExtensionCliDiscovery {
-    let summaries = list_summaries_with(None, readiness);
-    let mut broken_link_ids: Vec<String> = summaries
+    let catalog = homeboy_core::extension::catalog::list_api(&ExtensionApiCatalogRequest {
+        schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+    });
+    let readiness_by_id =
+        commands::extension::extension_inventory_readiness(&catalog.entries, readiness);
+    let broken_link_ids: Vec<String> = catalog
+        .entries
         .iter()
-        .filter(|summary| summary.error.as_deref() == Some("target_missing"))
-        .map(|summary| summary.id.clone())
+        .filter(|entry| {
+            entry.diagnostic.as_ref().is_some_and(|diagnostic| {
+                diagnostic.code == ExtensionApiCatalogDiagnosticCode::BrokenInstallation
+            })
+        })
+        .map(|entry| entry.id.clone())
         .collect();
-    broken_link_ids.sort();
 
     let (extensions, load_error) = match load_all_extensions() {
         Ok(extensions) => (extensions, None),
@@ -2216,13 +2230,21 @@ fn collect_extension_cli_info_with(readiness: ExtensionReadinessMode) -> Extensi
                 let args_help = help.args_help.clone();
                 let examples = help.examples.clone();
                 let about = format!("Run {} commands via {}", cli.display_name, m.name);
+                let health = catalog
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == m.id)
+                    .map(|entry| {
+                        extension_command_health_from_api(&m, entry, readiness_by_id.get(&m.id))
+                    })
+                    .unwrap_or_else(extension_command_health_missing);
                 let extension_manifest = extension_command_manifest(
                     &m,
                     &cli,
                     project_id_help.clone(),
                     args_help.clone(),
                     examples.clone(),
-                    &summaries,
+                    health,
                 );
                 ExtensionCliInfo {
                     descriptor: DynamicCommandDescriptor::installed_extension_command(
@@ -2255,22 +2277,10 @@ fn extension_command_manifest(
     project_id_help: Option<String>,
     args_help: Option<String>,
     examples: Vec<String>,
-    summaries: &[ExtensionSummary],
+    health: ExtensionCommandHealth,
 ) -> ExtensionCommandManifest {
     let project_id_help = project_id_help.unwrap_or_else(|| "Project ID".to_string());
     let args_help = args_help.unwrap_or_else(|| "Command arguments".to_string());
-    let summary = summaries.iter().find(|summary| summary.id == extension.id);
-    let health = summary
-        .map(extension_command_health_from_summary)
-        .unwrap_or_else(|| ExtensionCommandHealth {
-            status: "unknown".to_string(),
-            ready: false,
-            compatible: false,
-            linked: false,
-            reason: Some("summary_missing".to_string()),
-            detail: Some("Extension loaded, but no extension summary was available".to_string()),
-        });
-
     ExtensionCommandManifest {
         extension_id: extension.id.clone(),
         extension_name: extension.name.clone(),
@@ -2298,24 +2308,31 @@ fn extension_command_manifest(
     }
 }
 
-fn extension_command_health_from_summary(summary: &ExtensionSummary) -> ExtensionCommandHealth {
+fn extension_command_health_from_api(
+    extension: &InstalledExtensionManifest,
+    entry: &ExtensionApiCatalogEntry,
+    readiness: Option<&ExtensionApiReadinessStatus>,
+) -> ExtensionCommandHealth {
     // An extension whose `ready_check` was never run is `unknown`, not `ready`.
     // A command-health contract that treated an absent measurement as ready
     // would reproduce the fail-open defect class in #10685. (#10616)
-    let readiness_unknown =
-        summary.readiness == homeboy_core::extension::readiness::ExtensionReadinessState::Unknown;
+    let readiness_state = readiness.map(|status| status.state);
+    let readiness_unknown = readiness_state == Some(ExtensionApiReadinessState::Unknown);
+    let error = entry
+        .diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.category.clone());
+    let compatible = is_extension_compatible(extension, None);
 
-    let status = if summary.error.is_some() {
+    let status = if error.is_some() {
         "error"
-    } else if !summary.compatible {
+    } else if !compatible {
         "incompatible"
     } else if readiness_unknown {
         "unknown"
-    } else if summary.ready == Some(true) {
+    } else if readiness.is_some_and(|status| status.ready == Some(true)) {
         "ready"
-    } else if summary.readiness
-        == homeboy_core::extension::readiness::ExtensionReadinessState::TimedOut
-    {
+    } else if readiness_state == Some(ExtensionApiReadinessState::TimedOut) {
         "timed_out"
     } else {
         "not_ready"
@@ -2323,14 +2340,22 @@ fn extension_command_health_from_summary(summary: &ExtensionSummary) -> Extensio
 
     ExtensionCommandHealth {
         status: status.to_string(),
-        ready: summary.ready == Some(true),
-        compatible: summary.compatible,
-        linked: summary.linked,
-        reason: summary
-            .error
-            .clone()
-            .or_else(|| summary.ready_reason.clone()),
-        detail: summary.ready_detail.clone(),
+        ready: readiness.is_some_and(|status| status.ready == Some(true)),
+        compatible,
+        linked: is_extension_linked(&extension.id),
+        reason: error.or_else(|| readiness.and_then(|status| status.reason.clone())),
+        detail: readiness.and_then(|status| status.detail.clone()),
+    }
+}
+
+fn extension_command_health_missing() -> ExtensionCommandHealth {
+    ExtensionCommandHealth {
+        status: "unknown".to_string(),
+        ready: false,
+        compatible: false,
+        linked: false,
+        reason: Some("summary_missing".to_string()),
+        detail: Some("Extension loaded, but no extension catalog entry was available".to_string()),
     }
 }
 

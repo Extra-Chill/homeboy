@@ -7,10 +7,13 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiCompatibilityStatus, ExtensionApiDescriptor, ExtensionApiExecutionRequirements,
     ExtensionApiHandshakeRequest, ExtensionApiHandshakeResponse, ExtensionApiIdentity,
     ExtensionApiOperationFailure, ExtensionApiOperationFailureCode,
-    ExtensionApiReadinessDescriptor, ExtensionApiResolveRequest, ExtensionApiResolveResponse,
-    ExtensionApiRuntimeRequirement, ExtensionApiVersion, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
+    ExtensionApiReadinessDescriptor, ExtensionApiReadinessMode, ExtensionApiReadinessRequest,
+    ExtensionApiReadinessResponse, ExtensionApiReadinessState, ExtensionApiReadinessStatus,
+    ExtensionApiResolveRequest, ExtensionApiResolveResponse, ExtensionApiRuntimeRequirement,
+    ExtensionApiVersion, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
     EXTENSION_API_CATALOG_RESPONSE_SCHEMA, EXTENSION_API_DESCRIPTOR_SCHEMA,
     EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA, EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA,
+    EXTENSION_API_READINESS_REQUEST_SCHEMA, EXTENSION_API_READINESS_RESPONSE_SCHEMA,
     EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
 };
 use homeboy_extension_contract::{evaluate_core_compatibility, ExtensionCapability};
@@ -354,6 +357,115 @@ pub fn resolve_api(request: &ExtensionApiResolveRequest) -> ExtensionApiResolveR
     }
 }
 
+/// Read cached readiness or run one installed extension's declared probe through v1.
+pub fn readiness_api(request: &ExtensionApiReadinessRequest) -> ExtensionApiReadinessResponse {
+    readiness_api_for_discovered(request, &discover_extensions())
+}
+
+/// Serve several v1 readiness requests from one catalog discovery pass.
+pub fn readiness_api_batch(
+    requests: &[ExtensionApiReadinessRequest],
+) -> Vec<ExtensionApiReadinessResponse> {
+    let extensions = discover_extensions();
+    if requests
+        .iter()
+        .any(|request| request.mode == ExtensionApiReadinessMode::Probe)
+    {
+        std::thread::scope(|scope| {
+            requests
+                .iter()
+                .map(|request| scope.spawn(|| readiness_api_for_discovered(request, &extensions)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|probe| probe.join().expect("extension readiness probe panicked"))
+                .collect()
+        })
+    } else {
+        requests
+            .iter()
+            .map(|request| readiness_api_for_discovered(request, &extensions))
+            .collect()
+    }
+}
+
+fn readiness_api_for_discovered(
+    request: &ExtensionApiReadinessRequest,
+    extensions: &[DiscoveredExtension],
+) -> ExtensionApiReadinessResponse {
+    if let Some(failure) = validate_operation_request(
+        &request.schema,
+        EXTENSION_API_READINESS_REQUEST_SCHEMA,
+        request.api_version,
+    ) {
+        return readiness_failure(request, failure);
+    }
+
+    let Some(extension) = extensions.iter().find(|extension| match extension {
+        DiscoveredExtension::Valid(extension) => extension.id == request.extension_id,
+        DiscoveredExtension::Invalid(failure) => failure.id == request.extension_id,
+    }) else {
+        return readiness_failure(
+            request,
+            operation_failure(
+                ExtensionApiOperationFailureCode::ExtensionNotFound,
+                format!("Extension '{}' is not installed", request.extension_id),
+            ),
+        );
+    };
+
+    let DiscoveredExtension::Valid(extension) = extension else {
+        return readiness_failure(
+            request,
+            operation_failure(
+                ExtensionApiOperationFailureCode::ExtensionInvalid,
+                format!(
+                    "Extension '{}' has an invalid installation",
+                    request.extension_id
+                ),
+            ),
+        );
+    };
+    let mode = match request.mode {
+        ExtensionApiReadinessMode::Cached => {
+            crate::extension::readiness::ExtensionReadinessMode::Cached
+        }
+        ExtensionApiReadinessMode::Probe => {
+            crate::extension::readiness::ExtensionReadinessMode::Probe
+        }
+    };
+    let status = crate::extension::readiness::extension_ready_status_with(extension, mode);
+
+    ExtensionApiReadinessResponse {
+        schema: EXTENSION_API_READINESS_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        extension_id: request.extension_id.clone(),
+        status: Some(ExtensionApiReadinessStatus {
+            state: match status.state {
+                crate::extension::readiness::ExtensionReadinessState::Ready => {
+                    ExtensionApiReadinessState::Ready
+                }
+                crate::extension::readiness::ExtensionReadinessState::NotReady => {
+                    ExtensionApiReadinessState::NotReady
+                }
+                crate::extension::readiness::ExtensionReadinessState::Unknown => {
+                    ExtensionApiReadinessState::Unknown
+                }
+                crate::extension::readiness::ExtensionReadinessState::TimedOut => {
+                    ExtensionApiReadinessState::TimedOut
+                }
+            },
+            ready: status.ready,
+            reason: status.reason,
+            detail: status.detail,
+            cache_age_seconds: status.cache_age_seconds,
+            probe_duration_ms: status.probe_duration_ms,
+            timeout_ms: status.timeout_ms,
+            follow_up_command: status.follow_up_command,
+        }),
+        failure: None,
+    }
+}
+
 fn validate_operation_request(
     actual_schema: &str,
     expected_schema: &str,
@@ -405,6 +517,19 @@ fn resolve_failure(
         descriptor,
         capability: None,
         compatibility,
+        failure: Some(failure),
+    }
+}
+
+fn readiness_failure(
+    request: &ExtensionApiReadinessRequest,
+    failure: ExtensionApiOperationFailure,
+) -> ExtensionApiReadinessResponse {
+    ExtensionApiReadinessResponse {
+        schema: EXTENSION_API_READINESS_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        extension_id: request.extension_id.clone(),
+        status: None,
         failure: Some(failure),
     }
 }
@@ -463,6 +588,18 @@ mod tests {
             api_version: EXTENSION_API_V1,
             extension_id: extension_id.to_string(),
             capability_id: capability_id.to_string(),
+        }
+    }
+
+    fn readiness_request(
+        extension_id: &str,
+        mode: ExtensionApiReadinessMode,
+    ) -> ExtensionApiReadinessRequest {
+        ExtensionApiReadinessRequest {
+            schema: EXTENSION_API_READINESS_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: extension_id.to_string(),
+            mode,
         }
     }
 
@@ -732,6 +869,119 @@ mod tests {
                 ExtensionApiCompatibilityStatus::Incompatible
             );
             assert!(response.capability.is_none());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_api_preserves_cached_and_live_probe_semantics() {
+        crate::test_support::with_isolated_home(|home| {
+            let marker = home.path().join("ready");
+            std::fs::write(&marker, "ready").expect("ready marker");
+            write_extension(
+                "fixture",
+                serde_json::json!({
+                    "name": "Fixture",
+                    "version": "1.0.0",
+                    "executable": {
+                        "runtime": { "ready_check": format!("test -f '{}'", marker.display()) }
+                    }
+                }),
+            );
+
+            let cached = readiness_api(&readiness_request(
+                "fixture",
+                ExtensionApiReadinessMode::Cached,
+            ));
+            assert_eq!(
+                cached.status.expect("cached status").state,
+                ExtensionApiReadinessState::Unknown
+            );
+
+            let probed = readiness_api(&readiness_request(
+                "fixture",
+                ExtensionApiReadinessMode::Probe,
+            ));
+            assert_eq!(
+                probed.status.expect("probed status").state,
+                ExtensionApiReadinessState::Ready
+            );
+
+            let cached = readiness_api(&readiness_request(
+                "fixture",
+                ExtensionApiReadinessMode::Cached,
+            ));
+            assert_eq!(
+                cached.status.expect("cached status").state,
+                ExtensionApiReadinessState::Ready
+            );
+        });
+    }
+
+    #[test]
+    fn readiness_api_returns_typed_invalid_extension_failure() {
+        crate::test_support::with_isolated_home(|_| {
+            let broken_dir = crate::paths::extensions()
+                .expect("extensions path")
+                .join("broken");
+            std::fs::create_dir_all(&broken_dir).expect("broken extension directory");
+            std::fs::write(broken_dir.join("broken.json"), "{").expect("broken manifest");
+
+            let response = readiness_api(&readiness_request(
+                "broken",
+                ExtensionApiReadinessMode::Cached,
+            ));
+
+            assert_eq!(
+                response.failure.expect("failure").code,
+                ExtensionApiOperationFailureCode::ExtensionInvalid
+            );
+            assert!(response.status.is_none());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_batch_probes_independent_extensions_concurrently() {
+        crate::test_support::with_isolated_home(|home| {
+            let first = home.path().join("first-started");
+            let second = home.path().join("second-started");
+            let wait_for_peer = |own: &std::path::Path, peer: &std::path::Path| {
+                format!(
+                    "touch '{}' && i=0; while [ ! -f '{}' ] && [ $i -lt 200 ]; do i=$((i + 1)); sleep 0.01; done; test -f '{}'",
+                    own.display(),
+                    peer.display(),
+                    peer.display()
+                )
+            };
+            write_extension(
+                "first",
+                serde_json::json!({
+                    "name": "First",
+                    "version": "1.0.0",
+                    "executable": { "runtime": { "ready_check": wait_for_peer(&first, &second) } }
+                }),
+            );
+            write_extension(
+                "second",
+                serde_json::json!({
+                    "name": "Second",
+                    "version": "1.0.0",
+                    "executable": { "runtime": { "ready_check": wait_for_peer(&second, &first) } }
+                }),
+            );
+
+            let responses = readiness_api_batch(&[
+                readiness_request("first", ExtensionApiReadinessMode::Probe),
+                readiness_request("second", ExtensionApiReadinessMode::Probe),
+            ]);
+
+            assert!(responses.iter().all(|response| {
+                response
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.state == ExtensionApiReadinessState::Ready)
+            }));
         });
     }
 }
