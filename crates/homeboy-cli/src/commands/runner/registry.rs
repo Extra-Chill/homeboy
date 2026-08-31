@@ -6,7 +6,10 @@ use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::MergeOutput;
 use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner};
-use homeboy_runner_contract::RunnerKind;
+use homeboy_runner_contract::{
+    RunnerApiListRequest, RunnerApiListResponse, RunnerKind, RUNNER_API_LIST_REQUEST_SCHEMA,
+    RUNNER_API_V1,
+};
 
 use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::{CmdResult, DynamicSetArgs};
@@ -97,11 +100,34 @@ pub(super) fn list(full: bool) -> CmdResult<RunnerListOutput> {
         return Ok((full_list_output(runner::list()?, sessions), 0));
     }
 
-    let descriptors = runner::RunnerDiscoveryService::list()?;
+    let descriptors = descriptors_from_list_response(runner::RunnerDiscoveryService::list_api(
+        &RunnerApiListRequest {
+            schema: RUNNER_API_LIST_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+        },
+    )?)?;
     Ok((
         bounded_list_output(compact_list_output(&descriptors, &sessions)),
         0,
     ))
+}
+
+fn descriptors_from_list_response(
+    response: RunnerApiListResponse,
+) -> homeboy::core::Result<Vec<runner::RunnerDescriptor>> {
+    if let Some(failure) = response.failure {
+        let failure_code = serde_json::to_value(failure.code)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string));
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "runner_api.list",
+            failure.message,
+            failure_code,
+            None,
+        ));
+    }
+
+    Ok(response.descriptors)
 }
 
 fn full_list_output(
@@ -891,6 +917,23 @@ mod tests {
         #[test]
         fn full_is_available_explicitly() {
             assert!(parse(&["homeboy", "runner", "list", "--full"]));
+        }
+
+        #[test]
+        fn typed_api_failure_is_not_treated_as_an_empty_inventory() {
+            let error = descriptors_from_list_response(RunnerApiListResponse {
+                schema: homeboy_runner_contract::RUNNER_API_LIST_RESPONSE_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                descriptors: Vec::new(),
+                failure: Some(homeboy_runner_contract::RunnerApiOperationFailure {
+                    code: homeboy_runner_contract::RunnerApiOperationFailureCode::UnsupportedApiVersion,
+                    message: "unsupported Runner API version".to_string(),
+                }),
+            })
+            .expect_err("typed failure must fail the command");
+
+            assert!(error.message.contains("unsupported Runner API version"));
+            assert_eq!(error.details["id"], "unsupported_api_version");
         }
 
         #[test]
