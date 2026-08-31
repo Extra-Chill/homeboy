@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::RunnerLifecycleOwner;
 
+/// File and byte counts for a runner workspace transfer.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct ByteFileCounts {
+    pub files: usize,
+    pub bytes: u64,
+}
+
 /// A lease describing a runner's materialized workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerWorkspaceLease {
@@ -73,6 +80,22 @@ impl RunnerWorkspaceSyncMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_file_counts_keep_their_wire_shape_and_zero_default() {
+        assert_eq!(
+            serde_json::to_value(ByteFileCounts::default()).expect("serialize"),
+            serde_json::json!({ "files": 0, "bytes": 0 })
+        );
+        assert_eq!(
+            serde_json::to_value(ByteFileCounts {
+                files: 3,
+                bytes: 1024,
+            })
+            .expect("serialize"),
+            serde_json::json!({ "files": 3, "bytes": 1024 })
+        );
+    }
 
     #[test]
     fn workspace_lease_keeps_its_minimal_wire_shape() {

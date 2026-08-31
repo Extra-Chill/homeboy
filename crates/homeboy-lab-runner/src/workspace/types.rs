@@ -649,9 +649,8 @@ pub use homeboy_runner_contract::RunnerWorkspaceCurrentSummary;
 /// Shared across the workspace-sync and git-dependency materialization outputs
 /// so the `files` / `bytes` pair is declared once. Serialized flat via
 /// `#[serde(flatten)]` to preserve the historical top-level JSON keys.
-// ByteFileCounts now lives in the shared runner-contract crate (core's dev_run
-// names it). Re-exported so runner-internal call sites resolve.
-pub use homeboy_lab_runner_contract::ByteFileCounts;
+// Re-exported so runner-internal call sites resolve.
+pub use homeboy_runner_contract::ByteFileCounts;
 
 pub(super) type SnapshotStats = ByteFileCounts;
 
