@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SELF_CHECK_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
 
@@ -27,13 +27,28 @@ pub struct SelfCheckOutput {
 /// Existing capability callers pass no policy and retain their historic
 /// unbounded behavior.
 pub(crate) struct SelfCheckExecutionPolicy {
+    started: Instant,
     timeout: Duration,
     env: Vec<(String, String)>,
 }
 
 impl SelfCheckExecutionPolicy {
     pub(crate) fn bounded(timeout: Duration, env: Vec<(String, String)>) -> Self {
-        Self { timeout, env }
+        Self::bounded_at(timeout, env, Instant::now())
+    }
+
+    fn bounded_at(timeout: Duration, env: Vec<(String, String)>, started: Instant) -> Self {
+        Self {
+            started,
+            timeout,
+            env,
+        }
+    }
+
+    fn remaining_timeout_at(&self, now: Instant) -> Option<Duration> {
+        self.timeout
+            .checked_sub(now.saturating_duration_since(self.started))
+            .filter(|remaining| !remaining.is_zero())
     }
 }
 
@@ -129,13 +144,26 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
         if let Some(progress) = progress.as_mut() {
             progress.start(index)?;
         }
-        let output = execute_self_check_command(
-            command,
-            &working_dir,
-            passthrough,
-            cargo_target.as_ref(),
-            execution_policy,
-        );
+        let output =
+            match execution_policy.map(|policy| policy.remaining_timeout_at(Instant::now())) {
+                Some(Some(remaining_timeout)) => execute_self_check_command(
+                    command,
+                    &working_dir,
+                    passthrough,
+                    cargo_target.as_ref(),
+                    execution_policy,
+                    Some(remaining_timeout),
+                ),
+                Some(None) => self_check_suite_timeout_before_spawn(),
+                None => execute_self_check_command(
+                    command,
+                    &working_dir,
+                    passthrough,
+                    cargo_target.as_ref(),
+                    None,
+                    None,
+                ),
+            };
         let stdout_artifact = if let Some(run_dir) = run_dir {
             write_command_artifact(run_dir, index, "stdout", &output.stdout.to_string_lossy())?
         } else {
@@ -198,6 +226,7 @@ fn execute_self_check_command(
     passthrough: bool,
     cargo_target: Option<&homeboy_core::ManagedCargoTarget>,
     execution_policy: Option<&SelfCheckExecutionPolicy>,
+    remaining_timeout: Option<Duration>,
 ) -> SelfCheckCommandOutput {
     execute_local_self_check_command(
         command,
@@ -205,6 +234,7 @@ fn execute_self_check_command(
         passthrough,
         cargo_target,
         execution_policy,
+        remaining_timeout,
     )
 }
 
@@ -270,6 +300,7 @@ fn execute_local_self_check_command(
     passthrough: bool,
     cargo_target: Option<&homeboy_core::ManagedCargoTarget>,
     execution_policy: Option<&SelfCheckExecutionPolicy>,
+    remaining_timeout: Option<Duration>,
 ) -> SelfCheckCommandOutput {
     #[cfg(windows)]
     let mut cmd = {
@@ -296,10 +327,10 @@ fn execute_local_self_check_command(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    if let Some(policy) = execution_policy {
+    if let Some(remaining_timeout) = remaining_timeout {
         return execute_bounded_self_check_command(
             cmd,
-            policy,
+            remaining_timeout,
             passthrough.then(homeboy_engine_primitives::command::parent_stream_passthrough),
         );
     }
@@ -359,7 +390,7 @@ fn execute_local_self_check_command(
 
 fn execute_bounded_self_check_command(
     mut command: Command,
-    policy: &SelfCheckExecutionPolicy,
+    timeout: Duration,
     passthrough: Option<homeboy_engine_primitives::command::StreamChunkObserver>,
 ) -> SelfCheckCommandOutput {
     use homeboy_engine_primitives::command::{ControllerChildGuard, SupervisedCommandTermination};
@@ -379,7 +410,7 @@ fn execute_bounded_self_check_command(
     let supervised = match homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_passthrough(
         &mut child,
         SELF_CHECK_CAPTURE_LIMIT_BYTES,
-        policy.timeout,
+        timeout,
         Duration::from_secs(1),
         passthrough,
         || false,
@@ -407,6 +438,17 @@ fn execute_bounded_self_check_command(
         } else {
             output.status.code().unwrap_or(-1)
         },
+    }
+}
+
+fn self_check_suite_timeout_before_spawn() -> SelfCheckCommandOutput {
+    let mut stderr = BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES);
+    stderr.push_bytes(b"self-check suite timeout exhausted before starting next command\n");
+    SelfCheckCommandOutput {
+        stdout: BoundedCapture::new(SELF_CHECK_CAPTURE_LIMIT_BYTES),
+        stderr,
+        success: false,
+        exit_code: 124,
     }
 }
 
@@ -760,11 +802,8 @@ mod tests {
             .args(["-c", "printf live-output"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = execute_bounded_self_check_command(
-            command,
-            &SelfCheckExecutionPolicy::bounded(Duration::from_secs(1), Vec::new()),
-            Some(passthrough),
-        );
+        let output =
+            execute_bounded_self_check_command(command, Duration::from_secs(1), Some(passthrough));
 
         assert!(output.success);
         assert_eq!(output.stdout.to_string_lossy(), "live-output");
@@ -773,5 +812,70 @@ mod tests {
                 .expect("tee output is utf-8"),
             "live-output"
         );
+    }
+
+    #[test]
+    fn multiple_self_check_commands_share_one_deadline() {
+        let started = Instant::now();
+        let policy =
+            SelfCheckExecutionPolicy::bounded_at(Duration::from_secs(10), Vec::new(), started);
+
+        assert_eq!(
+            policy.remaining_timeout_at(started + Duration::from_secs(6)),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(
+            policy.remaining_timeout_at(started + Duration::from_secs(10)),
+            None,
+            "a second command must not receive a fresh suite timeout"
+        );
+
+        let large = SelfCheckExecutionPolicy::bounded_at(
+            Duration::from_secs(u64::MAX),
+            Vec::new(),
+            started,
+        );
+        assert_eq!(
+            large.remaining_timeout_at(started + Duration::from_secs(1)),
+            Some(Duration::from_secs(u64::MAX - 1))
+        );
+    }
+
+    #[test]
+    fn expired_self_check_suite_does_not_spawn_another_command() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut component = Component::new(
+            "fixture".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "".to_string(),
+            None,
+        );
+        component.scripts = Some(ComponentScriptsConfig {
+            test: vec!["touch should-not-exist".to_string()],
+            ..Default::default()
+        });
+        let policy = SelfCheckExecutionPolicy::bounded_at(
+            Duration::from_secs(1),
+            Vec::new(),
+            Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("monotonic clock has at least two seconds of history"),
+        );
+
+        let output = run_self_checks_with_passthrough_and_progress(
+            &component,
+            ExtensionCapability::Test,
+            dir.path(),
+            false,
+            Some(&policy),
+            None,
+            None,
+        )
+        .expect("exhausted suite returns a timeout result");
+
+        assert_eq!(output.exit_code, 124);
+        assert!(!output.success);
+        assert!(output.stderr.contains("before starting next command"));
+        assert!(!dir.path().join("should-not-exist").exists());
     }
 }
