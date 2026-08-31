@@ -13,10 +13,6 @@ use crate::defaults::HomeboyConfig;
 use crate::error::StorageExhaustedDetails;
 use crate::observation::disk_budget::disk_budget;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
-use crate::worktree_provider::{
-    cleanup_worktrees_from_config, ConfiguredWorktreeCleanupOutput, WorktreeCleanupEffects,
-    WorktreeCleanupRequest, WorktreeCleanupScope,
-};
 use crate::{git, Error, Result};
 
 mod cargo_targets;
@@ -407,7 +403,6 @@ pub enum ArtifactCleanupSort {
 pub struct ResourceCleanupOptions {
     pub intent: ResourceCleanupIntent,
     pub artifacts: Option<ArtifactCleanupOptions>,
-    pub worktree_providers: Option<WorktreeCleanupRequest>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -424,14 +419,6 @@ pub struct ResourceCleanupOutput {
     pub reclaimed_allocated_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<ArtifactCleanupOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree_providers: Option<ConfiguredWorktreeCleanupOutput>,
-    /// Normalized provider effects, projected from the untyped provider
-    /// payloads and also summed into the counts above (#9825). `None` when no
-    /// provider sweep ran; absent fields inside mean the provider did not
-    /// report that effect — never that nothing happened.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree_provider_effects: Option<WorktreeCleanupEffects>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1425,22 +1412,14 @@ fn artifact_cleanup_apply_command(options: &ArtifactCleanupOptions) -> String {
 
 pub fn cleanup_resources_from_config(
     mut options: ResourceCleanupOptions,
-    config: HomeboyConfig,
+    _config: HomeboyConfig,
 ) -> Result<ResourceCleanupOutput> {
     let apply = options.intent.is_apply();
     let mut artifacts = None;
-    let mut providers = None;
 
     if let Some(mut artifact_options) = options.artifacts.take() {
         artifact_options.apply = apply;
         artifacts = Some(cleanup_artifacts(artifact_options)?);
-    }
-
-    if let Some(mut provider_options) = options.worktree_providers.take() {
-        provider_options.apply = apply;
-        provider_options.scope = WorktreeCleanupScope::Configured;
-        let cleanup = cleanup_worktrees_from_config(&provider_options, &config)?;
-        providers = cleanup.configured;
     }
 
     let candidate_count = artifacts
@@ -1475,43 +1454,7 @@ pub fn cleanup_resources_from_config(
         .as_ref()
         .map(|output| output.reclaimed_allocated_bytes)
         .unwrap_or(0);
-    let provider_success_count = providers
-        .as_ref()
-        .map(|output| output.success_count)
-        .unwrap_or(0);
-    let provider_failure_count = providers
-        .as_ref()
-        .map(|output| output.failure_count)
-        .unwrap_or(0);
-
-    let (success_count, failure_count) = if providers.is_some() {
-        (provider_success_count, provider_failure_count)
-    } else {
-        (artifact_success_count, artifact_failure_count)
-    };
-
-    // Provider mutations are real resources. Leaving them out of the top-level
-    // counts is what let a sweep that pruned 49 lock files report
-    // `applied_count: 0` (#9825): every count above is artifact-derived, and
-    // providers previously contributed only success/failure.
-    //
-    // An absent effect stays absent. `mutated_resource_count` folds unreported
-    // effects as zero *for the sum only*, which is correct — a provider that
-    // never reported locks pruned adds no locks. The typed effects below retain
-    // the distinction between "reported zero" and "did not report".
-    let provider_effects = providers.as_ref().map(|output| output.effects.clone());
-    let provider_mutated = provider_effects
-        .as_ref()
-        .map(|effects| effects.mutated_resource_count())
-        .unwrap_or(0);
-    let provider_bytes = provider_effects
-        .as_ref()
-        .and_then(|effects| effects.bytes_reclaimed)
-        .unwrap_or(0);
-
-    let applied_count =
-        applied_count.saturating_add(usize::try_from(provider_mutated).unwrap_or(usize::MAX));
-    let reclaimed_bytes = reclaimed_bytes.saturating_add(provider_bytes);
+    let (success_count, failure_count) = (artifact_success_count, artifact_failure_count);
 
     Ok(ResourceCleanupOutput {
         command: "cleanup.resources",
@@ -1525,8 +1468,6 @@ pub fn cleanup_resources_from_config(
         reclaimed_bytes,
         reclaimed_allocated_bytes,
         artifacts,
-        worktree_providers: providers,
-        worktree_provider_effects: provider_effects,
     })
 }
 
@@ -1754,7 +1695,7 @@ fn apply_artifact_candidate_with_before_remove(
             Ok(true) => {
                 return ArtifactCleanupCandidateApplyOutcome::Skipped(
                     "artifact path gained files tracked by Git after discovery".to_string(),
-                )
+                );
             }
             Ok(false) => {}
             Err(error) => return ArtifactCleanupCandidateApplyOutcome::Failed(error),
@@ -2600,11 +2541,8 @@ mod tests {
     }
 
     use super::*;
-    use std::collections::HashMap;
     use std::process::Command;
     use tempfile::TempDir;
-
-    use crate::defaults::{WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind};
 
     #[cfg(not(unix))]
     #[test]
@@ -3365,10 +3303,9 @@ mod tests {
     }
 
     #[test]
-    fn clean_contract_dry_run_aggregates_artifacts_and_provider_preview() {
+    fn clean_contract_dry_run_aggregates_artifact_preview() {
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "artifact");
-        let script = fake_provider_script();
 
         let output = cleanup_resources_from_config(
             ResourceCleanupOptions {
@@ -3385,27 +3322,8 @@ mod tests {
                     include_active_worktrees: false,
                     max_scan_duration: None,
                 }),
-                worktree_providers: Some(WorktreeCleanupRequest {
-                    providers: vec!["fixture".to_string()],
-                    all_configured_providers: false,
-                    apply: true,
-                    timeout: None,
-                    ..WorktreeCleanupRequest::default()
-                }),
             },
-            config_with_provider(WorktreeProviderConfig {
-                enabled: true,
-                kind: WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: WorktreeProviderCommands {
-                    cleanup_preview: Some(vec![script, "dry_run".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: None,
-            }),
+            HomeboyConfig::default(),
         )
         .expect("aggregate dry run cleanup");
 
@@ -3418,22 +3336,12 @@ mod tests {
         assert_eq!(output.skipped_count, 0);
         assert_eq!(output.remaining_count, 1);
         assert!(repo.path().join("target/debug/app").exists());
-        assert_eq!(
-            output
-                .worktree_providers
-                .as_ref()
-                .expect("providers")
-                .providers[0]
-                .parsed_payload,
-            Some(serde_json::json!({ "mode": "dry_run" }))
-        );
     }
 
     #[test]
-    fn clean_contract_apply_aggregates_artifact_removal_and_provider_apply() {
+    fn clean_contract_apply_aggregates_artifact_removal() {
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "artifact");
-        let script = fake_provider_script();
 
         let output = cleanup_resources_from_config(
             ResourceCleanupOptions {
@@ -3450,27 +3358,8 @@ mod tests {
                     include_active_worktrees: false,
                     max_scan_duration: None,
                 }),
-                worktree_providers: Some(WorktreeCleanupRequest {
-                    providers: vec!["fixture".to_string()],
-                    all_configured_providers: false,
-                    apply: false,
-                    timeout: None,
-                    ..WorktreeCleanupRequest::default()
-                }),
             },
-            config_with_provider(WorktreeProviderConfig {
-                enabled: true,
-                kind: WorktreeProviderKind::Command,
-                apply_enabled: true,
-                lookup_timeout_ms: 10_000,
-                mutation_timeout_ms: 30_000,
-                lookup_output_limit_bytes: 64 * 1024,
-                commands: WorktreeProviderCommands {
-                    cleanup_apply: Some(vec![script, "apply".to_string()]),
-                    ..Default::default()
-                },
-                list_result_mapping: None,
-            }),
+            HomeboyConfig::default(),
         )
         .expect("aggregate apply cleanup");
 
@@ -3482,15 +3371,6 @@ mod tests {
         assert_eq!(output.skipped_count, 0);
         assert_eq!(output.remaining_count, 0);
         assert!(!repo.path().join("target").exists());
-        assert_eq!(
-            output
-                .worktree_providers
-                .as_ref()
-                .expect("providers")
-                .providers[0]
-                .parsed_payload,
-            Some(serde_json::json!({ "mode": "apply" }))
-        );
     }
 
     #[test]
@@ -3520,12 +3400,14 @@ mod tests {
 
         assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
         assert!(err.message.contains("is not a Homeboy source git checkout"));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("requires a source checkout, not a packaged Cargo registry source")));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("homeboy cleanup artifacts --path <PATH>")));
+        assert!(err.hints.iter().any(|hint| {
+            hint.message
+                .contains("requires a source checkout, not a packaged Cargo registry source")
+        }));
+        assert!(err.hints.iter().any(|hint| {
+            hint.message
+                .contains("homeboy cleanup artifacts --path <PATH>")
+        }));
     }
 
     #[test]
@@ -3556,9 +3438,10 @@ mod tests {
 
         let err = validate_homeboy_manifest_dir(tmp.path()).expect_err("reject packaged source");
 
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("Active Homeboy checkout appears to be:")));
+        assert!(err.hints.iter().any(|hint| {
+            hint.message
+                .contains("Active Homeboy checkout appears to be:")
+        }));
     }
 
     #[test]
@@ -3947,10 +3830,11 @@ mod tests {
 
         assert_eq!(output.mode, "dry_run");
         assert_eq!(output.applied_count, 0);
-        assert!(output.candidates.iter().any(|row| row
-            .worktree
-            .ends_with(repo.path().file_name().unwrap().to_str().unwrap())
-            && row.relative_path == "target"));
+        assert!(output.candidates.iter().any(|row| {
+            row.worktree
+                .ends_with(repo.path().file_name().unwrap().to_str().unwrap())
+                && row.relative_path == "target"
+        }));
         assert!(output
             .candidates
             .iter()
@@ -4537,65 +4421,6 @@ mod tests {
     fn init_git_repository(path: &Path) {
         git(path, &["init", "-b", "main"]);
     }
-
-    fn config_with_provider(provider: WorktreeProviderConfig) -> HomeboyConfig {
-        let mut providers = HashMap::new();
-        providers.insert("fixture".to_string(), provider);
-        HomeboyConfig {
-            worktree_providers: providers,
-            ..HomeboyConfig::default()
-        }
-    }
-
-    /// Shared, process-wide root for fixture provider scripts.
-    ///
-    /// A fixture script must outlive the helper that writes it (the test runs it
-    /// later), but previously each call `.keep()`-ed its own `tempfile::tempdir()`,
-    /// permanently disabling `TempDir` cleanup and leaking a directory per run
-    /// (see #9173 follow-up). Anchor all fixture scripts under a single `TempDir`
-    /// owned by this `OnceLock`: created once, cleaned up on normal process exit,
-    /// and `hb-test-` prefixed so the startup sweep (#9177) reclaims it even if
-    /// the process is killed.
-    fn fixture_script_root() -> &'static Path {
-        static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        ROOT.get_or_init(|| {
-            tempfile::Builder::new()
-                .prefix("hb-test-cleanup-fixtures-")
-                .tempdir()
-                .expect("fixture script root tempdir")
-        })
-        .path()
-    }
-
-    fn unique_fixture_script_dir() -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = fixture_script_root().join(format!("fixture-{id}"));
-        fs::create_dir_all(&dir).expect("create fixture script dir");
-        dir
-    }
-
-    fn fake_provider_script() -> String {
-        let dir = unique_fixture_script_dir();
-        let script = dir.join("provider");
-        fs::write(&script, "#!/bin/sh\nprintf '{\"mode\":\"%s\"}\n' \"$1\"\n")
-            .expect("write script");
-        make_executable(&script);
-        script.to_string_lossy().to_string()
-    }
-
-    #[cfg(unix)]
-    fn make_executable(path: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).expect("chmod");
-    }
-
-    #[cfg(not(unix))]
-    fn make_executable(_path: &std::path::Path) {}
 
     fn temp_homeboy_checkout(temp_root: &Path, name: &str) -> PathBuf {
         let checkout = temp_root.join(name);

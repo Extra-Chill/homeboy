@@ -192,38 +192,6 @@ persisted default that would silently apply to every future sweep.
 - `systemd_unit` — Unit restarted with `systemctl restart <unit>` when no explicit command is set.
 - `restart_command` — Explicit restart command, overriding the systemd default.
 
-### `WorktreeProviderConfig`
-
-- `enabled` — Whether the provider is available; defaults to `true`.
-- `kind` — Provider kind. Current supported value: `command`.
-- `apply_enabled` — Whether mutating provider operations are enabled.
-- `commands` — Provider command argv arrays.
-- `list_result_mapping` — Required projection contract when `commands.list` is configured.
-
-### `WorktreeProviderCommands`
-
-- `resolve` — Targeted handle lookup. Configure `resolve_not_found_exit_codes` when the provider signals an absent handle with a non-zero status; all statuses not listed remain hard lookup failures.
-- `resolve_task` — Targeted task URL lookup. Homeboy expands `{task_url}` and the provider returns the complete candidate set for that task, including any pagination required by its own backend.
-- `resolve_not_found_exit_codes` — Provider-native statuses that mean `resolve` found no matching handle.
-- `list`
-- `ensure` — Atomic create-or-return-existing argv template. Homeboy invokes it only after an explicit typed provider no-match, expands `{handle}`, `{repo}`, `{base}`, `{head}`, `{task_url}`, and `{idempotency_key}`, and requires `apply_enabled: true`.
-- `retention` — Preferred JSON stdin/stdout command using schema `homeboy/worktree-retention/v1` (`plan`, `apply`, `status`, `evidence`). Apply consumes an explicit reviewed `run_id` and `plan_id`.
-- `retention_timeout_ms` — Maximum time allowed for `retention` (default: 30,000 milliseconds; maximum: 300,000 milliseconds).
-- `cleanup_preview` — Legacy independent preview command. Used only when `retention` is unset.
-- `cleanup_apply` — Legacy independent apply command. Used only when `retention` is unset.
-- `artifacts_preview`
-- `artifacts_apply`
-
-### `WorktreeProviderListResultMapping`
-
-- `items`
-- `handle`
-- `path`
-- `branch`
-- `dirty`
-- `unpushed`
-- `primary`
-
 ### `ReleaseGateConfig`
 
 - `local_hot` — Policy for force-local or stale-runner fallback of release-gate hot commands: `fail_closed` (default) or `allowed`. `HOMEBOY_RELEASE_GATE_LOCAL_HOT` overrides this value for one process.

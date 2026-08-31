@@ -14,7 +14,7 @@ use crate::agent_task_gate::{
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::git::output_allow_empty;
 use homeboy_core::stream_capture::StreamCaptureMetadata;
-use homeboy_core::worktree_provider::{self, WorktreeMutationContext, WorktreeProviderIdentity};
+use homeboy_core::worktree_provider::{self, WorktreeMutationContext};
 use homeboy_core::{Error, Result};
 
 use super::types::{
@@ -106,21 +106,12 @@ pub(crate) const AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA: &str =
 pub(crate) const AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA: &str =
     "homeboy/agent-task-promotion-apply-response/v1";
 
-/// Confirm that the controller can promote into a managed workspace before it
-/// spends a provider attempt. Explicit provider commands remain authoritative
-/// and intentionally bypass this configured-provider lookup.
+/// Confirm that the controller can promote into a native managed workspace
+/// before it spends a provider attempt. Explicit provider commands remain
+/// authoritative.
 pub fn preflight_configured_workspace_provider(to_workspace: &str) -> Result<()> {
-    let config = homeboy_core::defaults::load_config();
-    preflight_configured_workspace_provider_with_config(to_workspace, &config)
-}
-
-pub(crate) fn preflight_configured_workspace_provider_with_config(
-    to_workspace: &str,
-    config: &homeboy_core::defaults::HomeboyConfig,
-) -> Result<()> {
-    worktree_provider::resolve_worktree_mutation_target_from_config(
+    worktree_provider::resolve_worktree_mutation_target(
         to_workspace,
-        config,
         WorktreeMutationContext::default(),
     )?;
     Ok(())
@@ -353,7 +344,6 @@ pub(crate) struct ExternalPromotionWorkspaceProvider {
 }
 
 struct ConfiguredPromotionWorkspaceProvider {
-    config: homeboy_core::defaults::HomeboyConfig,
     executable: Option<PathBuf>,
 }
 
@@ -370,7 +360,7 @@ impl ExternalPromotionWorkspaceProvider {
 
     pub(super) fn from_options_with_config_and_environment(
         options: &AgentTaskPromotionOptions,
-        config: &homeboy_core::defaults::HomeboyConfig,
+        _config: &homeboy_core::defaults::HomeboyConfig,
         executable: Option<PathBuf>,
         promotion_command: Option<String>,
     ) -> Self {
@@ -399,10 +389,7 @@ impl ExternalPromotionWorkspaceProvider {
         Self {
             invocation: None,
             provenance: None,
-            configured_fallback: Some(ConfiguredPromotionWorkspaceProvider {
-                config: config.clone(),
-                executable,
-            }),
+            configured_fallback: Some(ConfiguredPromotionWorkspaceProvider { executable }),
         }
     }
 
@@ -444,29 +431,14 @@ impl ExternalPromotionWorkspaceProvider {
                     )
                 })
             })?;
-        let trusted_unpushed_destination = request
-            .trusted_unpushed_candidate_destination
-            .as_ref()
-            .map(
-                |trusted| homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
-                    path: trusted.path.clone(),
-                    head: trusted.head.clone(),
-                },
-            );
-        let target = worktree_provider::resolve_worktree_mutation_target_from_config(
+        let target = worktree_provider::resolve_worktree_mutation_target(
             &request.to_workspace,
-            &configured_fallback.config,
             WorktreeMutationContext {
                 safety_baseline: request.gate_feedback_baseline.as_ref(),
-                trusted_unpushed_destination: trusted_unpushed_destination.as_ref(),
             },
         )?;
-        let provider_id = match &target.provider {
-            WorktreeProviderIdentity::Native => "homeboy",
-            WorktreeProviderIdentity::Configured(provider_id) => provider_id,
-        };
         self.provenance = Some(serde_json::json!({
-            "id": provider_id,
+            "id": "native",
             "handle": target.handle,
             "path": target.path,
         }));
@@ -670,7 +642,7 @@ pub(super) fn run_provider_command_with_timeout(
             return Err(Error::internal_io(
                 error.to_string(),
                 Some("write agent-task promotion provider request".to_string()),
-            ))
+            ));
         }
     }
     drop(process.stdin.take());

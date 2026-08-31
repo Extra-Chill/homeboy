@@ -210,7 +210,6 @@ pub mod workspace_claim;
 pub mod workspace_snapshot;
 pub mod worktree;
 pub mod worktree_provider;
-pub mod worktree_providers;
 
 // Internal path resolution helpers.
 // paths moved to the internal `homeboy-paths` crate. Re-exported so existing

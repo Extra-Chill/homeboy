@@ -2,13 +2,11 @@ use std::path::Path;
 
 use crate::release::operation_record::{FinalizationClaim, OperationRecord, OperationRecordStore};
 use homeboy_core::component::Component;
-use homeboy_core::defaults;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::worktree_provider::{
     self, worktree_provision_idempotency_key as worktree_provider_idempotency_key,
-    WorktreeCleanupPolicy as WorktreeProviderCleanupPolicy, WorktreeFinalizationLookup,
-    WorktreeProviderIdentity, WorktreeProvisionDestination,
+    WorktreeCleanupPolicy as WorktreeProviderCleanupPolicy, WorktreeProvisionDestination,
     WorktreeProvisionIntent as WorktreeProviderCreateIntent,
     WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent,
     WorktreeTerminalDisposition as WorktreeProviderTerminalDisposition,
@@ -52,7 +50,6 @@ impl ReleaseWorkspace {
             });
         }
 
-        let config = defaults::load_config();
         let source_sha = verified_remote_default_sha(component)?;
         let owner_id = Uuid::new_v4();
         let owner_run_ref = format!("release/{owner_id}");
@@ -68,24 +65,14 @@ impl ReleaseWorkspace {
             &owner_id.simple().to_string()[..12]
         );
         let handle = homeboy_core::worktree::handle_for_branch(&component.id, &branch);
-        let mut intent = WorktreeProviderCreateIntent {
+        let intent = WorktreeProviderCreateIntent {
             handle: handle.clone(),
             repo: component.id.clone(),
             base: source_sha.clone(),
             head: branch,
             task_url: None,
         };
-        let planned =
-            worktree_provider::plan_worktree_provision_from_config(&intent, &lifecycle, &config)?;
-        let destination = match planned {
-            homeboy_core::worktree_provider::WorktreeProvisionPlan::Admitted(destination)
-            | homeboy_core::worktree_provider::WorktreeProvisionPlan::Planned(destination) => {
-                destination
-            }
-        };
-        intent.handle = destination.ownership.handle;
-        let selected_provider = destination.ownership.provider;
-        let selected_provider_id = provider_evidence_id(&selected_provider);
+        let selected_provider_id = "native".to_string();
         // Publish ownership before invoking the provider. A crash during ensure
         // is therefore recoverable through the same idempotency owner reference.
         store.create(&OperationRecord {
@@ -115,23 +102,10 @@ impl ReleaseWorkspace {
                 }),
             )]),
         })?;
-        let provision = worktree_provider::ensure_worktree_provision_from_config(
-            &intent,
-            &lifecycle,
-            Some(&selected_provider),
-            &config,
-        )?;
-        if provision.destination.ownership.provider != selected_provider {
-            return Err(Error::validation_invalid_argument(
-                "release.workspace",
-                "provider selection changed after durable ownership was recorded",
-                Some(lifecycle.owner_run_ref.clone()),
-                None,
-            ));
-        }
+        let provision = worktree_provider::ensure_worktree_provision(&intent, &lifecycle)?;
         store.update(&lifecycle.owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| missing_record(&lifecycle.owner_run_ref))?;
-            record.provider = provider_evidence_id(&provision.destination.ownership.provider);
+            record.provider = "native".to_string();
             record.path = Some(provision.destination.ownership.path.clone());
             record.lifecycle_state = "provisioned".to_string();
             record
@@ -161,9 +135,9 @@ impl ReleaseWorkspace {
             return Err(Error::validation_invalid_argument(
                 "release.workspace",
                 match finalization_error {
-                    Some(error) => format!(
-                        "{validation_error}; provider reconciliation also failed: {error}"
-                    ),
+                    Some(error) => {
+                        format!("{validation_error}; provider reconciliation also failed: {error}")
+                    }
                     None => validation_error.to_string(),
                 },
                 Some(provision.destination.ownership.path.clone()),
@@ -181,9 +155,7 @@ impl ReleaseWorkspace {
             output: ReleaseWorkspaceOutput {
                 kind: "provider_owned".to_string(),
                 path: provision.destination.ownership.path.clone(),
-                provider_id: Some(provider_evidence_id(
-                    &provision.destination.ownership.provider,
-                )),
+                provider_id: Some("native".to_string()),
                 handle: Some(provision.destination.ownership.handle.clone()),
                 owner_run_ref: Some(lifecycle.owner_run_ref.clone()),
                 source_sha: Some(source_sha),
@@ -242,21 +214,6 @@ impl ReleaseWorkspace {
     }
 }
 
-fn provider_evidence_id(provider: &WorktreeProviderIdentity) -> String {
-    match provider {
-        WorktreeProviderIdentity::Native => "native".to_string(),
-        WorktreeProviderIdentity::Configured(provider_id) => provider_id.clone(),
-    }
-}
-
-fn provider_identity_from_evidence(provider_id: &str) -> WorktreeProviderIdentity {
-    if provider_id == "native" {
-        WorktreeProviderIdentity::Native
-    } else {
-        WorktreeProviderIdentity::Configured(provider_id.to_string())
-    }
-}
-
 pub(super) fn reconcile_pending(
     roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
@@ -270,12 +227,19 @@ pub(super) fn reconcile_pending(
     let record = match records.as_slice() {
         [] => return Ok(None),
         [record] => record.clone(),
-        _ => return Err(Error::validation_invalid_argument(
-            "owner_run_ref",
-            "more than one provider workspace requires reconciliation; select one with --owner-run-ref",
-            None,
-            Some(records.iter().map(|record| record.owner_run_ref.clone()).collect()),
-        )),
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "owner_run_ref",
+                "more than one provider workspace requires reconciliation; select one with --owner-run-ref",
+                None,
+                Some(
+                    records
+                        .iter()
+                        .map(|record| record.owner_run_ref.clone())
+                        .collect(),
+                ),
+            ));
+        }
     };
     if record.subject != component_id || record.operation != "provider_workspace" {
         return Err(Error::validation_invalid_argument(
@@ -325,25 +289,18 @@ pub(super) fn reconcile_pending(
         head: intent.head,
         task_url: intent.task_url,
     };
-    let config = defaults::load_config();
     // A crash may happen before ensure or after it returns but before the record
     // update. Re-running ensure with the persisted key closes both windows.
-    let selected_provider = provider_identity_from_evidence(&record.provider);
+    if record.provider != "native" {
+        return Err(Error::validation_invalid_argument(
+            "owner_run_ref",
+            "release workspace record is not native-registry owned",
+            Some(record.owner_run_ref.clone()),
+            None,
+        ));
+    }
     let destination = if record.path.is_none() {
-        let provision = worktree_provider::ensure_worktree_provision_from_config(
-            &create_intent,
-            &lifecycle,
-            Some(&selected_provider),
-            &config,
-        )?;
-        if provision.destination.ownership.provider != selected_provider {
-            return Err(Error::validation_invalid_argument(
-                "owner_run_ref",
-                "provider selection changed during workspace recovery",
-                Some(record.owner_run_ref.clone()),
-                None,
-            ));
-        }
+        let provision = worktree_provider::ensure_worktree_provision(&create_intent, &lifecycle)?;
         store.update(&record.owner_run_ref, |current| {
             let mut current = current.ok_or_else(|| missing_record(&record.owner_run_ref))?;
             current.path = Some(provision.destination.ownership.path.clone());
@@ -355,18 +312,14 @@ pub(super) fn reconcile_pending(
         })?;
         provision.destination
     } else {
-        worktree_provider::admit_worktree_provision_from_config(
-            &record.handle,
-            Some(&selected_provider),
-            &config,
-        )?
-        .into_admitted(&record.handle)?
+        WorktreeProvisionDestination {
+            ownership: worktree_provider::resolve_worktree_ownership(&record.handle)?,
+        }
     };
-    if destination.ownership.provider != selected_provider
-        || record
-            .path
-            .as_deref()
-            .is_some_and(|path| destination.ownership.path != path)
+    if record
+        .path
+        .as_deref()
+        .is_some_and(|path| destination.ownership.path != path)
     {
         return Err(Error::validation_invalid_argument(
             "owner_run_ref",
@@ -454,29 +407,18 @@ fn finalize_record(
             ]),
         )),
         FinalizationClaim::Claimed { lease, record: _ } => {
-            match worktree_provider::finalize_worktree_from_config(
+            match worktree_provider::finalize_worktree(
                 &destination.ownership.handle,
                 lifecycle,
                 disposition,
-                &defaults::load_config(),
             ) {
-                Ok(WorktreeFinalizationLookup::Finalized(_)) => {
-                    store.complete_finalization(owner, &lease)
-                }
-                Ok(WorktreeFinalizationLookup::Unsupported) => {
+                Ok(Some(_)) => store.complete_finalization(owner, &lease),
+                Ok(None) => {
                     let error = Error::validation_invalid_argument(
                         "release.workspace",
-                        "release staging provider does not support lifecycle finalization",
+                        "native release staging workspace is missing during finalization",
                         Some(destination.ownership.handle.clone()),
                         None,
-                    );
-                    let _ = store.fail_finalization(owner, &lease, error.to_string());
-                    Err(error)
-                }
-                Ok(WorktreeFinalizationLookup::NotFound) => {
-                    let error = worktree_provider::worktree_finalization_not_found_error(
-                        &destination.ownership.handle,
-                        &defaults::load_config(),
                     );
                     let _ = store.fail_finalization(owner, &lease, error.to_string());
                     Err(error)
@@ -518,14 +460,24 @@ fn verified_remote_default_sha(component: &Component) -> Result<String> {
     let remote = git::resolve_default_remote(path);
     let branch = git::default_branch_name(path).unwrap_or_else(|| "main".to_string());
     let reference = format!("{remote}/{branch}");
-    let value = git::run_git(path, &["rev-parse", "--verify", &format!("{reference}^{{commit}}")], "verify release staging source")
-        .map(|value| value.trim().to_string())
-        .map_err(|_| Error::validation_invalid_argument(
+    let value = git::run_git(
+        path,
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        "verify release staging source",
+    )
+    .map(|value| value.trim().to_string())
+    .map_err(|_| {
+        Error::validation_invalid_argument(
             "release.workspace",
-            format!("release staging requires an immutable verified default-branch SHA at `{reference}`"),
+            format!(
+                "release staging requires an immutable verified default-branch SHA at `{reference}`"
+            ),
             Some(component.local_path.clone()),
-            Some(vec!["Fetch the default branch, then retry the release.".to_string()]),
-        ))?;
+            Some(vec![
+                "Fetch the default branch, then retry the release.".to_string()
+            ]),
+        )
+    })?;
     if value.is_empty() {
         return Err(Error::validation_invalid_argument(
             "release.workspace",
@@ -585,14 +537,10 @@ mod tests {
     }
 
     use homeboy_core::component::Component;
-    use homeboy_core::defaults::{
-        save_config, HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig,
-        WorktreeProviderKind,
-    };
     use homeboy_core::git;
     use homeboy_core::worktree_provider::{
         WorktreeCleanupPolicy as WorktreeProviderCleanupPolicy, WorktreeOwnership,
-        WorktreeProviderIdentity, WorktreeProvisionDestination,
+        WorktreeProvisionDestination,
         WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent,
         WorktreeTerminalDisposition as WorktreeProviderTerminalDisposition, WorktreeWorkspaceKind,
     };
@@ -936,15 +884,13 @@ mod tests {
             let _claim = test_store().claim_finalization(owner).expect("claim lease");
             let destination = WorktreeProvisionDestination {
                 ownership: WorktreeOwnership {
-                    provider: WorktreeProviderIdentity::Configured("fixture".to_string()),
                     handle: "release-fixture".to_string(),
                     path: "/workspace".to_string(),
-                    kind: WorktreeWorkspaceKind::Configured,
+                    kind: WorktreeWorkspaceKind::TaskWorktree,
                     branch: Some("main".to_string()),
                     task_url: None,
                     provenance: None,
                 },
-                exact_identity: None,
             };
             let lifecycle = WorktreeProviderLifecycleIntent {
                 purpose: "release_staging".to_string(),
@@ -972,7 +918,7 @@ mod tests {
         });
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, any()))]
     #[test]
     fn recovery_ensures_a_pre_ensure_record_then_finalizes_and_closes_it() {
         use std::os::unix::fs::PermissionsExt;

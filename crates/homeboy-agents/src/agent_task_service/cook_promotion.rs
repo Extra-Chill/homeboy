@@ -821,9 +821,10 @@ pub(crate) fn promote_or_load_attempt_in_store(
             let target_path = promotion.target.path.as_deref().or_else(|| {
                 promotion.provenance.get("worktree_path").and_then(Value::as_str)
             }).map(PathBuf::from).or_else(|| {
-                homeboy_core::worktree_provider::observe_worktree_provider_workspace(&promotion.to_worktree)
+                homeboy_core::worktree_provider::resolve_worktree_ownership_if_present(&promotion.to_worktree)
                     .ok()
-                    .map(|workspace| PathBuf::from(workspace.ownership.path))
+                    .flatten()
+                    .map(|workspace| PathBuf::from(workspace.path))
             }).ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "promotion.target.path",
@@ -1455,9 +1456,10 @@ fn verify_replacement_gates_owned(
     let target_path = original.target.path.as_deref().or_else(|| {
         original.provenance.get("worktree_path").and_then(Value::as_str)
     }).map(PathBuf::from).or_else(|| {
-        homeboy_core::worktree_provider::observe_worktree_provider_workspace(&original.to_worktree)
+        homeboy_core::worktree_provider::resolve_worktree_ownership_if_present(&original.to_worktree)
             .ok()
-            .map(|workspace| PathBuf::from(workspace.ownership.path))
+            .flatten()
+            .map(|workspace| PathBuf::from(workspace.path))
     }).ok_or_else(|| Error::validation_invalid_argument(
         "promotion.target.path",
         "replacement gates require the failed promotion's durable candidate worktree path or registered worktree handle",
@@ -1986,7 +1988,10 @@ pub(crate) fn moving_base_recovery_report(
     invocation_latest_run_id: Option<&str>,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
     let stop_reason = if recovery.base_movements >= 3 {
-        Some(format!("moving-base recovery exhausted after {} refreshed base observations: {}; inspect the retained recovery evidence and reconcile the destination before retrying", recovery.base_movements, recovery.blocker))
+        Some(format!(
+            "moving-base recovery exhausted after {} refreshed base observations: {}; inspect the retained recovery evidence and reconcile the destination before retrying",
+            recovery.base_movements, recovery.blocker
+        ))
     } else if !continuation_queued {
         Some(format!(
             "moving-base recovery stopped: {}; inspect the retained recovery evidence before retrying",
@@ -2021,7 +2026,12 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
     recovery: &MovingBaseCookRecovery,
 ) -> Result<AgentTaskPromotionReport> {
     if recovery.base_movements >= 3 {
-        return Err(Error::validation_invalid_argument("base", "moving-base recovery budget is exhausted; inspect the retained recovery evidence before retrying", None, None));
+        return Err(Error::validation_invalid_argument(
+            "base",
+            "moving-base recovery budget is exhausted; inspect the retained recovery evidence before retrying",
+            None,
+            None,
+        ));
     }
     let path = recovery
         .promotion
@@ -2066,7 +2076,12 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
         )
     })?;
     if candidate_fingerprint(path)? != expected {
-        return Err(Error::validation_invalid_argument("path", "moving-base recovery destination differs from the exact promoted candidate; refusing to rebase divergent content", Some(path.to_string()), None));
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "moving-base recovery destination differs from the exact promoted candidate; refusing to rebase divergent content",
+            Some(path.to_string()),
+            None,
+        ));
     }
     let fresh_base = observe_and_fetch_base(path, &options.finalization.base)?;
     apply_immutable_candidate_to_base(
@@ -2960,7 +2975,12 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
                 || candidate.selected_task_id.is_none()
                 || candidate.selected_artifact_id.is_none()
             {
-                return Err(Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate", Some(run_id), None));
+                return Err(Error::validation_invalid_argument(
+                    "run_id",
+                    "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate",
+                    Some(run_id),
+                    None,
+                ));
             }
             return require_manual_finalization_run(&candidate.run_id);
         }
@@ -2996,7 +3016,12 @@ fn require_manual_finalization_run(run_id: &str) -> Result<String> {
     }
     if record.state == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable {
         if record.acceptance.is_some() || record.metadata.get("acceptance_requirement").is_some() {
-            return Err(Error::validation_invalid_argument("acceptance", "candidate-recoverable manual finalization cannot replace a durable acceptance decision", Some(run_id.to_string()), None));
+            return Err(Error::validation_invalid_argument(
+                "acceptance",
+                "candidate-recoverable manual finalization cannot replace a durable acceptance decision",
+                Some(run_id.to_string()),
+                None,
+            ));
         }
         let cook_id = record.metadata["cook_id"].as_str().ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -3014,7 +3039,12 @@ fn require_manual_finalization_run(run_id: &str) -> Result<String> {
         {
             return Ok(run_id.to_string());
         }
-        return Err(Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate", Some(run_id.to_string()), None));
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate",
+            Some(run_id.to_string()),
+            None,
+        ));
     }
     if record.lifecycle.execution.state
         != homeboy_core::run_lifecycle_record::RunExecutionState::Failed
@@ -3059,7 +3089,12 @@ fn manual_candidate_binding(
         || selection.selected_task_id.is_none()
         || selection.selected_artifact_id.is_none()
     {
-        return Err(Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate", Some(run_id.to_string()), None));
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "candidate-recoverable manual finalization requires the complete controller-selected Cook candidate",
+            Some(run_id.to_string()),
+            None,
+        ));
     }
     let promotion = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -3072,7 +3107,12 @@ fn manual_candidate_binding(
     let candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate = serde_json::from_value(promotion.provenance["candidate"].clone()).map_err(|_| Error::validation_invalid_argument("latest_promotion.provenance.candidate", "candidate-recoverable manual finalization requires a durable Git candidate fingerprint", Some(run_id.to_string()), None))?;
     let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
     else {
-        return Err(Error::validation_invalid_argument("latest_promotion.provenance.candidate", "candidate-recoverable manual finalization requires a durable Git candidate fingerprint", Some(run_id.to_string()), None));
+        return Err(Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate",
+            "candidate-recoverable manual finalization requires a durable Git candidate fingerprint",
+            Some(run_id.to_string()),
+            None,
+        ));
     };
     let model = record.lifecycle.provider_runtime.iter().rev().find_map(|runtime| runtime.metadata["model"].as_str()).filter(|model| !model.trim().is_empty()).ok_or_else(|| Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires concrete provider model provenance", Some(run_id.to_string()), None))?;
     let commit = report
@@ -3091,7 +3131,12 @@ fn manual_candidate_binding(
         || report.review_dossier.ai_assistance.model != model
         || promotion.gate_results != report.normalized_gate_results
     {
-        return Err(Error::validation_invalid_argument("manual_finalization_intent", "manual finalization dossier does not match the selected candidate, model provenance, and replacement gate proof", Some(run_id.to_string()), None));
+        return Err(Error::validation_invalid_argument(
+            "manual_finalization_intent",
+            "manual finalization dossier does not match the selected candidate, model provenance, and replacement gate proof",
+            Some(run_id.to_string()),
+            None,
+        ));
     }
     Ok(
         crate::agent_task_finalization::AgentTaskManualCandidateBinding {
@@ -5409,15 +5454,16 @@ pub fn cook_failure_context(
     let pre_execution_diagnostic = record.as_ref().and_then(|record| {
         let failure = record.metadata.get("pre_execution_failure")?;
         let details = failure.get("details")?;
-        homeboy_core::worktree_provider::compact_worktree_provider_failure_details(details).map(
-            |evidence| {
+        details
+            .get("worktree_provider_failure")
+            .cloned()
+            .map(|evidence| {
                 serde_json::json!({
                     "code": failure.get("error_code"),
                     "message": failure.get("message"),
                     "worktree_provider_failure": evidence,
                 })
-            },
-        )
+            })
     });
     let pre_provider_cause = agent_task_lifecycle::read_attempt_aggregate(record_run_id)
         .ok()
@@ -6008,7 +6054,10 @@ mod recovery_action_tests {
             None,
         );
         assert_eq!(
-            recovery.legal_actions.last().map(|action| action.command.as_str()),
+            recovery
+                .legal_actions
+                .last()
+                .map(|action| action.command.as_str()),
             Some(
                 "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id canonical-patch"
             )

@@ -23,8 +23,8 @@ Remove declared reconstructable artifacts from managed worktrees
 | Option | Value | Description |
 | --- | --- | --- |
 | `--apply` | flag | Apply cleanup across the selected categories. Omit for inventory dry-run output. Use the global `--placement local` to execute synchronously on this controller; the default submits a durable asynchronous controller job |
-| `--include` | `<INCLUDE>` | Include only these cleanup categories. Comma-separated or repeatable. `runner-downloads` is opt-in only: it holds artifacts an operator asked Homeboy to fetch, so a bare sweep never includes it Values: `repo-artifacts`, `task-worktrees`, `worktree-providers`, `terminal-runs`, `persisted-run-artifacts`, `orphaned-artifact-bytes`, `runner-downloads`, `runner-binary-caches`, `remote-lab-workspaces`, `runtime-tmp`, `controller-scratch`, `shared-cargo-targets`, `controller-runtimes`, `leaked-test-homes`, `external-storage`. |
-| `--exclude` | `<EXCLUDE>` | Exclude these cleanup categories. Comma-separated or repeatable Values: `repo-artifacts`, `task-worktrees`, `worktree-providers`, `terminal-runs`, `persisted-run-artifacts`, `orphaned-artifact-bytes`, `runner-downloads`, `runner-binary-caches`, `remote-lab-workspaces`, `runtime-tmp`, `controller-scratch`, `shared-cargo-targets`, `controller-runtimes`, `leaked-test-homes`, `external-storage`. |
+| `--include` | `<INCLUDE>` | Include only these cleanup categories. Comma-separated or repeatable. `runner-downloads` is opt-in only: it holds artifacts an operator asked Homeboy to fetch, so a bare sweep never includes it Values: `repo-artifacts`, `task-worktrees`, `terminal-runs`, `persisted-run-artifacts`, `orphaned-artifact-bytes`, `runner-downloads`, `runner-binary-caches`, `remote-lab-workspaces`, `runtime-tmp`, `controller-scratch`, `shared-cargo-targets`, `controller-runtimes`, `leaked-test-homes`, `external-storage`. |
+| `--exclude` | `<EXCLUDE>` | Exclude these cleanup categories. Comma-separated or repeatable Values: `repo-artifacts`, `task-worktrees`, `terminal-runs`, `persisted-run-artifacts`, `orphaned-artifact-bytes`, `runner-downloads`, `runner-binary-caches`, `remote-lab-workspaces`, `runtime-tmp`, `controller-scratch`, `shared-cargo-targets`, `controller-runtimes`, `leaked-test-homes`, `external-storage`. |
 | `--include-untagged` | flag | Also reap `runner-downloads` cache directories that carry no download intent marker. Untagged caches are treated as operator-owned by default, so every one written before intent tagging existed is otherwise retained forever. The fixed age floor, the running-run veto, and the never-reap rule for operator pulls all still apply |
 | `--older-than-days` | `<DAYS>` | Override the configured terminal-run retention window for this invocation |
 | `--runtime-tmp-managed-older-than-days` | `<DAYS>` | Override the age floor for metadata-backed runtime temp entries only. Unmanaged entries retain the configured runtime temp age floor |
@@ -35,7 +35,6 @@ Remove declared reconstructable artifacts from managed worktrees
 | Subcommand | Summary |
 | --- | --- |
 | `homeboy cleanup artifacts` | Inspect or remove declared reconstructable artifacts across repo worktrees |
-| `homeboy cleanup worktrees` | Aggregate cleanup across configured external worktree providers |
 | `homeboy cleanup retained-storage` | Explain retained Homeboy storage without deleting or reconciling resources |
 | `homeboy cleanup automatic-retention` | Run one configured, bounded retention pass |
 | `homeboy cleanup status` | Read compact durable progress for an asynchronous cleanup apply |
@@ -60,22 +59,6 @@ Inspect or remove declared reconstructable artifacts across repo worktrees
 | `--merged-only` | flag | Only reclaim artifacts from worktrees whose branch is already merged into its upstream. Preserves in-progress cooks' build dirs |
 | `--min-age-days` | `<DAYS>` | Only reclaim artifacts untouched for at least this many days. Composes with any age floor a declaration owner sets; the stricter one wins |
 | `--include-active-worktrees` | flag | Also reclaim extension-declared artifacts from checkouts registered as active task worktrees. Those are protected by default because removing an install tree leaves a live checkout unusable until it is rehydrated |
-
-## `homeboy cleanup worktrees`
-
-```sh
-homeboy cleanup worktrees [OPTIONS]
-```
-
-Aggregate cleanup across configured external worktree providers
-
-| Option | Value | Description |
-| --- | --- | --- |
-| `--provider` | `<ID>` | Cleanup a specific configured provider. Repeatable |
-| `--all-providers` | flag | Cleanup every enabled configured provider |
-| `--apply` | flag | Apply cleanup. Omit for provider preview/dry-run output |
-| `--provider-run-id` | `<ID>` | Reviewed provider run identity. Must be paired with `--provider-plan-id` and exactly one provider. Omit both to plan then apply |
-| `--provider-plan-id` | `<ID>` | Reviewed provider plan identity. Must be paired with `--provider-run-id` and exactly one provider. Omit both to plan then apply |
 
 ## `homeboy cleanup retained-storage`
 

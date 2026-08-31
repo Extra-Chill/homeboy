@@ -25,6 +25,10 @@ pub use builtins::deploy_generated_build_dir;
 pub use builtins::extension_provided_direct_test_file_suffixes;
 pub use builtins::extension_provided_test_drift_config;
 
+pub fn default_true() -> bool {
+    true
+}
+
 /// Root configuration structure for the product config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomeboyConfig {
@@ -52,15 +56,6 @@ pub struct HomeboyConfig {
     /// an unattended harvest recovery.
     #[serde(default)]
     pub automation: AutomationConfig,
-
-    /// External worktree lifecycle providers keyed by provider id.
-    ///
-    /// Providers are command-backed integration points owned by the local
-    /// environment. Homeboy only selects, gates, executes argv arrays, and
-    /// captures structured output; provider-specific semantics live outside
-    /// core.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub worktree_providers: HashMap<String, WorktreeProviderConfig>,
 
     /// Host-scoped environment for GitHub CLI subprocesses keyed by hostname.
     ///
@@ -177,7 +172,6 @@ impl Default for HomeboyConfig {
             agent_task: AgentTaskConfig::default(),
             notifications: NotificationConfig::default(),
             automation: AutomationConfig::default(),
-            worktree_providers: HashMap::new(),
             github_hosts: HashMap::new(),
             git_hosts: HashMap::new(),
             settings: HashMap::new(),
@@ -492,327 +486,335 @@ pub struct AutomationConfig {
     pub commit_identity: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorktreeProviderConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub kind: WorktreeProviderKind,
-    #[serde(default)]
-    pub apply_enabled: bool,
-    #[serde(default)]
-    pub commands: WorktreeProviderCommands,
-    /// Maximum time allowed for a read-only provider lookup, identity, or safety
-    /// command.
-    #[serde(
-        default = "default_worktree_provider_lookup_timeout_ms",
-        deserialize_with = "deserialize_worktree_provider_lookup_timeout_ms"
-    )]
-    pub lookup_timeout_ms: u64,
-    /// Maximum time allowed for a mutating provider ensure or finalization
-    /// command. The default preserves the prior fixed 30-second bound.
-    #[serde(
-        default = "default_worktree_provider_mutation_timeout_ms",
-        deserialize_with = "deserialize_worktree_provider_mutation_timeout_ms"
-    )]
-    pub mutation_timeout_ms: u64,
-    /// Maximum output retained from one provider command. The configured result
-    /// mapping receives the complete JSON payload.
-    #[serde(
-        default = "default_worktree_provider_lookup_output_limit_bytes",
-        deserialize_with = "deserialize_worktree_provider_lookup_output_limit_bytes"
-    )]
-    pub lookup_output_limit_bytes: usize,
-    /// Explicit projection of a command provider's list result into Homeboy's
-    /// generic worktree safety contract.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub list_result_mapping: Option<WorktreeProviderListResultMapping>,
-}
+#[cfg(any())]
+mod removed_worktree_provider_configuration {
+    use super::*;
 
-const DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
-const MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 1;
-pub const MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 300_000;
-const DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 30_000;
-const MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 1;
-const MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 900_000;
-const DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 30_000;
-const MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 1;
-const MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 300_000;
-const DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
-const MIN_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 1;
-const MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
-
-fn default_worktree_provider_lookup_timeout_ms() -> u64 {
-    DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
-}
-
-fn default_worktree_provider_mutation_timeout_ms() -> u64 {
-    DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS
-}
-
-fn default_worktree_provider_cleanup_timeout_ms() -> u64 {
-    DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
-}
-
-fn default_worktree_provider_lookup_output_limit_bytes() -> usize {
-    DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
-}
-
-fn deserialize_worktree_provider_lookup_timeout_ms<'de, D>(
-    deserializer: D,
-) -> std::result::Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let timeout_ms = u64::deserialize(deserializer)?;
-    validate_worktree_provider_lookup_timeout_ms(timeout_ms).map_err(serde::de::Error::custom)?;
-    Ok(timeout_ms)
-}
-
-pub fn validate_worktree_provider_lookup_timeout_ms(
-    timeout_ms: u64,
-) -> std::result::Result<(), String> {
-    if (MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS..=MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS)
-        .contains(&timeout_ms)
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "lookup_timeout_ms must be between {MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS} milliseconds"
-        ))
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct WorktreeProviderConfig {
+        #[serde(default = "default_true")]
+        pub enabled: bool,
+        #[serde(default)]
+        pub kind: WorktreeProviderKind,
+        #[serde(default)]
+        pub apply_enabled: bool,
+        #[serde(default)]
+        pub commands: WorktreeProviderCommands,
+        /// Maximum time allowed for a read-only provider lookup, identity, or safety
+        /// command.
+        #[serde(
+            default = "default_worktree_provider_lookup_timeout_ms",
+            deserialize_with = "deserialize_worktree_provider_lookup_timeout_ms"
+        )]
+        pub lookup_timeout_ms: u64,
+        /// Maximum time allowed for a mutating provider ensure or finalization
+        /// command. The default preserves the prior fixed 30-second bound.
+        #[serde(
+            default = "default_worktree_provider_mutation_timeout_ms",
+            deserialize_with = "deserialize_worktree_provider_mutation_timeout_ms"
+        )]
+        pub mutation_timeout_ms: u64,
+        /// Maximum output retained from one provider command. The configured result
+        /// mapping receives the complete JSON payload.
+        #[serde(
+            default = "default_worktree_provider_lookup_output_limit_bytes",
+            deserialize_with = "deserialize_worktree_provider_lookup_output_limit_bytes"
+        )]
+        pub lookup_output_limit_bytes: usize,
+        /// Explicit projection of a command provider's list result into Homeboy's
+        /// generic worktree safety contract.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub list_result_mapping: Option<WorktreeProviderListResultMapping>,
     }
-}
 
-fn deserialize_worktree_provider_mutation_timeout_ms<'de, D>(
-    deserializer: D,
-) -> std::result::Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let timeout_ms = u64::deserialize(deserializer)?;
-    validate_worktree_provider_mutation_timeout_ms(timeout_ms).map_err(serde::de::Error::custom)?;
-    Ok(timeout_ms)
-}
+    const DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 10_000;
+    const MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 1;
+    pub const MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS: u64 = 300_000;
+    const DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 30_000;
+    const MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 1;
+    const MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS: u64 = 900_000;
+    const DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 30_000;
+    const MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 1;
+    const MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS: u64 = 300_000;
+    const DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+    const MIN_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 1;
+    const MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
-pub fn validate_worktree_provider_mutation_timeout_ms(
-    timeout_ms: u64,
-) -> std::result::Result<(), String> {
-    if (MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS..=MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS)
-        .contains(&timeout_ms)
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "mutation_timeout_ms must be between {MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS} milliseconds"
-        ))
+    fn default_worktree_provider_lookup_timeout_ms() -> u64 {
+        DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
     }
-}
 
-fn deserialize_worktree_provider_cleanup_timeout_ms<'de, D>(
-    deserializer: D,
-) -> std::result::Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let timeout_ms = u64::deserialize(deserializer)?;
-    validate_worktree_provider_cleanup_timeout_ms(timeout_ms).map_err(serde::de::Error::custom)?;
-    Ok(timeout_ms)
-}
-
-pub fn validate_worktree_provider_cleanup_timeout_ms(
-    timeout_ms: u64,
-) -> std::result::Result<(), String> {
-    if (MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS..=MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS)
-        .contains(&timeout_ms)
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "cleanup timeout must be between {MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS} milliseconds"
-        ))
+    fn default_worktree_provider_mutation_timeout_ms() -> u64 {
+        DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS
     }
-}
 
-fn deserialize_worktree_provider_lookup_output_limit_bytes<'de, D>(
-    deserializer: D,
-) -> std::result::Result<usize, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let output_limit_bytes = usize::deserialize(deserializer)?;
-    validate_worktree_provider_lookup_output_limit_bytes(output_limit_bytes)
-        .map_err(serde::de::Error::custom)?;
-    Ok(output_limit_bytes)
-}
-
-pub fn validate_worktree_provider_lookup_output_limit_bytes(
-    output_limit_bytes: usize,
-) -> std::result::Result<(), String> {
-    if (MIN_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
-        ..=MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES)
-        .contains(&output_limit_bytes)
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "lookup_output_limit_bytes must be between {MIN_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES} and {MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES} bytes"
-        ))
+    fn default_worktree_provider_cleanup_timeout_ms() -> u64 {
+        DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorktreeProviderListResultMapping {
-    /// JSONPath resolving to exactly one array in the command result.
-    pub items: String,
-    /// JSONPath values resolved relative to each item in `items`.
-    pub handle: String,
-    pub path: String,
-    pub branch: String,
-    pub dirty: String,
-    pub unpushed: String,
-    pub primary: String,
-    /// Optional task/issue URL recorded for the managed worktree. This lets
-    /// callers safely reuse an existing destination by its tracker ownership.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_url: Option<String>,
-}
+    fn default_worktree_provider_lookup_output_limit_bytes() -> usize {
+        DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
+    }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorktreeProviderKind {
-    #[default]
-    Command,
-}
+    fn deserialize_worktree_provider_lookup_timeout_ms<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<u64, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let timeout_ms = u64::deserialize(deserializer)?;
+        validate_worktree_provider_lookup_timeout_ms(timeout_ms)
+            .map_err(serde::de::Error::custom)?;
+        Ok(timeout_ms)
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorktreeProviderCommands {
-    /// Versioned exact-identity lookup. It receives `{handle}` and returns a
-    /// `homeboy/worktree-provider-identity/v1` envelope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolve_identity: Option<Vec<String>>,
-    /// Versioned safety lookup. It receives `{identity}` from
-    /// `resolve_identity` and returns a `homeboy/worktree-provider-safety/v1`
-    /// envelope. Configure this together with `resolve_identity`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attest_safety: Option<Vec<String>>,
-    /// Targeted handle lookup. Each `{handle}` argument is replaced with the
-    /// requested handle. The result uses `list_result_mapping` and may contain one item.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolve: Option<Vec<String>>,
-    /// Targeted tracker lookup. Each `{task_url}` argument is replaced with the
-    /// canonical task URL and returns every candidate owned by that task. The
-    /// provider owns pagination so Homeboy never mistakes a partial page for an
-    /// absent destination.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolve_task: Option<Vec<String>>,
-    /// Read-only eligibility check for attaching `{task_url}` to one exact
-    /// `{handle}`. It also receives a stable `{idempotency_key}` and returns a
-    /// `homeboy/worktree-provider-task-attachment/v1` envelope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_attachment_preview: Option<Vec<String>>,
-    /// Provider-owned mutation that attaches `{task_url}` to one exact
-    /// `{handle}` after the matching preview succeeds. It receives the same
-    /// stable `{idempotency_key}` and returns the same versioned envelope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_attachment_apply: Option<Vec<String>>,
-    /// Targeted tracker lookup exit statuses that mean the requested task is
-    /// absent. This is independent from exact handle/path resolution.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resolve_task_not_found_exit_codes: Vec<i32>,
-    /// Targeted canonical-path lookup. Each `{path}` argument is replaced with
-    /// the requested canonical path. The result uses `list_result_mapping` and
-    /// may contain one item.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolve_path: Option<Vec<String>>,
-    /// Provider-native targeted lookup exit statuses that mean the requested
-    /// handle or path is absent. All other non-zero statuses remain failures.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resolve_not_found_exit_codes: Vec<i32>,
-    /// Discovery command and compatibility fallback for providers without
-    /// `resolve`. Exact handle lookups prefer `resolve` when it is configured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub list: Option<Vec<String>>,
-    /// Atomically return an existing managed worktree or create it. Homeboy
-    /// expands `{handle}`, `{repo}`, `{base}`, `{head}`, `{task_url}`, and a
-    /// stable `{idempotency_key}` from an explicit workspace request. Lifecycle
-    /// requests additionally expand `{purpose}`, `{owner_run_ref}`, and
-    /// `{cleanup_policy}`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ensure: Option<Vec<String>>,
-    /// Atomically converge one already-owned clean worktree to immutable
-    /// `{base}`. It receives `{handle}` and the attested opaque `{identity}`, and
-    /// returns a `homeboy/worktree-provider-convergence/v1` evidence envelope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub converge: Option<Vec<String>>,
-    /// Read-only projection of an `ensure` request. It receives the same
-    /// placeholders as `ensure` and returns the prospective workspace through
-    /// `list_result_mapping`, without creating a branch or checkout.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<Vec<String>>,
-    /// Versioned worktree-retention command. It receives one
-    /// `homeboy/worktree-retention/v1` JSON request on stdin and returns one
-    /// JSON response on stdout. Preferred over independent `cleanup_preview`
-    /// and `cleanup_apply` when configured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retention: Option<Vec<String>>,
-    /// Maximum time allowed for the versioned retention command.
-    #[serde(
-        default = "default_worktree_provider_cleanup_timeout_ms",
-        deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
-    )]
-    pub retention_timeout_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleanup_preview: Option<Vec<String>>,
-    /// Maximum time allowed for the cleanup preview command.
-    #[serde(
-        default = "default_worktree_provider_cleanup_timeout_ms",
-        deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
-    )]
-    pub cleanup_preview_timeout_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleanup_apply: Option<Vec<String>>,
-    /// Maximum time allowed for the cleanup apply command.
-    #[serde(
-        default = "default_worktree_provider_cleanup_timeout_ms",
-        deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
-    )]
-    pub cleanup_apply_timeout_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifacts_preview: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifacts_apply: Option<Vec<String>>,
-}
-
-impl Default for WorktreeProviderCommands {
-    fn default() -> Self {
-        Self {
-            resolve_identity: None,
-            attest_safety: None,
-            resolve: None,
-            resolve_task: None,
-            task_attachment_preview: None,
-            task_attachment_apply: None,
-            resolve_task_not_found_exit_codes: Vec::new(),
-            resolve_path: None,
-            resolve_not_found_exit_codes: Vec::new(),
-            list: None,
-            ensure: None,
-            converge: None,
-            plan: None,
-            retention: None,
-            retention_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
-            cleanup_preview: None,
-            cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
-            cleanup_apply: None,
-            cleanup_apply_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
-            artifacts_preview: None,
-            artifacts_apply: None,
+    pub fn validate_worktree_provider_lookup_timeout_ms(
+        timeout_ms: u64,
+    ) -> std::result::Result<(), String> {
+        if (MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS..=MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS)
+            .contains(&timeout_ms)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "lookup_timeout_ms must be between {MIN_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS} milliseconds"
+            ))
         }
     }
-}
 
-pub fn default_true() -> bool {
-    true
+    fn deserialize_worktree_provider_mutation_timeout_ms<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<u64, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let timeout_ms = u64::deserialize(deserializer)?;
+        validate_worktree_provider_mutation_timeout_ms(timeout_ms)
+            .map_err(serde::de::Error::custom)?;
+        Ok(timeout_ms)
+    }
+
+    pub fn validate_worktree_provider_mutation_timeout_ms(
+        timeout_ms: u64,
+    ) -> std::result::Result<(), String> {
+        if (MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS..=MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS)
+            .contains(&timeout_ms)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "mutation_timeout_ms must be between {MIN_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS} milliseconds"
+            ))
+        }
+    }
+
+    fn deserialize_worktree_provider_cleanup_timeout_ms<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<u64, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let timeout_ms = u64::deserialize(deserializer)?;
+        validate_worktree_provider_cleanup_timeout_ms(timeout_ms)
+            .map_err(serde::de::Error::custom)?;
+        Ok(timeout_ms)
+    }
+
+    pub fn validate_worktree_provider_cleanup_timeout_ms(
+        timeout_ms: u64,
+    ) -> std::result::Result<(), String> {
+        if (MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS..=MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS)
+            .contains(&timeout_ms)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "cleanup timeout must be between {MIN_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS} and {MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS} milliseconds"
+            ))
+        }
+    }
+
+    fn deserialize_worktree_provider_lookup_output_limit_bytes<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<usize, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let output_limit_bytes = usize::deserialize(deserializer)?;
+        validate_worktree_provider_lookup_output_limit_bytes(output_limit_bytes)
+            .map_err(serde::de::Error::custom)?;
+        Ok(output_limit_bytes)
+    }
+
+    pub fn validate_worktree_provider_lookup_output_limit_bytes(
+        output_limit_bytes: usize,
+    ) -> std::result::Result<(), String> {
+        if (MIN_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
+            ..=MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES)
+            .contains(&output_limit_bytes)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "lookup_output_limit_bytes must be between {MIN_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES} and {MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES} bytes"
+            ))
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct WorktreeProviderListResultMapping {
+        /// JSONPath resolving to exactly one array in the command result.
+        pub items: String,
+        /// JSONPath values resolved relative to each item in `items`.
+        pub handle: String,
+        pub path: String,
+        pub branch: String,
+        pub dirty: String,
+        pub unpushed: String,
+        pub primary: String,
+        /// Optional task/issue URL recorded for the managed worktree. This lets
+        /// callers safely reuse an existing destination by its tracker ownership.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub task_url: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WorktreeProviderKind {
+        #[default]
+        Command,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct WorktreeProviderCommands {
+        /// Versioned exact-identity lookup. It receives `{handle}` and returns a
+        /// `homeboy/worktree-provider-identity/v1` envelope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resolve_identity: Option<Vec<String>>,
+        /// Versioned safety lookup. It receives `{identity}` from
+        /// `resolve_identity` and returns a `homeboy/worktree-provider-safety/v1`
+        /// envelope. Configure this together with `resolve_identity`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub attest_safety: Option<Vec<String>>,
+        /// Targeted handle lookup. Each `{handle}` argument is replaced with the
+        /// requested handle. The result uses `list_result_mapping` and may contain one item.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resolve: Option<Vec<String>>,
+        /// Targeted tracker lookup. Each `{task_url}` argument is replaced with the
+        /// canonical task URL and returns every candidate owned by that task. The
+        /// provider owns pagination so Homeboy never mistakes a partial page for an
+        /// absent destination.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resolve_task: Option<Vec<String>>,
+        /// Read-only eligibility check for attaching `{task_url}` to one exact
+        /// `{handle}`. It also receives a stable `{idempotency_key}` and returns a
+        /// `homeboy/worktree-provider-task-attachment/v1` envelope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub task_attachment_preview: Option<Vec<String>>,
+        /// Provider-owned mutation that attaches `{task_url}` to one exact
+        /// `{handle}` after the matching preview succeeds. It receives the same
+        /// stable `{idempotency_key}` and returns the same versioned envelope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub task_attachment_apply: Option<Vec<String>>,
+        /// Targeted tracker lookup exit statuses that mean the requested task is
+        /// absent. This is independent from exact handle/path resolution.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub resolve_task_not_found_exit_codes: Vec<i32>,
+        /// Targeted canonical-path lookup. Each `{path}` argument is replaced with
+        /// the requested canonical path. The result uses `list_result_mapping` and
+        /// may contain one item.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resolve_path: Option<Vec<String>>,
+        /// Provider-native targeted lookup exit statuses that mean the requested
+        /// handle or path is absent. All other non-zero statuses remain failures.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub resolve_not_found_exit_codes: Vec<i32>,
+        /// Discovery command and compatibility fallback for providers without
+        /// `resolve`. Exact handle lookups prefer `resolve` when it is configured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub list: Option<Vec<String>>,
+        /// Atomically return an existing managed worktree or create it. Homeboy
+        /// expands `{handle}`, `{repo}`, `{base}`, `{head}`, `{task_url}`, and a
+        /// stable `{idempotency_key}` from an explicit workspace request. Lifecycle
+        /// requests additionally expand `{purpose}`, `{owner_run_ref}`, and
+        /// `{cleanup_policy}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ensure: Option<Vec<String>>,
+        /// Atomically converge one already-owned clean worktree to immutable
+        /// `{base}`. It receives `{handle}` and the attested opaque `{identity}`, and
+        /// returns a `homeboy/worktree-provider-convergence/v1` evidence envelope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub converge: Option<Vec<String>>,
+        /// Read-only projection of an `ensure` request. It receives the same
+        /// placeholders as `ensure` and returns the prospective workspace through
+        /// `list_result_mapping`, without creating a branch or checkout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub plan: Option<Vec<String>>,
+        /// Versioned worktree-retention command. It receives one
+        /// `homeboy/worktree-retention/v1` JSON request on stdin and returns one
+        /// JSON response on stdout. Preferred over independent `cleanup_preview`
+        /// and `cleanup_apply` when configured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub retention: Option<Vec<String>>,
+        /// Maximum time allowed for the versioned retention command.
+        #[serde(
+            default = "default_worktree_provider_cleanup_timeout_ms",
+            deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
+        )]
+        pub retention_timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cleanup_preview: Option<Vec<String>>,
+        /// Maximum time allowed for the cleanup preview command.
+        #[serde(
+            default = "default_worktree_provider_cleanup_timeout_ms",
+            deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
+        )]
+        pub cleanup_preview_timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cleanup_apply: Option<Vec<String>>,
+        /// Maximum time allowed for the cleanup apply command.
+        #[serde(
+            default = "default_worktree_provider_cleanup_timeout_ms",
+            deserialize_with = "deserialize_worktree_provider_cleanup_timeout_ms"
+        )]
+        pub cleanup_apply_timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub artifacts_preview: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub artifacts_apply: Option<Vec<String>>,
+    }
+
+    impl Default for WorktreeProviderCommands {
+        fn default() -> Self {
+            Self {
+                resolve_identity: None,
+                attest_safety: None,
+                resolve: None,
+                resolve_task: None,
+                task_attachment_preview: None,
+                task_attachment_apply: None,
+                resolve_task_not_found_exit_codes: Vec::new(),
+                resolve_path: None,
+                resolve_not_found_exit_codes: Vec::new(),
+                list: None,
+                ensure: None,
+                converge: None,
+                plan: None,
+                retention: None,
+                retention_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
+                cleanup_preview: None,
+                cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
+                cleanup_apply: None,
+                cleanup_apply_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
+                artifacts_preview: None,
+                artifacts_apply: None,
+            }
+        }
+    }
+
+    pub fn default_true() -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1135,188 +1137,16 @@ mod tests {
     }
 
     #[test]
-    fn worktree_provider_lookup_timeout_defaults_and_validates() {
+    fn homeboy_config_does_not_persist_worktree_provider_configuration() {
         let config: HomeboyConfig = serde_json::from_str(
             r#"{"worktree_providers":{"fixture":{"commands":{"list":["provider"]}}}}"#,
         )
-        .expect("existing provider config remains valid");
-        assert_eq!(
-            config.worktree_providers["fixture"].lookup_timeout_ms,
-            DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
-        );
-        assert_eq!(
-            config.worktree_providers["fixture"].mutation_timeout_ms,
-            DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS
-        );
-        assert_eq!(
-            config.worktree_providers["fixture"]
-                .commands
-                .cleanup_preview_timeout_ms,
-            DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
-        );
-        assert_eq!(
-            config.worktree_providers["fixture"]
-                .commands
-                .cleanup_apply_timeout_ms,
-            DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
-        );
-        assert_eq!(
-            config.worktree_providers["fixture"]
-                .commands
-                .retention_timeout_ms,
-            DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
-        );
-        assert_eq!(
-            config.worktree_providers["fixture"].lookup_output_limit_bytes,
-            DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
-        );
-        assert_eq!(
-            serde_json::to_value(&config)
-                .expect("config serializes")
-                .pointer("/worktree_providers/fixture/lookup_timeout_ms"),
-            Some(&serde_json::json!(
-                DEFAULT_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS
-            ))
-        );
-        assert_eq!(
-            serde_json::to_value(&config)
-                .expect("config serializes")
-                .pointer("/worktree_providers/fixture/mutation_timeout_ms"),
-            Some(&serde_json::json!(
-                DEFAULT_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS
-            ))
-        );
-        assert_eq!(
-            serde_json::to_value(&config)
-                .expect("config serializes")
-                .pointer("/worktree_providers/fixture/lookup_output_limit_bytes"),
-            Some(&serde_json::json!(
-                DEFAULT_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES
-            ))
-        );
-        assert_eq!(
-            serde_json::to_value(&config)
-                .expect("config serializes")
-                .pointer("/worktree_providers/fixture/commands/cleanup_preview_timeout_ms"),
-            Some(&serde_json::json!(
-                DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
-            ))
-        );
-        assert_eq!(
-            serde_json::to_value(&config)
-                .expect("config serializes")
-                .pointer("/worktree_providers/fixture/commands/cleanup_apply_timeout_ms"),
-            Some(&serde_json::json!(
-                DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
-            ))
-        );
-        assert_eq!(
-            serde_json::to_value(&config)
-                .expect("config serializes")
-                .pointer("/worktree_providers/fixture/commands/retention_timeout_ms"),
-            Some(&serde_json::json!(
-                DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS
-            ))
-        );
+        .expect("obsolete configuration remains safely ignored");
 
-        for timeout_ms in [0, MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS + 1] {
-            let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
-                "worktree_providers": {"fixture": {"lookup_timeout_ms": timeout_ms}}
-            }))
-            .expect_err("out-of-range lookup timeout is invalid");
-            assert!(error
-                .to_string()
-                .contains("lookup_timeout_ms must be between"));
-        }
-
-        for timeout_ms in [0, MAX_WORKTREE_PROVIDER_MUTATION_TIMEOUT_MS + 1] {
-            let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
-                "worktree_providers": {"fixture": {"mutation_timeout_ms": timeout_ms}}
-            }))
-            .expect_err("out-of-range mutation timeout is invalid");
-            assert!(error
-                .to_string()
-                .contains("mutation_timeout_ms must be between"));
-        }
-
-        let config: HomeboyConfig = serde_json::from_value(serde_json::json!({
-            "worktree_providers": {"fixture": {"mutation_timeout_ms": 540_000}}
-        }))
-        .expect("a 540-second ensure budget is valid");
-        assert_eq!(
-            config.worktree_providers["fixture"].mutation_timeout_ms,
-            540_000
-        );
-
-        for field in [
-            "cleanup_preview_timeout_ms",
-            "cleanup_apply_timeout_ms",
-            "retention_timeout_ms",
-        ] {
-            for timeout_ms in [0, MAX_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS + 1] {
-                let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
-                    "worktree_providers": {"fixture": {"commands": {field: timeout_ms}}}
-                }))
-                .expect_err("out-of-range cleanup timeout is invalid");
-                assert!(error
-                    .to_string()
-                    .contains("cleanup timeout must be between"));
-            }
-        }
-
-        for output_limit_bytes in [0, MAX_WORKTREE_PROVIDER_LOOKUP_OUTPUT_LIMIT_BYTES + 1] {
-            let error = serde_json::from_value::<HomeboyConfig>(serde_json::json!({
-                "worktree_providers": {"fixture": {"lookup_output_limit_bytes": output_limit_bytes}}
-            }))
-            .expect_err("out-of-range lookup output limit is invalid");
-            assert!(error
-                .to_string()
-                .contains("lookup_output_limit_bytes must be between"));
-        }
-    }
-
-    #[test]
-    fn legacy_worktree_provider_commands_literal_remains_compatible() {
-        let commands = WorktreeProviderCommands {
-            resolve_identity: None,
-            attest_safety: None,
-            resolve: None,
-            resolve_task: None,
-            task_attachment_preview: None,
-            task_attachment_apply: None,
-            resolve_task_not_found_exit_codes: Vec::new(),
-            resolve_path: None,
-            resolve_not_found_exit_codes: Vec::new(),
-            list: Some(vec!["provider".to_string(), "list".to_string()]),
-            ensure: Some(vec!["provider".to_string(), "ensure".to_string()]),
-            converge: None,
-            plan: None,
-            retention: None,
-            retention_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
-            cleanup_preview: None,
-            cleanup_preview_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
-            cleanup_apply: None,
-            cleanup_apply_timeout_ms: DEFAULT_WORKTREE_PROVIDER_CLEANUP_TIMEOUT_MS,
-            artifacts_preview: None,
-            artifacts_apply: None,
-        };
-
-        assert!(commands.ensure.is_some());
-    }
-
-    #[test]
-    fn legacy_worktree_provider_commands_config_defaults_task_not_found_exit_codes() {
-        let config: HomeboyConfig = serde_json::from_value(serde_json::json!({
-            "worktree_providers": {"fixture": {"commands": {
-                "resolve_task": ["provider", "resolve-task", "{task_url}"],
-                "resolve_not_found_exit_codes": [41]
-            }}}
-        }))
-        .expect("legacy config deserializes");
-        let commands = &config.worktree_providers["fixture"].commands;
-
-        assert_eq!(commands.resolve_not_found_exit_codes, vec![41]);
-        assert!(commands.resolve_task_not_found_exit_codes.is_empty());
+        assert!(serde_json::to_value(config)
+            .expect("config serializes")
+            .get("worktree_providers")
+            .is_none());
     }
 
     #[test]

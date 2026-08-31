@@ -590,65 +590,23 @@ fn resolve_dispatch_workspace(
         return Ok(Some(DispatchWorkspaceTarget::path(path, "workspace-path")));
     }
 
-    let target = homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
-        workspace,
-        &homeboy_core::defaults::load_config(),
-        homeboy_core::worktree_provider::WorktreeMutationContext::default(),
-    )
-    .map_err(|error| {
-        if error
-            .details
-            .pointer("/workspace/classification")
-            .and_then(Value::as_str)
-            == Some("workspace.resolved_but_dirty")
-        {
-            return error;
-        }
+    let record = worktree::resolve_workspace_ref_if_present(workspace)?
+        .ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace",
             format!(
-                "agent-task cook workspace '{}' is neither an existing directory nor a resolvable managed worktree handle: {}",
-                workspace, error.message
+                "agent-task cook workspace '{}' is neither an existing directory nor a native managed worktree handle",
+                workspace
             ),
             Some(workspace.clone()),
             Some(vec![
                 "Pass --cwd <path> for an explicit checkout".to_string(),
                 "Pass --workspace <path> for an existing workspace path".to_string(),
                 "Create or list Homeboy task worktrees with `homeboy worktree create` and `homeboy worktree list`".to_string(),
-                "Configure a worktree provider that can resolve the managed handle.".to_string(),
             ]),
         )
     })?;
-    if target.provider == homeboy_core::worktree_provider::WorktreeProviderIdentity::Native {
-        let record = worktree::resolve_workspace_ref_if_present(workspace)?.ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "native provider selected workspace `{workspace}` without a registry record"
-            ))
-        })?;
-        return DispatchWorkspaceTarget::workspace_ref(record).map(Some);
-    }
-    let root = target.path.clone();
-    if !root.is_dir() {
-        let provider = match &target.provider {
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => "native",
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
-                provider
-            }
-        };
-        return Err(Error::validation_invalid_argument(
-            "workspace",
-            format!(
-                "managed worktree '{}' resolved by provider '{}' points at a missing directory {}",
-                workspace,
-                provider,
-                root.display()
-            ),
-            Some(workspace.clone()),
-            None,
-        ));
-    }
-
-    Ok(Some(DispatchWorkspaceTarget::provider(target)))
+    DispatchWorkspaceTarget::workspace_ref(record).map(Some)
 }
 
 #[derive(Debug, Clone)]
@@ -738,48 +696,6 @@ impl DispatchWorkspaceTarget {
                 "task_url": record.task_url,
             }),
         })
-    }
-
-    fn provider(target: homeboy_core::worktree_provider::WorktreeMutationTarget) -> Self {
-        let root = target.path;
-        let provider_id = match target.provider {
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Native => {
-                "native".to_string()
-            }
-            homeboy_core::worktree_provider::WorktreeProviderIdentity::Configured(provider) => {
-                provider
-            }
-        };
-        let safety =
-            target
-                .safety
-                .unwrap_or(homeboy_core::worktree_provider::WorktreeProviderSafety {
-                    dirty: false,
-                    unpushed: false,
-                    primary: false,
-                    missing: false,
-                });
-        Self {
-            root: root.clone(),
-            slug: Some(target.handle.clone()),
-            kind: Some("worktree-provider".to_string()),
-            component_id: None,
-            branch: target.branch.clone(),
-            base_ref: None,
-            workspace_identity: None,
-            metadata: serde_json::json!({
-                "kind": "worktree-provider",
-                "provider_id": provider_id,
-                "handle": target.handle,
-                "root": root.display().to_string(),
-                "branch": target.branch,
-                "safety": {
-                    "dirty": safety.dirty,
-                    "unpushed": safety.unpushed,
-                    "primary": safety.primary,
-                },
-            }),
-        }
     }
 }
 

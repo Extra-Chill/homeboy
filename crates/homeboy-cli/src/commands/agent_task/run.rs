@@ -22,13 +22,9 @@ use homeboy::agents::agent_tasks::scheduler::{
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::core::command_invocation::CommandInvocation;
-use homeboy::core::defaults;
 use homeboy::core::engine::shell::quote_args;
 use homeboy::core::worktree_provider::{
-    self, WorktreeCleanupPolicy as WorktreeProviderCleanupPolicy,
-    WorktreeProvisionIntent as WorktreeProviderCreateIntent,
-    WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent, WorktreeProvisionPlan,
-    WorktreeTaskAttachmentStatus,
+    self, WorktreeProvisionIntent as WorktreeProviderCreateIntent, WorktreeProvisionPlan,
 };
 use homeboy::core::Error;
 
@@ -745,21 +741,8 @@ pub(crate) fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
     if let Some(run_id) = &args.attempt_run_id {
         argv.extend(["--attempt-run-id".to_string(), run_id.clone()]);
     }
-    if args.worktree_provider_self_repair.is_none() {
-        if let Some(worktree) = &args.to_worktree {
-            argv.extend(["--to-worktree".to_string(), worktree.clone()]);
-        }
-    }
-    if let Some(provider_id) = &args.worktree_provider_self_repair {
-        argv.extend([
-            "--cwd".to_string(),
-            args.dispatch
-                .cwd
-                .clone()
-                .expect("provider self-repair requires an explicit CWD"),
-            "--worktree-provider-self-repair".to_string(),
-            provider_id.clone(),
-        ]);
+    if let Some(worktree) = &args.to_worktree {
+        argv.extend(["--to-worktree".to_string(), worktree.clone()]);
     }
     for gate in &args.gates.verify {
         argv.extend(["--verify".to_string(), gate.clone()]);
@@ -985,7 +968,12 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
     } else {
         vec![format!("{flag}={placeholder}")]
     };
-    (replay, Some(format!("{flag} was redacted; replace its parseable placeholder with the original value before replaying")))
+    (
+        replay,
+        Some(format!(
+            "{flag} was redacted; replace its parseable placeholder with the original value before replaying"
+        )),
+    )
 }
 
 fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
@@ -3110,7 +3098,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         &error,
                     ),
                     1,
-                ))
+                ));
             }
         };
     let run_id =
@@ -3133,7 +3121,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         &error,
                     ),
                     1,
-                ))
+                ));
             }
         };
     // A terminal legacy candidate with no model can never finalize. Reject it
@@ -3183,7 +3171,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     &error,
                 ),
                 1,
-            ))
+            ));
         }
     };
     if !record.state.is_terminal() {
@@ -3223,7 +3211,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     &error,
                 ),
                 1,
-            ))
+            ));
         }
     };
     let pre_execution_runtime_recovery =
@@ -3256,7 +3244,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     &error,
                 ),
                 1,
-            ))
+            ));
         }
     };
     let attempt = recipe
@@ -3280,7 +3268,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     &error,
                 ),
                 1,
-            ))
+            ));
         }
     };
     let historical_terminal =
@@ -3309,7 +3297,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     &error,
                 ),
                 1,
-            ))
+            ));
         }
     };
     options.identity.initial_run_id = attempt.run_id.clone();
@@ -3615,61 +3603,24 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     if let Some(cwd) = args.dispatch.cwd.as_deref() {
         let cwd = Path::new(cwd);
         ensure_active_managed_cook_destination(to_worktree)?;
-        homeboy::core::worktree_provider::validate_worktree_root(cwd, to_worktree)?;
+        validate_cook_worktree_root(cwd)?;
         let path = std::fs::canonicalize(cwd).map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(cwd.display().to_string()))
         })?;
         validate_cook_destination_identity(args, &path)?;
-        let provider_identity = validate_cook_cwd_destination_identity(&path, to_worktree)?;
+        validate_cook_cwd_destination_identity(&path, to_worktree)?;
         validate_cook_base_before_provisioning(args)?;
-        let mut provision = serde_json::json!({
+        let provision = serde_json::json!({
             "action": "existing",
             "kind": "explicit_cwd",
             "handle": to_worktree,
             "path": path,
         });
-        if let Some(provider_id) = args.worktree_provider_self_repair.as_deref() {
-            let contract = configured_worktree_provider_self_repair_contract(args, provider_id)?;
-            provision["self_repair_bootstrap"] = serde_json::json!({
-                "schema": "homeboy/worktree-provider-self-repair-bootstrap/v1",
-                "provider_id": contract.provider_id,
-                "repository": contract.repository,
-                "workspace_authority": "explicit_clean_existing_checkout",
-                "task_url": args.dispatch.task_url,
-                "branch": args.head,
-                "review_and_finalization": "normal",
-                "provider_lifecycle_reconciliation": {
-                    "status": "pending",
-                    "required_after": "repair_ships",
-                    "action": "resume_normal_provider_lifecycle_finalization",
-                },
-            });
-        }
-        if let Some((identity, safety)) = provider_identity {
-            provision["provider"] = Value::String(identity.provider_id.clone());
-            provision["workspace_identity"] =
-                serde_json::to_value(&identity).expect("provider identity serializes");
-            provision["workspace_safety"] =
-                serde_json::to_value(&safety).expect("provider safety serializes");
-        } else if !Path::new(to_worktree).is_dir()
-            && homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
-                to_worktree,
-                homeboy::core::worktree_provider::WorktreeMutationContext::default(),
-            )?
-            .is_none()
-        {
-            provision["logical_provider_provenance"] = serde_json::json!({
-                "schema": "homeboy/logical-worktree-handle-provenance/v1",
-                "handle": to_worktree,
-                "canonical_path": path,
-                "validation": "exact_handle_basename",
-            });
-        }
         return Ok(provision);
     }
     let direct_path = Path::new(to_worktree);
     if direct_path.is_dir() {
-        homeboy::core::worktree_provider::validate_worktree_root(direct_path, to_worktree)?;
+        validate_cook_worktree_root(direct_path)?;
         let path = std::fs::canonicalize(direct_path).map_err(|error| {
             homeboy::core::Error::internal_io(
                 error.to_string(),
@@ -3684,12 +3635,12 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             "path": path,
         }));
     }
-    if let Some(target) = homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
+    if let Ok(target) = homeboy::core::worktree_provider::resolve_worktree_mutation_target(
         to_worktree,
         homeboy::core::worktree_provider::WorktreeMutationContext::default(),
-    )? {
+    ) {
         let path = target.path;
-        homeboy::core::worktree_provider::validate_worktree_root(&path, to_worktree)?;
+        validate_cook_worktree_root(&path)?;
         validate_cook_base_before_provisioning(args)?;
         return Ok(
             serde_json::json!({ "action": "existing", "kind": target.source_kind, "handle": to_worktree, "path": path }),
@@ -3777,7 +3728,7 @@ fn cook_workspace_plan_identity(intent: &WorktreeProviderCreateIntent) -> Value 
 }
 
 fn ensure_active_managed_cook_destination(to_worktree: &str) -> homeboy::core::Result<()> {
-    homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
+    homeboy::core::worktree_provider::resolve_worktree_mutation_target(
         to_worktree,
         homeboy::core::worktree_provider::WorktreeMutationContext::default(),
     )?;
@@ -3790,52 +3741,17 @@ fn ensure_active_managed_cook_destination(to_worktree: &str) -> homeboy::core::R
 fn validate_cook_cwd_destination_identity(
     cwd: &Path,
     to_worktree: &str,
-) -> homeboy::core::Result<
-    Option<(
-        homeboy::core::worktree_provider::WorktreeExactIdentity,
-        homeboy::core::worktree_provider::WorktreeSafetyAttestation,
-    )>,
-> {
-    let (destination, provider_identity) = if Path::new(to_worktree).is_dir() {
-        std::fs::canonicalize(to_worktree).map(|path| (path, None))
-    } else if let Some(target) =
-        homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
-            to_worktree,
-            homeboy::core::worktree_provider::WorktreeMutationContext::default(),
-        )?
-    {
-        std::fs::canonicalize(target.path).map(|path| (path, None))
+) -> homeboy::core::Result<()> {
+    let destination = if Path::new(to_worktree).is_dir() {
+        std::fs::canonicalize(to_worktree)
+    } else if let Ok(target) = homeboy::core::worktree_provider::resolve_worktree_mutation_target(
+        to_worktree,
+        homeboy::core::worktree_provider::WorktreeMutationContext::default(),
+    ) {
+        std::fs::canonicalize(target.path)
     } else {
-        let config = defaults::load_config();
-        match homeboy::core::worktree_provider::resolve_configured_worktree_exact_identity_by_path_from_config(cwd, &config)? {
-            Some(identity) => {
-                if identity.handle != to_worktree {
-                    return Err(homeboy::core::Error::validation_invalid_argument(
-                        "to_worktree",
-                        "--cwd and --to-worktree resolve to different provider worktrees",
-                        Some(to_worktree.to_string()),
-                        None,
-                    ));
-                }
-                let safety = homeboy::core::worktree_provider::attest_configured_worktree_safety_from_config(&identity, &config)?;
-                // Cook owns mutations in an explicit CWD, so a clean committed
-                // candidate may be unpushed. Durable admission rechecks its
-                // cleanliness and base ancestry before provider execution.
-                if !safety.fresh || safety.dirty || identity.primary {
-                    return Err(homeboy::core::Error::validation_invalid_argument(
-                        "to_worktree",
-                        "worktree provider safety attestation is not safe for Cook execution",
-                        Some(to_worktree.to_string()),
-                        None,
-                    ));
-                }
-                Ok((PathBuf::from(&identity.path), Some((identity, safety))))
-            }
-            None => {
-                validate_logical_worktree_handle_path_relationship(cwd, to_worktree)?;
-                Ok((cwd.to_path_buf(), None))
-            }
-        }
+        validate_logical_worktree_handle_path_relationship(cwd, to_worktree)?;
+        Ok(cwd.to_path_buf())
     }
     .map_err(|error| {
         homeboy::core::Error::internal_io(error.to_string(), Some(to_worktree.to_string()))
@@ -3848,7 +3764,23 @@ fn validate_cook_cwd_destination_identity(
             None,
         ));
     }
-    Ok(provider_identity)
+    Ok(())
+}
+
+fn validate_cook_worktree_root(path: &Path) -> homeboy::core::Result<()> {
+    if homeboy::core::git::repo_root(path).is_some() {
+        return Ok(());
+    }
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "to_worktree",
+        "Cook destination must be a Git worktree",
+        Some(path.display().to_string()),
+        None,
+    ))
+}
+
+fn normalize_worktree_task_url(task_url: &str) -> String {
+    task_url.trim().trim_end_matches('/').to_string()
 }
 
 pub(crate) fn validate_logical_worktree_handle_path_relationship(
@@ -3881,10 +3813,6 @@ pub(crate) fn resolve_cook_destination(
     mut args: AgentTaskCookArgs,
 ) -> homeboy::core::Result<AgentTaskCookArgs> {
     normalize_cook_repository_identity(&mut args)?;
-    if bind_worktree_provider_self_repair_bootstrap(&mut args)? {
-        resolve_cook_base(&mut args)?;
-        return Ok(args);
-    }
     if args.to_worktree.is_some() {
         resolve_cook_base(&mut args)?;
         return Ok(args);
@@ -3893,11 +3821,7 @@ pub(crate) fn resolve_cook_destination(
         let cwd = std::fs::canonicalize(cwd).map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
         })?;
-        let config = defaults::load_config();
-        args.to_worktree = Some(match homeboy::core::worktree_provider::resolve_configured_worktree_exact_identity_by_path_from_config(&cwd, &config)? {
-            Some(identity) => identity.handle,
-            None => cwd.display().to_string(),
-        });
+        args.to_worktree = Some(cwd.display().to_string());
         resolve_cook_base(&mut args)?;
         return Ok(args);
     }
@@ -3911,209 +3835,44 @@ pub(crate) fn resolve_cook_destination(
             "--task-url <url> is required when --to-worktree is omitted".to_string(),
         ])
     })?;
-    let task_url = homeboy::core::worktree_provider::normalize_worktree_task_url(task_url);
+    let task_url = normalize_worktree_task_url(task_url);
     args.dispatch.task_url = Some(task_url.clone());
-    let config = defaults::load_config();
     // Resolve the requested branch before task discovery. An explicit --head is
     // authoritative through candidate reuse, provisioning, and finalization.
     let head = match args.head.clone() {
         Some(head) => head,
         None => derived_cook_branch(&task_url)?,
     };
-    args.to_worktree = Some(
-        match homeboy::core::worktree_provider::find_configured_worktree_by_task_from_config(
-            &task_url,
-            args.head.as_deref(),
-            &config,
-        ) {
-            Ok(Some(target)) => {
-                if args.head.is_none() {
-                    args.head = target.branch.clone();
-                }
-                target.handle
-            }
-            Ok(None) => format!("{repo}@{}", slugify_cook_branch(&head)),
-            Err(error) => {
-                let mut error = annotate_worktree_provider_self_repair_route(
-                    error,
-                    &args,
-                    &config,
-                    Some(&head),
-                );
-                if let Some(handles) = error.message.strip_prefix(&format!(
-                    "multiple active apply-enabled worktrees are owned by `{task_url}`: "
-                )) {
-                    error.details["recovery"] = serde_json::json!(handles
-                        .split(", ")
-                        .map(|handle| format!("homeboy agent-task cook --to-worktree {handle}"))
-                        .collect::<Vec<_>>());
-                }
-                return Err(error);
-            }
-        },
-    );
+    let existing = homeboy::core::worktree_provider::list_worktree_inventory()?
+        .into_iter()
+        .filter(|workspace| workspace.ownership.task_url.as_deref() == Some(&task_url))
+        .filter(|workspace| {
+            args.head
+                .as_deref()
+                .is_none_or(|head| workspace.ownership.branch.as_deref() == Some(head))
+        })
+        .collect::<Vec<_>>();
+    if existing.len() > 1 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "multiple active native worktrees match this task; pass --to-worktree explicitly",
+            Some(task_url),
+            None,
+        ));
+    }
+    if let Some(workspace) = existing.into_iter().next() {
+        if args.head.is_none() {
+            args.head = workspace.ownership.branch;
+        }
+        args.to_worktree = Some(workspace.ownership.handle);
+    } else {
+        args.to_worktree = Some(format!("{repo}@{}", slugify_cook_branch(&head)));
+    }
     if args.head.is_none() {
         args.head = Some(head);
     }
     resolve_cook_base(&mut args)?;
     Ok(args)
-}
-
-fn configured_worktree_provider_self_repair_contract(
-    args: &AgentTaskCookArgs,
-    provider_id: &str,
-) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeSelfRepairContract> {
-    let config = defaults::load_config();
-    if !config.worktree_providers.contains_key(provider_id) {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "worktree_provider_self_repair",
-            "self-repair provider is not configured as a worktree provider",
-            Some(provider_id.to_string()),
-            None,
-        ));
-    }
-    let contract = homeboy::core::worktree_provider::configured_worktree_self_repair_contract_from_config(
-        provider_id,
-        &config,
-    )?
-    .ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "worktree_provider_self_repair",
-            format!("worktree provider `{provider_id}` does not declare a self-repair repository"),
-            Some(provider_id.to_string()),
-            Some(vec![format!(
-                "Configure settings.worktree_provider_self_repair.{provider_id}.repository with the owning component id."
-            )]),
-        )
-    })?;
-    let repository = cook_component_id(args).ok_or_else(|| {
-        homeboy::core::Error::validation_missing_argument(vec![
-            "--repo <repo> is required for a worktree provider self-repair bootstrap".to_string(),
-        ])
-    })?;
-    if contract.repository != repository {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "worktree_provider_self_repair",
-            format!(
-                "worktree provider `{provider_id}` is owned by configured repository `{}`, not `{repository}`",
-                contract.repository
-            ),
-            Some(provider_id.to_string()),
-            None,
-        ));
-    }
-    if args.dispatch.task_url.as_deref().is_none_or(str::is_empty) {
-        return Err(homeboy::core::Error::validation_missing_argument(vec![
-            "--task-url <url> is required to preserve tracker identity during provider self-repair"
-                .to_string(),
-        ]));
-    }
-    Ok(contract)
-}
-
-fn bind_worktree_provider_self_repair_bootstrap(
-    args: &mut AgentTaskCookArgs,
-) -> homeboy::core::Result<bool> {
-    let Some(provider_id) = args.worktree_provider_self_repair.clone() else {
-        return Ok(false);
-    };
-    configured_worktree_provider_self_repair_contract(args, &provider_id)?;
-    let cwd = args.dispatch.cwd.as_deref().ok_or_else(|| {
-        homeboy::core::Error::validation_missing_argument(vec![
-            "--cwd <clean-existing-checkout> is required for provider self-repair".to_string(),
-        ])
-    })?;
-    let cwd = std::fs::canonicalize(cwd).map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
-    })?;
-    homeboy::core::worktree_provider::validate_worktree_root(&cwd, &provider_id)?;
-    let branch = homeboy::core::git::current_branch(&cwd).ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "head",
-            "provider self-repair checkout must be on an attached branch",
-            Some(cwd.display().to_string()),
-            None,
-        )
-    })?;
-    if args.head.as_deref().is_some_and(|head| head != branch) {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "head",
-            "provider self-repair --head does not match the explicit checkout branch",
-            args.head.clone(),
-            None,
-        ));
-    }
-    args.head = Some(branch);
-    args.dispatch.cwd = Some(cwd.display().to_string());
-    args.to_worktree = Some(cwd.display().to_string());
-    Ok(true)
-}
-
-fn annotate_worktree_provider_self_repair_route(
-    mut error: homeboy::core::Error,
-    args: &AgentTaskCookArgs,
-    config: &defaults::HomeboyConfig,
-    head: Option<&str>,
-) -> homeboy::core::Error {
-    // A bootstrap is a publication route, not an escape hatch from the review
-    // and finalization contract selected by the original Cook.
-    if args.no_finalize {
-        return error;
-    }
-    let provider_id = error.details["worktree_provider_id"].as_str();
-    let operation = error.details["worktree_provider_operation"].as_str();
-    let Some((provider_id, operation)) = provider_id.zip(operation) else {
-        return error;
-    };
-    if !matches!(operation, "resolve_task" | "ensure") {
-        return error;
-    }
-    let Ok(Some(contract)) =
-        homeboy::core::worktree_provider::configured_worktree_self_repair_contract_from_config(
-            provider_id,
-            config,
-        )
-    else {
-        return error;
-    };
-    if cook_component_id(args) != Some(contract.repository.as_str()) {
-        return error;
-    }
-    let mut replay_args = args.clone();
-    if replay_args.head.is_none() {
-        replay_args.head = head.map(str::to_string);
-    }
-    replay_args.to_worktree = None;
-    replay_args.dispatch.cwd = Some("<clean-existing-linked-worktree>".to_string());
-    replay_args.worktree_provider_self_repair = Some(provider_id.to_string());
-    let mut replay_argv = cook_replay_argv(&replay_args);
-    for _ in &args.gates.private_verify {
-        replay_argv.extend([
-            "--private-verify".to_string(),
-            "<redacted:--private-verify>".to_string(),
-        ]);
-    }
-    let replay_command = quote_args(&replay_argv);
-    let mut replay_requires = vec!["replace <clean-existing-linked-worktree> with an existing clean linked checkout of the configured owning repository".to_string()];
-    if !args.gates.private_verify.is_empty() {
-        replay_requires.push("replace each <redacted:--private-verify> placeholder with the original private gate before replaying".to_string());
-    }
-    error.details["worktree_provider_self_repair"] = serde_json::json!({
-        "schema": "homeboy/worktree-provider-self-repair-route/v1",
-        "provider_id": provider_id,
-        "repository": contract.repository,
-        "failed_operation": operation,
-        "workspace_authority": "explicit_clean_existing_checkout",
-        "replay_argv": replay_argv,
-        "replay_requires": replay_requires,
-        "provider_lifecycle_reconciliation": {
-            "status": "required_after_repair_ships",
-            "action": "resume_normal_provider_lifecycle_finalization",
-        },
-    });
-    error.with_hint(format!(
-        "Bootstrap the provider-owning repair with: {replay_command}"
-    ))
 }
 
 fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -4222,7 +3981,6 @@ pub(crate) fn corrected_cook_base_replay_argv(
 fn resolve_cook_preview_destination(
     args: AgentTaskCookArgs,
 ) -> homeboy::core::Result<(AgentTaskCookArgs, Value)> {
-    let issue_derived = args.to_worktree.is_none() && args.dispatch.cwd.is_none();
     let mut args = resolve_cook_destination(args)?;
     let handle = args.to_worktree.clone().expect("preview destination set");
     let path = if let Some(cwd) = args.dispatch.cwd.as_deref() {
@@ -4230,7 +3988,7 @@ fn resolve_cook_preview_destination(
             homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
         })?;
         ensure_active_managed_cook_destination(&handle)?;
-        homeboy::core::worktree_provider::validate_worktree_root(&path, &handle)?;
+        validate_cook_worktree_root(&path)?;
         validate_cook_destination_identity(&args, &path)?;
         validate_cook_cwd_destination_identity(&path, &handle)?;
         path
@@ -4238,172 +3996,29 @@ fn resolve_cook_preview_destination(
         let path = std::fs::canonicalize(&handle).map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(handle.clone()))
         })?;
-        homeboy::core::worktree_provider::validate_worktree_root(&path, &handle)?;
+        validate_cook_worktree_root(&path)?;
         validate_cook_destination_identity(&args, &path)?;
         path
-    } else if let Some(target) =
-        homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
-            &handle,
-            homeboy::core::worktree_provider::WorktreeMutationContext::default(),
-        )?
-    {
+    } else if let Ok(target) = homeboy::core::worktree_provider::resolve_worktree_mutation_target(
+        &handle,
+        homeboy::core::worktree_provider::WorktreeMutationContext::default(),
+    ) {
         let path = target.path;
-        homeboy::core::worktree_provider::validate_worktree_root(&path, &handle)?;
+        validate_cook_worktree_root(&path)?;
         validate_cook_destination_identity(&args, &path)?;
         path
     } else {
-        let config = defaults::load_config();
-        let task_attachment = args
-            .dispatch
-            .task_url
-            .as_deref()
-            .map(|task_url| {
-                worktree_provider::preview_configured_worktree_task_attachment_from_config(
-                    &handle, task_url, &config,
-                )
-            })
-            .transpose()?
-            .flatten();
-        if let Some(attachment) = task_attachment
-            .as_ref()
-            .filter(|attachment| attachment.status == WorktreeTaskAttachmentStatus::Eligible)
-        {
-            let path = PathBuf::from(&attachment.path);
-            homeboy::core::worktree_provider::validate_worktree_root(&path, &handle)?;
-            validate_cook_destination_identity(&args, &path)?;
-            resolve_cook_base(&mut args)?;
-            return Ok((
-                args,
-                serde_json::json!({
-                    "action": "planned_task_attachment",
-                    "kind": "provider",
-                    "handle": attachment.handle,
-                    "path": attachment.path,
-                    "branch": attachment.branch,
-                    "provider_id": attachment.provider_id,
-                    "task_url": attachment.task_url,
-                    "attachment_status": attachment.status,
-                }),
-            ));
-        }
-        let target = match homeboy::core::worktree_provider::resolve_configured_worktree_mutation_target_from_config(
-            &handle,
-            &config,
-            homeboy::core::worktree_provider::WorktreeMutationContext::default(),
-        ) {
-            Ok(target) => target,
-            // An explicit destination reaches planning too: previewing a missing
-            // one is the point of #13515, so a not-found provider is planned
-            // whether or not the destination was derived from an issue.
-            Err(lookup_error) if lookup_error.details["worktree_provider_lookup"] == "not_found" => {
-                // Planning a creation needs an intent to plan. An explicit
-                // handle that cannot describe one — no --repo to create it
-                // under — is simply an absent destination, which the lookup
-                // failure already reports precisely.
-                let intent = match cook_workspace_create_intent(&args) {
-                    Ok(intent) => intent,
-                    Err(error) if issue_derived => return Err(error),
-                    Err(_) => return Err(lookup_error),
-                };
-                let lifecycle = WorktreeProviderLifecycleIntent {
-                    purpose: "agent_task_cook".to_string(),
-                    owner_run_ref: args
-                        .attempt_run_id
-                        .clone()
-                        .expect("preview lifecycle is bound before destination resolution"),
-                    cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
-                };
-                let plan = match worktree_provider::plan_worktree_provision_from_config(
-                    &intent, &lifecycle, &config,
-                ) {
-                    Ok(plan) => plan,
-                    Err(error) if issue_derived => {
-                        return Ok((args, unresolved_provider_preview(&handle, error, &config)));
-                    }
-                    // A provider that can ensure but cannot plan is a real
-                    // answer about this destination, so it is reported. Any
-                    // other planning failure means no provider owns the handle
-                    // at all, which the original lookup already says better.
-                    Err(error) => {
-                        return Err(if error.details["worktree_provider_planning"] == "unsupported" {
-                            error
-                        } else {
-                            lookup_error
-                        })
-                    }
-                };
-                let WorktreeProvisionPlan::Planned(destination) = plan else {
-                    return Err(homeboy::core::Error::internal_unexpected(
-                        "worktree provider changed from absent to admitted while previewing Cook"
-                            .to_string(),
-                    ));
-                };
-                let provider_id = match &destination.ownership.provider {
-                    homeboy::core::worktree_provider::WorktreeProviderIdentity::Native => "native",
-                    homeboy::core::worktree_provider::WorktreeProviderIdentity::Configured(id) => id,
-                };
-                let planning_timeout = preview_provider_plan_timeout(&config, provider_id);
-                return Ok((
-                    args,
-                    serde_json::json!({
-                        "action": "planned_create",
-                        "kind": "provider",
-                        "handle": destination.ownership.handle,
-                        "path": destination.ownership.path,
-                        "branch": destination.ownership.branch,
-                        "provider_id": provider_id,
-                        "intent": cook_workspace_plan_identity(&intent),
-                        "planning_timeout_ms": planning_timeout["effective_timeout_ms"],
-                        "planning_timeout": planning_timeout,
-                    }),
-                ));
-            }
-            Err(error) if issue_derived => {
-                return Ok((args, unresolved_provider_preview(&handle, error, &config)));
-            }
-            Err(error) => return Err(error),
+        let intent = cook_workspace_create_intent(&args)?;
+        let destination = match worktree_provider::plan_worktree_provision(&intent)? {
+            WorktreeProvisionPlan::Planned(destination) => destination,
+            WorktreeProvisionPlan::Admitted(destination) => destination,
         };
-        let provider_id = match &target.provider {
-            homeboy::core::worktree_provider::WorktreeProviderIdentity::Native => "native",
-            homeboy::core::worktree_provider::WorktreeProviderIdentity::Configured(id) => id,
-        };
-        if homeboy::core::worktree_provider::configured_worktree_path_requires_materialization(
-            &target.path.display().to_string(),
-        ) {
-            resolve_cook_base(&mut args)?;
-            return Ok((
-                args,
-                serde_json::json!({
-                    "action": "materialization_required",
-                    "kind": "provider",
-                    "handle": handle,
-                    "provider_id": provider_id,
-                    "remote_path": target.path,
-                    "reason": "the configured provider resolved a registered remote workspace that requires materialization before filesystem planning",
-                    "apply": "rerun Cook without --preview to converge the destination through its configured provider",
-                    "provider_calls": {
-                        "resolve_and_admission": "executed",
-                        "ensure": "deferred",
-                    },
-                }),
-            ));
-        }
-        let path = target.path;
-        homeboy::core::worktree_provider::validate_worktree_root(&path, &handle)?;
-        validate_cook_destination_identity(&args, &path)?;
         return Ok((
             args,
             serde_json::json!({
-                "action": "planned_reuse",
-                "kind": "provider",
-                "handle": target.handle,
-                "path": path,
-                "branch": target.branch,
-                "provider_id": provider_id,
-                "provider_calls": {
-                    "resolve_and_admission": "executed",
-                    "ensure": "deferred",
-                },
+                "action": "planned_create", "kind": "native", "handle": destination.ownership.handle,
+                "path": destination.ownership.path, "branch": destination.ownership.branch,
+                "intent": cook_workspace_plan_identity(&intent),
             }),
         ));
     };
@@ -4456,49 +4071,6 @@ fn project_preview_dirty_admission(provision: &mut Value) {
             "changes": { "tracked": tracked, "staged": staged, "untracked": untracked },
         });
     }
-}
-
-fn unresolved_provider_preview(
-    handle: &str,
-    error: homeboy::core::Error,
-    config: &defaults::HomeboyConfig,
-) -> Value {
-    let provider_id = error.details["worktree_provider_id"]
-        .as_str()
-        .unwrap_or_default();
-    let planning_timeout = preview_provider_plan_timeout(config, provider_id);
-    let failure = error.details.get("provider_failure").cloned();
-    serde_json::json!({
-        "action": "unresolved_provider",
-        "disposition": "unresolved",
-        "kind": "provider",
-        "handle": handle,
-        "provider_id": error.details["worktree_provider_id"],
-        "planning_timeout_ms": planning_timeout["effective_timeout_ms"],
-        "planning_timeout": planning_timeout,
-        "reason": error.message,
-        "remediation": error.details["tried"],
-        "failure": failure,
-        "details": error.details,
-    })
-}
-
-fn preview_provider_plan_timeout(config: &defaults::HomeboyConfig, provider_id: &str) -> Value {
-    let Some(provider) = config.worktree_providers.get(provider_id) else {
-        return Value::Null;
-    };
-    let configured_timeout_ms = provider.lookup_timeout_ms;
-    let capped_timeout_ms =
-        configured_timeout_ms.min(defaults::MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS);
-    serde_json::json!({
-        "operation": "plan",
-        "requested_timeout_ms": configured_timeout_ms,
-        "configured_timeout_ms": configured_timeout_ms,
-        "maximum_timeout_ms": defaults::MAX_WORKTREE_PROVIDER_LOOKUP_TIMEOUT_MS,
-        "capped_timeout_ms": capped_timeout_ms,
-        "effective_timeout_ms": capped_timeout_ms,
-        "source": format!("worktree_providers.{provider_id}.lookup_timeout_ms"),
-    })
 }
 
 #[derive(Debug, Clone)]
@@ -4952,12 +4524,10 @@ pub(super) fn cook_repository_identities_for_workspace(
         std::fs::canonicalize(path).map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?
-    } else if let Some(target) =
-        homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
-            value,
-            homeboy::core::worktree_provider::WorktreeMutationContext::default(),
-        )?
-    {
+    } else if let Ok(target) = homeboy::core::worktree_provider::resolve_worktree_mutation_target(
+        value,
+        homeboy::core::worktree_provider::WorktreeMutationContext::default(),
+    ) {
         target.path
     } else {
         return Ok(Vec::new());
@@ -5090,16 +4660,41 @@ fn validate_cook_destination_identity(
     args: &AgentTaskCookArgs,
     destination: &Path,
 ) -> homeboy::core::Result<()> {
-    let identity = args.repository_identity.as_ref();
-    homeboy::core::worktree_provider::validate_worktree_repository_identity(
-        destination,
-        identity
-            .and_then(|identity| identity.get("remote_identity"))
-            .and_then(Value::as_str),
-        identity
-            .and_then(|identity| identity.get("repository_name"))
-            .and_then(Value::as_str),
-    )
+    let Some(expected) = args
+        .repository_identity
+        .as_ref()
+        .and_then(|identity| identity.get("remote_identity"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let root = homeboy::core::git::repo_root(destination).ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook destination is not a Git worktree",
+            Some(destination.display().to_string()),
+            None,
+        )
+    })?;
+    let matches = homeboy::core::git::output_optional(&root, &["remote"])
+        .unwrap_or_default()
+        .lines()
+        .any(|remote| {
+            homeboy::core::git::remote_url(&root, remote)
+                .and_then(|url| canonical_remote_identity(&url))
+                .as_deref()
+                == Some(expected)
+        });
+    if matches {
+        Ok(())
+    } else {
+        Err(homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook destination repository does not match the requested repository",
+            Some(destination.display().to_string()),
+            None,
+        ))
+    }
 }
 
 fn repository_identity_error(
@@ -5136,7 +4731,7 @@ fn repository_identity_error(
 }
 
 fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
-    let issue = homeboy::core::worktree_provider::normalize_worktree_task_url(task_url);
+    let issue = normalize_worktree_task_url(task_url);
     let issue = issue.as_str();
     let Some((repository, number)) = issue.rsplit_once("/issues/") else {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -8809,7 +8404,9 @@ mod tests {
     fn attached_local_placement_is_disclosed_at_submission() {
         assert_eq!(
             cook_attached_local_placement_disclosure(Some("local"), false).as_deref(),
-            Some("cook: attached local placement — the provider runs in this client's process tree and will not survive it; pass --detach-after-handoff to re-execute the Cook in its own session")
+            Some(
+                "cook: attached local placement — the provider runs in this client's process tree and will not survive it; pass --detach-after-handoff to re-execute the Cook in its own session"
+            )
         );
     }
 

@@ -624,8 +624,7 @@ fn provider_primary_failure(
     if run_id.is_empty() {
         return None;
     }
-    let compact =
-        homeboy_core::worktree_provider::compact_worktree_provider_failure_details(details)?;
+    let compact = details.get("worktree_provider_failure")?;
     let provider_id = compact.get("provider_id")?.as_str()?.to_string();
     let operation = compact.get("operation")?.as_str()?.to_string();
     let exit_code = compact.get("exit_code")?.as_i64()?;

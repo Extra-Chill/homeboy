@@ -2442,28 +2442,18 @@ fn candidate_patch_safety_baseline(
 
 fn resolve_promotion_target_path(
     to_worktree: &str,
-    trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
+    _trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
     safety_baseline: Option<&Value>,
 ) -> Result<Option<PathBuf>> {
     if Path::new(to_worktree).is_dir() {
         return Ok(None);
     }
-    let trusted_unpushed_destination = trusted_unpushed_candidate_destination.map(|trusted| {
-        homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
-            path: trusted.path.clone(),
-            head: trusted.head.clone(),
-        }
-    });
-    match homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
+    match homeboy_core::worktree_provider::NativeWorktreeRegistry.resolve_mutation(
         to_worktree,
-        &homeboy_core::defaults::load_config(),
-        homeboy_core::worktree_provider::WorktreeMutationContext {
-            safety_baseline,
-            trusted_unpushed_destination: trusted_unpushed_destination.as_ref(),
-        },
+        homeboy_core::worktree_provider::WorktreeMutationContext { safety_baseline },
     ) {
-        Ok(target) => Ok(target.path.is_dir().then_some(target.path)),
-        Err(error) if error.details["worktree_provider_lookup"] == "not_found" => Ok(None),
+        Ok(Some(target)) => Ok(target.path.is_dir().then_some(target.path)),
+        Ok(None) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -3068,7 +3058,11 @@ fn select_recoverable_patch_artifact(
     let canonical =
         canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)?;
     match canonical.artifacts.len() {
-        1 => Ok(canonical.artifacts.into_iter().next().expect("one canonical patch")),
+        1 => Ok(canonical
+            .artifacts
+            .into_iter()
+            .next()
+            .expect("one canonical patch")),
         0 => Err(Error::new(
             homeboy_core::ErrorCode::ValidationInvalidArgument,
             "recoverable-candidate promotion found no readable actionable patch; reconcile or hydrate the run artifacts before retrying",
