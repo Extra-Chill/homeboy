@@ -729,7 +729,10 @@ fn run_next_redacts_poisoned_recipe_dispatcher_kind() {
         );
         assert!(!rendered.contains(POISONED_KIND));
         assert!(rendered.contains("cook_continuation_unsupported_dispatcher"));
-        assert!(rendered.contains("agent-task diagnose <run-id> --full"));
+        assert!(rendered.contains(&format!(
+            "agent-task diagnose {} --full",
+            options.identity.initial_run_id
+        )));
     });
 }
 
@@ -16866,6 +16869,126 @@ fn terminal_persisted_promotion_loads_without_source_aggregate() {
             preflight_cook_promotion_in_store(&lifecycle_store, &options, run_id, None).is_err()
         );
         assert!(promote_or_load_attempt_in_store(&lifecycle_store, &options, run_id).is_err());
+    });
+}
+
+#[test]
+fn production_cook_loop_loads_terminal_promotion_without_source_aggregate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-loop-persisted-promotion";
+        let run_id = "run-loop-persisted-promotion";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        let expected = promotion(run_id);
+        options.identity.initial_run_id = run_id.to_string();
+        options.provider_transport.attempt_dispatcher = None;
+        options.workspace.to_worktree = expected.target.worktree.clone();
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: expected.target.worktree.clone(),
+            path: expected.target.path.clone().expect("promotion target path"),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register persisted promotion target");
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("persist terminal attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("index terminal attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
+        })
+        .expect("terminalize fixture");
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(expected).expect("serialize promotion fixture"),
+        )
+        .expect("persist terminal promotion");
+
+        let store = CookRecipeStore::from_current_data_root().expect("recipe store");
+        let lifecycle_store = test_lifecycle_store();
+        assert!(lifecycle_store.read_aggregate(run_id).is_err());
+        let result = CookService::run(
+            options,
+            CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+            CookMode::Resume,
+        )
+        .expect("production Cook loop loads persisted promotion");
+
+        assert_eq!(result.exit_code, 0, "{result:#?}");
+        assert_eq!(result.value.status, "green_no_finalize");
+        assert_eq!(result.value.attempts.len(), 1);
+        assert_eq!(
+            result.value.attempts[0]
+                .promotion
+                .as_ref()
+                .expect("persisted promotion reported")
+                .status,
+            AgentTaskPromotionStatus::Applied
+        );
+        assert!(lifecycle_store.read_aggregate(run_id).is_err());
+    });
+}
+
+#[test]
+fn production_cook_loop_replays_finalization_without_source_aggregate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-loop-finalized-promotion";
+        let run_id = "run-loop-finalized-promotion";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        let expected = promotion(run_id);
+        options.identity.initial_run_id = run_id.to_string();
+        options.provider_transport.attempt_dispatcher = None;
+        options.workspace.to_worktree = expected.target.worktree.clone();
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: expected.target.worktree.clone(),
+            path: expected.target.path.clone().expect("promotion target path"),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register persisted promotion target");
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        let lifecycle_store = test_lifecycle_store();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&options.identity.initial_plan, run_id, |_| {
+                Ok(serde_json::json!({}))
+            })
+            .expect("persist terminal attempt");
+        lifecycle_store
+            .record_cook_attempt(cook_id, 1, run_id)
+            .expect("index terminal attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
+        })
+        .expect("terminalize fixture");
+        lifecycle_store
+            .record_promotion(run_id, serde_json::to_value(expected).unwrap())
+            .expect("persist terminal promotion");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["latest_promotion"] = serde_json::json!({ "status": "applied" });
+        })
+        .expect("model stale legacy promotion metadata");
+        lifecycle_store
+            .record_cook_finalization(run_id, serde_json::json!({ "status": "review_ready" }))
+            .expect("persist finalization receipt");
+
+        let store = CookRecipeStore::from_current_data_root().expect("recipe store");
+        assert!(lifecycle_store.read_aggregate(run_id).is_err());
+        let result = CookService::run(
+            options,
+            CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+            CookMode::Resume,
+        )
+        .expect("production Cook loop replays finalization receipt");
+
+        assert_eq!(result.exit_code, 0, "{result:#?}");
+        assert_eq!(result.value.status, "review_ready");
+        assert_eq!(result.value.finalization.unwrap()["status"], "review_ready");
+        assert!(lifecycle_store.read_aggregate(run_id).is_err());
     });
 }
 

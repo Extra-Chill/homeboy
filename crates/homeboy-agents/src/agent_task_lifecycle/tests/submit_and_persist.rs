@@ -4015,6 +4015,16 @@ fn terminal_projection_ignores_a_stale_aggregate_cache_after_commit() {
         let aggregate = durable.aggregate.expect("mirrored aggregate");
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.outcomes[0].summary.as_deref(), Some("ok"));
+        assert_eq!(
+            AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store")
+                .read_aggregate_readonly(&record.run_id)
+                .expect("read-only admission follows SQLite")
+                .outcomes[0]
+                .summary
+                .as_deref(),
+            Some("ok")
+        );
         assert!(durable.unavailable_sources.is_empty());
     });
 }

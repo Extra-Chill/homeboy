@@ -3673,6 +3673,26 @@ pub fn record_cook_controller_failure_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook controller failure record was unchanged"))
 }
 
+/// Restore a compensated controller failure without replacing evidence written
+/// by a concurrent controller after the original failure was removed.
+pub fn restore_cook_controller_failure_if_absent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    diagnostic: &Value,
+) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    let diagnostic = diagnostic.clone();
+    lifecycle_store.mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        if metadata.contains_key("cook_controller_failure") {
+            return false;
+        }
+        metadata.insert("cook_controller_failure".to_string(), diagnostic);
+        true
+    })?;
+    Ok(())
+}
+
 // The ambient `clear_cook_controller_failure()` shim that used to sit above
 // this resolved a root and delegated straight here. It had no callers, so it
 // was a resolution point that existed for nobody (#7505).

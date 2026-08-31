@@ -38,6 +38,7 @@ use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
     AgentTaskReviewEvidence, AgentTaskReviewOverride, AgentTaskReviewTestStep,
 };
+use crate::agent_task_scheduler::AgentTaskAggregate;
 use homeboy_core::{config, Error, Result};
 
 use super::cook::{
@@ -418,8 +419,26 @@ pub fn preflight_cook_promotion_in_store(
     run_id: &str,
     artifact_id: Option<&str>,
 ) -> Result<Value> {
-    let record = lifecycle_store.read_record_bounded(run_id)?;
-    if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
+    let (record, aggregate) = lifecycle_store.read_record_with_aggregate_bounded(run_id)?;
+    preflight_cook_promotion_for_observation_in_store(
+        lifecycle_store,
+        options,
+        run_id,
+        artifact_id,
+        &record,
+        aggregate.as_ref(),
+    )
+}
+
+pub fn preflight_cook_promotion_for_observation_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &CookRequest,
+    run_id: &str,
+    artifact_id: Option<&str>,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Result<Value> {
+    if let Some(promotion) = persisted_promotion_from_record(run_id, record.clone())? {
         let behavior = if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             "resume_verification_pending"
         } else {
@@ -438,7 +457,14 @@ pub fn preflight_cook_promotion_in_store(
             }));
         }
     }
-    let aggregate = lifecycle_store.read_aggregate_readonly(run_id)?;
+    let aggregate = aggregate.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "agent_task_aggregate",
+            "authoritative observation has no mirrored agent-task aggregate",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
     let outcome = aggregate
         .selected_outcome()
         .or_else(|| {
@@ -454,9 +480,13 @@ pub fn preflight_cook_promotion_in_store(
                 None,
             )
         })?;
-    validate_cook_attempt_model_provenance_readonly_in_store(lifecycle_store, run_id)?;
-    let record = lifecycle_store.read_record_bounded(run_id)?;
-    if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
+    validate_cook_attempt_model_provenance_for_observation_in_store(
+        lifecycle_store,
+        run_id,
+        record,
+        aggregate,
+    )?;
+    if let Some(promotion) = persisted_promotion_from_record(run_id, record.clone())? {
         let behavior = if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             "resume_verification_pending"
         } else {
@@ -5133,13 +5163,22 @@ pub fn validate_cook_attempt_model_provenance(run_id: &str) -> Result<()> {
     .map(|_| ())
 }
 
-pub(super) fn validate_cook_attempt_model_provenance_readonly_in_store(
+fn validate_cook_attempt_model_provenance_for_observation_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
     let plan = lifecycle_store.read_controller_plan(run_id)?;
-    let record = lifecycle_store.read_record_bounded(run_id)?;
-    let aggregate = lifecycle_store.read_aggregate_readonly(run_id)?;
+    validate_cook_attempt_model_provenance_for_observation(&plan, record, aggregate, run_id)
+}
+
+fn validate_cook_attempt_model_provenance_for_observation(
+    plan: &crate::agent_task_scheduler::AgentTaskPlan,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+    run_id: &str,
+) -> Result<()> {
     let outcome = aggregate
         .selected_outcome()
         .or_else(|| {
@@ -5155,7 +5194,7 @@ pub(super) fn validate_cook_attempt_model_provenance_readonly_in_store(
                 None,
             )
         })?;
-    let (_, model) = authoritative_execution_identity(&plan, &record, outcome, run_id)?;
+    let (_, model) = authoritative_execution_identity(plan, record, outcome, run_id)?;
     model.map(|_| ()).ok_or_else(|| {
         Error::validation_invalid_argument(
             "provider_model",

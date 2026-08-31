@@ -1859,10 +1859,25 @@ pub fn terminal_artifact_projection_readiness_readonly_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<String>> {
-    let record = lifecycle_store.read_record_bounded(&super::sanitize_run_id(run_id))?;
-    terminal_artifact_projection_readiness_for_record_with(
+    let (record, aggregate) =
+        lifecycle_store.read_record_with_aggregate_bounded(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+        lifecycle_store,
         &record,
-        lifecycle_store.read_aggregate_readonly(&record.run_id),
+        aggregate.as_ref(),
+    )
+}
+
+pub fn terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Result<Option<String>> {
+    terminal_artifact_projection_readiness_for_record_with(
+        record,
+        aggregate
+            .cloned()
+            .ok_or_else(|| Error::internal_unexpected("authoritative aggregate mirror is absent")),
         |record, aggregate| {
             terminal_artifact_projection_is_verified_with(record, aggregate, || {
                 lifecycle_store.open_observation_readonly()

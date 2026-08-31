@@ -30,7 +30,7 @@ use crate::agent_task_promotion::{
     AgentTaskPromotionStatus,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
+    AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
 use crate::agent_task_timeout::{
     capture_cook_deadline, current_cook_deadline, expired_cook_deadline, now_unix_ms, CookDeadline,
@@ -4318,6 +4318,19 @@ pub fn terminal_review_form_continuation_is_eligible_readonly(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<bool> {
+    let aggregate = lifecycle_store.read_aggregate_readonly(&record.run_id).ok();
+    terminal_review_form_continuation_is_eligible_for_observation_readonly(
+        plan,
+        record,
+        aggregate.as_ref(),
+    )
+}
+
+pub fn terminal_review_form_continuation_is_eligible_for_observation_readonly(
+    plan: &AgentTaskPlan,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Result<bool> {
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Failed
@@ -4326,11 +4339,10 @@ pub fn terminal_review_form_continuation_is_eligible_readonly(
     {
         return Ok(false);
     }
-    let aggregate = match lifecycle_store.read_aggregate_readonly(&record.run_id) {
-        Ok(aggregate) => aggregate,
-        Err(_) => return Ok(false),
-    };
-    Ok(retryable_review_form_terminal_failure(record, &aggregate))
+    Ok(
+        aggregate
+            .is_some_and(|aggregate| retryable_review_form_terminal_failure(record, aggregate)),
+    )
 }
 
 /// Validate the read-only admission boundary for a reconstructed continuation.
@@ -4340,6 +4352,15 @@ pub fn preflight_cook_continuation_admission(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<Vec<&'static str>> {
+    let aggregate = lifecycle_store.read_aggregate_readonly(&record.run_id).ok();
+    preflight_cook_continuation_admission_for_observation(options, record, aggregate.as_ref())
+}
+
+pub fn preflight_cook_continuation_admission_for_observation(
+    options: &CookRequest,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Vec<&'static str>> {
     let moving_base_continuation = record.metadata.get("cook_moving_base_recovery").is_some();
     let verification_pending_continuation = record
@@ -4352,10 +4373,10 @@ pub fn preflight_cook_continuation_admission(
             .unwrap_or(false)
     };
     if review_form_continuation
-        && !terminal_review_form_continuation_is_eligible_readonly(
-            lifecycle_store,
+        && !terminal_review_form_continuation_is_eligible_for_observation_readonly(
             &options.identity.initial_plan,
             record,
+            aggregate,
         )?
     {
         let mut error = Error::validation_invalid_argument(
@@ -5063,12 +5084,23 @@ fn run_cook_spine(
                     .and_then(Value::as_str)
                     == Some("verification_pending")
         });
-    let authenticated_historical_review_continuation = if mode.allows_historical_terminal() {
-        authenticated_historical_review_form_workspace(&options)?
-    } else {
-        false
-    };
-    if !moving_base_continuation
+    let persisted_finalization = lifecycle_store
+        .read_record(&options.identity.initial_run_id)
+        .ok()
+        .is_some_and(|record| {
+            record
+                .metadata
+                .get("cook_finalization")
+                .is_some_and(|finalization| !finalization.is_null())
+        });
+    let authenticated_historical_review_continuation =
+        if mode.allows_historical_terminal() && !persisted_finalization {
+            authenticated_historical_review_form_workspace(&options)?
+        } else {
+            false
+        };
+    if !persisted_finalization
+        && !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
@@ -5081,12 +5113,16 @@ fn run_cook_spine(
     }
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
-    let adopted_model = lifecycle_store
-        .read_record(&options.identity.initial_run_id)
-        .ok()
-        .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
-        .transpose()?
-        .flatten();
+    let adopted_model = if persisted_finalization {
+        None
+    } else {
+        lifecycle_store
+            .read_record(&options.identity.initial_run_id)
+            .ok()
+            .map(|record| adopted_attempt_is_ready_for_cook_continuation(&record))
+            .transpose()?
+            .flatten()
+    };
     // A form-only continuation has already appended and persisted its exact
     // attempt. Re-persisting it as a fresh initial recipe would falsely look
     // like an unsafe post-gate correction because the durable lineage now has
@@ -6232,12 +6268,142 @@ fn run_cook_spine(
         }
         let plan = lifecycle_store.read_controller_plan_for_execution(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
+        let Some(source_request) = plan.tasks.first().cloned() else {
+            return Ok(cook_report(CookReportInput {
+                cook_id,
+                status: "policy_failure",
+                disposition: CookDisposition::Terminal,
+                attempts,
+                finalization: None,
+                stop_reason: Some(
+                    "agent-task cook requires a plan with one source task".to_string(),
+                ),
+                exit_code: 1,
+                invocation_latest_run_id: Some(&run_id),
+            }));
+        };
+        validate_cook_candidate_group(&plan)?;
+        if let Some(finalization) = record
+            .metadata
+            .get("cook_finalization")
+            .filter(|finalization| !finalization.is_null())
+            .cloned()
+        {
+            // A terminal child may outlive its coordinator. Its finalization is
+            // the durable completion receipt, so harvesting it must not repeat
+            // promotion, gates, or any provider-facing work.
+            let status = finalization["status"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let exit_code = if matches!(status.as_str(), "review_ready" | "draft_published") {
+                0
+            } else {
+                1
+            };
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            return Ok(cook_report(CookReportInput {
+                cook_id,
+                status: &status,
+                disposition: CookDisposition::Terminal,
+                attempts,
+                finalization: Some(finalization),
+                stop_reason: None,
+                exit_code,
+                invocation_latest_run_id: Some(&run_id),
+            }));
+        }
+        let persisted_terminal_promotion = if record
+            .metadata
+            .pointer("/latest_promotion/status")
+            .and_then(Value::as_str)
+            == Some("verification_pending")
+        {
+            None
+        } else {
+            super::cook_promotion::persisted_promotion_for_attempt_in_store(
+                lifecycle_store,
+                &run_id,
+            )?
+        };
         let aggregate = match lifecycle_store.read_aggregate(&run_id) {
             Ok(aggregate) => aggregate,
             // An aggregate path is authoritative evidence that an aggregate was
             // committed. Its read failure must surface for repair rather than be
             // misclassified as an interruption and bypass immutable output.
             Err(_error) if record.state.is_terminal() && record.aggregate_path.is_none() => {
+                if let Some(promotion) = persisted_terminal_promotion {
+                    let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
+                        source_request,
+                        promotion_report: promotion.clone(),
+                        attempt,
+                        max_attempts: attempt_limit,
+                        source_run_id: Some(run_id.clone()),
+                        current_diff: gate_feedback_current_diff(&promotion),
+                        require_review_form: !options.finalization.no_finalize,
+                        review_form: None,
+                        metadata: serde_json::json!({
+                            "previous_failure_set": Value::Null,
+                            "intentional_no_change": Value::Null,
+                        }),
+                    });
+                    attempts.push(AgentTaskCookAttemptReport {
+                        attempt,
+                        run_id: run_id.clone(),
+                        run_state: format!("{:?}", record.state),
+                        aggregate_path: record.aggregate_path,
+                        promotion: Some(promotion),
+                        feedback: Some(feedback.clone()),
+                    });
+                    let (status, stop_reason, exit_code) = match feedback.status {
+                        AgentTaskCookLoopStatus::GreenCompleted
+                            if options.finalization.no_finalize =>
+                        {
+                            (
+                                "green_no_finalize",
+                                "loaded the terminal persisted promotion; --no-finalize skipped commit, push, and PR finalization",
+                                0,
+                            )
+                        }
+                        AgentTaskCookLoopStatus::BaselineRed => (
+                            "baseline_red",
+                            "loaded the terminal persisted promotion with inherited baseline failures",
+                            1,
+                        ),
+                        AgentTaskCookLoopStatus::NoChanges => (
+                            "no_changes",
+                            "loaded the terminal persisted no-changes promotion",
+                            1,
+                        ),
+                        AgentTaskCookLoopStatus::NoOpGateFailed => (
+                            "no_op_gate_failed",
+                            "loaded the terminal persisted no-changes gate failure",
+                            1,
+                        ),
+                        _ => (
+                            "durable_failure",
+                            "loaded the terminal persisted promotion, but finalization evidence is absent from the authoritative source observation",
+                            1,
+                        ),
+                    };
+                    return Ok(cook_report(CookReportInput {
+                        cook_id,
+                        status,
+                        disposition: CookDisposition::Terminal,
+                        attempts,
+                        finalization: None,
+                        stop_reason: Some(stop_reason.to_string()),
+                        exit_code,
+                        invocation_latest_run_id: Some(&run_id),
+                    }));
+                }
                 let phase = pre_artifact_interruption_phase(&record);
                 // Aggregates normally provide this accounting. A missing
                 // aggregate must still carry only ledger-proven executions
@@ -6379,22 +6545,6 @@ fn run_cook_spine(
         budget_used.provider_rotations = budget_used
             .provider_rotations
             .saturating_add(remediation_category_usage.provider_rotations);
-        let Some(source_request) = plan.tasks.first().cloned() else {
-            return Ok(cook_report(CookReportInput {
-                cook_id,
-                status: "policy_failure",
-                disposition: CookDisposition::Terminal,
-                attempts,
-                finalization: None,
-                stop_reason: Some(
-                    "agent-task cook requires a plan with one source task".to_string(),
-                ),
-                exit_code: 1,
-                invocation_latest_run_id: Some(&run_id),
-            }));
-        };
-        validate_cook_candidate_group(&plan)?;
-
         let adopted_continuation = adopted_attempt_is_ready_for_cook_continuation(&record)?;
         let review_form_continuation = mode.allows_historical_terminal()
             && review_form_attempt_is_ready_for_cook_continuation(&plan, &record)?
@@ -6503,44 +6653,6 @@ fn run_cook_spine(
                 }
             }
             return Ok(report);
-        }
-
-        if let Some(finalization) = record
-            .metadata
-            .get("cook_finalization")
-            .filter(|finalization| !finalization.is_null())
-            .cloned()
-        {
-            // A terminal child may outlive its coordinator. Its finalization is
-            // the durable completion receipt, so harvesting it must not repeat
-            // promotion, gates, or any provider-facing work.
-            let status = finalization["status"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string();
-            let exit_code = if matches!(status.as_str(), "review_ready" | "draft_published") {
-                0
-            } else {
-                1
-            };
-            attempts.push(AgentTaskCookAttemptReport {
-                attempt,
-                run_id: run_id.clone(),
-                run_state: format!("{:?}", record.state),
-                aggregate_path: record.aggregate_path,
-                promotion: None,
-                feedback: None,
-            });
-            return Ok(cook_report(CookReportInput {
-                cook_id,
-                status: &status,
-                disposition: CookDisposition::Terminal,
-                attempts,
-                finalization: Some(finalization),
-                stop_reason: None,
-                exit_code,
-                invocation_latest_run_id: Some(&run_id),
-            }));
         }
 
         if let Some(declaration) = intentional_no_change_from_aggregate(&aggregate) {
@@ -9457,6 +9569,13 @@ fn tracked_promotion_continuation(
     options: &CookRequest,
 ) -> Result<Option<TrackedPromotionContinuation>> {
     if !agent_task_lifecycle::run_record_exists(&options.identity.initial_run_id)? {
+        return Ok(None);
+    }
+    if agent_task_lifecycle::exact_record(&options.identity.initial_run_id)?
+        .metadata
+        .get("cook_finalization")
+        .is_some_and(|finalization| !finalization.is_null())
+    {
         return Ok(None);
     }
     let Some(promotion) = persisted_promotion_for_attempt(&options.identity.initial_run_id)? else {

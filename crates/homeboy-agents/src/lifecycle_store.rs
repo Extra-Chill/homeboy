@@ -586,25 +586,36 @@ impl AgentTaskLifecycleStore {
         read_aggregate_bounded_in_store(self, run_id)
     }
 
-    /// Observe the same mirrored-aggregate-first source as execution without
-    /// initializing or migrating the observation database.
+    /// Observe only the aggregate mirrored in the authoritative SQLite row,
+    /// without initializing or migrating the observation database.
     pub fn read_aggregate_readonly(&self, run_id: &str) -> Result<AgentTaskAggregate> {
         let observations = self.open_observation_readonly()?;
-        if let Some(run) = observations.get_run(run_id)? {
-            if let Some(value) = run
-                .metadata_json
-                .get("agent_task_aggregate")
-                .filter(|value| !value.is_null())
-            {
-                return serde_json::from_value(value.clone()).map_err(|error| {
-                    Error::internal_json(
-                        error.to_string(),
-                        Some(format!("parse agent-task aggregate {}", run.id)),
-                    )
-                });
-            }
-        }
-        read_aggregate_bounded_in_store(self, run_id)
+        let run = observations.get_run(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!("agent-task run record not found: {run_id}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        let value = run
+            .metadata_json
+            .get("agent_task_aggregate")
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "agent_task_aggregate",
+                    "authoritative observation has no mirrored agent-task aggregate",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })?;
+        serde_json::from_value(value.clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("parse agent-task aggregate {}", run.id)),
+            )
+        })
     }
 
     pub fn write_cook_index_attempt(

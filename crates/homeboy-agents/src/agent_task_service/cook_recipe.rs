@@ -14,7 +14,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::agent_task_lifecycle;
-use crate::agent_task_scheduler::AgentTaskPlan;
+use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::agent_task_service::cook::{
     AgentTaskCookAttemptDispatcher, CookAiDisclosure, CookFinalization, CookIdentity, CookMode,
     CookProviderTransport, CookRequest, CookRetryPolicy, CookWorkspace,
@@ -1404,6 +1404,16 @@ pub fn validate_recipe_attempt_record(
     validate_recipe_attempt_record_with_controller_plan(recipe, run_id, record, &controller_plan)
 }
 
+fn validate_recipe_attempt_record_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<()> {
+    let controller_plan = lifecycle_store.read_controller_plan(run_id)?;
+    validate_recipe_attempt_record_with_controller_plan(recipe, run_id, record, &controller_plan)
+}
+
 pub(crate) fn validate_recipe_attempt_record_with_controller_plan(
     recipe: &AgentTaskCookRecipe,
     run_id: &str,
@@ -1502,15 +1512,24 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
     recipe: &AgentTaskCookRecipe,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    let existing = lifecycle_store.read_record_bounded(run_id)?;
-    validate_recipe_attempt_record(recipe, run_id, &existing)?;
-    if super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
-        .is_some_and(|promotion| {
-            promotion.status
-                != crate::agent_task_promotion::AgentTaskPromotionStatus::VerificationPending
-        })
-    {
-        return Ok(existing);
+    if lifecycle_store.record_exists(run_id)? {
+        let existing = lifecycle_store.read_record_bounded(run_id)?;
+        validate_recipe_attempt_record_in_store(lifecycle_store, recipe, run_id, &existing)?;
+        if existing
+            .metadata
+            .get("cook_finalization")
+            .is_some_and(|finalization| !finalization.is_null())
+        {
+            return Ok(existing);
+        }
+        if super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
+            .is_some_and(|promotion| {
+                promotion.status
+                    != crate::agent_task_promotion::AgentTaskPromotionStatus::VerificationPending
+            })
+        {
+            return Ok(existing);
+        }
     }
     let record = super::cook_pre_execution::recover_recipe_attempt_with_stores(
         recipe_store,
@@ -1522,7 +1541,7 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
             "Cook recipe unexpectedly disappeared during continuation recovery",
         )
     })?;
-    validate_recipe_attempt_record(recipe, run_id, &record)?;
+    validate_recipe_attempt_record_in_store(lifecycle_store, recipe, run_id, &record)?;
     // Promotion has copied and verified the selected artifact into the
     // controller-owned destination. Once its gates are green, finalization no
     // longer consumes the provider aggregate's artifact transport.
@@ -1560,15 +1579,35 @@ pub fn preflight_recipe_attempt_for_continuation(
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let record = lifecycle_store.read_record_bounded(run_id)?;
-    validate_recipe_attempt_record(recipe, run_id, &record)?;
+    preflight_recipe_attempt_for_continuation_in_store(&lifecycle_store, recipe, run_id)
+        .map(|(record, _)| record)
+}
+
+pub fn preflight_recipe_attempt_for_continuation_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<(
+    agent_task_lifecycle::AgentTaskRunRecord,
+    Option<AgentTaskAggregate>,
+)> {
+    let (record, aggregate) = lifecycle_store.read_record_with_aggregate_bounded(run_id)?;
+    validate_recipe_attempt_record_in_store(lifecycle_store, recipe, run_id, &record)?;
+    if record
+        .metadata
+        .get("cook_finalization")
+        .is_some_and(|finalization| !finalization.is_null())
+    {
+        return Ok((record, aggregate));
+    }
     if super::cook_promotion::persisted_promotion_from_record(run_id, record.clone())?.is_some() {
-        return Ok(record);
+        return Ok((record, aggregate));
     }
     if let Some(reason) =
-        agent_task_lifecycle::terminal_artifact_projection_readiness_readonly_in_store(
-            &lifecycle_store,
-            run_id,
+        agent_task_lifecycle::terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+            lifecycle_store,
+            &record,
+            aggregate.as_ref(),
         )?
     {
         return Err(Error::validation_invalid_argument(
@@ -1585,7 +1624,7 @@ pub fn preflight_recipe_attempt_for_continuation(
         )
         .with_retryable(true));
     }
-    Ok(record)
+    Ok((record, aggregate))
 }
 
 pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
@@ -2043,14 +2082,20 @@ pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
             }
         },
         |diagnostic| {
-            agent_task_lifecycle::record_cook_controller_failure_in_store(
+            agent_task_lifecycle::restore_cook_controller_failure_if_absent_in_store(
                 lifecycle_store,
                 run_id,
                 &diagnostic,
             )?;
             Ok(())
         },
-        |from, to| fs::rename(from, to),
+        atomic_write_and_sync,
+        |from, to| {
+            fs::rename(from, to).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(from.display().to_string()))
+            })?;
+            sync_directory(to.parent().expect("claimed continuation has parent"))
+        },
     )
 }
 
@@ -2060,10 +2105,37 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
     run_id: &str,
     clear_failure: impl FnOnce() -> Result<Option<Value>>,
     restore_failure: impl FnOnce(Value) -> Result<()>,
-    publish_claim: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    persist_reset: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    publish_claim: impl FnOnce(&Path, &Path) -> Result<()>,
 ) -> Result<Option<ClaimedCookContinuation>> {
     let Some(claim) = claim_continuation_for_recovery_in_store(store, cook_id, run_id)? else {
         return Ok(None);
+    };
+    let mut reset_continuation = claim.continuation.clone();
+    reset_continuation.retries = 0;
+    let reset_bytes = match serde_json::to_vec_pretty(&reset_continuation) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let error = Error::internal_json(
+                error.to_string(),
+                Some(format!("serialize recovery claim {}", claim.path.display())),
+            );
+            let (failed, _) = claim
+                .recovery_rollback
+                .as_ref()
+                .expect("recovery claims retain rollback state");
+            fs::rename(&claim.path, failed).map_err(|rollback| {
+                Error::internal_io(
+                    format!(
+                        "serialize reset recovery claim: {}; restore failed continuation: {rollback}",
+                        error.message
+                    ),
+                    Some(claim.path.display().to_string()),
+                )
+            })?;
+            sync_directory(failed.parent().expect("failed continuation has parent"))?;
+            return Err(error);
+        }
     };
     let removed_failure = match clear_failure() {
         Ok(removed) => removed,
@@ -2086,24 +2158,51 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
         }
     };
     let mut claim = claim;
-    claim.continuation.retries = 0;
-    let claimed = continuation_base_path(&claim.path)
-        .with_extension(format!("claimed.{}", std::process::id()));
-    if let Err(error) = publish_claim(&claim.path, &claimed) {
-        let (failed, _) = claim
+    claim.continuation = reset_continuation;
+    if let Err(error) = persist_reset(&claim.path, &reset_bytes) {
+        let (failed, original_bytes) = claim
             .recovery_rollback
             .as_ref()
             .expect("recovery claims retain rollback state");
+        if let Some(diagnostic) = removed_failure {
+            restore_failure(diagnostic)?;
+        }
+        atomic_write_and_sync(&claim.path, original_bytes)?;
         fs::rename(&claim.path, failed).map_err(|rollback| {
             Error::internal_io(
-                format!("publish recovery claim: {error}; restore failed continuation: {rollback}"),
+                format!(
+                    "persist reset recovery claim: {}; restore failed continuation: {rollback}",
+                    error.message
+                ),
                 Some(claim.path.display().to_string()),
             )
         })?;
         sync_directory(failed.parent().expect("failed continuation has parent"))?;
+        return Err(error);
+    }
+    let claimed = continuation_base_path(&claim.path)
+        .with_extension(format!("claimed.{}", std::process::id()));
+    if let Err(error) = publish_claim(&claim.path, &claimed) {
+        let (failed, original_bytes) = claim
+            .recovery_rollback
+            .as_ref()
+            .expect("recovery claims retain rollback state");
         if let Some(diagnostic) = removed_failure {
             restore_failure(diagnostic)?;
         }
+        let rollback_path = if claimed.exists() {
+            &claimed
+        } else {
+            &claim.path
+        };
+        atomic_write_and_sync(rollback_path, original_bytes)?;
+        fs::rename(rollback_path, failed).map_err(|rollback| {
+            Error::internal_io(
+                format!("publish recovery claim: {error}; restore failed continuation: {rollback}"),
+                Some(rollback_path.display().to_string()),
+            )
+        })?;
+        sync_directory(failed.parent().expect("failed continuation has parent"))?;
         return Err(Error::internal_io(
             error.to_string(),
             Some(claim.path.display().to_string()),
@@ -2112,6 +2211,39 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
     claim.path = claimed;
     claim.recovery_rollback = None;
     Ok(Some(claim))
+}
+
+fn atomic_write_and_sync(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().expect("continuation path has parent");
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("continuation"),
+        Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+            })?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+            })?;
+        fs::rename(&temporary, path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        sync_directory(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn rearm_state_error(cook_id: &str, run_id: &str, state: CookContinuationState) -> Error {
@@ -3981,6 +4113,43 @@ mod tests {
     }
 
     #[test]
+    fn finalization_receipt_bypasses_stale_promotion_during_continuation_reconciliation() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        let recipe = recipe();
+        store.persist_recipe(&recipe).unwrap();
+        let mut record = lifecycle_store
+            .submit_plan_with_runtime_admission(&recipe.attempts[0].plan, "run", |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        record.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
+        record.metadata["latest_promotion"] = serde_json::json!({ "status": "applied" });
+        record.metadata["cook_finalization"] = serde_json::json!({ "status": "review_ready" });
+        lifecycle_store.write_record(&record).unwrap();
+
+        let reconciled = reconcile_recipe_attempt_for_continuation_in_stores(
+            &store,
+            &lifecycle_store,
+            &recipe,
+            "run",
+        )
+        .expect("execution reconciliation honors finalization receipt");
+        assert_eq!(
+            reconciled.metadata["cook_finalization"]["status"],
+            "review_ready"
+        );
+        let (preflight, aggregate) =
+            preflight_recipe_attempt_for_continuation_in_store(&lifecycle_store, &recipe, "run")
+                .expect("read-only reconciliation honors finalization receipt");
+        assert_eq!(
+            preflight.metadata["cook_finalization"]["status"],
+            "review_ready"
+        );
+        assert!(aggregate.is_none());
+    }
+
+    #[test]
     fn production_recovery_claim_clears_controller_failure_with_queue_rearm() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let (store, lifecycle_store) = rooted_stores(&context);
@@ -4014,6 +4183,9 @@ mod tests {
         .expect("failed continuation rearmed and claimed");
 
         assert_eq!(claim.continuation().key, "cook:run");
+        let persisted: AgentTaskCookContinuation =
+            serde_json::from_slice(&fs::read(&claim.path).unwrap()).unwrap();
+        assert_eq!(persisted.retries, 0);
         assert!(
             agent_task_lifecycle::exact_record_in_store(&lifecycle_store, "run")
                 .unwrap()
@@ -4021,6 +4193,21 @@ mod tests {
                 .get("cook_controller_failure")
                 .is_none()
         );
+
+        let hash = content_hash::sha256_hex(b"cook:run");
+        let dead_claim = store
+            .queue_root()
+            .join(format!("{hash}.claimed.{}", u32::MAX));
+        fs::rename(&claim.path, &dead_claim).unwrap();
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Pending
+        );
+        let reclaimed: AgentTaskCookContinuation = serde_json::from_slice(
+            &fs::read(store.queue_root().join(format!("{hash}.pending"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reclaimed.retries, 0);
     }
 
     #[test]
@@ -4057,7 +4244,12 @@ mod tests {
                 ))
             },
             |_| Ok(()),
-            |from, to| fs::rename(from, to),
+            atomic_write_and_sync,
+            |from, to| {
+                fs::rename(from, to).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(from.display().to_string()))
+                })
+            },
         )
         .expect_err("lifecycle failure must abort recovery");
 
@@ -4077,7 +4269,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_claim_restores_queue_and_failure_when_publish_fails() {
+    fn recovery_claim_restores_queue_and_failure_when_reset_persistence_fails() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
         store.persist_recipe(&recipe()).unwrap();
@@ -4102,10 +4294,68 @@ mod tests {
                 restored.replace(Some(diagnostic));
                 Ok(())
             },
-            |_, _| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected claim publication failure",
+            |path, bytes| {
+                atomic_write_and_sync(path, bytes)?;
+                Err(Error::internal_io(
+                    "injected post-publication reset persistence failure",
+                    None,
+                ))
+            },
+            |from, to| {
+                fs::rename(from, to).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(from.display().to_string()))
+                })
+            },
+        )
+        .expect_err("reset persistence failure compensates both stores");
+
+        assert_eq!(error.code, homeboy_core::ErrorCode::InternalIoError);
+        assert_eq!(fs::read(&failed).unwrap(), original);
+        assert_eq!(
+            restored.into_inner(),
+            Some(serde_json::json!({ "message": "original failure" }))
+        );
+    }
+
+    #[test]
+    fn recovery_claim_restores_queue_and_failure_when_publish_fails() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+        let hash = content_hash::sha256_hex(b"cook:run");
+        let failed = store.queue_root().join(format!("{hash}.failed"));
+        let original = fs::read(&failed).unwrap();
+        let restored = std::cell::RefCell::new(None);
+        let observed_private_ownership = std::cell::Cell::new(false);
+
+        let error = claim_continuation_for_recovery_and_clear_failure_with(
+            &store,
+            "cook",
+            "run",
+            || Ok(Some(serde_json::json!({ "message": "original failure" }))),
+            |diagnostic| {
+                observed_private_ownership.set(
+                    preflight_continuation_claim_in_store(&store, "cook", "run", true).is_err()
+                        && !failed.exists(),
+                );
+                restored.replace(Some(diagnostic));
+                Ok(())
+            },
+            atomic_write_and_sync,
+            |from, to| {
+                fs::rename(from, to).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(from.display().to_string()))
+                })?;
+                Err(Error::internal_io(
+                    "injected post-rename claim directory sync failure",
+                    None,
                 ))
             },
         )
@@ -4113,9 +4363,78 @@ mod tests {
 
         assert_eq!(error.code, homeboy_core::ErrorCode::InternalIoError);
         assert_eq!(fs::read(&failed).unwrap(), original);
+        assert!(
+            observed_private_ownership.get(),
+            "failure compensation must finish while the queue entry remains privately owned"
+        );
         assert_eq!(
             restored.into_inner(),
             Some(serde_json::json!({ "message": "original failure" }))
+        );
+    }
+
+    #[test]
+    fn recovery_publish_failure_does_not_overwrite_newer_controller_diagnostic() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        let recipe = recipe();
+        store.persist_recipe(&recipe).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&recipe.attempts[0].plan, "run", |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+        agent_task_lifecycle::record_cook_controller_failure_in_store(
+            &lifecycle_store,
+            "run",
+            &serde_json::json!({ "message": "original" }),
+        )
+        .unwrap();
+
+        claim_continuation_for_recovery_and_clear_failure_with(
+            &store,
+            "cook",
+            "run",
+            || agent_task_lifecycle::take_cook_controller_failure_in_store(&lifecycle_store, "run"),
+            |diagnostic| {
+                agent_task_lifecycle::restore_cook_controller_failure_if_absent_in_store(
+                    &lifecycle_store,
+                    "run",
+                    &diagnostic,
+                )
+            },
+            atomic_write_and_sync,
+            |_, _| {
+                agent_task_lifecycle::record_cook_controller_failure_in_store(
+                    &lifecycle_store,
+                    "run",
+                    &serde_json::json!({ "message": "newer" }),
+                )
+                .unwrap();
+                Err(Error::internal_io(
+                    "injected claim publication failure",
+                    None,
+                ))
+            },
+        )
+        .expect_err("publication failure is compensated");
+
+        assert_eq!(
+            agent_task_lifecycle::exact_record_in_store(&lifecycle_store, "run")
+                .unwrap()
+                .metadata["cook_controller_failure"]["message"],
+            "newer"
+        );
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Failed
         );
     }
 

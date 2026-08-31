@@ -47,3 +47,41 @@ fn public_continuation_preflight_reaches_read_only_handler_without_initializing_
     assert!(!context.data_dir().join("agent-task-runs").exists());
     assert!(!context.data_dir().join("agent-task-cooks").exists());
 }
+
+#[test]
+fn pressured_public_continuation_preflight_bypasses_startup_resource_admission() {
+    let context = HermeticTestContext::new();
+    let output = context
+        .command(TestBinary::HomeboyFixture)
+        .env("HOMEBOY_TEST_LOAD_AVERAGES", "100000,100000,100000")
+        .args([
+            "agent-task",
+            "cook-continue",
+            "missing-cook-under-pressure",
+            "--preflight",
+        ])
+        .output()
+        .expect("run pressured public continuation preflight");
+
+    assert_eq!(output.status.code(), Some(1));
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "pressured preflight output is JSON: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(
+        envelope["data"]["schema"],
+        "homeboy/agent-task-cook-continue-preflight/v1"
+    );
+    assert_eq!(envelope["data"]["admitted"], false);
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!context.data_dir().join("observations.sqlite").exists());
+    assert!(!context.data_dir().join("agent-task-runs").exists());
+    assert!(!context.data_dir().join("agent-task-cooks").exists());
+}
