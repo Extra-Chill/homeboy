@@ -2008,6 +2008,77 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
 }
 
 #[test]
+fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_projection() {
+    with_isolated_home(|_| {
+        let run_id = "cook-runner-reconcile-claim-attempt-1-transport-retry";
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::configured_idle(),
+        ));
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        let execution_context =
+            homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                Some(run_id),
+                "homeboy-lab",
+                "00000000-0000-4000-8000-000000000001",
+                "homeboy",
+                "reservation-1",
+            )
+            .expect("accepted runner execution context");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
+            record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+            record.metadata["runner_job_id"] = serde_json::json!(execution_context.runner_job_id());
+            record.metadata["runner_execution_context"] = execution_context
+                .evidence_record()
+                .expect("execution context evidence");
+            record.metadata["provider_executions_consumed"] = serde_json::json!(0);
+            record
+                .metadata
+                .as_object_mut()
+                .expect("metadata")
+                .remove("runner_pid");
+        })
+        .expect("ownerless runner record");
+        let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
+            idempotency_key: "reconcile-runner-claim-1".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+            confirmed: true,
+        };
+
+        let first = crate::orchestration::execute_action_from_current_environment(run_id, &request)
+            .expect("reconciliation action");
+        assert_eq!(
+            first.outcome,
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        );
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run_id)
+                .expect("terminal record")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+        let operation_key = format!("control-plane-action:reconcile:{}", request.idempotency_key);
+        assert_eq!(
+            agent_task_lifecycle::operation_claim(run_id, &operation_key)
+                .expect("operation claim")
+                .expect("completed operation claim")
+                .state,
+            agent_task_lifecycle::ClaimState::Completed
+        );
+        assert_eq!(
+            crate::orchestration::execute_action_from_current_environment(run_id, &request)
+                .expect("replayed reconciliation"),
+            first
+        );
+    });
+}
+
+#[test]
 fn record_scoped_reconciliation_stays_with_its_explicit_lifecycle_store() {
     with_isolated_home(|home| {
         let run_id = "queued-in-explicit-store";
