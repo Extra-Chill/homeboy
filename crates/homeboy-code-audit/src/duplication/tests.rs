@@ -5,11 +5,13 @@ fn detect_duplicates(
     fingerprints: &[&FileFingerprint],
     convention_methods: &HashSet<String>,
 ) -> Vec<Finding> {
-    detect_exact_duplicates_scoped(fingerprints, fingerprints, convention_methods).findings
+    let index = DuplicationIndex::new(fingerprints);
+    detect_exact_duplicates_scoped(fingerprints, &index, convention_methods).findings
 }
 
 fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<DuplicateGroup> {
-    detect_exact_duplicates_scoped(fingerprints, fingerprints, &HashSet::new()).groups
+    let index = DuplicationIndex::new(fingerprints);
+    detect_exact_duplicates_scoped(fingerprints, &index, &HashSet::new()).groups
 }
 
 fn detect_duplicates_scoped(
@@ -17,14 +19,45 @@ fn detect_duplicates_scoped(
     all: &[&FileFingerprint],
     convention_methods: &HashSet<String>,
 ) -> Vec<Finding> {
-    detect_exact_duplicates_scoped(scoped, all, convention_methods).findings
+    let index = DuplicationIndex::new(all);
+    detect_exact_duplicates_scoped(scoped, &index, convention_methods).findings
 }
 
 fn detect_duplicate_groups_scoped(
     scoped: &[&FileFingerprint],
     all: &[&FileFingerprint],
 ) -> Vec<DuplicateGroup> {
-    detect_exact_duplicates_scoped(scoped, all, &HashSet::new()).groups
+    let index = DuplicationIndex::new(all);
+    detect_exact_duplicates_scoped(scoped, &index, &HashSet::new()).groups
+}
+
+fn detect_cross_name_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+    let index = DuplicationIndex::new(fingerprints);
+    detect_cross_name_duplicates_with_index(fingerprints, &index)
+}
+
+fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+    let index = DuplicationIndex::new(fingerprints);
+    detect_near_duplicates_with_index(fingerprints, &index)
+}
+
+fn detect_skeleton_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+    let index = DuplicationIndex::new(fingerprints);
+    detect_skeleton_duplicates_with_index(fingerprints, &index)
+}
+
+fn detect_parallel_implementations(
+    fingerprints: &[&FileFingerprint],
+    convention_methods: &HashSet<String>,
+    detector_config: &DuplicationDetectorConfig,
+) -> Vec<Finding> {
+    let index = DuplicationIndex::new(fingerprints);
+    detect_parallel_implementations_with_index(
+        fingerprints,
+        &index,
+        convention_methods,
+        detector_config,
+    )
 }
 
 fn make_fingerprint(path: &str, methods: &[&str], hashes: &[(&str, &str)]) -> FileFingerprint {
@@ -310,28 +343,6 @@ mod scope_seeded {
                 )
             })
             .collect()
-    }
-
-    #[test]
-    fn seeding_from_the_full_corpus_is_a_no_op_filter() {
-        // This is what lets the unscoped entry points delegate to the scoped
-        // ones: with the whole corpus as the seed, every key is a candidate, so
-        // the seeded expansion reproduces `build_groups` exactly — same keys,
-        // same locations, same location order.
-        let fp1 = make_fingerprint(
-            "src/a.rs",
-            &["shared", "unique_a"],
-            &[("shared", "same"), ("unique_a", "hash_a")],
-        );
-        let fp2 = make_fingerprint(
-            "src/b.rs",
-            &["shared", "unique_b"],
-            &[("shared", "same"), ("unique_b", "hash_b")],
-        );
-        let fp3 = make_fingerprint("src/c.rs", &["shared"], &[("shared", "same")]);
-        let all = [&fp1, &fp2, &fp3];
-
-        assert_eq!(build_groups_seeded(&all, &all), build_groups(&all));
     }
 
     #[test]

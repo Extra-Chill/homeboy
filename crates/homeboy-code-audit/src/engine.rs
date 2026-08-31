@@ -410,9 +410,9 @@ pub(super) fn audit_internal(
     //
     // "Hand-sequenced" describes the REPORTING, which is still the fixed sequence
     // of blocks below: each pass owns a distinct log line, and one pass produces
-    // `duplicate_groups`. The passes themselves are independent pure functions of
-    // the same immutable corpus, so `run_duplication_family` runs them
-    // concurrently and hands back one named output per pass.
+    // `duplicate_groups`. `run_duplication_family` builds shared cross-file
+    // evidence once, fans the dependent passes out over it, and hands back one
+    // named output per pass.
     //
     // Those three families — duplication, the descriptor table, and artifact
     // portability — are independent of each other too, so all three run
@@ -709,12 +709,13 @@ struct DuplicationUnit {
     parallel_implementation: Vec<findings::Finding>,
 }
 
-/// Run the duplication family's six passes concurrently.
+/// Run the duplication family's six passes in two concurrent stages.
 ///
-/// Every pass is a pure function of the same two immutable inputs — the
-/// convention fingerprint corpus and the convention method set — and returns
-/// owned output. The family's "hand-sequenced" shape is a reporting requirement,
-/// not an execution dependency.
+/// Exact analysis builds the shared full-corpus index while intra-method analysis
+/// runs beside it. The remaining four cross-file passes then fan out over that
+/// immutable index instead of rebuilding the same maps independently. The
+/// family's "hand-sequenced" shape remains a reporting requirement, not an
+/// execution requirement.
 ///
 /// Units are started in pass order and joined in pass order, and the spans are
 /// concatenated in that same order, so the timing report is identical to the
@@ -723,15 +724,12 @@ struct DuplicationUnit {
 /// start point, which reproduces the original serial execution exactly.
 ///
 /// `scoped_fingerprints` is the changed-scope seed corpus (#12583). The exact
-/// duplicate pass uses the scope-seeded entry point, which seeds candidate
-/// `(method_name, body_hash)` keys from it and then expand each candidate against
-/// the full `all_fingerprints` corpus, so counterpart evidence from out-of-scope
-/// files is still found. It must be a SUBSET of `all_fingerprints`; in unscoped
-/// mode the caller passes `all_fingerprints` itself, which is the same `(all, all)`
-/// delegation an unscoped analysis performs.
-/// The other five passes have no scoped variant and take the full corpus, so this
-/// adds a third immutable input without adding a data dependency: every pass is
-/// still a pure function of borrowed, shared inputs.
+/// duplicate pass selects candidate `(method_name, body_hash)` keys from it, then
+/// resolves them through the full-corpus index so counterpart evidence from
+/// out-of-scope files is still found. It must be a SUBSET of `all_fingerprints`;
+/// in unscoped mode the caller passes `all_fingerprints` itself.
+/// The other five passes have no scoped variant and take the full corpus. Four
+/// consume the exact pass's immutable index; intra-method analysis is independent.
 fn run_duplication_family(
     plan: &AuditExecutionPlan,
     scoped_fingerprints: &[&fingerprint::FileFingerprint],
@@ -747,13 +745,20 @@ fn run_duplication_family(
                 "detector.duplication.exact",
                 enabled,
                 || {
-                    duplication::detect_exact_duplicates_scoped(
+                    let index = duplication::DuplicationIndex::new(all_fingerprints);
+                    let analysis = duplication::detect_exact_duplicates_scoped(
                         scoped_fingerprints,
-                        all_fingerprints,
+                        &index,
                         convention_methods,
+                    );
+                    (index, analysis)
+                },
+                || {
+                    (
+                        duplication::DuplicationIndex::default(),
+                        duplication::ExactDuplicateAnalysis::default(),
                     )
                 },
-                duplication::ExactDuplicateAnalysis::default,
             )
         });
         let intra_method = spawn_or_run(scope, || {
@@ -764,52 +769,68 @@ fn run_duplication_family(
                 Vec::new,
             )
         });
-        let near_duplicate = spawn_or_run(scope, || {
-            time_audit_detector_isolated(
-                "detector.duplication.near_duplicate",
-                enabled,
-                || duplication::detect_near_duplicates(all_fingerprints),
-                Vec::new,
-            )
-        });
-        let cross_name = spawn_or_run(scope, || {
-            time_audit_detector_isolated(
-                "detector.duplication.cross_name_duplicate",
-                enabled,
-                || duplication::detect_cross_name_duplicates(all_fingerprints),
-                Vec::new,
-            )
-        });
-        let skeleton = spawn_or_run(scope, || {
-            time_audit_detector_isolated(
-                "detector.duplication.skeleton_duplicate",
-                enabled,
-                || duplication::detect_skeleton_duplicates(all_fingerprints),
-                Vec::new,
-            )
-        });
-        let parallel_implementation = spawn_or_run(scope, || {
-            time_audit_detector_isolated(
-                "detector.duplication.parallel_implementation",
-                enabled,
-                || {
-                    duplication::detect_parallel_implementations(
-                        all_fingerprints,
-                        convention_methods,
-                        &audit_config.duplication_detector,
-                    )
-                },
-                Vec::new,
+
+        let ((index, exact), exact_spans) = exact.join();
+        let (
+            (near_duplicate, near_duplicate_spans),
+            (cross_name, cross_name_spans),
+            (skeleton, skeleton_spans),
+            (parallel_implementation, parallel_implementation_spans),
+        ) = std::thread::scope(|dependent_scope| {
+            let near_duplicate = spawn_or_run(dependent_scope, || {
+                time_audit_detector_isolated(
+                    "detector.duplication.near_duplicate",
+                    enabled,
+                    || duplication::detect_near_duplicates_with_index(all_fingerprints, &index),
+                    Vec::new,
+                )
+            });
+            let cross_name = spawn_or_run(dependent_scope, || {
+                time_audit_detector_isolated(
+                    "detector.duplication.cross_name_duplicate",
+                    enabled,
+                    || {
+                        duplication::detect_cross_name_duplicates_with_index(
+                            all_fingerprints,
+                            &index,
+                        )
+                    },
+                    Vec::new,
+                )
+            });
+            let skeleton = spawn_or_run(dependent_scope, || {
+                time_audit_detector_isolated(
+                    "detector.duplication.skeleton_duplicate",
+                    enabled,
+                    || duplication::detect_skeleton_duplicates_with_index(all_fingerprints, &index),
+                    Vec::new,
+                )
+            });
+            let parallel_implementation = spawn_or_run(dependent_scope, || {
+                time_audit_detector_isolated(
+                    "detector.duplication.parallel_implementation",
+                    enabled,
+                    || {
+                        duplication::detect_parallel_implementations_with_index(
+                            all_fingerprints,
+                            &index,
+                            convention_methods,
+                            &audit_config.duplication_detector,
+                        )
+                    },
+                    Vec::new,
+                )
+            });
+
+            (
+                near_duplicate.join(),
+                cross_name.join(),
+                skeleton.join(),
+                parallel_implementation.join(),
             )
         });
 
-        let (exact, exact_spans) = exact.join();
         let (intra_method, intra_method_spans) = intra_method.join();
-        let (near_duplicate, near_duplicate_spans) = near_duplicate.join();
-        let (cross_name, cross_name_spans) = cross_name.join();
-        let (skeleton, skeleton_spans) = skeleton.join();
-        let (parallel_implementation, parallel_implementation_spans) =
-            parallel_implementation.join();
 
         let mut spans = Vec::new();
         spans.extend(exact_spans);
