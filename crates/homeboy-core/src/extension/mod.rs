@@ -5,7 +5,6 @@ pub mod audit_manifest_provider;
 pub mod bench;
 pub mod build;
 pub mod catalog;
-mod compiler_warning_contract;
 pub mod component_script;
 pub mod fingerprint;
 pub mod invoke;
@@ -22,10 +21,6 @@ mod setup_env;
 pub mod test;
 pub mod trace;
 
-pub use compiler_warning_contract::{
-    extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
-    CompilerWarningContract,
-};
 pub(crate) use homeboy_core::extension::resolve::{extension_guidance_hints, stderr_tail};
 
 pub(crate) use invoke::build_settings_json_from_manifest;

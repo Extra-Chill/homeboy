@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 mod action;
+mod api;
 mod context;
 pub(crate) mod env_provider;
 mod environment;
@@ -34,6 +35,7 @@ use homeboy_extension_contract::runner_contract::RunnerStepFilter;
 use homeboy_extension_contract::ExtensionManifest;
 
 pub use action::execute_action;
+pub use api::invoke_api;
 pub use context::ResolvedExtensionInvocationContext;
 pub use env_provider::{
     declared_secret_names, resolve_installed, resolve_installed_all, EnvProviderCommandPayload,
