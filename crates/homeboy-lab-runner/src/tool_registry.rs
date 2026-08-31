@@ -48,6 +48,18 @@ impl RunnerToolRegistry {
             .into_iter()
             .find(|spec| spec.tool.as_ref() == Some(tool))
     }
+
+    /// Return the same configured tool definition that runner doctor uses.
+    /// Capability preflight must execute this command rather than infer tool
+    /// presence from its identifier alone.
+    pub fn spec_for_runner_required_tool(
+        runner: &Runner,
+        tool: &RunnerRequiredTool,
+    ) -> Option<RunnerToolSpec> {
+        Self::doctor_tools(runner)
+            .into_iter()
+            .find(|spec| spec.tool.as_ref() == Some(tool))
+    }
 }
 
 fn intrinsic_tool_specs() -> Vec<RunnerToolSpec> {
