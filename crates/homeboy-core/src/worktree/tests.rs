@@ -395,6 +395,44 @@ fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateO
 }
 
 #[test]
+fn create_accepts_an_existing_repository_path_without_component_registration() {
+    crate::test_support::with_isolated_home(|home| {
+        let parent = home.path().join("Developer");
+        let source = parent.join("repository-fixture");
+        fs::create_dir_all(&source).expect("source directory");
+        run_git(&source, &["init", "-q"]);
+        run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.join("README.md"), "initial\n").expect("initial file");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "initial"]);
+
+        let created = create(WorktreeCreateOptions {
+            component_id: source.to_string_lossy().to_string(),
+            branch: "fix/repository-path".to_string(),
+            from: Some("HEAD".to_string()),
+            task_url: Some("https://example.com/tasks/repository-path".to_string()),
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+        })
+        .expect("create from repository path");
+
+        assert_eq!(created.record.component_id, "repository-fixture");
+        assert_eq!(created.record.id, "repository-fixture@fix-repository-path");
+        assert_eq!(created.record.source_checkout, source.to_string_lossy());
+        assert_eq!(
+            created.record.worktree_path,
+            parent
+                .join("repository-fixture@fix-repository-path")
+                .to_string_lossy()
+        );
+        assert_eq!(created.record.branch, "fix/repository-path");
+        assert!(Path::new(&created.record.worktree_path).is_dir());
+    });
+}
+
+#[test]
 fn import_records_an_exact_existing_worktree_without_changing_git_and_replays_idempotently() {
     crate::test_support::with_isolated_home(|home| {
         let (source, _) = registered_create_fixture(home.path(), "import-fixture");
