@@ -418,6 +418,26 @@ pub fn preflight_cook_promotion_in_store(
     run_id: &str,
     artifact_id: Option<&str>,
 ) -> Result<Value> {
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
+        let behavior = if promotion.status == AgentTaskPromotionStatus::VerificationPending {
+            "resume_verification_pending"
+        } else {
+            "load_persisted"
+        };
+        if promotion.status != AgentTaskPromotionStatus::VerificationPending {
+            return Ok(json!({
+                "behavior": behavior,
+                "status": promotion.status,
+                "artifact_id": promotion.patch_artifact.id,
+                "candidate_fingerprint": promotion.provenance.get("candidate").cloned().unwrap_or(Value::Null),
+                "execution_only_checks": persisted_promotion_execution_only_checks(
+                    promotion.status,
+                    options.finalization.no_finalize,
+                ),
+            }));
+        }
+    }
     let aggregate = lifecycle_store.read_aggregate_readonly(run_id)?;
     let outcome = aggregate
         .selected_outcome()
@@ -478,6 +498,16 @@ pub fn preflight_cook_promotion_in_store(
     };
     let observation_store = lifecycle_store.open_observation_readonly()?;
     if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
+        if artifact_id.is_none()
+            && !crate::agent_task_promotion::outcome_has_patch_artifacts(outcome)
+        {
+            return Ok(json!({
+                "behavior": "promote_committed_candidate",
+                "artifact_id": Value::Null,
+                "candidate_fingerprint": Value::Null,
+                "execution_only_checks": ["committed_candidate_resolution", "promotion_target_resolution", "patch_apply", "verification_gates"],
+            }));
+        }
         let artifact =
             crate::agent_task_promotion::preflight_patch_artifact_admission_in_observation_store(
                 outcome,
@@ -969,6 +999,11 @@ pub(crate) fn promote_or_load_attempt_in_store(
     options: &CookRequest,
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
+    if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
+        if promotion.status != AgentTaskPromotionStatus::VerificationPending {
+            return Ok(promotion);
+        }
+    }
     let aggregate = lifecycle_store.read_aggregate(run_id)?;
     let outcome = aggregate
         .selected_outcome()

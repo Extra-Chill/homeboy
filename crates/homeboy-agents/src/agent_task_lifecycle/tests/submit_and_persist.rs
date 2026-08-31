@@ -4185,6 +4185,40 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
         .expect("artifact projections");
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].artifact_type, "file");
+    let writable = lifecycle_store
+        .open_observation_maintained()
+        .expect("writable observation store");
+    let mut legacy_metadata = artifacts[0].metadata_json.clone();
+    legacy_metadata["agent_task"]
+        .as_object_mut()
+        .expect("agent-task metadata")
+        .remove("projection");
+    writable
+        .update_artifact_metadata(&artifacts[0].id, legacy_metadata)
+        .expect("seed legacy projection metadata");
+    drop(writable);
+    let projected_readonly = verified_controller_artifact_projection_path_in_store(
+        &lifecycle_store
+            .open_observation_readonly()
+            .expect("read-only store"),
+        run_id,
+        &aggregate.outcomes[0].task_id,
+        &aggregate.outcomes[0].artifacts[0],
+    )
+    .expect("legacy projection remains admissible read-only");
+    assert_eq!(
+        projected_readonly,
+        Some(std::path::PathBuf::from(&artifacts[0].path))
+    );
+    let after_readonly = lifecycle_store
+        .open_observation_maintained()
+        .expect("inspect legacy metadata")
+        .list_artifacts(run_id)
+        .expect("artifact projections");
+    assert!(after_readonly[0]
+        .metadata_json
+        .pointer("/agent_task/projection")
+        .is_none());
     let projected = verified_controller_artifact_projection_path_in_store(
         &lifecycle_store
             .open_observation_maintained()

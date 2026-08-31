@@ -19,11 +19,11 @@ use super::super::cook_promotion::{
     moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
     persist_manual_finalization_intent, persist_manual_finalization_receipt,
     persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
-    prepare_manual_finalization_identity, record_replacement_gate_proof,
-    recover_cook_pr_with_backend, recover_moving_base_cook_candidate_in_store,
-    refreshed_moving_base_recovery, replacement_gate_execution_started,
-    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
-    MovingBaseCookRecovery,
+    preflight_cook_promotion_in_store, prepare_manual_finalization_identity,
+    record_replacement_gate_proof, recover_cook_pr_with_backend,
+    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
+    replacement_gate_execution_started, selected_candidate_task_id_in_store,
+    verify_replacement_gates, CookReportInput, MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
     load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
@@ -16822,6 +16822,50 @@ fn fresh_cook_has_no_tracked_promotion_before_lifecycle_materialization() {
             !agent_task_lifecycle::run_record_exists(&options.identity.initial_run_id).unwrap()
         );
         assert!(tracked_promotion_continuation(&options).unwrap().is_none());
+    });
+}
+
+#[test]
+fn terminal_persisted_promotion_loads_without_source_aggregate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "run-persisted-promotion-without-aggregate";
+        let options = promotion_claim_options("cook-persisted-promotion", run_id);
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+        let expected = promotion(run_id);
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(&expected).expect("serialize promotion fixture"),
+        )
+        .unwrap();
+        let lifecycle_store = test_lifecycle_store();
+        assert!(lifecycle_store.read_aggregate(run_id).is_err());
+
+        let preflight = preflight_cook_promotion_in_store(
+            &lifecycle_store,
+            &options,
+            run_id,
+            Some("different-artifact"),
+        )
+        .expect("terminal persisted promotion is authoritative");
+        assert_eq!(preflight["behavior"], "load_persisted");
+        assert_eq!(preflight["artifact_id"], "patch");
+        let loaded = promote_or_load_attempt_in_store(&lifecycle_store, &options, run_id)
+            .expect("execution loads terminal persisted promotion");
+        assert_eq!(loaded.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(loaded.source.run_id.as_deref(), Some(run_id));
+        assert_eq!(loaded.patch_artifact.id, expected.patch_artifact.id);
+
+        let mut pending = promotion(run_id);
+        pending.status = AgentTaskPromotionStatus::VerificationPending;
+        let pending = serde_json::to_value(pending).expect("serialize pending fixture");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["latest_promotion"] = pending.clone();
+        })
+        .unwrap();
+        assert!(
+            preflight_cook_promotion_in_store(&lifecycle_store, &options, run_id, None).is_err()
+        );
+        assert!(promote_or_load_attempt_in_store(&lifecycle_store, &options, run_id).is_err());
     });
 }
 

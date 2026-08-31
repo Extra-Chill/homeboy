@@ -1171,6 +1171,43 @@ fn shared_patch_preflight_rejects_execution_hash_and_normalization_failures() {
 }
 
 #[test]
+fn execution_revalidates_artifact_bytes_after_passing_preflight() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source_path, source) = write_patch_source(&temp);
+        let outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
+        let options = AgentTaskPromotionOptions {
+            source,
+            source_run_id: None,
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@preflight-revalidation".to_string(),
+            task_id: None,
+            artifact_id: Some("patch".to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        };
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
+            .expect("original artifact passes preflight");
+        std::fs::write(temp.path().join("changes.patch"), "changed after preflight")
+            .expect("mutate admitted artifact");
+        let mut provider = FakePromotionWorkspaceProvider::default();
+
+        let error = promote_with_provider_in_observation_store(options, &mut provider, &store)
+            .expect_err("execution rejects artifact drift");
+
+        assert!(error.message.contains("size mismatch"), "{error:?}");
+        assert!(provider.applied_patch_contents.is_empty());
+    });
+}
+
+#[test]
 fn review_only_patch_cannot_be_selected_for_promotion() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (_, source) = write_patch_source(&temp);

@@ -1502,6 +1502,16 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
     recipe: &AgentTaskCookRecipe,
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let existing = lifecycle_store.read_record_bounded(run_id)?;
+    validate_recipe_attempt_record(recipe, run_id, &existing)?;
+    if super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
+        .is_some_and(|promotion| {
+            promotion.status
+                != crate::agent_task_promotion::AgentTaskPromotionStatus::VerificationPending
+        })
+    {
+        return Ok(existing);
+    }
     let record = super::cook_pre_execution::recover_recipe_attempt_with_stores(
         recipe_store,
         lifecycle_store,
@@ -1814,6 +1824,7 @@ pub fn preflight_continuation_claim_in_store(
     let mut state = CookContinuationState::Absent;
     if root.is_dir() {
         let claimed_prefix = format!("{hash}.claimed.");
+        let rearming_prefix = format!("{hash}.rearming.");
         for entry in fs::read_dir(&root).map_err(|error| {
             Error::internal_io(error.to_string(), Some(root.display().to_string()))
         })? {
@@ -1825,7 +1836,11 @@ pub fn preflight_continuation_claim_in_store(
             let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            let Some(pid_text) = name.strip_prefix(&claimed_prefix) else {
+            let recovery = name.starts_with(&rearming_prefix);
+            let Some(pid_text) = name
+                .strip_prefix(&claimed_prefix)
+                .or_else(|| name.strip_prefix(&rearming_prefix))
+            else {
                 continue;
             };
             let pid = pid_text.parse::<u32>().ok();
@@ -1841,6 +1856,8 @@ pub fn preflight_continuation_claim_in_store(
             }
             state = if pid.is_none_or(homeboy_core::process::pid_is_running) {
                 CookContinuationState::Claimed
+            } else if recovery {
+                CookContinuationState::Failed
             } else {
                 CookContinuationState::Pending
             };
@@ -1928,7 +1945,10 @@ pub fn claim_continuation_for_recovery_in_store(
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
         .filter_map(std::result::Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .any(|name| name.starts_with(&format!("{hash}.claimed.")))
+        .any(|name| {
+            name.starts_with(&format!("{hash}.claimed."))
+                || name.starts_with(&format!("{hash}.rearming."))
+        })
     {
         return Err(rearm_state_error(
             cook_id,
@@ -1937,9 +1957,9 @@ pub fn claim_continuation_for_recovery_in_store(
         ));
     }
 
-    let claimed = root.join(format!("{hash}.claimed.{}", std::process::id()));
     let failed = root.join(format!("{hash}.failed"));
-    match fs::rename(&failed, &claimed) {
+    let rearming = root.join(format!("{hash}.rearming.{}", std::process::id()));
+    match fs::rename(&failed, &rearming) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(rearm_state_error(
@@ -1955,26 +1975,34 @@ pub fn claim_continuation_for_recovery_in_store(
             ))
         }
     }
-    let original_bytes = fs::read(&claimed).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(claimed.display().to_string()))
-    })?;
-    let mut continuation: AgentTaskCookContinuation = match serde_json::from_slice(&original_bytes)
-        .map_err(|error| {
-            Error::validation_invalid_argument(
+    let original_bytes = match fs::read(&rearming) {
+        Ok(bytes) => bytes,
+        Err(cause) => {
+            let error = Error::validation_invalid_argument(
                 "cook_continuation",
-                format!("malformed failed durable continuation: {error}"),
-                Some(claimed.display().to_string()),
+                format!("unreadable failed durable continuation: {cause}"),
+                Some(rearming.display().to_string()),
                 None,
-            )
-        }) {
+            );
+            fail_claimed_path(&rearming, &error.message)?;
+            return Err(error);
+        }
+    };
+    let continuation: AgentTaskCookContinuation = match serde_json::from_slice(&original_bytes) {
         Ok(continuation) => continuation,
-        Err(error) => {
-            fail_claimed_path(&claimed, &error.message)?;
+        Err(cause) => {
+            let error = Error::validation_invalid_argument(
+                "cook_continuation",
+                format!("malformed failed durable continuation: {cause}"),
+                Some(rearming.display().to_string()),
+                None,
+            );
+            fail_claimed_path(&rearming, &error.message)?;
             return Err(error);
         }
     };
     if let Err(error) = validate_continuation(&continuation) {
-        fail_claimed_path(&claimed, &error.message)?;
+        fail_claimed_path(&rearming, &error.message)?;
         return Err(error);
     }
     if continuation.key != key {
@@ -1984,19 +2012,12 @@ pub fn claim_continuation_for_recovery_in_store(
             Some(continuation.key.clone()),
             None,
         );
-        fail_claimed_path(&claimed, &error.message)?;
+        fail_claimed_path(&rearming, &error.message)?;
         return Err(error);
     }
-    continuation.retries = 0;
-    fs::write(
-        &claimed,
-        serde_json::to_vec(&continuation)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
-    )
-    .map_err(|error| Error::internal_io(error.to_string(), Some(claimed.display().to_string())))?;
     Ok(Some(ClaimedCookContinuation {
         continuation,
-        path: claimed,
+        path: rearming,
         recovery_rollback: Some((failed, original_bytes)),
     }))
 }
@@ -2010,32 +2031,48 @@ pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
     cook_id: &str,
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
-    claim_continuation_for_recovery_and_clear_failure_with(store, cook_id, run_id, || {
-        if agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, run_id)? {
-            agent_task_lifecycle::clear_cook_controller_failure_in_store(lifecycle_store, run_id)?;
-        }
-        Ok(())
-    })
+    claim_continuation_for_recovery_and_clear_failure_with(
+        store,
+        cook_id,
+        run_id,
+        || {
+            if agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, run_id)? {
+                agent_task_lifecycle::take_cook_controller_failure_in_store(lifecycle_store, run_id)
+            } else {
+                Ok(None)
+            }
+        },
+        |diagnostic| {
+            agent_task_lifecycle::record_cook_controller_failure_in_store(
+                lifecycle_store,
+                run_id,
+                &diagnostic,
+            )?;
+            Ok(())
+        },
+        |from, to| fs::rename(from, to),
+    )
 }
 
 fn claim_continuation_for_recovery_and_clear_failure_with(
     store: &CookRecipeStore,
     cook_id: &str,
     run_id: &str,
-    clear_failure: impl FnOnce() -> Result<()>,
+    clear_failure: impl FnOnce() -> Result<Option<Value>>,
+    restore_failure: impl FnOnce(Value) -> Result<()>,
+    publish_claim: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<Option<ClaimedCookContinuation>> {
     let Some(claim) = claim_continuation_for_recovery_in_store(store, cook_id, run_id)? else {
         return Ok(None);
     };
-    if let Err(error) = clear_failure() {
-        let (failed, original_bytes) = claim
-            .recovery_rollback
-            .as_ref()
-            .expect("recovery claims retain rollback state");
-        fs::write(&claim.path, original_bytes)
-            .and_then(|_| File::open(&claim.path)?.sync_all())
-            .and_then(|_| fs::rename(&claim.path, failed))
-            .map_err(|rollback| {
+    let removed_failure = match clear_failure() {
+        Ok(removed) => removed,
+        Err(error) => {
+            let (failed, _) = claim
+                .recovery_rollback
+                .as_ref()
+                .expect("recovery claims retain rollback state");
+            fs::rename(&claim.path, failed).map_err(|rollback| {
                 Error::internal_io(
                     format!(
                     "clear Cook controller failure: {}; restore failed continuation: {rollback}",
@@ -2044,9 +2081,36 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
                     Some(claim.path.display().to_string()),
                 )
             })?;
+            sync_directory(failed.parent().expect("failed continuation has parent"))?;
+            return Err(error);
+        }
+    };
+    let mut claim = claim;
+    claim.continuation.retries = 0;
+    let claimed = continuation_base_path(&claim.path)
+        .with_extension(format!("claimed.{}", std::process::id()));
+    if let Err(error) = publish_claim(&claim.path, &claimed) {
+        let (failed, _) = claim
+            .recovery_rollback
+            .as_ref()
+            .expect("recovery claims retain rollback state");
+        fs::rename(&claim.path, failed).map_err(|rollback| {
+            Error::internal_io(
+                format!("publish recovery claim: {error}; restore failed continuation: {rollback}"),
+                Some(claim.path.display().to_string()),
+            )
+        })?;
         sync_directory(failed.parent().expect("failed continuation has parent"))?;
-        return Err(error);
+        if let Some(diagnostic) = removed_failure {
+            restore_failure(diagnostic)?;
+        }
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some(claim.path.display().to_string()),
+        ));
     }
+    claim.path = claimed;
+    claim.recovery_rollback = None;
     Ok(Some(claim))
 }
 
@@ -2748,6 +2812,7 @@ fn continuation_base_path(path: &std::path::Path) -> PathBuf {
     let base = name
         .split_once(".claimed.")
         .map(|(base, _)| base)
+        .or_else(|| name.split_once(".rearming.").map(|(base, _)| base))
         .or_else(|| name.rsplit_once('.').map(|(base, _)| base))
         .unwrap_or(name);
     path.with_file_name(base)
@@ -2782,14 +2847,21 @@ fn reclaim_dead_claims(root: &std::path::Path) -> Result<()> {
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
+        let recovery = name.contains(".rearming.");
         let Some(pid) = name
-            .rsplit_once(".claimed.")
+            .rsplit_once(if recovery { ".rearming." } else { ".claimed." })
             .map(|(_, pid)| pid)
             .and_then(|value| value.parse::<u32>().ok())
         else {
             continue;
         };
         if !homeboy_core::process::pid_is_running(pid) {
+            if recovery {
+                fs::rename(&path, continuation_state_path(&path, "failed")).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                })?;
+                continue;
+            }
             let continuation: AgentTaskCookContinuation =
                 match read_claimed_continuation(&path, "durable continuation") {
                     Ok(continuation) => continuation,
@@ -3972,16 +4044,22 @@ mod tests {
         .into_bytes();
         fs::write(&failed, &original).unwrap();
 
-        let error =
-            claim_continuation_for_recovery_and_clear_failure_with(&store, "cook", "run", || {
+        let error = claim_continuation_for_recovery_and_clear_failure_with(
+            &store,
+            "cook",
+            "run",
+            || {
                 Err(Error::validation_invalid_argument(
                     "test.lifecycle_clear",
                     "injected lifecycle clear failure",
                     None,
                     None,
                 ))
-            })
-            .expect_err("lifecycle failure must abort recovery");
+            },
+            |_| Ok(()),
+            |from, to| fs::rename(from, to),
+        )
+        .expect_err("lifecycle failure must abort recovery");
 
         assert!(error.message.contains("injected lifecycle clear failure"));
         assert_eq!(fs::read(&failed).unwrap(), original);
@@ -3996,6 +4074,87 @@ mod tests {
             .queue_root()
             .join(format!("{hash}.claimed.{}", std::process::id()))
             .exists());
+    }
+
+    #[test]
+    fn recovery_claim_restores_queue_and_failure_when_publish_fails() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+        let hash = content_hash::sha256_hex(b"cook:run");
+        let failed = store.queue_root().join(format!("{hash}.failed"));
+        let original = fs::read(&failed).unwrap();
+        let restored = std::cell::RefCell::new(None);
+
+        let error = claim_continuation_for_recovery_and_clear_failure_with(
+            &store,
+            "cook",
+            "run",
+            || Ok(Some(serde_json::json!({ "message": "original failure" }))),
+            |diagnostic| {
+                restored.replace(Some(diagnostic));
+                Ok(())
+            },
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected claim publication failure",
+                ))
+            },
+        )
+        .expect_err("injected claim publication failure rolls back both stores");
+
+        assert_eq!(error.code, homeboy_core::ErrorCode::InternalIoError);
+        assert_eq!(fs::read(&failed).unwrap(), original);
+        assert_eq!(
+            restored.into_inner(),
+            Some(serde_json::json!({ "message": "original failure" }))
+        );
+    }
+
+    #[test]
+    fn dead_recovery_claim_restores_the_exact_failed_entry() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+
+        let hash = content_hash::sha256_hex(b"cook:run");
+        let failed = store.queue_root().join(format!("{hash}.failed"));
+        let original = format!(
+            "{{\n  \"schema\": \"{CONTINUATION_SCHEMA}\",\n  \"key\": \"cook:run\",\n  \"cook_id\": \"cook\",\n  \"run_id\": \"run\",\n  \"retries\": 3\n}}\n"
+        )
+        .into_bytes();
+        fs::write(&failed, &original).unwrap();
+        let rearming = store
+            .queue_root()
+            .join(format!("{hash}.rearming.{}", u32::MAX));
+        fs::rename(&failed, &rearming).unwrap();
+
+        assert_eq!(
+            preflight_continuation_claim_in_store(&store, "cook", "run", true).unwrap(),
+            CookContinuationState::Failed
+        );
+        assert_eq!(fs::read(&rearming).unwrap(), original);
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Failed
+        );
+        assert_eq!(fs::read(&failed).unwrap(), original);
+        assert!(!rearming.exists());
     }
 
     #[test]

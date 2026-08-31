@@ -2672,13 +2672,15 @@ pub fn verified_controller_artifact_projection_path_in_store(
             None,
         ));
     }
-    if !matches!(
-        candidate
-            .metadata_json
-            .pointer("/agent_task/projection")
-            .and_then(serde_json::Value::as_str),
-        Some("controller_local" | "controller_finalized" | "runner_mirrored")
-    ) {
+    if !store.is_readonly()
+        && !matches!(
+            candidate
+                .metadata_json
+                .pointer("/agent_task/projection")
+                .and_then(serde_json::Value::as_str),
+            Some("controller_local" | "controller_finalized" | "runner_mirrored")
+        )
+    {
         candidate.metadata_json["agent_task"]["projection"] = json!("controller_local");
         store.update_artifact_metadata(&candidate.id, candidate.metadata_json)?;
     }

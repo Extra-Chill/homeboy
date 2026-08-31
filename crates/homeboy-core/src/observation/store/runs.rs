@@ -257,6 +257,11 @@ impl ObservationStore {
         self.roots.as_ref()
     }
 
+    /// Whether this handle was opened without write authority.
+    pub fn is_readonly(&self) -> bool {
+        self.readonly
+    }
+
     /// Whether this store was opened against injected roots.
     pub fn is_rooted(&self) -> bool {
         self.roots.is_some()

@@ -1472,7 +1472,7 @@ fn source_canonical_artifact<'a>(
     Ok(artifact)
 }
 
-fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
+pub(crate) fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
     outcome
         .artifacts
         .iter()

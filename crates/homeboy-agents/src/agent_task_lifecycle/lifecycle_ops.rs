@@ -3692,15 +3692,25 @@ pub fn clear_cook_controller_failure_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<()> {
+    take_cook_controller_failure_in_store(lifecycle_store, run_id).map(|_| ())
+}
+
+/// Atomically remove and return the controller failure so a cross-store rearm
+/// can compensate if publishing queue ownership fails.
+pub fn take_cook_controller_failure_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<Value>> {
     let run_id = sanitize_run_id(run_id);
+    let mut removed = None;
     let record = lifecycle_store.mutate_record(&run_id, |record| {
-        record
+        removed = record
             .ensure_metadata_object()
-            .remove("cook_controller_failure")
-            .is_some()
+            .remove("cook_controller_failure");
+        removed.is_some()
     })?;
     let _ = record;
-    Ok(())
+    Ok(removed)
 }
 
 pub fn record_cook_progress_with_activity_in_store(

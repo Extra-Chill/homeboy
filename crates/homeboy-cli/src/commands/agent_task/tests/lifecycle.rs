@@ -2236,6 +2236,27 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
         succeeded_aggregate.status =
             homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded;
         succeeded_aggregate.outcomes[0].status = AgentTaskOutcomeStatus::Succeeded;
+        let mut committed_candidate_aggregate = succeeded_aggregate.clone();
+        committed_candidate_aggregate.outcomes[0].artifacts.clear();
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &committed_candidate_aggregate)
+            .unwrap();
+        let committed_candidate =
+            homeboy::agents::agent_task_service::preflight_cook_promotion_in_store(
+                &test_lifecycle_store(),
+                &options,
+                run_id,
+                None,
+            )
+            .expect("read-only preflight defers committed-candidate discovery");
+        assert_eq!(
+            committed_candidate["behavior"],
+            "promote_committed_candidate"
+        );
+        assert!(committed_candidate["execution_only_checks"]
+            .as_array()
+            .expect("execution-only checks")
+            .iter()
+            .any(|check| check == "committed_candidate_resolution"));
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &succeeded_aggregate).unwrap();
         let succeeded = homeboy::agents::agent_task_service::preflight_cook_promotion_in_store(
             &test_lifecycle_store(),
