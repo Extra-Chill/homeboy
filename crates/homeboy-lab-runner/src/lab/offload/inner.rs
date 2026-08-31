@@ -1103,7 +1103,7 @@ pub(crate) struct AcceptedRunnerJob {
     pub(crate) daemon_generation: Option<String>,
 }
 
-fn accepted_runner_job_id(runner_id: &str, run_id: &str) -> Option<AcceptedRunnerJob> {
+pub(crate) fn accepted_runner_job_id(runner_id: &str, run_id: &str) -> Option<AcceptedRunnerJob> {
     accepted_runner_job_id_with(runner_id, run_id, || crate::status(runner_id))
 }
 
