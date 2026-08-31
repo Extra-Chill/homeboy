@@ -4537,9 +4537,25 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
     }
     if identities.is_empty() {
         if args.dispatch.workspace.is_some() || args.dispatch.cwd.is_some() {
+            let supplied_workspaces = [
+                args.dispatch.workspace.as_deref(),
+                args.dispatch.cwd.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(cook_workspace_path)
+            .collect::<homeboy::core::Result<Vec<_>>>()?;
+            let supplied_git_checkout = supplied_workspaces
+                .into_iter()
+                .flatten()
+                .any(|path| homeboy::core::git::repo_root(&path).is_some());
             return require_explicit_cook_repo(
                 args,
-                "the supplied workspace is not a Git checkout with a configured repository remote",
+                if supplied_git_checkout {
+                    "the supplied Git checkout has no configured repository remote mapping"
+                } else {
+                    "the supplied workspace is not a Git checkout"
+                },
             );
         }
         return bind_cook_repository_identity_from_config(args);
@@ -4947,19 +4963,7 @@ pub(super) fn cook_repository_identities_for_workspace(
     value: &str,
     requested_repository: Option<&str>,
 ) -> homeboy::core::Result<Vec<CookRepositoryIdentity>> {
-    let path = Path::new(value);
-    let workspace_path = if path.is_dir() {
-        std::fs::canonicalize(path).map_err(|error| {
-            homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
-        })?
-    } else if let Some(target) =
-        homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
-            value,
-            homeboy::core::worktree_provider::WorktreeMutationContext::default(),
-        )?
-    {
-        target.path
-    } else {
+    let Some(workspace_path) = cook_workspace_path(value)? else {
         return Ok(Vec::new());
     };
     let Some(git_root) = homeboy::core::git::repo_root(&workspace_path) else {
@@ -5028,6 +5032,22 @@ pub(super) fn cook_repository_identities_for_workspace(
         }
     }
     Ok(identities)
+}
+
+fn cook_workspace_path(value: &str) -> homeboy::core::Result<Option<PathBuf>> {
+    let path = Path::new(value);
+    if path.is_dir() {
+        return std::fs::canonicalize(path).map(Some).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        });
+    }
+    Ok(
+        homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
+            value,
+            homeboy::core::worktree_provider::WorktreeMutationContext::default(),
+        )?
+        .map(|target| target.path),
+    )
 }
 
 pub(crate) fn canonical_remote_identity(remote_url: &str) -> Option<String> {
