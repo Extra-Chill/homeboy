@@ -756,6 +756,7 @@ impl AgentTaskScheduleSupport {
                                 .map_err(|error| format!("{error:?}"))
                         });
                         if harvest.is_ok() {
+                            super::mark_timeout_workspace_candidates_incomplete(&mut recovered);
                             // The provider has exited, so runtime artifact discovery can no
                             // longer race its writes to the isolated attempt workspace.
                             Self::reconcile_timeout_artifacts(

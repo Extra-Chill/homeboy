@@ -548,6 +548,26 @@ const COOK_PROVIDER_RESOLVE_BACKOFF: Duration = Duration::from_millis(100);
 const COOK_PROVIDER_RESOLVE_DEADLINE: Duration = Duration::from_secs(121);
 const COOK_PROVIDER_RESOLVE_MIN_BUDGET: Duration = Duration::from_millis(50);
 
+fn provider_timeout_heartbeat_detail(
+    timeout_ms: u64,
+    remaining_ms: u64,
+    supervision_detail: Option<&str>,
+    activity: &CookProviderActivity,
+) -> String {
+    let mut detail = format!(
+        "provider execution is still running; timeout={timeout_ms}ms; remaining={remaining_ms}ms"
+    );
+    if let Some(summary) = activity.summary_line() {
+        detail.push_str("; ");
+        detail.push_str(&summary);
+    }
+    if let Some(supervision_detail) = supervision_detail {
+        detail.push_str("; ");
+        detail.push_str(supervision_detail);
+    }
+    detail.chars().take(512).collect()
+}
+
 /// One Cook progress event, as delivered to a foreground observer.
 ///
 /// This used to be three bare `&str`s — `(phase, cook_id, run_id)` — which is
@@ -5846,6 +5866,16 @@ fn run_cook_spine(
                         .tasks
                         .first()
                         .map(|task| task.executor.backend.clone());
+                    let heartbeat_provider_timeout_ms = dispatch_plan
+                        .tasks
+                        .first()
+                        .map(|task| {
+                            crate::agent_task_timeout::effective_provider_timeout_ms(
+                                task.limits.timeout_ms.or(dispatch_plan.options.timeout_ms),
+                                task.limits.max_runtime_ms,
+                            )
+                        })
+                        .unwrap_or(crate::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS);
                     // Captured before the spawn: the budget lives in a
                     // thread-local, and the heartbeat runs on a thread of its
                     // own that would otherwise start unbudgeted.
@@ -5858,6 +5888,7 @@ fn run_cook_spine(
                         scope.spawn(move || {
                             let mut supervisor =
                                 CookSupervisor::new(supervision_policy, supervision_backend);
+                            let provider_started_at = Instant::now();
                             let mut deadline_stop_issued = false;
                             let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
                             loop {
@@ -5891,6 +5922,18 @@ fn run_cook_spine(
                                 let activity = heartbeat_activity.sample(activity_owner_pid);
                                 let tick = supervisor.observe(&activity);
                                 let detail = tick.detail_line();
+                                let remaining_ms = heartbeat_provider_timeout_ms
+                                    .saturating_sub(provider_started_at.elapsed().as_millis() as u64)
+                                    .min(heartbeat_deadline
+                                        .deadline()
+                                        .map(|deadline| deadline.remaining_ms())
+                                        .unwrap_or(u64::MAX));
+                                let progress_detail = provider_timeout_heartbeat_detail(
+                                    heartbeat_provider_timeout_ms,
+                                    remaining_ms,
+                                    detail.as_deref(),
+                                    &activity,
+                                );
                                 let _ = report_cook_progress_with_activity(
                                     heartbeat_lifecycle_store,
                                     durable_observer,
@@ -5898,11 +5941,7 @@ fn run_cook_spine(
                                     &heartbeat_run_id,
                                     "heartbeat",
                                     attempt,
-                                    Some(
-                                        detail
-                                            .as_deref()
-                                            .unwrap_or("provider execution is still running"),
-                                    ),
+                                    Some(&progress_detail),
                                     (!activity.is_empty()).then_some(&activity),
                                     None,
                                     None,

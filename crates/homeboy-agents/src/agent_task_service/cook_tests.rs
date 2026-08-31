@@ -18834,6 +18834,22 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
 }
 
 #[test]
+fn provider_timeout_heartbeat_reports_resolved_and_remaining_budget() {
+    let detail = provider_timeout_heartbeat_detail(
+        1_200_000,
+        1_184_997,
+        Some("rss_mib exceeded warning threshold"),
+        &CookProviderActivity::default(),
+    );
+
+    assert_eq!(
+        detail,
+        "provider execution is still running; timeout=1200000ms; remaining=1184997ms; rss_mib exceeded warning threshold"
+    );
+    assert!(detail.len() <= 512);
+}
+
+#[test]
 fn cook_observer_failures_write_only_to_the_explicit_lifecycle_store() {
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
     let right_context = homeboy_core::test_support::HermeticTestContext::new();

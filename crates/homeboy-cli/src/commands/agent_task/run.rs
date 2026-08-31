@@ -5650,7 +5650,12 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
                     event.phase,
                     Some(event.cook_id),
                     Some(event.run_id),
-                    terminal_outcome.or(activity.as_deref()),
+                    terminal_outcome.or_else(|| {
+                        (event.phase == "heartbeat")
+                            .then_some(event.detail)
+                            .flatten()
+                            .or(activity.as_deref())
+                    }),
                     event.terminal_retry_command,
                 )
             })
