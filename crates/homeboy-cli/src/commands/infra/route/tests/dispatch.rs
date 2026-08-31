@@ -3173,9 +3173,10 @@ fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
 }
 
 #[test]
-fn nonlocal_cook_is_eligible_for_durable_admission() {
+fn only_detached_cook_without_local_fallback_enters_deferred_admission() {
     let queued = Cli::parse_from([
         "homeboy",
+        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--to-worktree",
@@ -3185,7 +3186,7 @@ fn nonlocal_cook_is_eligible_for_durable_admission() {
         "--prompt",
         "queue this on Lab",
     ]);
-    assert!(cook_can_enter_durable_admission(&queued));
+    assert!(detached_cook_requires_deferred_admission(&queued));
 
     let local = Cli::parse_from([
         "homeboy",
@@ -3201,7 +3202,23 @@ fn nonlocal_cook_is_eligible_for_durable_admission() {
         "--prompt",
         "remain local",
     ]);
-    assert!(!cook_can_enter_durable_admission(&local));
+    assert!(!detached_cook_requires_deferred_admission(&local));
+
+    let fallback = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "lab-or-local",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@fallback",
+        "--verify",
+        "true",
+        "--prompt",
+        "run locally when Lab is unavailable",
+    ]);
+    assert!(!detached_cook_requires_deferred_admission(&fallback));
 }
 
 #[test]

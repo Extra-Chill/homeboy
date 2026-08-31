@@ -2892,7 +2892,7 @@ fn preflight_hot_command_with_input(
             if hot_command.lab_offload_supported
                 && cli.runner.is_none()
                 && !matches!(cli.placement, crate::cli_surface::Placement::Local)
-                && !cook_durable_admission_eligible(cli)
+                && !nonlocal_cook_requires_durable_admission(cli)
                 && resource_policy::evaluate_with_runner_hint(
                     hot_command,
                     &resources,
@@ -3075,7 +3075,7 @@ fn preflight_hot_command_with_input(
                     warning,
                     cli.placement.is_explicit_local_override() || runner_hosted,
                     is_interactive_shell(),
-                    (!cook_durable_admission_eligible(cli))
+                    (!nonlocal_cook_requires_durable_admission(cli))
                         .then(|| {
                             resource_policy::admission_recovery(
                                 normalized_args,
@@ -3090,7 +3090,7 @@ fn preflight_hot_command_with_input(
                             .expect("Lab inventory admission diagnostic serializes");
                     }
                     if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload)
-                        || cook_durable_admission_eligible(cli)
+                        || nonlocal_cook_requires_durable_admission(cli)
                     {
                         return None;
                     }
@@ -3198,7 +3198,7 @@ fn controller_owned_unmaterialized_resume(cli: &Cli) -> bool {
 /// influence Lab placement, but cannot prevent creating an inspectable Cook.
 /// Explicit local placement remains the only authorization for controller
 /// provider execution.
-fn cook_durable_admission_eligible(cli: &Cli) -> bool {
+fn nonlocal_cook_requires_durable_admission(cli: &Cli) -> bool {
     !matches!(cli.placement, crate::cli_surface::Placement::Local)
         && matches!(
             cli.command,
@@ -4095,7 +4095,7 @@ mod tests {
             "true",
         ]);
 
-        assert!(cook_durable_admission_eligible(&cli));
+        assert!(nonlocal_cook_requires_durable_admission(&cli));
         assert_eq!(
             preflight_hot_command_with(
                 &cli,
