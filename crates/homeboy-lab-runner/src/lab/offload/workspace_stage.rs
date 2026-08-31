@@ -908,16 +908,21 @@ fn declared_agent_task_evidence_inputs(
 pub(crate) fn workspace_path_materialization_plan(
     workspace_mapping: &[LabWorkspaceMappingEntry],
     owner: &str,
-    materialization_mode: impl Into<String>,
+    primary_materialization_mode: impl Into<String>,
 ) -> PathMaterializationPlan {
-    let materialization_mode = materialization_mode.into();
+    let primary_materialization_mode = primary_materialization_mode.into();
     PathMaterializationPlan::new(workspace_mapping.iter().map(|entry| {
+        let materialization_mode = if entry.role() == "primary" {
+            primary_materialization_mode.as_str()
+        } else {
+            entry.sync_mode()
+        };
         PathMaterializationEntry::new(
             entry.role(),
             owner,
             (!entry.local_path().trim().is_empty()).then(|| entry.local_path().to_string()),
             entry.remote_path(),
-            &materialization_mode,
+            materialization_mode,
             PATH_MATERIALIZATION_STATUS_MATERIALIZED,
         )
     }))
@@ -2723,6 +2728,33 @@ mod tests {
         assert_eq!(plan.entries[0].remote_path, "/runner/workspaces/homeboy");
         assert_eq!(plan.entries[0].materialization_mode, "snapshot");
         assert_eq!(plan.entries[0].validation_status, "materialized");
+    }
+
+    #[test]
+    fn workspace_path_materialization_plan_preserves_each_extra_workspace_mode() {
+        let primary = test_synced_workspace(
+            "/controller/workspaces/primary",
+            "/runner/workspaces/primary",
+        );
+        let mut provider = test_synced_workspace(
+            "/controller/workspaces/provider@issue",
+            "/runner/workspaces/provider@issue",
+        );
+        provider.sync_mode = RunnerWorkspaceSyncMode::SnapshotGit;
+        let workspace_mapping = vec![
+            workspace_mapping_entry("primary", &primary),
+            workspace_mapping_entry("agent_task_plan_config", &provider),
+        ];
+
+        let plan = workspace_path_materialization_plan(
+            &workspace_mapping,
+            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            RunnerWorkspaceSyncMode::Git.as_str(),
+        );
+
+        assert_eq!(plan.entries[0].materialization_mode, "git");
+        assert_eq!(plan.entries[1].role, "agent_task_plan_config");
+        assert_eq!(plan.entries[1].materialization_mode, "snapshot-git");
     }
 
     #[test]
