@@ -22,18 +22,19 @@ pub(crate) fn prepare_capability_run(
         )?;
     }
 
-    let manifest = load_extension_manifest_from_dir(&execution.extension_path)?;
+    let manifest =
+        homeboy_core::extension::catalog::load_extension_from_dir(&execution.extension_path)?;
     homeboy_extension_contract::validate_core_compatibility(
         "extension",
         &execution.extension_id,
         manifest
-            .get("requires")
-            .and_then(|requires| requires.get("homeboy"))
-            .and_then(serde_json::Value::as_str),
+            .requires
+            .as_ref()
+            .and_then(|requires| requires.homeboy.as_deref()),
         homeboy_core::extension::lifecycle::read_source_revision(&execution.extension_id),
     )?;
-    let settings_json = build_settings_json_from_manifest(
-        &manifest,
+    let settings_json = build_settings_json(
+        &manifest.settings,
         &execution.settings,
         settings_overrides,
         settings_json_overrides,

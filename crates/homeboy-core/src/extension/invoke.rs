@@ -27,7 +27,7 @@ mod scope;
 mod settings;
 mod tool;
 
-use crate::extension::catalog::load_extension;
+use crate::extension::catalog::{load_extension, load_extension_from_dir};
 use homeboy_core::extension::resolve::ExtensionExecutionContext;
 use homeboy_extension_contract::exec_context;
 use homeboy_extension_contract::manifest_action_config::RuntimeConfig;
@@ -55,8 +55,8 @@ pub use runtime_helper::{
     RUNTIME_SETTINGS_HELPER_ENV, RUNTIME_SETTINGS_HELPER_ID,
 };
 pub use scenario_runner::{build_scenario_runner, ScenarioRunnerOptions};
+pub(crate) use settings::build_settings_json;
 use settings::serialize_settings;
-pub(crate) use settings::{build_settings_json_from_manifest, load_extension_manifest_from_dir};
 pub use tool::exec_tool;
 
 /// Result of executing a extension.
@@ -466,7 +466,7 @@ pub(crate) fn build_capability_env_with_additional_providers(
 
     let mut provider_env = env.clone();
     provider_env.extend(extra_env.iter().cloned());
-    if let Ok(extension) = env_provider::load_manifest_from_dir(extension_path) {
+    if let Ok(extension) = load_extension_from_dir(extension_path) {
         env.extend(env_provider::env_vars(
             &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
                 "homeboy",
@@ -477,7 +477,7 @@ pub(crate) fn build_capability_env_with_additional_providers(
         )?);
     }
     for (_extension_id, provider_path) in additional_env_provider_paths {
-        if let Ok(extension) = env_provider::load_manifest_from_dir(provider_path) {
+        if let Ok(extension) = load_extension_from_dir(provider_path) {
             env.extend(env_provider::env_vars(
                 &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
                     "homeboy",
@@ -648,6 +648,7 @@ mod tests {
     use super::*;
     use crate::extension::resolve::extract_component_extension_settings;
     use homeboy_core::component::Component;
+    use homeboy_extension_contract::manifest_action_config::SettingConfig;
 
     fn runtime_with_setup_timeout(setup_timeout_seconds: Option<u64>) -> RuntimeConfig {
         RuntimeConfig {
@@ -658,6 +659,16 @@ mod tests {
             env: None,
             entrypoint: None,
             args: None,
+        }
+    }
+
+    fn setting(id: &str, default: serde_json::Value) -> SettingConfig {
+        SettingConfig {
+            id: id.to_string(),
+            setting_type: "json".to_string(),
+            label: id.to_string(),
+            placeholder: None,
+            default: Some(default),
         }
     }
 
@@ -1075,12 +1086,11 @@ mod tests {
     fn build_settings_json_preserves_array_values() {
         // Regression test for #844: array values in extension settings
         // were serialized as empty strings.
-        let manifest = serde_json::json!({
-            "settings": [
-                { "id": "string_setting", "default": "hello" },
-                { "id": "array_default", "default": ["a", "b"] }
-            ]
-        });
+        let manifest_settings = vec![
+            setting("string_setting", serde_json::json!("hello")),
+            setting("array_default", serde_json::json!(["a", "b"])),
+            setting("null_default", serde_json::Value::Null),
+        ];
 
         let extension_settings: Vec<(String, serde_json::Value)> = vec![
             (
@@ -1096,8 +1106,8 @@ mod tests {
         let overrides: Vec<(String, String)> = vec![];
         let json_overrides: Vec<(String, serde_json::Value)> = vec![];
 
-        let json = build_settings_json_from_manifest(
-            &manifest,
+        let json = build_settings_json(
+            &manifest_settings,
             &extension_settings,
             &overrides,
             &json_overrides,
@@ -1120,6 +1130,7 @@ mod tests {
 
         // Array default from manifest is preserved
         assert_eq!(parsed["array_default"], serde_json::json!(["a", "b"]));
+        assert_eq!(parsed["null_default"], serde_json::Value::Null);
     }
 
     #[test]
@@ -1136,14 +1147,13 @@ mod tests {
             }
         }))
         .expect("component config");
-        let manifest = serde_json::json!({
-            "settings": [
-                { "id": "test_backend", "default": "custom-provider" }
-            ]
-        });
+        let manifest_settings = vec![setting(
+            "test_backend",
+            serde_json::json!("custom-provider"),
+        )];
         let extension_settings = extract_component_extension_settings(&component, "sample-runtime");
 
-        let json = build_settings_json_from_manifest(&manifest, &extension_settings, &[], &[])
+        let json = build_settings_json(&manifest_settings, &extension_settings, &[], &[])
             .expect("settings json");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse settings json");
 
@@ -1153,19 +1163,13 @@ mod tests {
 
     #[test]
     fn build_settings_json_cli_overrides_replace_values() {
-        let manifest = serde_json::json!({});
         let extension_settings: Vec<(String, serde_json::Value)> =
             vec![("key".to_string(), serde_json::json!(["original"]))];
         let overrides = vec![("key".to_string(), "override_value".to_string())];
         let json_overrides: Vec<(String, serde_json::Value)> = vec![];
 
-        let json = build_settings_json_from_manifest(
-            &manifest,
-            &extension_settings,
-            &overrides,
-            &json_overrides,
-        )
-        .expect("should serialize");
+        let json = build_settings_json(&[], &extension_settings, &overrides, &json_overrides)
+            .expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
 
         // CLI override replaces the array value with a string
@@ -1178,11 +1182,7 @@ mod tests {
         // unlike --setting which would coerce them to a JSON-string-of-an-
         // object. Mirrors the wp_config_defines / bench_env use case
         // (homeboy-extensions #248 / #250).
-        let manifest = serde_json::json!({
-            "settings": [
-                { "id": "bench_env", "default": {} }
-            ]
-        });
+        let manifest_settings = vec![setting("bench_env", serde_json::json!({}))];
         let extension_settings: Vec<(String, serde_json::Value)> = vec![];
         let overrides: Vec<(String, String)> = vec![];
         let json_overrides = vec![(
@@ -1190,8 +1190,8 @@ mod tests {
             serde_json::json!({"BENCH_CORPUS_SIZE": "1000"}),
         )];
 
-        let json = build_settings_json_from_manifest(
-            &manifest,
+        let json = build_settings_json(
+            &manifest_settings,
             &extension_settings,
             &overrides,
             &json_overrides,
@@ -1211,18 +1211,12 @@ mod tests {
     fn build_settings_json_typed_override_wins_on_conflict() {
         // When the same key is targeted by both --setting and --setting-json,
         // the typed override wins (strictly more expressive, applied later).
-        let manifest = serde_json::json!({});
         let extension_settings: Vec<(String, serde_json::Value)> = vec![];
         let overrides = vec![("key".to_string(), "string_value".to_string())];
         let json_overrides = vec![("key".to_string(), serde_json::json!({"nested": true}))];
 
-        let json = build_settings_json_from_manifest(
-            &manifest,
-            &extension_settings,
-            &overrides,
-            &json_overrides,
-        )
-        .expect("should serialize");
+        let json = build_settings_json(&[], &extension_settings, &overrides, &json_overrides)
+            .expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
 
         assert_eq!(parsed["key"], serde_json::json!({"nested": true}));

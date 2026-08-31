@@ -512,12 +512,7 @@ pub(crate) fn bench_component_script_env(
         ),
         (
             "HOMEBOY_SETTINGS_JSON".to_string(),
-            crate::extension::build_settings_json_from_manifest(
-                &serde_json::json!({}),
-                &[],
-                &args.settings,
-                &args.settings_json,
-            )?,
+            crate::extension::build_settings_json(&[], &[], &args.settings, &args.settings_json)?,
         ),
     ];
     if let Some(run_id) = args
