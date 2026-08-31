@@ -137,6 +137,10 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
             )
         })
         .unwrap_or_default();
+    let route_disclosure = plan.metadata["cook_retry_policy"]["route"]["fallback"]["mode"]
+        .as_str()
+        .map(|mode| format!("cook: route: {mode}; "))
+        .unwrap_or_default();
     if funded == 0 {
         let unreachable = if entries > 0 {
             format!(
@@ -148,11 +152,11 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
             String::new()
         };
         format!(
-            "cook: rotation: disabled ({executions} provider execution(s)){unreachable}{budget_facts}"
+            "{route_disclosure}cook: rotation: disabled ({executions} provider execution(s)){unreachable}{budget_facts}"
         )
     } else {
         format!(
-            "cook: rotation: {funded} fallback provider(s), up to {executions} provider execution(s){budget_facts}"
+            "{route_disclosure}cook: rotation: {funded} fallback provider(s), up to {executions} provider execution(s){budget_facts}"
         )
     }
 }
@@ -5786,9 +5790,23 @@ fn resolve_cook_execution_budget(
     plan: &mut AgentTaskPlan,
 ) -> homeboy::core::Result<()> {
     let core = &args.dispatch.core;
+    // A concrete route is a caller contract, not merely a preference. Keep the
+    // configured policy in the plan for provenance, but give it no budget until
+    // the caller explicitly opts back into cross-route fallback.
+    let explicit_route = args.dispatch.backend.is_some() && args.dispatch.model.is_some();
+    let rotation_opted_in = args.allow_provider_rotation
+        || core
+            .provider_rotations
+            .is_some_and(|rotations| rotations > 0);
+    let pinned_route = explicit_route && !rotation_opted_in;
+    let configured_rotations = if pinned_route {
+        0
+    } else {
+        plan.options.execution_budget.max_provider_rotations
+    };
     let resolved = homeboy::agents::agent_task_service::resolve_cook_budget(
         args.max_attempts,
-        plan.options.execution_budget.max_provider_rotations,
+        configured_rotations,
         core.attempts,
         core.same_provider_retries,
         core.provider_rotations,
@@ -5799,12 +5817,34 @@ fn resolve_cook_execution_budget(
             resolved.same_provider_remediations,
             resolved.provider_rotations,
         );
+    let effective_route = plan.tasks.first().map(|task| {
+        serde_json::json!({
+            "backend": task.executor.backend,
+            "selector": task.executor.selector,
+            "model": task.executor.model,
+            "model_selection": plan.metadata["model_selection"],
+        })
+    });
     plan.metadata["cook_retry_policy"] = serde_json::json!({
         "operator_intent": {
             "max_attempts": args.max_attempts,
             "max_provider_executions": core.attempts,
             "max_same_provider_retries": core.same_provider_retries,
             "max_provider_rotations": core.provider_rotations,
+            "allow_provider_rotation": args.allow_provider_rotation,
+        },
+        "route": {
+            "requested": {
+                "backend": args.dispatch.backend,
+                "model": args.dispatch.model,
+            },
+            "effective": effective_route,
+            "fallback": {
+                "mode": if pinned_route { "pinned" } else { "rotatable" },
+                "configured_rotations": plan.options.rotation.as_ref().map_or(0, |rotation| rotation.entries.len()),
+                "enabled": resolved.provider_rotations > 0,
+                "opted_in": rotation_opted_in,
+            },
         },
         "resolved": {
             "max_attempts": resolved.requested_attempts,
@@ -5937,6 +5977,7 @@ fn snapshot_cook_prompt_bounded(
 #[cfg(test)]
 mod rotation_disclosure_tests {
     use super::*;
+    use clap::Parser;
     use homeboy::agents::agent_task_scheduler::{
         AgentTaskExecutionBudget, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
     };
@@ -6006,6 +6047,86 @@ mod rotation_disclosure_tests {
         assert_eq!(
             cook_rotation_disclosure(&plan_with(2, 5, 5)),
             "cook: rotation: 1 fallback provider(s), up to 2 provider execution(s)"
+        );
+    }
+
+    #[test]
+    fn explicit_route_without_opt_in_is_pinned_but_keeps_same_provider_retries() {
+        let args = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--backend",
+            "opencode",
+            "--model",
+            "openai/gpt-5.6-terra",
+            "--max-attempts",
+            "2",
+            "--no-finalize",
+            "--prompt",
+            "test",
+            "--to-worktree",
+            "repo@branch",
+        ])
+        .expect("parse pinned Cook");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = args.command else {
+            panic!("agent-task command");
+        };
+        let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        let mut plan = plan_with(4, 2, 2);
+        resolve_cook_execution_budget(&cook, &mut plan).expect("resolve pinned budget");
+
+        assert_eq!(plan.options.execution_budget.max_provider_executions, 2);
+        assert_eq!(plan.options.execution_budget.max_same_provider_retries, 1);
+        assert_eq!(plan.options.execution_budget.max_provider_rotations, 0);
+        assert_eq!(
+            plan.metadata["cook_retry_policy"]["route"]["requested"]["model"],
+            "openai/gpt-5.6-terra"
+        );
+        assert_eq!(
+            plan.metadata["cook_retry_policy"]["route"]["fallback"]["mode"],
+            "pinned"
+        );
+        assert!(cook_rotation_disclosure(&plan).starts_with("cook: route: pinned;"));
+    }
+
+    #[test]
+    fn explicit_route_can_opt_into_configured_rotation() {
+        let args = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--backend",
+            "opencode",
+            "--model",
+            "openai/gpt-5.6-terra",
+            "--allow-provider-rotation",
+            "--max-attempts",
+            "2",
+            "--no-finalize",
+            "--prompt",
+            "test",
+            "--to-worktree",
+            "repo@branch",
+        ])
+        .expect("parse rotatable Cook");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = args.command else {
+            panic!("agent-task command");
+        };
+        let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        let mut plan = plan_with(4, 2, 2);
+        resolve_cook_execution_budget(&cook, &mut plan).expect("resolve rotatable budget");
+
+        assert_eq!(plan.options.execution_budget.max_provider_executions, 4);
+        assert_eq!(plan.options.execution_budget.max_same_provider_retries, 1);
+        assert_eq!(plan.options.execution_budget.max_provider_rotations, 2);
+        assert_eq!(
+            plan.metadata["cook_retry_policy"]["route"]["fallback"]["mode"],
+            "rotatable"
         );
     }
 }

@@ -914,6 +914,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                     no_gate_shared_cargo_target: false,
                 },
                 max_attempts: 1,
+                allow_provider_rotation: false,
                 no_finalize: true,
                 draft_pr: false,
                 full: true,

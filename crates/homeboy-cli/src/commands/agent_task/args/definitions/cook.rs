@@ -806,6 +806,37 @@ mod tests {
     }
 
     #[test]
+    fn cook_help_and_parser_expose_explicit_route_rotation_opt_in() {
+        let help = rendered_cook_help();
+        assert!(help.contains("--allow-provider-rotation"), "{help}");
+        assert!(help.contains("same-provider remediation"), "{help}");
+
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--backend",
+            "opencode",
+            "--model",
+            "openai/gpt-5.6-terra",
+            "--allow-provider-rotation",
+            "--no-finalize",
+            "--prompt",
+            "test",
+            "--to-worktree",
+            "repo@branch",
+        ])
+        .expect("parse explicit rotation opt-in");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        assert!(cook.allow_provider_rotation);
+    }
+
+    #[test]
     fn cook_parser_preserves_an_explicit_execution_cap_without_a_rotation_override() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
@@ -1080,9 +1111,9 @@ pub struct AgentTaskCookArgs {
     pub gates: VerifyGateArgs,
     /// Maximum Cook attempts before giving up. Each attempt re-runs the agent
     /// and gates; a later attempt can recover from a transient failure. This
-    /// derives provider execution and same-provider remediation budgets. A
-    /// configured provider rotation receives its own additional execution
-    /// allowance unless an advanced budget flag explicitly caps it (default 3).
+    /// derives provider execution and same-provider remediation budgets. An
+    /// explicit --backend plus --model stays on that route; use
+    /// --allow-provider-rotation to opt it into configured fallbacks (default 3).
     #[arg(
         long = "max-attempts",
         default_value_t = 3,
@@ -1090,6 +1121,12 @@ pub struct AgentTaskCookArgs {
         value_name = "N"
     )]
     pub max_attempts: u32,
+    /// Permit configured cross-provider/model fallbacks after explicitly
+    /// selecting both --backend and --model. This is distinct from
+    /// same-provider remediation, which retries the selected route for gate
+    /// and required review-form fixes.
+    #[arg(long = "allow-provider-rotation")]
+    pub allow_provider_rotation: bool,
     /// Stop after the work is verified but before opening the pull request,
     /// leaving the committed change on the worktree branch for manual review or
     /// a later `agent-task review`/finalize.
