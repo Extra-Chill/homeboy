@@ -899,7 +899,7 @@ mod tests {
         assert_eq!(
             directory["payload"]["run"]["metadata"]["operator_projection"]["artifact_refs"][0]
                 ["command"],
-            "homeboy runs artifact preview 'run directory' 'directory'\''s artifact'"
+            r#"homeboy runs artifact preview 'run directory' 'directory'\''s artifact'"#
         );
     }
 

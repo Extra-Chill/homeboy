@@ -870,24 +870,33 @@ mod bounded_failure_result_tests {
 /// Known event streams retain their array/item schema. The owning evidence
 /// object receives additive metadata describing the omitted durable events.
 fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &str) {
-    let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
-        return;
+    let projection = {
+        let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
+            return;
+        };
+        let projection = (items.len() > COMPACT_REF_LIMIT).then(|| {
+            let total_items = items.len();
+            let digest = content_hash::sha256_hex(
+                serde_json::to_vec(items.as_slice())
+                    .as_deref()
+                    .unwrap_or_default(),
+            );
+            items.truncate(COMPACT_REF_LIMIT);
+            json!({
+                "total_items": total_items,
+                "returned_items": COMPACT_REF_LIMIT,
+                "omitted_items": total_items - COMPACT_REF_LIMIT,
+                "sha256": digest,
+            })
+        });
+        for item in items {
+            project_operator_value(item, true);
+        }
+        projection
     };
-    if items.len() <= COMPACT_REF_LIMIT {
-        return;
+    if let Some(projection) = projection {
+        fields.insert(format!("{key}_projection"), projection);
     }
-    let total_items = items.len();
-    let digest = content_hash::sha256_hex(serde_json::to_vec(items).as_deref().unwrap_or_default());
-    items.truncate(COMPACT_REF_LIMIT);
-    fields.insert(
-        format!("{key}_projection"),
-        json!({
-            "total_items": total_items,
-            "returned_items": COMPACT_REF_LIMIT,
-            "omitted_items": total_items - COMPACT_REF_LIMIT,
-            "sha256": digest,
-        }),
-    );
 }
 
 pub(super) fn list_runs(
@@ -1446,11 +1455,11 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let root_cause = ranked_reasons
         .first()
         .cloned()
-        .map(|item| collected_diagnostic_value_with_details(item, false));
+        .map(|item| collected_diagnostic_value_with_details(item, args.full));
     let diagnostic_chain = ranked_reasons
         .into_iter()
         .take(FAILURE_REASON_LIMIT)
-        .map(|item| collected_diagnostic_value_with_details(item, false))
+        .map(|item| collected_diagnostic_value_with_details(item, args.full))
         .collect::<Vec<_>>();
 
     let missing_artifacts = aggregate
