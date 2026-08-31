@@ -8,7 +8,7 @@
 //!
 //! Primary outputs:
 //! - `detect_exact_duplicates_scoped()` → exact findings plus fixer groups
-//! - `detect_near_duplicates()` → flat `Vec<Finding>` for structural near-duplicates
+//! - structural, cross-name, skeleton, and parallel duplicate findings
 //! - `detect_intra_method_duplicates()` → duplicated blocks within a single method
 //!
 //! # Scope-seeded analysis
@@ -19,12 +19,12 @@
 //! somewhere else, and that counterpart may sit outside the changed scope. So
 //! the full corpus cannot simply be replaced by the scoped subset.
 //!
-//! It can, however, be split in two:
+//! A shared full-corpus index lets it be split in two:
 //!
 //! 1. **Seed** the candidate `(method_name, body_hash)` keys from the scoped
 //!    subset only.
-//! 2. **Expand** those candidates to their counterparts by matching them
-//!    against the full corpus.
+//! 2. **Select** those candidates from full-corpus groups that are also reused
+//!    by the near, skeleton, and parallel passes.
 //!
 //! Every *reportable* finding is keyed to an in-scope file (out-of-scope
 //! findings are discarded by the engine's scope filter), so a group with no
@@ -61,9 +61,9 @@ const MIN_DUPLICATE_LOCATIONS: usize = 2;
 type BodyHashGroups = HashMap<(String, String), Vec<String>>;
 
 /// Candidate seed index: `method_name` → the body hashes seen for that name in
-/// the seed corpus. Nested (rather than a `HashSet<(String, String)>`) so the
-/// expansion phase can probe it with borrowed `&String` keys and never has to
-/// allocate a tuple per method just to ask "is this a candidate?".
+/// the seed corpus. Nested (rather than a `HashSet<(String, String)>`) so callers
+/// can probe it with borrowed `&String` keys and never allocate a tuple merely to
+/// ask "is this candidate in scope?".
 type SeededBodyHashes = HashMap<String, HashSet<String>>;
 
 /// Build grouped duplication data from fingerprints.
@@ -85,7 +85,7 @@ fn build_groups(fingerprints: &[&FileFingerprint]) -> BodyHashGroups {
     hash_groups
 }
 
-/// Phase 1 of scope-seeded duplication: collect the candidate
+/// Collect the candidate
 /// `(method_name, body_hash)` keys contributed by the scoped subset.
 fn seed_body_hashes(scoped: &[&FileFingerprint]) -> SeededBodyHashes {
     let mut seeds: SeededBodyHashes = HashMap::new();
@@ -102,40 +102,10 @@ fn seed_body_hashes(scoped: &[&FileFingerprint]) -> SeededBodyHashes {
     seeds
 }
 
-/// Two-phase equivalent of [`build_groups`]: seed candidate keys from `scoped`,
-/// then expand each candidate to *all* of its locations across `all`.
-///
-/// `scoped` must be a subset of `all` — it is the changed-scope filter of the
-/// same corpus. Under that precondition the returned groups are byte-identical
-/// to `build_groups(all)` restricted to the keys present in `scoped`, including
-/// location order (both phases walk `all` in the same order).
-///
-/// Groups whose key appears nowhere in `scoped` are omitted: they have no
-/// in-scope member, so no finding derived from them could survive the engine's
-/// scope filter.
-fn build_groups_seeded(scoped: &[&FileFingerprint], all: &[&FileFingerprint]) -> BodyHashGroups {
-    let seeds = seed_body_hashes(scoped);
-    let mut hash_groups: BodyHashGroups = HashMap::new();
-    if seeds.is_empty() {
-        return hash_groups;
-    }
-
-    for fp in all {
-        for (method_name, body_hash) in &fp.method_hashes {
-            let is_candidate = seeds
-                .get(method_name)
-                .is_some_and(|hashes| hashes.contains(body_hash));
-            if !is_candidate {
-                continue;
-            }
-            hash_groups
-                .entry((method_name.clone(), body_hash.clone()))
-                .or_default()
-                .push(fp.relative_path.clone());
-        }
-    }
-
-    hash_groups
+fn is_seeded_body_hash(seeds: &SeededBodyHashes, method_name: &str, body_hash: &str) -> bool {
+    seeds
+        .get(method_name)
+        .is_some_and(|hashes| hashes.contains(body_hash))
 }
 
 /// Pick the canonical file from a list of locations.
@@ -166,29 +136,60 @@ pub(crate) struct ExactDuplicateAnalysis {
     pub(crate) groups: Vec<DuplicateGroup>,
 }
 
+/// Full-corpus evidence reused by the cross-file duplication passes.
+#[derive(Default)]
+pub(crate) struct DuplicationIndex {
+    body_hash_groups: BodyHashGroups,
+    exact_duplicate_names: HashSet<String>,
+    inline_test_methods: HashSet<(String, String)>,
+}
+
+impl DuplicationIndex {
+    pub(crate) fn new(fingerprints: &[&FileFingerprint]) -> Self {
+        let body_hash_groups = build_groups(fingerprints);
+        let exact_duplicate_names = body_hash_groups
+            .iter()
+            .filter(|(_, locations)| locations.len() >= MIN_DUPLICATE_LOCATIONS)
+            .map(|((method_name, _), _)| method_name.clone())
+            .collect();
+        let inline_test_methods = inline_test_context_methods(fingerprints);
+
+        Self {
+            body_hash_groups,
+            exact_duplicate_names,
+            inline_test_methods,
+        }
+    }
+}
+
 /// Detect exact duplicates and build their fixer groups from one seeded index.
 ///
-/// `scoped` must be a subset of `all`. Candidate keys come from `scoped`, then
-/// expand against `all` so findings and canonical selection retain every
-/// out-of-scope counterpart. Passing `(all, all)` performs an unscoped analysis.
+/// `scoped` must be a subset of the corpus used to build `index`. Candidate keys
+/// come from `scoped`, then select full-corpus groups from `index` so findings
+/// and canonical selection retain every out-of-scope counterpart.
 pub(crate) fn detect_exact_duplicates_scoped(
     scoped: &[&FileFingerprint],
-    all: &[&FileFingerprint],
+    index: &DuplicationIndex,
     convention_methods: &HashSet<String>,
 ) -> ExactDuplicateAnalysis {
-    let hash_groups = build_groups_seeded(scoped, all);
+    let seeds = seed_body_hashes(scoped);
     ExactDuplicateAnalysis {
-        findings: duplicate_findings_from_body_hash_groups(&hash_groups, all, convention_methods),
-        groups: duplicate_groups_from_body_hash_groups(&hash_groups),
+        findings: duplicate_findings_from_body_hash_groups(index, &seeds, convention_methods),
+        groups: duplicate_groups_from_body_hash_groups(&index.body_hash_groups, &seeds),
     }
 }
 
 /// Shared group-construction phase for both the scoped and unscoped paths.
-fn duplicate_groups_from_body_hash_groups(hash_groups: &BodyHashGroups) -> Vec<DuplicateGroup> {
+fn duplicate_groups_from_body_hash_groups(
+    hash_groups: &BodyHashGroups,
+    seeds: &SeededBodyHashes,
+) -> Vec<DuplicateGroup> {
     let mut groups = Vec::new();
 
-    for ((method_name, _hash), locations) in hash_groups {
-        if locations.len() < MIN_DUPLICATE_LOCATIONS {
+    for ((method_name, body_hash), locations) in hash_groups {
+        if !is_seeded_body_hash(seeds, method_name, body_hash)
+            || locations.len() < MIN_DUPLICATE_LOCATIONS
+        {
             continue;
         }
 
@@ -242,55 +243,6 @@ fn inline_test_context_methods(fingerprints: &[&FileFingerprint]) -> HashSet<(St
     out
 }
 
-/// [`inline_test_context_methods`] restricted to the `(file → method_names)`
-/// pairs a caller will actually query.
-///
-/// `inline_test_context_methods` scans the content of *every* fingerprint and
-/// probes it once per method — an O(corpus) content pass. The exact-duplicate
-/// detector only ever asks about `(method_name, file)` pairs that are members of
-/// a surviving duplicate group, which is a tiny slice of the corpus. Restricting
-/// the scan to those pairs returns the same answer for every query the caller
-/// makes: the unrestricted set is exactly this one unioned over all pairs, and
-/// membership is decided per pair independently.
-///
-/// The `method_hashes` guard mirrors the unrestricted version, which only
-/// considers method names present in that file's `method_hashes`.
-fn inline_test_context_methods_for(
-    fingerprints: &[&FileFingerprint],
-    wanted: &HashMap<&str, HashSet<&str>>,
-) -> HashSet<(String, String)> {
-    let mut out = HashSet::new();
-    if wanted.is_empty() {
-        return out;
-    }
-
-    for fp in fingerprints {
-        let Some(method_names) = wanted.get(fp.relative_path.as_str()) else {
-            continue;
-        };
-        let regions = inline_test_regions(&fp.content, fp.language.inline_test_region_markers());
-        if regions.is_empty() {
-            continue;
-        }
-        for method_name in method_names {
-            if !fp.method_hashes.contains_key(*method_name) {
-                continue;
-            }
-            let needle = format!("fn {}", method_name);
-            if let Some(pos) = fp.content.find(&needle) {
-                if regions
-                    .iter()
-                    .any(|(start, end)| pos >= *start && pos <= *end)
-                {
-                    out.insert(((*method_name).to_string(), fp.relative_path.clone()));
-                }
-            }
-        }
-    }
-
-    out
-}
-
 /// Whether a duplicate location is test code — either a whole test file
 /// (`is_test_path`) or a method defined inside an inline `#[cfg(test)]` block.
 fn is_test_location(
@@ -317,36 +269,22 @@ fn is_reportable_duplicate_group(
 
 /// Shared finding-construction phase for both the scoped and unscoped paths.
 fn duplicate_findings_from_body_hash_groups(
-    hash_groups: &BodyHashGroups,
-    all: &[&FileFingerprint],
+    index: &DuplicationIndex,
+    seeds: &SeededBodyHashes,
     convention_methods: &std::collections::HashSet<String>,
 ) -> Vec<Finding> {
-    // Only reportable groups ever ask about inline `cfg(test)` context, so
-    // collect exactly those `(file, method)` pairs first and keep the content
-    // scan off the rest of the corpus.
-    let mut wanted: HashMap<&str, HashSet<&str>> = HashMap::new();
-    for ((method_name, _hash), locations) in hash_groups {
-        if !is_reportable_duplicate_group(method_name, locations, convention_methods) {
-            continue;
-        }
-        for file in locations {
-            wanted
-                .entry(file.as_str())
-                .or_default()
-                .insert(method_name.as_str());
-        }
-    }
-    let inline_test_methods = inline_test_context_methods_for(all, &wanted);
     let mut findings = Vec::new();
 
-    for ((method_name, _hash), locations) in hash_groups {
-        if !is_reportable_duplicate_group(method_name, locations, convention_methods) {
+    for ((method_name, body_hash), locations) in &index.body_hash_groups {
+        if !is_seeded_body_hash(seeds, method_name, body_hash)
+            || !is_reportable_duplicate_group(method_name, locations, convention_methods)
+        {
             continue;
         }
 
         let test_only_duplicate = locations
             .iter()
-            .all(|file| is_test_location(method_name, file, &inline_test_methods));
+            .all(|file| is_test_location(method_name, file, &index.inline_test_methods));
         let severity = if test_only_duplicate {
             Severity::Info
         } else {
@@ -417,8 +355,10 @@ const CROSS_NAME_MIN_BODY_LINES: usize = 1;
 /// `already_flagged_names` are method names already reported by the same-name
 /// exact detector; a cross-name group is still reported (its value is the
 /// *cross-name* link), but same-name-only groups are left to the exact detector.
-pub(crate) fn detect_cross_name_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
-    let inline_test_methods = inline_test_context_methods(fingerprints);
+pub(crate) fn detect_cross_name_duplicates_with_index(
+    fingerprints: &[&FileFingerprint],
+    index: &DuplicationIndex,
+) -> Vec<Finding> {
     // hash -> list of (file, method_name)
     let mut by_body: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
     for fp in fingerprints {
@@ -449,7 +389,7 @@ pub(crate) fn detect_cross_name_duplicates(fingerprints: &[&FileFingerprint]) ->
 
         let test_only = locations
             .iter()
-            .all(|(file, name)| is_test_location(name, file, &inline_test_methods));
+            .all(|(file, name)| is_test_location(name, file, &index.inline_test_methods));
         let severity = if test_only {
             Severity::Info
         } else {
@@ -630,17 +570,11 @@ fn count_body_lines(fp: &FileFingerprint, method_name: &str) -> usize {
 /// - Trivial functions (fewer than `MIN_BODY_LINES` body lines, where the
 ///   body line count is *strictly between the braces* — so a single-line
 ///   body is 0 and the standard three-line shape is 1)
-pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(crate) fn detect_near_duplicates_with_index(
+    fingerprints: &[&FileFingerprint],
+    index: &DuplicationIndex,
+) -> Vec<Finding> {
     let structural_groups = build_structural_groups(fingerprints);
-    let exact_groups = build_groups(fingerprints);
-    let inline_test_methods = inline_test_context_methods(fingerprints);
-
-    // Collect exact-duplicate (name, hash) pairs for exclusion
-    let exact_duplicate_names: std::collections::HashSet<String> = exact_groups
-        .iter()
-        .filter(|(_, locs)| locs.len() >= MIN_DUPLICATE_LOCATIONS)
-        .map(|((name, _), _)| name.clone())
-        .collect();
 
     let mut findings = Vec::new();
 
@@ -651,7 +585,7 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
         }
 
         // Skip if already an exact duplicate
-        if exact_duplicate_names.contains(method_name) {
+        if index.exact_duplicate_names.contains(method_name) {
             continue;
         }
 
@@ -661,7 +595,7 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
         // expected and not an actionable production near-duplicate.
         if file_hashes
             .iter()
-            .all(|(file, _)| is_test_location(method_name, file, &inline_test_methods))
+            .all(|(file, _)| is_test_location(method_name, file, &index.inline_test_methods))
         {
             continue;
         }
@@ -854,15 +788,10 @@ fn skeleton_group_shares_name_token(names: &[&str]) -> bool {
 /// - requires a real backbone (`SKELETON_MIN_TOKENS` significant tokens),
 /// - reuses the generic-name, trivial-method, and command↔core delegation
 ///   filters so it does not re-flag idiomatic or delegation-shaped bodies.
-pub(crate) fn detect_skeleton_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
-    // Names already reported as exact duplicates — skeleton is redundant there.
-    let exact_groups = build_groups(fingerprints);
-    let exact_duplicate_names: HashSet<String> = exact_groups
-        .iter()
-        .filter(|(_, locs)| locs.len() >= MIN_DUPLICATE_LOCATIONS)
-        .map(|((name, _), _)| name.clone())
-        .collect();
-
+pub(crate) fn detect_skeleton_duplicates_with_index(
+    fingerprints: &[&FileFingerprint],
+    index: &DuplicationIndex,
+) -> Vec<Finding> {
     // skeleton_hash -> [(file, name, structural_hash)]
     let mut by_skeleton: SkeletonDuplicateGroups = HashMap::new();
     for fp in fingerprints {
@@ -931,7 +860,7 @@ pub(crate) fn detect_skeleton_duplicates(fingerprints: &[&FileFingerprint]) -> V
         // Skip when every member was already an exact duplicate (same name)…
         let all_exact = locations
             .iter()
-            .all(|(_, name, _)| exact_duplicate_names.contains(*name));
+            .all(|(_, name, _)| index.exact_duplicate_names.contains(*name));
         if all_exact {
             continue;
         }
@@ -1657,8 +1586,9 @@ fn lcs_ratio(a: &[String], b: &[String]) -> f64 {
 /// `detector_config` carries extension-supplied trivial/plumbing call name lists
 /// that augment the built-in generic floors. Core never interprets these strings;
 /// they are merged into the existing filters.
-pub(crate) fn detect_parallel_implementations(
+pub(crate) fn detect_parallel_implementations_with_index(
     fingerprints: &[&FileFingerprint],
+    index: &DuplicationIndex,
     convention_methods: &std::collections::HashSet<String>,
     detector_config: &DuplicationDetectorConfig,
 ) -> Vec<Finding> {
@@ -1677,14 +1607,6 @@ pub(crate) fn detect_parallel_implementations(
     let common_calls = corpus_common_calls(&sequences);
     let sequences = scored_call_sequences(sequences, &extra_plumbing, &common_calls);
 
-    // Build sets of already-flagged pairs (exact + near duplicates) to avoid double-flagging
-    let exact_groups = build_groups(fingerprints);
-    let exact_dup_fns: std::collections::HashSet<String> = exact_groups
-        .iter()
-        .filter(|(_, locs)| locs.len() >= MIN_DUPLICATE_LOCATIONS)
-        .map(|((name, _), _)| name.clone())
-        .collect();
-
     let mut findings = Vec::new();
     for i in 0..sequences.len() {
         for j in (i + 1)..sequences.len() {
@@ -1702,7 +1624,9 @@ pub(crate) fn detect_parallel_implementations(
             }
 
             // Skip if either function is an exact duplicate
-            if exact_dup_fns.contains(&a.method) || exact_dup_fns.contains(&b.method) {
+            if index.exact_duplicate_names.contains(&a.method)
+                || index.exact_duplicate_names.contains(&b.method)
+            {
                 continue;
             }
 
