@@ -1444,6 +1444,220 @@ fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
     });
 }
 
+fn typed_pre_provider_runner_failure_snapshot(
+    status: homeboy_core::api_jobs::JobStatus,
+) -> homeboy_core::api_jobs::RunnerJobLogSnapshot {
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+    snapshot.job.status = status;
+    snapshot.job.finished_at_ms = None;
+    snapshot.events = vec![homeboy_core::api_jobs::JobEvent {
+        sequence: 7,
+        job_id: snapshot.job.id,
+        kind: JobEventKind::Error,
+        timestamp_ms: 2,
+        message: Some("failed to materialize runner workspace".to_string()),
+        data: Some(json!({
+            "phase": "local_child_worker_failed_before_child_identity",
+            "error": "IO error: failed to materialize runner workspace",
+            "error_code": "internal.io_error",
+            "error_details": {
+                "context": "persist runner execution context",
+            },
+        })),
+    }];
+    snapshot
+}
+
+#[test]
+fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+
+    for (run_id, stale_status) in [
+        (
+            "cook-13965-attempt-queued",
+            homeboy_core::api_jobs::JobStatus::Queued,
+        ),
+        (
+            "cook-13965-attempt-running",
+            homeboy_core::api_jobs::JobStatus::Running,
+        ),
+    ] {
+        let mut record = record_detached_lab_run_in_store(
+            &lifecycle_store,
+            DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "00000000-0000-0000-0000-000000000123",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+            },
+        )
+        .expect("accepted detached handoff");
+        let snapshot = typed_pre_provider_runner_failure_snapshot(stale_status);
+
+        reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+            .expect("typed terminal failure outranks stale status");
+        let aggregate = lifecycle_store
+            .read_aggregate(run_id)
+            .expect("failed aggregate is durable");
+
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+        assert_eq!(record.metadata["phase"], "lab_runner_job_pre_provider");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["error_code"],
+            "internal.io_error"
+        );
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.metadata["runner_job_status"], "failed");
+        assert_eq!(
+            record.metadata["runner_result_synchronization"]["source"],
+            "typed_runner_job_error"
+        );
+        assert_eq!(
+            record.metadata["managed_recovery"]["command"],
+            format!("homeboy agent-task retry {run_id} --run")
+        );
+
+        reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+            .expect("repeated terminal snapshot is a no-op");
+        assert_eq!(
+            lifecycle_store
+                .read_aggregate(run_id)
+                .expect("aggregate remains durable"),
+            aggregate
+        );
+        assert_eq!(
+            record.metadata["runner_job_events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn typed_runner_failure_preserves_existing_provider_progress() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let run_id = "cook-13965-attempt-provider-progress";
+    let mut record = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        },
+    )
+    .expect("accepted detached handoff");
+    record.provider_handles.push(AgentTaskRunProviderHandle {
+        kind: Default::default(),
+        task_id: "task-a".to_string(),
+        backend: "test".to_string(),
+        provider_run_id: "provider-already-started".to_string(),
+        stream_uri: None,
+        state: Some(AgentTaskState::Running),
+        metadata: Value::Null,
+    });
+    lifecycle_store
+        .write_record(&record)
+        .expect("provider progress is durable");
+    let snapshot =
+        typed_pre_provider_runner_failure_snapshot(homeboy_core::api_jobs::JobStatus::Running);
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("late transport failure preserves provider work");
+
+    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(
+        record.provider_handles[0].provider_run_id,
+        "provider-already-started"
+    );
+    assert_eq!(record.metadata["candidate_preserved"], true);
+    assert_eq!(
+        record.metadata["runner_result_synchronization"]["state"],
+        "candidate_preserved"
+    );
+    assert_ne!(record.metadata["phase"], "lab_runner_job_pre_provider");
+    assert!(lifecycle_store.read_aggregate(run_id).is_err());
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("repeated transport failure is a no-op");
+    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(
+        record.provider_handles[0].provider_run_id,
+        "provider-already-started"
+    );
+    assert_eq!(record.metadata["candidate_preserved"], true);
+    assert_eq!(
+        record.metadata["runner_result_synchronization"]["event_sequence"],
+        7
+    );
+    assert!(lifecycle_store.read_aggregate(run_id).is_err());
+}
+
+#[test]
+fn restart_recovers_persisted_typed_runner_failure_before_live_reconciliation() {
+    with_isolated_home(|_| {
+        let run_id = "cook-13965-attempt-restart";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted detached handoff");
+        let snapshot =
+            typed_pre_provider_runner_failure_snapshot(homeboy_core::api_jobs::JobStatus::Queued);
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_job_status"] = json!(snapshot.job.status);
+            record.metadata["runner_job_events"] = json!(snapshot.events);
+            record.metadata["phase"] = json!("provider_start");
+        })
+        .expect("persist contradictory pre-restart observation");
+
+        let outcome = reconcile_status_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("restart consumes durable terminal event");
+        assert_eq!(outcome.record.state, AgentTaskRunState::Failed);
+        assert!(!outcome.runner_probe.performed);
+        assert_eq!(
+            outcome.record.metadata["terminal_transport_recovery"],
+            "persisted_runner_job_error"
+        );
+        assert_eq!(
+            outcome.record.metadata["pre_execution_failure"]["phase"],
+            outcome.record.metadata["phase"]
+        );
+        assert_eq!(
+            outcome.record.metadata["pre_execution_failure"]["retryable"],
+            true
+        );
+
+        for dry_run in [true, false] {
+            let report = reconcile_run(run_id, dry_run).expect("terminal reconcile is a no-op");
+            assert_eq!(report.considered, 0);
+            assert_eq!(report.reconciled, 0);
+            assert_eq!(report.failed, 0);
+        }
+        let repeated = reconcile_status(run_id).expect("terminal status remains stable");
+        assert_eq!(repeated.state, AgentTaskRunState::Failed);
+        assert_eq!(repeated.metadata["phase"], "lab_runner_job_pre_provider");
+    });
+}
+
 #[test]
 fn stale_reconcile_keeps_an_accepted_runner_job_active_after_controller_owner_exit() {
     with_isolated_home(|_| {
