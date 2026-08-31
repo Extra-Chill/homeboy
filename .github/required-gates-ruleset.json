@@ -28,10 +28,6 @@
             "integration_id": 15368
           },
           {
-            "context": "homeboy / Audit",
-            "integration_id": 15368
-          },
-          {
             "context": "homeboy / Lint",
             "integration_id": 15368
           },

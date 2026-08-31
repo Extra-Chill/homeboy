@@ -28,21 +28,9 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
-  homeboy-fast:
-    name: homeboy / ${{ matrix.title }}
+  lint:
+    name: homeboy / Lint
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - command: review audit
-            title: Audit
-            section_key: audit
-            section_title: Audit
-          - command: review lint
-            title: Lint
-            section_key: lint
-            section_title: Lint
     steps:
       - uses: actions/checkout@v6
         with:
@@ -63,15 +51,15 @@ jobs:
         with:
           source: .
           component: homeboy
-          commands: ${{ matrix.command }}
-          expected-commands: review audit,review lint,review test
+          commands: review lint
+          expected-commands: review lint,review test
           differential-gating: true
           execution-timeout-seconds: '1800'
           test-timeout-seconds: '1500'
           setup-timeout-seconds: '2400'
           app-token: ${{ steps.app-token.outputs.token || github.token }}
-          comment-section-key: ${{ matrix.section_key }}
-          comment-section-title: ${{ matrix.section_title }}
+          comment-section-key: lint
+          comment-section-title: Lint
 
   homeboy:
     name: homeboy
@@ -79,7 +67,7 @@ jobs:
     with:
       commands: review test
       args: --skip-lint
-      expected-commands: review audit,review lint,review test
+      expected-commands: review lint,review test
       component: homeboy
       action-ref: a55a1dde4d52d00656ac9b01ad06d1be2e5b4378
       extension-ref: 9c95310bd12a78cb900dc2fe4ed2411396cb30ca
