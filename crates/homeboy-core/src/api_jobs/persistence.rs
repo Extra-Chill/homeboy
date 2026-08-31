@@ -370,8 +370,11 @@ pub(super) fn read_durable_store(path: &Path) -> Result<DurableJobStore> {
 
     let content = fs::read_to_string(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", path.display()))))?;
-    match serde_json::from_str(&content) {
-        Ok(store) => Ok(store),
+    match serde_json::from_str::<DurableJobStore>(&content) {
+        Ok(store) => {
+            super::remote_runner::validate_stored_remote_runner_jobs(&store.jobs)?;
+            Ok(store)
+        }
         Err(err) => {
             let quarantine_path = path.with_file_name(format!(
                 "{}.corrupt-{}",
@@ -685,9 +688,11 @@ pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
     let linked_agent_task_run_id = stored
         .remote_runner
         .as_ref()
-        .and_then(|remote_runner| remote_runner.request.lab_runner_workload.as_ref())
-        .and_then(|workload| workload.agent_task.as_ref())
-        .map(|agent_task| agent_task.run_id.trim())
+        .and_then(|remote_runner| remote_runner.request().ok())
+        .and_then(|request| request.lab_runner_workload)
+        .as_ref()
+        .and_then(|workload| workload.agent_task.clone())
+        .map(|agent_task| agent_task.run_id.trim().to_string())
         .filter(|run_id| !run_id.is_empty());
 
     serde_json::json!({
@@ -706,15 +711,15 @@ pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
             "terminal_result_recorded": false,
             "last_known_event": last_child_event.map(last_known_child_event),
             "output_observed": last_child_event.is_some(),
-            "linked_durable_run": linked_agent_task_run_id.map(|run_id| serde_json::json!({
+            "linked_durable_run": linked_agent_task_run_id.as_deref().map(|run_id| serde_json::json!({
                 "kind": "agent_task",
                 "run_id": run_id,
                 "terminal_result_observed": false,
             })),
         },
         "remote_runner": stored.remote_runner.as_ref().map(|remote_runner| serde_json::json!({
-            "runner_id": remote_runner.request.runner_id.clone(),
-            "project_id": remote_runner.request.project_id.clone(),
+            "runner_id": remote_runner.request().ok().map(|request| request.runner_id),
+            "project_id": remote_runner.request().ok().and_then(|request| request.project_id),
             "claim_id": stored.job.claim_id.clone(),
             "claimed_by_runner_id": stored.job.claimed_by_runner_id.clone(),
             "claimed_at_ms": stored.job.claimed_at_ms,

@@ -1276,3 +1276,19 @@ pub fn record_lab_offload_submission_request(
     lifecycle_store.write_record(&record)?;
     Ok(record)
 }
+
+/// Persist the envelope-first replay input before it crosses the broker.
+pub fn record_lab_offload_submission_envelope(
+    run_id: &str,
+    request: &homeboy_runner_contract::RunnerApiSubmitRequest,
+) -> Result<AgentTaskRunRecord> {
+    let legacy = homeboy_core::api_jobs::legacy_request_from_envelope(&request.envelope)?;
+    let record = record_lab_offload_submission_request(run_id, &legacy)?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    lifecycle_store.mutate_record(run_id, |record| {
+        record.ensure_metadata_object()["runner_submission_intent"]["replay_envelope_request"] =
+            serde_json::to_value(request).expect("serialize envelope replay request");
+        true
+    })?;
+    Ok(record)
+}

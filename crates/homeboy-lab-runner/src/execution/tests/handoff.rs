@@ -735,6 +735,57 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
 }
 
 #[test]
+fn reverse_broker_rejects_inline_secret_before_detached_intent_persistence() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "agent-task-inline-secret-rejected";
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
+            homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id,
+                runner_id: "lab",
+                remote_workspace: "/srv/homeboy/project",
+                remote_command: &["homeboy".to_string(), "test".to_string()],
+                durable_plan: None,
+            },
+        )
+        .expect("controller proxy run recorded");
+        let error = exec_via_reverse_broker(
+            &ssh_runner(),
+            "http://127.0.0.1:1",
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "test".to_string()],
+            [("DECLARED_TOKEN".to_string(), "must-not-persist".to_string())]
+                .into_iter()
+                .collect(),
+            vec!["DECLARED_TOKEN".to_string()],
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(run_id.to_string()),
+            false,
+            true,
+            true,
+            true,
+        )
+        .expect_err("inline declared secret is rejected before handoff");
+        assert_eq!(
+            error.code,
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument
+        );
+        let record = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+            .read_record(run_id)
+            .expect("persisted record");
+        assert!(!serde_json::to_string(&record)
+            .expect("record JSON")
+            .contains("must-not-persist"));
+    });
+}
+
+#[test]
 fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion() {
     homeboy_core::test_support::with_isolated_home(|_| {
         // The in-process daemon's /exec endpoint drives runner processes through

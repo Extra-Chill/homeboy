@@ -10,6 +10,10 @@ use homeboy_core::api_jobs::{
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::source_snapshot::SourceSnapshot;
+use homeboy_runner_contract::{
+    RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse,
+    RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
+};
 use reqwest::blocking::Client;
 
 use super::super::broker_http;
@@ -55,6 +59,61 @@ pub(super) fn exec_via_reverse_broker(
             runner.workspace_root.as_deref(),
         )
     });
+    let redaction_env = env.clone();
+    let redaction_secret_env_names = secret_env_names.clone();
+    let mut env = env;
+    // Snapshot the configured command binary into the durable job. A later
+    // daemon refresh must not redirect work that has already been accepted.
+    if !env.contains_key("HOMEBOY_COMMAND") {
+        if let Some(homeboy_path) = runner.settings.homeboy_path.as_deref() {
+            env.insert("HOMEBOY_COMMAND".to_string(), homeboy_path.to_string());
+        }
+    }
+    let mut request = RemoteRunnerJobRequest {
+        runner_id: runner.id.clone(),
+        project_id,
+        operation: "runner.exec".to_string(),
+        command: command.clone(),
+        cwd: Some(cwd.clone()),
+        env,
+        secret_env_names,
+        secret_env_plan: Default::default(),
+        env_materialization: None,
+        capture_patch,
+        source_snapshot: Some(source_snapshot.clone()),
+        path_materialization_plan: path_materialization_plan.clone(),
+        lab_runner_workload: lab_runner_workload.clone(),
+        metadata: Some({
+            let mut metadata =
+                runner_exec_request_metadata(run_id.as_deref(), "reverse_broker", &runner.id);
+            metadata["submission_key"] = serde_json::json!(run_id.as_deref().map_or_else(
+                || format!("reverse-broker:v1:{}:{}", runner.id, uuid::Uuid::new_v4()),
+                |run_id| reverse_broker_submission_key(&runner.id, run_id),
+            ));
+            metadata
+        }),
+        lifecycle: Some(RunnerJobLifecycleMetadata {
+            source: Some("reverse-broker".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: run_id.clone(),
+            ..Default::default()
+        }),
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+        require_paths: require_paths.clone(),
+        extension_env_providers,
+    };
+    let command_assets = durable_command_assets(&command, path_materialization_plan.as_ref())?;
+    if !command_assets.is_empty() {
+        request
+            .metadata
+            .as_mut()
+            .expect("reverse broker request metadata")["command_assets"] = serde_json::json!({
+            "schema": "homeboy/reverse-runner-command-assets/v1",
+            "assets": command_assets,
+        });
+    }
+    request.validate_durable_submission()?;
     persist_runner_execution_transition(
         &RunnerExecutionRecord::planned(
             format!("runner-exec:{}:reverse_broker", runner.id),
@@ -71,16 +130,6 @@ pub(super) fn exec_via_reverse_broker(
         &cwd,
         &command,
     )?;
-    let redaction_env = env.clone();
-    let redaction_secret_env_names = secret_env_names.clone();
-    let mut env = env;
-    // Snapshot the configured command binary into the durable job. A later
-    // daemon refresh must not redirect work that has already been accepted.
-    if !env.contains_key("HOMEBOY_COMMAND") {
-        if let Some(homeboy_path) = runner.settings.homeboy_path.as_deref() {
-            env.insert("HOMEBOY_COMMAND".to_string(), homeboy_path.to_string());
-        }
-    }
     // Reverse jobs hold a renewable owner lease while queued/running. A
     // reconciliation claim is a separate exclusive fence and is never used as
     // ordinary execution ownership.
@@ -120,54 +169,45 @@ pub(super) fn exec_via_reverse_broker(
             Ok::<_, Error>(lease)
         })
         .transpose()?;
-    let mut request = RemoteRunnerJobRequest {
-        runner_id: runner.id.clone(),
-        project_id,
-        operation: "runner.exec".to_string(),
-        command: command.clone(),
-        cwd: Some(cwd.clone()),
-        env,
-        secret_env_names,
-        secret_env_plan: Default::default(),
-        env_materialization: None,
-        capture_patch,
-        source_snapshot: Some(source_snapshot.clone()),
-        path_materialization_plan: path_materialization_plan.clone(),
-        lab_runner_workload: lab_runner_workload.clone(),
-        metadata: Some({
-            let mut metadata =
-                runner_exec_request_metadata(run_id.as_deref(), "reverse_broker", &runner.id);
-            if let Some(run_id) = run_id.as_deref() {
-                metadata["submission_key"] =
-                    serde_json::json!(reverse_broker_submission_key(&runner.id, run_id));
-            }
-            metadata
-        }),
-        lifecycle: Some(RunnerJobLifecycleMetadata {
-            source: Some("reverse-broker".to_string()),
-            kind: Some("runner.exec".to_string()),
-            durable_run_id: run_id.clone(),
-            ..Default::default()
-        }),
-        workspace_claim_binding: None,
-        workspace_owner_lease: workspace_owner_lease.clone(),
-        require_paths: require_paths.clone(),
-        extension_env_providers,
+    request.workspace_owner_lease = workspace_owner_lease.clone();
+    let envelope = request.execution_envelope();
+    let submission_key = request
+        .submission_key()
+        .ok_or_else(|| Error::internal_unexpected("reverse broker submission has no key"))?
+        .to_string();
+    let submission = RunnerApiSubmitRequest {
+        schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+        api_version: RUNNER_API_V1,
+        submission_key,
+        envelope,
+        workspace_claim_binding: request
+            .workspace_claim_binding
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize workspace claim binding".to_string()),
+                )
+            })?,
+        workspace_owner_lease: request
+            .workspace_owner_lease
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize workspace owner lease".to_string()),
+                )
+            })?,
     };
-    let command_assets = durable_command_assets(&command, path_materialization_plan.as_ref())?;
-    if !command_assets.is_empty() {
-        request
-            .metadata
-            .as_mut()
-            .expect("reverse broker request metadata")["command_assets"] = serde_json::json!({
-            "schema": "homeboy/reverse-runner-command-assets/v1",
-            "assets": command_assets,
-        });
-    }
     if detach_after_handoff {
         if let Some(run_id) = run_id.as_deref() {
-            homeboy_agents::agent_task_lifecycle::record_lab_offload_submission_request(
-                run_id, &request,
+            homeboy_agents::agent_task_lifecycle::record_lab_offload_submission_envelope(
+                run_id,
+                &submission,
             )?;
         }
     }
@@ -176,7 +216,7 @@ pub(super) fn exec_via_reverse_broker(
         &client,
         broker_url,
         "/runner/jobs",
-        serde_json::to_value(&request).map_err(|err| {
+        serde_json::to_value(&submission).map_err(|err| {
             Error::internal_json(
                 err.to_string(),
                 Some("serialize reverse runner job request".to_string()),
@@ -185,6 +225,26 @@ pub(super) fn exec_via_reverse_broker(
         "submit reverse runner job",
         broker_token.as_deref(),
     );
+    let data = data.and_then(|data| {
+        if let Some(response) = data.get("response") {
+            let response: RunnerApiSubmitResponse = serde_json::from_value(response.clone())
+                .map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("parse runner submit response".to_string()),
+                    )
+                })?;
+            if let RunnerApiSubmitOutcome::Rejected { failure } = response.outcome {
+                return Err(Error::validation_invalid_argument(
+                    "runner_submission",
+                    failure.message,
+                    None,
+                    None,
+                ));
+            }
+        }
+        Ok(data)
+    });
     let data = match data {
         Ok(data) => data,
         Err(error) => {
