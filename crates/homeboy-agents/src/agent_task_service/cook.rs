@@ -4313,38 +4313,50 @@ pub fn terminal_review_form_continuation_is_eligible(
     Ok(retryable_review_form_terminal_failure(record, &aggregate))
 }
 
+pub fn terminal_review_form_continuation_is_eligible_readonly(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<bool> {
+    if !matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+    ) || !review_form_attempt_is_ready_for_cook_continuation(plan, record)?
+    {
+        return Ok(false);
+    }
+    let aggregate = match lifecycle_store.read_aggregate_readonly(&record.run_id) {
+        Ok(aggregate) => aggregate,
+        Err(_) => return Ok(false),
+    };
+    Ok(retryable_review_form_terminal_failure(record, &aggregate))
+}
+
 /// Validate the read-only admission boundary for a reconstructed continuation.
 /// This deliberately stops before recipe/lifecycle materialization, transport
 /// preparation, provider dispatch, and finalization.
-pub fn preflight_cook_continuation_admission(options: &CookRequest) -> Result<()> {
-    let mut options = options.clone();
-    canonicalize_cook_provider_workspace(&mut options)?;
-    let options = &options;
-    let moving_base_continuation =
-        agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
-            .ok()
-            .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
-            .is_some();
-    let verification_pending_continuation =
-        agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
-            .ok()
-            .is_some_and(|record| {
-                record
-                    .metadata
-                    .pointer("/latest_promotion/status")
-                    .and_then(Value::as_str)
-                    == Some("verification_pending")
-            });
-    let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id).ok();
-    let review_form_continuation = record.as_ref().is_some_and(|record| {
+pub fn preflight_cook_continuation_admission(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &CookRequest,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<Vec<&'static str>> {
+    let moving_base_continuation = record.metadata.get("cook_moving_base_recovery").is_some();
+    let verification_pending_continuation = record
+        .metadata
+        .pointer("/latest_promotion/status")
+        .and_then(Value::as_str)
+        == Some("verification_pending");
+    let review_form_continuation = {
         review_form_attempt_is_ready_for_cook_continuation(&options.identity.initial_plan, record)
             .unwrap_or(false)
-    });
+    };
     if review_form_continuation
-        && !record.as_ref().is_some_and(|record| {
-            terminal_review_form_continuation_is_eligible(&options.identity.initial_plan, record)
-                .unwrap_or(false)
-        })
+        && !terminal_review_form_continuation_is_eligible_readonly(
+            lifecycle_store,
+            &options.identity.initial_plan,
+            record,
+        )?
     {
         let mut error = Error::validation_invalid_argument(
             "cook_continuation",
@@ -4361,42 +4373,27 @@ pub fn preflight_cook_continuation_admission(options: &CookRequest) -> Result<()
     // Attempts that can bypass provider execution need durable model evidence
     // before they can reach promotion or finalization. A retryable
     // pre-execution failure has no executed model yet by definition.
-    if record
-        .as_ref()
-        .is_none_or(cook_continuation_requires_model_provenance)
-    {
-        super::cook_promotion::validate_cook_attempt_model_provenance(
-            &options.identity.initial_run_id,
-        )?;
-    }
-    let authenticated_historical_review_continuation =
-        authenticated_historical_review_form_workspace_with_trace(options, false)?;
-    if review_form_continuation && !authenticated_historical_review_continuation {
-        return Err(Error::validation_invalid_argument(
-            "cook_continuation",
-            "terminal review-form continuation workspace could not be authenticated",
-            Some(options.identity.initial_run_id.clone()),
-            None,
-        ));
-    }
-    if !moving_base_continuation
+    validate_cook_candidate_group(&options.identity.initial_plan)?;
+    let mut execution_only = Vec::new();
+    if review_form_continuation {
+        execution_only.push("historical_workspace_authentication");
+    } else if !moving_base_continuation
         && !verification_pending_continuation
-        && !authenticated_historical_review_continuation
-        && !cook_workspace_lookup_pending(&options.identity.initial_plan)
-        && options.provider_transport.attempt_dispatcher.is_none()
-        && options.workspace.source_worktree_path.is_none()
-        && options.provider_transport.provider_command.is_none()
-        && options.provider_transport.provider_invocation.is_none()
-    {
-        preflight_initial_cook_workspace_provider(options)?;
-    }
-    if cook_attempt_needs_execution(&options.identity.initial_run_id)
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
         && options.provider_transport.attempt_dispatcher.is_none()
     {
-        validate_cook_workspace(options)?;
+        execution_only.push("provider_workspace_resolution");
     }
-    validate_cook_candidate_group(&options.identity.initial_plan)
+    if cook_run_record_needs_execution(record) {
+        execution_only.push("provider_execution");
+    }
+    Ok(execution_only)
+}
+
+pub fn cook_continuation_replays_provider(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    cook_run_record_needs_execution(record)
 }
 
 fn reserve_cook_materialization_capacity(
@@ -7314,12 +7311,6 @@ fn bind_dispatch_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> 
     Ok(())
 }
 
-fn cook_attempt_needs_execution(run_id: &str) -> bool {
-    agent_task_lifecycle::reconcile_status(run_id)
-        .map(|record| cook_run_record_needs_execution(&record))
-        .unwrap_or(true)
-}
-
 pub fn cook_continuation_requires_model_provenance(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> bool {
@@ -7354,6 +7345,7 @@ fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRe
 /// Validate the Cook target before a provider can run. An explicit source path
 /// is already the authoritative workspace; otherwise resolve the declared
 /// handle through the existing local/provider path.
+#[cfg(test)]
 fn validate_cook_workspace(options: &CookRequest) -> Result<Option<CookWorkspaceBaseValidation>> {
     validate_cook_workspace_with_adopted_candidate(options, false)
 }

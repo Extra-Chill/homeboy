@@ -29,9 +29,11 @@ use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
     candidate_fingerprint, canonical_recoverable_patch_artifacts,
     canonical_recoverable_patch_artifacts_in_observation_store,
+    preflight_recoverable_candidate_promotion_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
-    resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    resume_promoted_patch_replacement_gates_in_observation_store, select_patch_artifact,
+    AgentTaskPromotionCandidate, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -407,6 +409,108 @@ pub(crate) fn promote_attempt_in_store(
             Ok(())
         },
     )
+}
+
+/// Observe the exact persisted promote-or-load decision without opening a
+/// writable store, applying a patch, or running verification gates.
+pub fn preflight_cook_promotion_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &CookRequest,
+    run_id: &str,
+    artifact_id: Option<&str>,
+) -> Result<Value> {
+    let aggregate = lifecycle_store.read_aggregate_readonly(run_id)?;
+    let outcome = aggregate
+        .selected_outcome()
+        .or_else(|| {
+            (aggregate.outcomes.len() == 1)
+                .then(|| aggregate.outcomes.first())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_model",
+                "Cook promotion has no selected provider outcome",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    validate_cook_attempt_model_provenance_readonly_in_store(lifecycle_store, run_id)?;
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
+        let behavior = if promotion.status == AgentTaskPromotionStatus::VerificationPending {
+            "resume_verification_pending"
+        } else {
+            "load_persisted"
+        };
+        return Ok(json!({
+            "behavior": behavior,
+            "status": promotion.status,
+            "artifact_id": promotion.patch_artifact.id,
+            "candidate_fingerprint": promotion.provenance.get("candidate").cloned().unwrap_or(Value::Null),
+            "execution_only_checks": if promotion.status == AgentTaskPromotionStatus::VerificationPending {
+                json!(["promotion_target_resolution", "patch_presence", "verification_gates"])
+            } else {
+                json!([])
+            },
+        }));
+    }
+    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
+        let artifact = select_patch_artifact(outcome, artifact_id)?;
+        return Ok(json!({
+            "behavior": "promote_new",
+            "artifact_id": artifact.id,
+            "candidate_fingerprint": Value::Null,
+            "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
+        }));
+    }
+    let source = serde_json::to_string_pretty(&aggregate).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some(format!("serialize agent-task aggregate {run_id}")),
+        )
+    })?;
+    let promotion_options = AgentTaskPromotionOptions {
+        source,
+        source_run_id: Some(run_id.to_string()),
+        source_path: Some(lifecycle_store.aggregate_path(run_id)),
+        source_worktree_path: component_workspace_path(options)?
+            .or_else(|| options.workspace.source_worktree_path.clone()),
+        base_ref: Some(options.finalization.base.clone()),
+        task_base_sha: cook_candidate_base_sha(options),
+        candidate_ref: None,
+        to_worktree: options.workspace.to_worktree.clone(),
+        task_id: Some(outcome.task_id.clone()),
+        artifact_id: artifact_id.map(str::to_string),
+        dry_run: false,
+        gates: options.gates.clone(),
+        provider_command: options.provider_transport.provider_command.clone(),
+        provider_invocation: options.provider_transport.provider_invocation.clone(),
+    };
+    let observation_store = lifecycle_store.open_observation_readonly()?;
+    let artifact = preflight_recoverable_candidate_promotion_in_observation_store(
+        &promotion_options,
+        &observation_store,
+    )?;
+    Ok(json!({
+        "behavior": "promote_new",
+        "artifact_id": artifact.id,
+        "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
+        "candidate_fingerprint": {
+            "schema": "homeboy/agent-task-recoverable-candidate-fingerprint/v1",
+            "kind": "recoverable_patch",
+            "artifact_id": artifact.id,
+            "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes,
+            "run_id": artifact.metadata.get("run_id"),
+            "task_id": artifact.metadata.get("task_id"),
+            "producer_attempt": artifact.metadata.get("producer_attempt"),
+            "base_ref": artifact.metadata.get("base_ref"),
+            "provider_backend": artifact.metadata.get("provider_backend"),
+            "repository_identity": artifact.metadata.get("repository_identity"),
+            "workspace_identity": artifact.metadata.get("workspace_identity"),
+        }
+    }))
 }
 
 pub(crate) fn canonical_cook_patch_artifact_id_in_store(
@@ -921,7 +1025,7 @@ pub(crate) fn persisted_promotion_for_attempt(
     persisted_promotion_from_record(run_id, record)
 }
 
-fn persisted_promotion_from_record(
+pub(super) fn persisted_promotion_from_record(
     requested_run_id: &str,
     record: agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskPromotionReport>> {
@@ -4565,6 +4669,72 @@ fn selected_outcome_for_attempt_in_store(
 /// recipe or finalization flags. A pre-provider adopted source has task context
 /// but no executed model; any attempt used as an execution is validated by its
 /// caller before disclosure.
+fn authoritative_execution_identity(
+    plan: &crate::agent_task_schedule::AgentTaskPlan,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    outcome: &crate::agent_task::AgentTaskOutcome,
+    run_id: &str,
+) -> Result<(String, Option<String>)> {
+    let task = plan
+        .tasks
+        .iter()
+        .find(|task| task.task_id == outcome.task_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "Cook lineage outcome does not match a task in its durable execution plan",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    if task.executor.backend.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "provider_tool",
+            "Cook lineage attempt has no dispatched provider tool",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let terminal = super::cook_pre_execution::terminal_executor_identity(
+        outcome,
+        plan,
+        record.metadata.get("provider_executions"),
+    );
+    let model = selected_execution_model(
+        record
+            .metadata
+            .get("provider_executions")
+            .unwrap_or(&Value::Null),
+        outcome,
+        terminal
+            .as_ref()
+            .and_then(|identity| identity.model.as_deref()),
+        run_id,
+    )?;
+    if model.is_none()
+        && outcome.metadata["model_identity"]["provider_reported"]
+            .as_str()
+            .is_none()
+        && outcome.metadata["model_identity"]["requested"]
+            .as_str()
+            .zip(outcome.metadata["model_identity"]["resolved"].as_str())
+            .is_some_and(|(requested, resolved)| requested != resolved)
+    {
+        return Err(Error::validation_invalid_argument(
+            "provider_model",
+            "Cook lineage has unresolved requested and resolved model disagreement without a provider-reported executed model",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok((
+        terminal
+            .map(|identity| identity.backend)
+            .unwrap_or_else(|| task.executor.backend.clone()),
+        model,
+    ))
+}
+
 fn cook_attempt_execution_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -4609,46 +4779,7 @@ fn cook_attempt_execution_in_store(
                 None,
             )
         })?;
-    let terminal = super::cook_pre_execution::terminal_executor_identity(
-        &outcome,
-        &plan,
-        record.metadata.get("provider_executions"),
-    );
-    let model = selected_execution_model(
-        record
-            .metadata
-            .get("provider_executions")
-            .unwrap_or(&Value::Null),
-        &outcome,
-        terminal
-            .as_ref()
-            .and_then(|identity| identity.model.as_deref()),
-        run_id,
-    )?;
-    let requested_model = outcome.metadata["model_identity"]["requested"].as_str();
-    let resolved_model = outcome.metadata["model_identity"]["resolved"].as_str();
-    let provider_reported_model = outcome.metadata["model_identity"]["provider_reported"].as_str();
-    if model.is_none()
-        && provider_reported_model.is_none()
-        && requested_model
-            .zip(resolved_model)
-            .is_some_and(|(requested, resolved)| requested != resolved)
-    {
-        return Err(Error::validation_invalid_argument(
-            "provider_model",
-            "Cook lineage has unresolved requested and resolved model disagreement without a provider-reported executed model",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
-    if task.executor.backend.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "provider_tool",
-            "Cook lineage attempt has no dispatched provider tool",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
+    let (tool, model) = authoritative_execution_identity(&plan, &record, &outcome, run_id)?;
     Ok(CookAttemptExecution {
         task_summary: task
             .instructions
@@ -4661,10 +4792,7 @@ fn cook_attempt_execution_in_store(
             &outcome.outputs,
         )?
         .filter(|form| form.validate().is_ok()),
-        tool: terminal
-            .as_ref()
-            .map(|identity| identity.backend.clone())
-            .unwrap_or_else(|| task.executor.backend.clone()),
+        tool,
         model,
         review_form_only: task.inputs["cook_loop"]["review_form_required"] == true,
     })
@@ -4910,6 +5038,39 @@ pub fn validate_cook_attempt_model_provenance(run_id: &str) -> Result<()> {
         run_id,
     )
     .map(|_| ())
+}
+
+pub(super) fn validate_cook_attempt_model_provenance_readonly_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<()> {
+    let plan = lifecycle_store.read_controller_plan(run_id)?;
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    let aggregate = lifecycle_store.read_aggregate_readonly(run_id)?;
+    let outcome = aggregate
+        .selected_outcome()
+        .or_else(|| {
+            (aggregate.outcomes.len() == 1)
+                .then(|| aggregate.outcomes.first())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "Cook lineage attempt has no selected provider outcome",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let (_, model) = authoritative_execution_identity(&plan, &record, outcome, run_id)?;
+    model.map(|_| ()).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_model",
+            "Cook lineage attempt has no concrete executed model",
+            Some(run_id.to_string()),
+            None,
+        )
+    })
 }
 
 fn cook_ai_lineage_with_stores(

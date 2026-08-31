@@ -1846,7 +1846,27 @@ pub fn terminal_artifact_projection_readiness_bounded_in_store(
         &record,
         lifecycle_store.read_aggregate_bounded(&record.run_id),
         |record, aggregate| {
-            terminal_artifact_projection_is_verified_in_store(lifecycle_store, record, aggregate)
+            terminal_artifact_projection_is_verified_with(record, aggregate, || {
+                lifecycle_store.open_observation_readonly()
+            })
+        },
+    )
+}
+
+/// Read-only promotion-path counterpart that preserves execution's mirrored
+/// aggregate preference while avoiding observation-store initialization.
+pub fn terminal_artifact_projection_readiness_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let record = lifecycle_store.read_record_bounded(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_record_with(
+        &record,
+        lifecycle_store.read_aggregate_readonly(&record.run_id),
+        |record, aggregate| {
+            terminal_artifact_projection_is_verified_with(record, aggregate, || {
+                lifecycle_store.open_observation_readonly()
+            })
         },
     )
 }

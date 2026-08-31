@@ -17588,8 +17588,12 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             !authenticated_historical_review_form_workspace(&historical).unwrap(),
             "cancelled review-form attempts never authorize the bypass"
         );
-        let preflight = preflight_cook_continuation_admission(&historical)
-            .expect_err("preflight rejects the same ineligible terminal review form");
+        let record = agent_task_lifecycle::exact_record(&historical.identity.initial_run_id)
+            .expect("read cancelled review-form attempt");
+        let lifecycle_store = test_lifecycle_store();
+        let preflight =
+            preflight_cook_continuation_admission(&lifecycle_store, &historical, &record)
+                .expect_err("preflight rejects the same ineligible terminal review form");
         assert_eq!(
             preflight.details["continuation_admission"]["first_authoritative_denial"],
             "terminal_review_form_eligibility",

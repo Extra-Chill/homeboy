@@ -1515,13 +1515,9 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
     // Promotion has copied and verified the selected artifact into the
     // controller-owned destination. Once its gates are green, finalization no
     // longer consumes the provider aggregate's artifact transport.
-    let finalized_candidate =
-        super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
-            .is_some_and(|promotion| {
-                promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-                    && promotion.finalization_eligible(false)
-            });
-    if finalized_candidate {
+    if super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
+        .is_some()
+    {
         return Ok(record);
     }
     if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness_in_store(
@@ -1555,17 +1551,11 @@ pub fn preflight_recipe_attempt_for_continuation(
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let record = lifecycle_store.read_record_bounded(run_id)?;
     validate_recipe_attempt_record(recipe, run_id, &record)?;
-    let finalized_candidate =
-        super::cook_promotion::persisted_promotion_for_attempt_in_store(&lifecycle_store, run_id)?
-            .is_some_and(|promotion| {
-                promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-                    && promotion.finalization_eligible(false)
-            });
-    if finalized_candidate {
+    if super::cook_promotion::persisted_promotion_from_record(run_id, record.clone())?.is_some() {
         return Ok(record);
     }
     if let Some(reason) =
-        agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
+        agent_task_lifecycle::terminal_artifact_projection_readiness_readonly_in_store(
             &lifecycle_store,
             run_id,
         )?
@@ -1797,6 +1787,110 @@ pub fn continuation_state_in_store(
     Ok(CookContinuationState::Absent)
 }
 
+/// Observe whether the exact continuation claim that `cook-continue` will make
+/// is currently admissible. This never creates the queue root, reclaims a dead
+/// claim, or renames a queue entry.
+pub fn preflight_continuation_claim(
+    cook_id: &str,
+    run_id: &str,
+    rearm: bool,
+) -> Result<CookContinuationState> {
+    let store = default_store()?;
+    preflight_continuation_claim_in_store(&store, cook_id, run_id, rearm)
+}
+
+pub fn preflight_continuation_claim_in_store(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    run_id: &str,
+    rearm: bool,
+) -> Result<CookContinuationState> {
+    let key = format!("{cook_id}:{run_id}");
+    let hash = content_hash::sha256_hex(key.as_bytes());
+    let root = store.queue_root();
+    let mut state = CookContinuationState::Absent;
+    if root.is_dir() {
+        let claimed_prefix = format!("{hash}.claimed.");
+        for entry in fs::read_dir(&root).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(root.display().to_string()))
+        })? {
+            let path = entry
+                .map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(root.display().to_string()))
+                })?
+                .path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(pid_text) = name.strip_prefix(&claimed_prefix) else {
+                continue;
+            };
+            let pid = pid_text.parse::<u32>().ok();
+            let continuation = read_claimed_continuation(&path, "durable continuation")?;
+            validate_continuation(&continuation)?;
+            if continuation.key != key {
+                return Err(Error::validation_invalid_argument(
+                    "cook_continuation",
+                    "durable continuation key does not match its Cook attempt",
+                    Some(continuation.key),
+                    None,
+                ));
+            }
+            state = if pid.is_none_or(homeboy_core::process::pid_is_running) {
+                CookContinuationState::Claimed
+            } else {
+                CookContinuationState::Pending
+            };
+            break;
+        }
+        if state == CookContinuationState::Absent {
+            for (suffix, candidate) in [
+                ("pending", CookContinuationState::Pending),
+                ("failed", CookContinuationState::Failed),
+                ("completed", CookContinuationState::Completed),
+            ] {
+                let path = root.join(format!("{hash}.{suffix}"));
+                if path.is_file() {
+                    let continuation = read_claimed_continuation(&path, "durable continuation")?;
+                    validate_continuation(&continuation)?;
+                    if continuation.key != key {
+                        return Err(Error::validation_invalid_argument(
+                            "cook_continuation",
+                            "durable continuation key does not match its Cook attempt",
+                            Some(continuation.key),
+                            None,
+                        ));
+                    }
+                    state = candidate;
+                    break;
+                }
+            }
+        }
+    }
+    let admitted = if rearm {
+        state == CookContinuationState::Failed
+    } else {
+        matches!(
+            state,
+            CookContinuationState::Pending | CookContinuationState::Absent
+        )
+    };
+    if admitted {
+        Ok(state)
+    } else if rearm {
+        Err(rearm_state_error(cook_id, run_id, state))
+    } else {
+        Err(Error::validation_invalid_argument(
+            "cook_continuation.claim",
+            format!(
+                "Cook `{cook_id}` attempt `{run_id}` cannot be claimed because its continuation is {state:?}"
+            ),
+            Some(run_id.to_string()),
+            None,
+        ))
+    }
+}
+
 /// `claim_continuation_for_recovery` against an explicitly injected recipe
 /// store.
 ///
@@ -1891,6 +1985,40 @@ pub fn claim_continuation_for_recovery_in_store(
         continuation,
         path: claimed,
     }))
+}
+
+/// Rearm one failed continuation and clear its stale controller cause as one
+/// recoverable operation. If the lifecycle update fails, ownership is returned
+/// to the failed queue entry before the error is exposed.
+pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
+    store: &CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<Option<ClaimedCookContinuation>> {
+    let Some(claim) = claim_continuation_for_recovery_in_store(store, cook_id, run_id)? else {
+        return Ok(None);
+    };
+    let lifecycle_update: Result<()> = (|| {
+        if agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, run_id)? {
+            agent_task_lifecycle::clear_cook_controller_failure_in_store(lifecycle_store, run_id)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = lifecycle_update {
+        let failed = claim.path.with_extension("failed");
+        fs::rename(&claim.path, &failed).map_err(|rollback| {
+            Error::internal_io(
+                format!(
+                    "clear Cook controller failure: {}; restore failed continuation: {rollback}",
+                    error.message
+                ),
+                Some(claim.path.display().to_string()),
+            )
+        })?;
+        return Err(error);
+    }
+    Ok(Some(claim))
 }
 
 fn rearm_state_error(cook_id: &str, run_id: &str, state: CookContinuationState) -> Error {
@@ -3719,6 +3847,79 @@ mod tests {
             "run"
         )
         .unwrap());
+    }
+
+    #[test]
+    fn continuation_preflight_observes_claim_and_rearm_without_renaming_queue_state() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+
+        assert_eq!(
+            preflight_continuation_claim_in_store(&store, "cook", "run", false).unwrap(),
+            CookContinuationState::Pending
+        );
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Pending
+        );
+        claim_next_from(&store)
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+        assert_eq!(
+            preflight_continuation_claim_in_store(&store, "cook", "run", true).unwrap(),
+            CookContinuationState::Failed
+        );
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Failed
+        );
+    }
+
+    #[test]
+    fn production_recovery_claim_clears_controller_failure_with_queue_rearm() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        let recipe = recipe();
+        store.persist_recipe(&recipe).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&recipe.attempts[0].plan, "run", |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        claim_next_from(&store)
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+        agent_task_lifecycle::record_cook_controller_failure_in_store(
+            &lifecycle_store,
+            "run",
+            &serde_json::json!({ "message": "stale" }),
+        )
+        .unwrap();
+
+        let claim = claim_continuation_for_recovery_and_clear_failure_in_store(
+            &store,
+            &lifecycle_store,
+            "cook",
+            "run",
+        )
+        .unwrap()
+        .expect("failed continuation rearmed and claimed");
+
+        assert_eq!(claim.continuation().key, "cook:run");
+        assert!(
+            agent_task_lifecycle::exact_record_in_store(&lifecycle_store, "run")
+                .unwrap()
+                .metadata
+                .get("cook_controller_failure")
+                .is_none()
+        );
     }
 
     #[test]
