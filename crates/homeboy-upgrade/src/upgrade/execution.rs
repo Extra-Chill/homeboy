@@ -5,7 +5,8 @@ use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_engine_primitives::command::{
     terminate_process_tree_and_reap, terminate_remaining_process_group,
-    wait_with_bounded_output_supervised, ControllerChildGuard, SupervisedCommandTermination,
+    wait_with_bounded_output_supervised_guarded, ControllerChildGuard,
+    SupervisedCommandTermination,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -456,16 +457,16 @@ fn run_installer_shell_command(
         script,
         timeout,
         context,
-        |command| promotion_lease.authorize_subprocess(command),
+        |command| promotion_lease.authorize_mutating_subprocess(command),
         configure,
     )
 }
 
-fn supervise_installer_shell_command(
+fn supervise_installer_shell_command<A>(
     script: &str,
     timeout: Duration,
     context: &str,
-    authorize_before_spawn: impl FnOnce(&mut Command),
+    authorize_before_spawn: impl FnOnce(&mut Command) -> Result<A>,
     configure: impl FnOnce(&mut Command),
 ) -> Result<std::process::Output> {
     let mut start_gate = InstallerStartGate::new()
@@ -476,13 +477,14 @@ fn supervise_installer_shell_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let guard = ControllerChildGuard::prepare(&mut command)
+    let mut guard = ControllerChildGuard::prepare(&mut command)
         .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
     // The capability is intentionally scoped to this exact supervised spawn.
-    authorize_before_spawn(&mut command);
+    let mutation_fence = authorize_before_spawn(&mut command)?;
     let mut child = command
         .spawn()
         .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+    drop(mutation_fence);
     #[cfg(test)]
     if let Some(ready) = std::env::var_os("HOMEBOY_INSTALLER_BEFORE_ATTACH_READY") {
         if let Some(pid_file) = std::env::var_os("HOMEBOY_INSTALLER_GATE_PID_FILE") {
@@ -512,8 +514,9 @@ fn supervise_installer_shell_command(
             terminate_process_tree_and_reap(&mut child).err(),
         )
     })?;
-    let supervised = wait_with_bounded_output_supervised(
+    let supervised = wait_with_bounded_output_supervised_guarded(
         &mut child,
+        &mut guard,
         UPGRADE_CAPTURE_LIMIT_BYTES,
         timeout,
         INSTALLER_SUPERVISION_POLL_INTERVAL,

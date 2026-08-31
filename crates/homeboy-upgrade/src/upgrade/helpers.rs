@@ -454,6 +454,14 @@ fn run_controller_upgrade_with_operation(
             // Even when no binary update is needed, still run extension updates.
             let selection_guard =
                 acquire_controller_selection_guard(operation, "controller extension refresh")?;
+            // Acquiring shared admission proves every prior installer mutation
+            // fence has drained. Freeze its pending byte evidence before this
+            // operation can return the same-version/no-update result.
+            super::operation::freeze_prior_pending_replacements(
+                operation
+                    .id()
+                    .expect("controller upgrades require a durable operation"),
+            )?;
             let initial_completion = reconcile_controller_identity(
                 observed_installed_controller_identity()?,
                 previous_build_identity.as_deref(),

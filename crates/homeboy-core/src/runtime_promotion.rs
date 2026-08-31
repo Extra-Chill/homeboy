@@ -185,6 +185,14 @@ pub struct RuntimePromotionLease {
     admission_lock: Option<fs::File>,
 }
 
+/// Keeps the exact admission-lock file description alive until a mutating
+/// subprocess has inherited it. Descendants inherit the same fence, so stale
+/// lease-record reclamation cannot admit a successor while installer code can
+/// still mutate the runtime.
+pub struct RuntimePromotionSubprocessFence {
+    _admission_lock: fs::File,
+}
+
 /// Pins the generation required by a cook until its lifecycle finalizes.
 #[derive(Debug)]
 pub struct RuntimeGenerationPinGuard {
@@ -879,6 +887,62 @@ impl RuntimePromotionLease {
         let payload = serde_json::to_vec(&capability)
             .expect("runtime promotion subprocess capability serializes");
         command.env(SUBPROCESS_LEASE_ENV, URL_SAFE_NO_PAD.encode(payload));
+    }
+
+    /// Authorize a subprocess and make the OS admission lock inheritable for
+    /// the lifetime of its process tree. The returned fence must be retained
+    /// through `Command::spawn`; the child then owns the duplicated handle.
+    pub fn authorize_mutating_subprocess(
+        &self,
+        command: &mut Command,
+    ) -> Result<RuntimePromotionSubprocessFence> {
+        self.assert_generation()?;
+        self.authorize_subprocess(command);
+        let admission_lock = self.admission_lock.as_ref().ok_or_else(|| {
+            Error::internal_unexpected(
+                "installer mutation requires primary runtime admission ownership",
+            )
+        })?;
+        let inherited = admission_lock
+            .try_clone()
+            .map_err(io("duplicate runtime admission lock for installer"))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = inherited.as_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0
+            {
+                return Err(io("make runtime admission lock inheritable")(
+                    std::io::Error::last_os_error(),
+                ));
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+            let handle = inherited.as_raw_handle();
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                == 0
+            {
+                return Err(io("make runtime admission lock inheritable")(
+                    std::io::Error::last_os_error(),
+                ));
+            }
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        return Err(Error::internal_unexpected(
+            "inheritable runtime admission fences are unsupported on this platform",
+        ));
+
+        #[cfg(any(unix, windows))]
+        Ok(RuntimePromotionSubprocessFence {
+            _admission_lock: inherited,
+        })
     }
 
     /// Refuse to continue a multi-step mutation after another runtime generation

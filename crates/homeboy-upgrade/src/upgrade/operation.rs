@@ -1333,6 +1333,43 @@ mod tests {
     }
 
     #[test]
+    fn successful_noop_installer_is_terminal_error_with_not_applied_evidence() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            let checkpoint = replacement_checkpoint("pending", "/tmp/homeboy-target");
+            operation
+                .record_replacement_checkpoint_durable(&checkpoint)
+                .expect("persist replacement intent");
+            operation
+                .record_replacement_checkpoint_durable(&checkpoint.with_state("not_applied"))
+                .expect("persist successful installer no-op");
+
+            operation
+                .finish_failed_durable(&Error::internal_unexpected(
+                    "binary installer exited successfully without replacing the controller",
+                ))
+                .expect("terminalize successful installer no-op");
+
+            let run = operation
+                .observation
+                .as_ref()
+                .expect("observation")
+                .store()
+                .get_run(&id)
+                .expect("read operation")
+                .expect("operation exists");
+            assert_eq!(run.status, RunStatus::Error.as_str());
+            assert_eq!(run.metadata_json["phase"], "failed");
+            assert_eq!(run.metadata_json["replacement"]["state"], "not_applied");
+            assert_eq!(
+                run.metadata_json["controller"]["status"],
+                "replacement_not_applied"
+            );
+        });
+    }
+
+    #[test]
     fn applied_checkpoint_survives_the_following_persistence_failure() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut operation = UpgradeOperation::start("homeboy upgrade");
