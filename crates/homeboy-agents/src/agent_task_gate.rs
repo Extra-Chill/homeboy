@@ -1814,10 +1814,13 @@ fn run_gate_argv_with_supervision(
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
-    // Cook's persisted gate deadline is the only deadline policy here. When a
-    // shell gate starts Cargo, propagate it into the hermetic binary runner so
-    // a hung test binary gets the same bound and process-group cleanup.
-    if let Some(supervision) = supervision {
+    if let Some(plan) = declared_plan {
+        let (name, value) = plan.suite_timeout_env();
+        process.env(name, value);
+    }
+    // Legacy shell gates inherit Cook's deadline. Declared plans already set
+    // their own deadline above, so supervision cannot silently rewrite it.
+    if let Some(supervision) = supervision.filter(|_| declared_plan.is_none()) {
         let plan =
             homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
                 supervision.timeout,
@@ -2124,6 +2127,10 @@ fn run_gate_argv_with_timeout(
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
+    if let Some(plan) = declared_plan {
+        let (name, value) = plan.suite_timeout_env();
+        process.env(name, value);
+    }
     // See the matching comment in `run_gate_command_with_supervision`: this
     // gate spawns build/test tooling that must not outlive an agent process
     // killed out from under it (#13649).
@@ -4966,6 +4973,53 @@ mod tests {
                 "-lc",
                 command.as_str(),
             ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_baseline_executor_exports_the_plan_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = workspace.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let homeboy = bin.join("homeboy");
+        std::fs::write(
+            &homeboy,
+            "#!/bin/sh\nprintf %s \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\n",
+        )
+        .expect("adapter");
+        let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&homeboy, permissions).unwrap();
+        let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+            42,
+        )
+        .unwrap();
+        let mut environment = AgentTaskGateEnvironmentPolicy::default();
+        environment
+            .variables
+            .insert("PATH".to_string(), format!("{}:/bin", bin.display()));
+        let runtime = tempfile::tempdir().expect("runtime");
+
+        let report = run_declared_test_with_timeout(
+            workspace.path(),
+            1,
+            &plan,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            runtime.path(),
+            &environment,
+            &[],
+        )
+        .expect("baseline execution");
+
+        assert_eq!(report.stdout, "42");
+        assert_eq!(
+            report.test_execution_outcome,
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed)
         );
     }
 

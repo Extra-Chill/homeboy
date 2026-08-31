@@ -348,13 +348,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     // Resolve the caller input to the commit object before durable ownership is
     // claimed, then use that immutable SHA for every subsequent operation.
     let candidate_sha = resolve_candidate_revision(&source_worktree, candidate_ref)?;
-    let gate_identity = serde_json::to_string(&serde_json::json!({
-        "verify": options.gates.verify,
-        "private_verify": options.gates.private_verify,
-        "test_execution_plan": options.gates.test_execution_plan,
-    }))
-    .map(|contract| homeboy_engine_primitives::content_hash::sha256_hex(contract.as_bytes()))
-    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let gate_identity = adoption_gate_identity(&options.gates)?;
     let persisted_adoption_result = record
         .candidate_adoption
         .as_ref()
@@ -960,6 +954,30 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     }))
 }
 
+/// Keep the historical adoption key for recipes without declared tests: durable
+/// interrupted/completed adoption state is keyed by this exact string.
+fn adoption_gate_identity(gates: &crate::agent_task_gate::VerifyGateOptions) -> Result<String> {
+    let Some(plan) = gates.test_execution_plan.as_ref() else {
+        return Ok(if gates.verify.is_empty() {
+            "promotion verification".to_string()
+        } else {
+            gates.verify.join(" && ")
+        });
+    };
+    plan.declared_command()
+        .map_err(|message| Error::invalid_argument("test_execution_plan", message))?;
+    let contract = serde_json::json!({
+        "verify": gates.verify,
+        "private_verify": gates.private_verify,
+        "test_execution_plan": plan,
+    });
+    let encoded = serde_json::to_vec(&contract)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Ok(homeboy_engine_primitives::content_hash::sha256_hex(
+        &encoded,
+    ))
+}
+
 /// PR/finalization evidence is a projection of the durable decision, never a
 /// fresh interpretation of runner or environment metadata.
 fn project_execution_placement(finalization: &mut Value, metadata: &Value) {
@@ -1494,6 +1512,71 @@ mod projection_tests {
         assert_eq!(
             finalization["execution_placement_decision"]["decision_id"],
             finalization["execution_placement_outcome"]["decision_id"]
+        );
+    }
+
+    #[test]
+    fn adoption_gate_identity_preserves_legacy_values_and_binds_declared_plans() {
+        let empty = crate::agent_task_gate::VerifyGateOptions::default();
+        assert_eq!(
+            adoption_gate_identity(&empty).unwrap(),
+            "promotion verification"
+        );
+
+        let legacy = crate::agent_task_gate::VerifyGateOptions {
+            verify: vec!["cargo test".to_string(), "cargo fmt --check".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            adoption_gate_identity(&legacy).unwrap(),
+            "cargo test && cargo fmt --check"
+        );
+
+        let typed = |command: Vec<String>, timeout| {
+            crate::agent_task_gate::VerifyGateOptions {
+            verify: vec!["legacy companion".to_string()],
+            private_verify: vec!["private companion".to_string()],
+            test_execution_plan: Some(
+                homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+                    command, timeout,
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        }
+        };
+        let first = typed(
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+            ],
+            10,
+        );
+        let changed_argv = typed(
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "component".to_string(),
+            ],
+            10,
+        );
+        let changed_deadline = typed(
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+            ],
+            11,
+        );
+        assert_ne!(
+            adoption_gate_identity(&first).unwrap(),
+            adoption_gate_identity(&changed_argv).unwrap()
+        );
+        assert_ne!(
+            adoption_gate_identity(&first).unwrap(),
+            adoption_gate_identity(&changed_deadline).unwrap()
         );
     }
 }
