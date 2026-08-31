@@ -29,6 +29,8 @@ The wire schemas are:
 - `homeboy/extension-api-readiness-response/v1`
 - `homeboy/extension-api-invoke-request/v1`
 - `homeboy/extension-api-invoke-response/v1`
+- `homeboy/extension-api-environment-resolve-request/v1`
+- `homeboy/extension-api-environment-resolve-response/v1`
 
 Additive optional fields may be added within v1. Changes to identity,
 capability meaning, compatibility decisions, or required fields require a new
@@ -140,6 +142,22 @@ This synchronous operation is intentionally limited to analysis. It does not
 perform durable mutation and therefore has no idempotency, cancellation,
 reconciliation, activity, or terminal-result lifecycle.
 
+## Environment Resolution
+
+`extension::invoke::resolve_environment_api` resolves the `environment`
+capability through a dedicated typed operation. Its serialized request carries
+only the selected extension ID. Authenticated runner context, working directory,
+and effective base environment are explicit private service inputs; raw runtime
+and secret values never enter the generic invocation envelope.
+
+Core resolves the installed manifest and private provider script path, then uses
+the same bounded capability process executor as read-only invocation. The
+successful response retains only extension identity, version, non-sensitive
+public environment values, and declared secret names. Process failures and
+invalid output retain bounded, redacted process evidence. Provider ordering,
+environment layering, collision detection, and runner-side secret resolution
+remain caller policy over this operation.
+
 ## Contract Classification
 
 `homeboy-extension-contract` predates the stable API and contains several kinds
@@ -149,7 +167,7 @@ stability.
 
 | Classification | Modules | Direction |
 | --- | --- | --- |
-| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, and read-only invocation envelopes. |
+| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, read-only invocation, and environment-resolution envelopes. |
 | Stable API candidates | `capability`, `core_compat`, `exec_context`, `runtime_helper`, `sidecar_config` | Reuse or reference from future v1 operations after their wire semantics are reviewed. |
 | Extension-owned domain contracts | `action_types`, `agent_task_executor_declaration`, `autofix_config`, `bench_artifact`, `bench_diagnostics`, `bench_distribution`, `bench_gate`, `bench_metric_preset`, `bench_responsiveness`, `bench_result`, `bench_results`, `bench_stage`, `ci_config`, `ci_context`, `external_check_detail_resolver`, `external_storage_retention`, `fuzz_config`, `lint_result`, `lint_results`, `notification_transport_config`, `source_metadata_repair`, `test_analysis`, `test_drift`, `test_duration`, `test_inventory_config`, `test_parsing`, `test_result`, `test_results`, `test_workflow`, `trace_config`, `trace_parsing`, `trace_preview`, `trace_results`, `trace_spec`, `update_output`, `worktree_retention` | Remain portable domain schemas; the Extension API references their schema IDs rather than absorbing their fields. |
 | Manifest and implementation detail | `extension_contract_producer`, `hook_event`, `manifest`, `manifest_action_config`, `manifest_artifact_cleanup`, `manifest_capabilities`, `manifest_capability_config`, `manifest_deploy_config`, `manifest_test_config`, `manifest_toolchain_config`, `runner_contract`, `version` | Inputs and helpers used to build or execute descriptors. They are not a stable service API. |

@@ -298,4 +298,47 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn environment_resolve_wire_shape_excludes_private_execution_inputs() {
+        let request = ExtensionApiEnvironmentResolveRequest {
+            schema: EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: "fixture".to_string(),
+        };
+        let response = ExtensionApiEnvironmentResolveResponse {
+            schema: EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            contribution: Some(ExtensionApiEnvironmentContribution {
+                extension_id: "fixture".to_string(),
+                version: "1.2.3".to_string(),
+                public_env: vec![("PUBLIC_PATH".to_string(), "/opt/tool/bin".to_string())],
+                secret_env_names: vec!["FIXTURE_TOKEN".to_string()],
+            }),
+            failure: None,
+            process: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).expect("environment request JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA,
+                "api_version": { "major": 1 },
+                "extension_id": "fixture"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(response).expect("environment response JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "contribution": {
+                    "extension_id": "fixture",
+                    "version": "1.2.3",
+                    "public_env": [["PUBLIC_PATH", "/opt/tool/bin"]],
+                    "secret_env_names": ["FIXTURE_TOKEN"]
+                }
+            })
+        );
+    }
 }

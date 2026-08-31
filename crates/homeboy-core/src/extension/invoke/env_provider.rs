@@ -1,89 +1,37 @@
+use std::collections::HashMap;
+use std::path::Path;
+
 use homeboy_core::error::{Error, Result};
 use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
-use homeboy_core::server::execute_local_command_in_dir;
-use homeboy_engine_primitives::shell;
-use homeboy_extension_contract::ExtensionManifest;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiEnvironmentContribution, ExtensionApiEnvironmentResolveRequest,
+    ExtensionApiOperationFailureCode, EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA,
+    EXTENSION_API_V1,
+};
 
-pub const ENV_PROVIDER_COMMAND_PAYLOAD_ENV: &str = "HOMEBOY_ENV_PROVIDER_COMMAND_PAYLOAD";
-const ENV_PROVIDER_COMMAND_PAYLOAD_SCHEMA: &str = "homeboy/env-provider-command/v1";
-const MAX_PROVIDER_COMMAND_PAYLOAD_BYTES: usize = 8 * 1024;
+use super::environment_api::{
+    resolve_environment_api, resolve_environment_from_directory, EnvironmentResolutionContext,
+};
 
-/// The explicit, bounded payload passed to every provider script. The typed
-/// context is duplicated here because scripts are process boundaries and
-/// cannot rely on Rust-side pre-validation.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct EnvProviderCommandPayload<'a> {
-    pub schema: &'static str,
-    pub execution_context: &'a RunnerJobExecutionContext,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct EnvProviderContribution {
-    pub extension_id: String,
-    pub version: String,
-    pub script: String,
-    pub public_env: Vec<(String, String)>,
-    pub secret_env_names: Vec<String>,
-}
-
-pub fn declared_secret_names(extension_id: &str) -> Result<Vec<String>> {
-    let extension = homeboy_core::extension::catalog::load_extension(extension_id)?;
-    let Some(config) = extension.env_provider else {
-        return Err(Error::validation_invalid_argument(
-            "extension_env",
-            format!("Extension '{extension_id}' does not declare an env_provider"),
-            Some(extension_id.to_string()),
-            None,
-        ));
-    };
-    let mut names = config.secret_env;
-    names.sort();
-    names.dedup();
-    Ok(names)
-}
+pub type EnvProviderContribution = ExtensionApiEnvironmentContribution;
 
 /// Resolve an installed extension's environment contribution on the machine
-/// that will execute the workload. The caller retains only this non-secret
-/// provenance; secret values remain in the runner's secret-env resolver.
+/// that will execute the workload. The result contains no secret values.
 pub fn resolve_installed(
     execution_context: &RunnerJobExecutionContext,
     extension_id: &str,
     component_path: &Path,
     base_env: &[(String, String)],
 ) -> Result<EnvProviderContribution> {
-    let extension = homeboy_core::extension::catalog::load_extension(extension_id)?;
-    let Some(script) = extension.env_provider_script() else {
-        return Err(Error::validation_invalid_argument(
+    resolve(execution_context, extension_id, component_path, base_env)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
             "extension_env",
             format!("Extension '{extension_id}' does not declare an env_provider"),
             Some(extension_id.to_string()),
             Some(vec![format!(
                 "Add env_provider.script to the '{extension_id}' extension manifest."
             )]),
-        ));
-    };
-    let secret_env_names = declared_secret_names(extension_id)?;
-    let public_env = env_vars(execution_context, &extension, component_path, base_env)?;
-    for (name, _) in &public_env {
-        if secret_env_names.iter().any(|secret| secret == name)
-            || homeboy_core::redaction::RedactionPolicy::default().is_sensitive_key(name)
-        {
-            return Err(Error::validation_invalid_argument(
-                "extension_env",
-                format!("Extension '{extension_id}' emitted sensitive '{name}' as public env"),
-                Some(name.clone()),
-                Some(vec!["Declare secret names in env_provider.secret_env and resolve them through runner secret_env instead of provider output.".to_string()]),
-            ));
-        }
-    }
-    Ok(EnvProviderContribution {
-        extension_id: extension.id.clone(),
-        version: extension.version.clone(),
-        script: script.to_string(),
-        public_env,
-        secret_env_names,
+        )
     })
 }
 
@@ -138,113 +86,60 @@ pub fn resolve_installed_all(
     Ok(contributions)
 }
 
+/// Resolve an optional provider from an explicit extension directory.
 pub(crate) fn env_vars(
     execution_context: &RunnerJobExecutionContext,
-    extension: &ExtensionManifest,
+    extension_id: &str,
+    extension_directory: Option<&Path>,
     component_path: &Path,
     base_env: &[(String, String)],
 ) -> Result<Vec<(String, String)>> {
-    let Some(script_path) = extension.env_provider_script() else {
-        return Ok(Vec::new());
-    };
-    let extension_path = extension_path(extension)?;
-    let command = shell::quote_path(&extension_path.join(script_path).to_string_lossy());
-    let payload = provider_command_payload(execution_context)?;
-    if base_env
-        .iter()
-        .any(|(key, _)| key == ENV_PROVIDER_COMMAND_PAYLOAD_ENV)
-    {
+    if let Some(extension_directory) = extension_directory {
+        return resolve_environment_from_directory(
+            execution_context,
+            extension_id,
+            extension_directory,
+            component_path,
+            base_env,
+        );
+    }
+    Ok(
+        resolve(execution_context, extension_id, component_path, base_env)?
+            .map(|contribution| contribution.public_env)
+            .unwrap_or_default(),
+    )
+}
+
+fn resolve(
+    execution_context: &RunnerJobExecutionContext,
+    extension_id: &str,
+    component_path: &Path,
+    base_env: &[(String, String)],
+) -> Result<Option<EnvProviderContribution>> {
+    let response = resolve_environment_api(
+        &ExtensionApiEnvironmentResolveRequest {
+            schema: EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: extension_id.to_string(),
+        },
+        EnvironmentResolutionContext::installed(execution_context, component_path, base_env),
+    );
+    if let Some(failure) = response.failure {
+        if failure.code == ExtensionApiOperationFailureCode::CapabilityNotProvided {
+            return Ok(None);
+        }
         return Err(Error::validation_invalid_argument(
             "extension_env",
-            format!("request environment cannot override {ENV_PROVIDER_COMMAND_PAYLOAD_ENV}"),
-            None,
+            failure.message,
+            Some(extension_id.to_string()),
             None,
         ));
     }
-    let mut provider_env = base_env.to_vec();
-    provider_env.push((ENV_PROVIDER_COMMAND_PAYLOAD_ENV.to_string(), payload));
-    let env_refs = provider_env
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
-    let env = (!env_refs.is_empty()).then_some(env_refs.as_slice());
-    let output =
-        execute_local_command_in_dir(&command, Some(&component_path.to_string_lossy()), env);
-
-    if !output.success {
-        return Err(Error::internal_io(
-            format!(
-                "Extension '{}' env provider failed with exit code {}: {}",
-                extension.id,
-                output.exit_code,
-                output.stderr.trim()
-            ),
-            Some("extension env provider".to_string()),
-        ));
-    }
-
-    parse_env_provider_output(&output.stdout)
-}
-
-fn provider_command_payload(execution_context: &RunnerJobExecutionContext) -> Result<String> {
-    execution_context.verify_integrity().map_err(|_| {
-        Error::validation_invalid_argument(
-            "execution_context",
-            "extension environment providers require authenticated runner execution context",
-            None,
-            None,
-        )
-    })?;
-    let payload = serde_json::to_string(&EnvProviderCommandPayload {
-        schema: ENV_PROVIDER_COMMAND_PAYLOAD_SCHEMA,
-        execution_context,
+    response.contribution.map(Some).ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "Environment resolution for extension '{extension_id}' returned no contribution"
+        ))
     })
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize env provider command payload".to_string()),
-        )
-    })?;
-    if payload.len() > MAX_PROVIDER_COMMAND_PAYLOAD_BYTES {
-        return Err(Error::validation_invalid_argument(
-            "execution_context",
-            "extension environment provider command payload exceeds its bounded record",
-            None,
-            None,
-        ));
-    }
-    Ok(payload)
-}
-
-fn extension_path(extension: &ExtensionManifest) -> Result<PathBuf> {
-    extension
-        .extension_path
-        .as_deref()
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "Extension '{}' has no extension_path",
-                extension.id
-            ))
-        })
-}
-
-fn parse_env_provider_output(stdout: &str) -> Result<Vec<(String, String)>> {
-    if stdout.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let values = serde_json::from_str::<HashMap<String, String>>(stdout.trim()).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some("parse extension env provider output".to_string()),
-            None,
-        )
-    })?;
-
-    let mut values = values.into_iter().collect::<Vec<_>>();
-    values.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(values)
 }
 
 #[cfg(test)]
@@ -271,55 +166,6 @@ mod tests {
             .expect("provider executable");
         crate::extension::lifecycle::install(&source.display().to_string(), Some(id))
             .expect("install provider fixture");
-    }
-
-    #[test]
-    fn parses_blank_output_as_no_env() {
-        assert!(parse_env_provider_output("\n").unwrap().is_empty());
-    }
-
-    #[test]
-    fn parses_json_object_as_sorted_env_pairs() {
-        let env = parse_env_provider_output(r#"{"B":"two","A":"one"}"#).unwrap();
-
-        assert_eq!(
-            env,
-            vec![
-                ("A".to_string(), "one".to_string()),
-                ("B".to_string(), "two".to_string())
-            ]
-        );
-    }
-
-    #[test]
-    fn command_payload_carries_the_stable_verified_context_identity() {
-        let context = RunnerJobExecutionContext::local("homeboy");
-        let payload = provider_command_payload(&context).expect("payload");
-        let value: serde_json::Value = serde_json::from_str(&payload).expect("JSON payload");
-
-        assert_eq!(value["schema"], ENV_PROVIDER_COMMAND_PAYLOAD_SCHEMA);
-        assert_eq!(
-            value["execution_context"]["schema"],
-            homeboy_core::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA
-        );
-        assert_eq!(value["execution_context"]["id"], context.id());
-    }
-
-    #[test]
-    fn command_payload_redacts_raw_execution_claim_material() {
-        let secret = "reservation-secret";
-        let context = RunnerJobExecutionContext::direct_daemon(
-            Some("run-1"),
-            "runner-1",
-            "job-1",
-            "homeboy",
-            secret,
-        )
-        .expect("context");
-
-        let payload = provider_command_payload(&context).expect("payload");
-        assert!(!payload.contains(secret));
-        assert!(payload.contains("claim_ref"));
     }
 
     #[cfg(unix)]
