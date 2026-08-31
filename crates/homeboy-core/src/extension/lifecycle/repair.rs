@@ -163,8 +163,9 @@ fn replace_from_path(
     let staged_link = extension_dir.with_file_name(format!(".replace-link-tmp-{}", extension_id));
     clean_replace_temp(&staged_link)?;
 
-    create_symlink(&source, &staged_link)?;
     let backup_dir = extension_dir.with_file_name(format!(".replace-backup-tmp-{}", extension_id));
+    let metadata = LinkedSourceMetadata::capture(&extension_dir)?;
+    create_symlink(&source, &staged_link)?;
     move_existing_install(&extension_dir, &backup_dir)?;
     if let Err(err) = std::fs::rename(&staged_link, &extension_dir).map_err(|e| {
         Error::internal_io(e.to_string(), Some("replace extension symlink".to_string()))
@@ -172,10 +173,19 @@ fn replace_from_path(
         let _ = restore_existing_install(&backup_dir, &extension_dir);
         return Err(err);
     }
-    write_requested_source_ref(&extension_dir, requested_revision);
+    if let Err(err) = metadata.write(&source, source_revision.as_deref(), requested_revision) {
+        restore_relinked_install(&extension_dir, &backup_dir, &metadata);
+        return Err(err);
+    }
 
-    run_setup_or_restore(&extension_id, &extension_dir, &backup_dir)?;
-    validate_agent_runtime_discovery_or_restore(&extension_id, &extension_dir, &backup_dir)?;
+    if let Err(err) = run_setup(&extension_id) {
+        restore_relinked_install(&extension_dir, &backup_dir, &metadata);
+        return Err(err);
+    }
+    if let Err(err) = validate_installed_extension_provider_discovery(&extension_id) {
+        restore_relinked_install(&extension_dir, &backup_dir, &metadata);
+        return Err(err);
+    }
     remove_existing_install(&backup_dir)?;
     let manifest_path = paths::extension_manifest(&extension_id)?;
 
@@ -340,6 +350,109 @@ fn remove_existing_install(path: &Path) -> Result<()> {
     Ok(())
 }
 
+struct LinkedSourceMetadata {
+    values: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl LinkedSourceMetadata {
+    fn capture(extension_dir: &Path) -> Result<Self> {
+        let parent = extension_dir.parent().ok_or_else(|| {
+            Error::internal_io(
+                "linked extension has no parent directory",
+                Some("capture extension source metadata".to_string()),
+            )
+        })?;
+        let extension_id = extension_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                Error::internal_io(
+                    "linked extension has no valid directory name",
+                    Some("capture extension source metadata".to_string()),
+                )
+            })?;
+        let values = ["url", "revision", "requested-ref"]
+            .into_iter()
+            .map(|kind| {
+                let path = parent.join(format!(".{extension_id}.source-{kind}"));
+                let value = match std::fs::read(&path) {
+                    Ok(value) => Some(value),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        return Err(Error::internal_io(
+                            error.to_string(),
+                            Some("capture extension source metadata".to_string()),
+                        ));
+                    }
+                };
+                Ok((path, value))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { values })
+    }
+
+    fn write(
+        &self,
+        source: &Path,
+        source_revision: Option<&str>,
+        requested_revision: Option<&str>,
+    ) -> Result<()> {
+        let values = [
+            Some(source.to_string_lossy().into_owned().into_bytes()),
+            source_revision.map(|value| value.as_bytes().to_vec()),
+            requested_revision.map(|value| value.as_bytes().to_vec()),
+        ];
+        for ((path, _), value) in self.values.iter().zip(values) {
+            match value {
+                Some(value) => std::fs::write(path, value).map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some("write extension source metadata".to_string()),
+                    )
+                })?,
+                None => remove_file_if_exists(path, "clear extension source metadata")?,
+            }
+        }
+        Ok(())
+    }
+
+    fn restore(&self) -> Result<()> {
+        for (path, value) in &self.values {
+            match value {
+                Some(value) => std::fs::write(path, value).map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some("restore extension source metadata".to_string()),
+                    )
+                })?,
+                None => remove_file_if_exists(path, "restore extension source metadata")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+fn remove_file_if_exists(path: &Path, action: &str) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(action.to_string()),
+        )),
+    }
+}
+
+fn restore_relinked_install(
+    extension_dir: &Path,
+    backup_dir: &Path,
+    metadata: &LinkedSourceMetadata,
+) {
+    let _ = remove_existing_install(extension_dir);
+    let _ = restore_existing_install(backup_dir, extension_dir);
+    let _ = metadata.restore();
+}
+
 fn run_setup_or_restore(extension_id: &str, extension_dir: &Path, backup_dir: &Path) -> Result<()> {
     if let Err(err) = run_setup(extension_id) {
         let _ = remove_existing_install(extension_dir);
@@ -441,7 +554,7 @@ mod tests {
         unique_replace_clone_temp,
     };
     use crate::extension::catalog::load_extension;
-    use crate::extension::lifecycle::install;
+    use crate::extension::lifecycle::{install, read_source_revision, read_source_url};
     use homeboy_core::test_support::with_isolated_home;
     use std::fs;
     use std::path::Path;
@@ -726,6 +839,62 @@ mod tests {
     }
 
     #[test]
+    fn relink_replaces_durable_source_provenance_with_git_worktree_provenance() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let durable_source = home.join(".config/homeboy/extension-sources/opencode");
+            let worktree = home.join("opencode-worktree");
+            write_extension_fixture(&durable_source, "opencode");
+            write_extension_fixture_with_version(&worktree, "opencode", "2.0.0");
+            assert!(run_git(&worktree, &["init", "--quiet"]));
+            assert!(commit_all(&worktree, "initial worktree"));
+            let revision =
+                git_output(&worktree, &["rev-parse", "HEAD"]).expect("worktree revision");
+            let short_revision = git_output(&worktree, &["rev-parse", "--short", "HEAD"])
+                .expect("short worktree revision");
+
+            install(
+                &durable_source.join("opencode").to_string_lossy(),
+                Some("opencode"),
+            )
+            .expect("install durable linked extension");
+            let metadata_dir = home.join(".config/homeboy/extensions");
+            fs::write(
+                metadata_dir.join(".opencode.source-requested-ref"),
+                "durable-source-ref\n",
+            )
+            .expect("durable requested ref");
+
+            relink("opencode", &worktree.join("opencode").to_string_lossy())
+                .expect("relink to git worktree");
+
+            let installed = metadata_dir.join("opencode");
+            assert_eq!(
+                fs::read_link(&installed).expect("worktree link"),
+                worktree.join("opencode")
+            );
+            assert_eq!(
+                read_source_url(&installed).as_deref(),
+                Some(worktree.join("opencode").to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                read_source_revision("opencode").as_deref(),
+                Some(revision.as_str())
+            );
+            assert_eq!(
+                fs::read_to_string(metadata_dir.join(".opencode.source-revision"))
+                    .expect("worktree source revision")
+                    .trim(),
+                short_revision
+            );
+            assert!(
+                !metadata_dir.join(".opencode.source-requested-ref").exists(),
+                "relink must clear the requested ref inherited from the durable source"
+            );
+        });
+    }
+
+    #[test]
     fn replace_fails_and_restores_existing_install_when_declared_provider_is_not_discoverable() {
         with_isolated_home(|home| {
             let home = home.path();
@@ -953,6 +1122,17 @@ mod tests {
 
             install(&old_source.join("swift").to_string_lossy(), Some("swift"))
                 .expect("install linked extension");
+            let metadata_dir = home.join(".config/homeboy/extensions");
+            fs::write(
+                metadata_dir.join(".swift.source-requested-ref"),
+                "old-source-ref\n",
+            )
+            .expect("old requested ref");
+            fs::write(
+                metadata_dir.join(".swift.source-revision"),
+                "old-source-revision\n",
+            )
+            .expect("old source revision");
 
             let err = relink("swift", &new_source.join("swift").to_string_lossy())
                 .expect_err("relink should fail when setup fails");
@@ -964,6 +1144,20 @@ mod tests {
             assert_eq!(
                 fs::read_link(installed_path).expect("read restored link"),
                 old_source.join("swift")
+            );
+            assert_eq!(
+                read_source_url(&home.join(".config/homeboy/extensions/swift")).as_deref(),
+                Some(old_source.join("swift").to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                fs::read_to_string(metadata_dir.join(".swift.source-requested-ref"))
+                    .expect("restored requested ref"),
+                "old-source-ref\n"
+            );
+            assert_eq!(
+                fs::read_to_string(metadata_dir.join(".swift.source-revision"))
+                    .expect("restored source revision"),
+                "old-source-revision\n"
             );
         });
     }
