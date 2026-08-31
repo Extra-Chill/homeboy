@@ -90,6 +90,15 @@ impl UpgradeOperation {
     pub fn set_phase(&mut self, phase: &str) {
         emit_upgrade_phase(phase);
         self.metadata["phase"] = json!(phase);
+        match phase {
+            "refreshing installed extensions" => {
+                self.metadata["extensions"] = component("running", "extension refresh in progress");
+            }
+            "refreshing configured runners" => {
+                self.metadata["runners"] = component("running", "runner refresh in progress");
+            }
+            _ => {}
+        }
         self.metadata["elapsed_seconds"] = json!(self.started.elapsed().as_secs());
         self.persist();
     }
@@ -478,6 +487,35 @@ mod tests {
                 .unwrap_or_default()
                 .contains("wordpress"));
             assert_eq!(status.elapsed_seconds, 45);
+        });
+    }
+
+    #[test]
+    fn runner_refresh_phase_preserves_completed_extensions_and_started_runners() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            operation.mark_controller_promoted("controller installation completed");
+            operation.set_phase("refreshing installed extensions");
+            operation.mark_extensions("completed", "7 updated, 0 skipped");
+            operation.set_phase("refreshing configured runners");
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
+            assert_eq!(status.phase, "refreshing configured runners");
+            assert_eq!(
+                status
+                    .extensions
+                    .as_ref()
+                    .map(|component| (component.status.as_str(), component.summary.as_str())),
+                Some(("completed", "7 updated, 0 skipped"))
+            );
+            assert_eq!(
+                status
+                    .runners
+                    .as_ref()
+                    .map(|component| component.status.as_str()),
+                Some("running")
+            );
         });
     }
 
