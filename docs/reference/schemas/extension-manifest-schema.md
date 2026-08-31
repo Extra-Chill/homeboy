@@ -248,8 +248,9 @@ and canonicalizes URLs in requests, responses, stderr, actions, and diagnostics.
 Unknown, ambiguous, malformed, unavailable, timed-out, and budget-exhausted
 resolvers preserve the source check and appear as resolver diagnostics. Multiple
 installed extensions that declare a provider are rejected as ambiguous before
-any secret is resolved. Provider names are unique within a manifest and across
-installed manifests; public and secret names are individually unique and disjoint.
+any secret is resolved. Duplicate provider names within one manifest or across
+installed manifests remain visible as typed ambiguity diagnostics; public and
+secret names are individually unique and disjoint.
 
 ## Notification transports
 
