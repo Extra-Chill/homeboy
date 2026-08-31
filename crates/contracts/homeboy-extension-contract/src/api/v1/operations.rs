@@ -1,4 +1,4 @@
-//! Catalog and explicit capability-resolution operation envelopes.
+//! Catalog, capability-resolution, and readiness operation envelopes.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,10 @@ pub const EXTENSION_API_CATALOG_REQUEST_SCHEMA: &str = "homeboy/extension-api-ca
 pub const EXTENSION_API_CATALOG_RESPONSE_SCHEMA: &str = "homeboy/extension-api-catalog-response/v1";
 pub const EXTENSION_API_RESOLVE_REQUEST_SCHEMA: &str = "homeboy/extension-api-resolve-request/v1";
 pub const EXTENSION_API_RESOLVE_RESPONSE_SCHEMA: &str = "homeboy/extension-api-resolve-response/v1";
+pub const EXTENSION_API_READINESS_REQUEST_SCHEMA: &str =
+    "homeboy/extension-api-readiness-request/v1";
+pub const EXTENSION_API_READINESS_RESPONSE_SCHEMA: &str =
+    "homeboy/extension-api-readiness-response/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExtensionApiCatalogRequest {
@@ -97,6 +101,59 @@ pub struct ExtensionApiResolveResponse {
     pub capability: Option<ExtensionApiCapabilityDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility: Option<ExtensionApiCompatibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ExtensionApiOperationFailure>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionApiReadinessMode {
+    Cached,
+    Probe,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionApiReadinessState {
+    Ready,
+    NotReady,
+    Unknown,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionApiReadinessStatus {
+    pub state: ExtensionApiReadinessState,
+    pub ready: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_age_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionApiReadinessRequest {
+    pub schema: String,
+    pub api_version: ExtensionApiVersion,
+    pub extension_id: String,
+    pub mode: ExtensionApiReadinessMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionApiReadinessResponse {
+    pub schema: String,
+    pub api_version: ExtensionApiVersion,
+    pub extension_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ExtensionApiReadinessStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<ExtensionApiOperationFailure>,
 }

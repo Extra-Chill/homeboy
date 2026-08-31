@@ -10,13 +10,26 @@ use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
-use homeboy_core::extension::catalog::{is_extension_linked, load_extension};
+use homeboy_core::error::ExecutableAction;
+use homeboy_core::extension::catalog::{
+    broken_extension_link_repair_actions, is_extension_linked, load_extension,
+};
 use homeboy_core::extension::readiness::{
     extension_ready_status_with, ExtensionReadinessMode, ExtensionReadinessState,
 };
-use homeboy_core::extension::{catalog::ExtensionSummary, invoke::run_setup};
+use homeboy_core::extension::{invoke::run_setup, resolve::is_extension_compatible};
 use homeboy_extension_contract as extension_contract;
+use homeboy_extension_contract::action_types::ActionType;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiCatalogDiagnosticCode, ExtensionApiCatalogEntry, ExtensionApiCatalogEntryStatus,
+    ExtensionApiCatalogRequest, ExtensionApiReadinessMode, ExtensionApiReadinessRequest,
+    ExtensionApiReadinessState, ExtensionApiReadinessStatus, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
+    EXTENSION_API_READINESS_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
 use homeboy_extension_contract::update_output::UpdateEntry;
+use homeboy_extension_contract::{
+    evaluate_core_compatibility, CoreCompatibilityReport, NotificationTransportDescriptor,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
@@ -348,7 +361,7 @@ pub enum ExtensionOutput {
     List {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
-        extensions: Vec<ExtensionSummary>,
+        extensions: Vec<ExtensionInventoryEntry>,
     },
     #[serde(rename = "extension.diff_installed")]
     DiffInstalled {
@@ -480,6 +493,66 @@ pub enum ExtensionOutput {
     DevRun(homeboy::runner::dev_run::ExtensionDevRunOutput),
     #[serde(rename = "extension.set")]
     SetBatch { batch: homeboy::core::BatchResult },
+}
+
+/// CLI compatibility projection sourced from the stable v1 catalog and readiness services.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionInventoryEntry {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub runtime: String,
+    pub compatible: bool,
+    pub core_compatibility: CoreCompatibilityReport,
+    pub readiness: ExtensionApiReadinessState,
+    pub ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_cache_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_probe_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_follow_up_command: Option<String>,
+    pub linked: bool,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ExtensionInventoryAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repair_actions: Vec<ExecutableAction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notification_transports: Vec<NotificationTransportDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_setup: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_ready_check: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionInventoryAction {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub action_type: ActionType,
 }
 
 #[derive(Serialize)]
@@ -685,9 +758,215 @@ fn readiness_mode(live_readiness: bool, _skip_ready_check: bool) -> ExtensionRea
     }
 }
 
+fn extension_inventory(
+    project: Option<&Project>,
+    readiness: ExtensionReadinessMode,
+) -> Vec<ExtensionInventoryEntry> {
+    let catalog = extension::catalog::list_api(&ExtensionApiCatalogRequest {
+        schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+    });
+    let readiness_by_id = extension_inventory_readiness(&catalog.entries, readiness);
+
+    catalog
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let readiness = readiness_by_id.get(&entry.id).cloned();
+            extension_inventory_entry(entry, project, readiness)
+        })
+        .collect()
+}
+
+pub(crate) fn extension_inventory_readiness(
+    entries: &[ExtensionApiCatalogEntry],
+    mode: ExtensionReadinessMode,
+) -> BTreeMap<String, ExtensionApiReadinessStatus> {
+    let requests = entries
+        .iter()
+        .filter(|entry| entry.status != ExtensionApiCatalogEntryStatus::Invalid)
+        .map(|entry| ExtensionApiReadinessRequest {
+            schema: EXTENSION_API_READINESS_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: entry.id.clone(),
+            mode: match mode {
+                ExtensionReadinessMode::Cached => ExtensionApiReadinessMode::Cached,
+                ExtensionReadinessMode::Probe => ExtensionApiReadinessMode::Probe,
+            },
+        })
+        .collect::<Vec<_>>();
+    let responses = extension::catalog::readiness_api_batch(&requests);
+
+    responses
+        .into_iter()
+        .filter_map(|response| {
+            response
+                .status
+                .map(|status| (response.extension_id, status))
+        })
+        .collect()
+}
+
+fn extension_inventory_entry(
+    entry: ExtensionApiCatalogEntry,
+    project: Option<&Project>,
+    readiness: Option<ExtensionApiReadinessStatus>,
+) -> ExtensionInventoryEntry {
+    if entry.descriptor.is_none() {
+        return invalid_extension_inventory_entry(entry);
+    }
+    let Ok(manifest) = load_extension(&entry.id) else {
+        return invalid_extension_inventory_entry(entry);
+    };
+    let descriptor = entry
+        .descriptor
+        .expect("v1 catalog entry descriptor checked above");
+    let readiness = readiness.unwrap_or_else(|| ExtensionApiReadinessStatus {
+        state: ExtensionApiReadinessState::Unknown,
+        ready: None,
+        reason: Some("readiness_unavailable".to_string()),
+        detail: Some("The v1 readiness service returned no status.".to_string()),
+        cache_age_seconds: None,
+        probe_duration_ms: None,
+        timeout_ms: None,
+        follow_up_command: None,
+    });
+    let (cli_tool, cli_display_name) = manifest
+        .cli
+        .as_ref()
+        .map(|cli| (Some(cli.tool.clone()), Some(cli.display_name.clone())))
+        .unwrap_or((None, None));
+    let source_revision = descriptor.identity.source_revision.clone();
+    let core_compatibility = evaluate_core_compatibility(
+        descriptor.requires_homeboy.as_deref(),
+        source_revision.clone(),
+    )
+    .unwrap_or_else(|_| CoreCompatibilityReport::undeclared(source_revision.clone()));
+
+    ExtensionInventoryEntry {
+        id: entry.id,
+        name: descriptor.identity.name,
+        version: descriptor.identity.version,
+        description: manifest
+            .description
+            .as_ref()
+            .and_then(|description| description.lines().next())
+            .unwrap_or("")
+            .to_string(),
+        runtime: if manifest.executable.is_some() {
+            "executable".to_string()
+        } else {
+            "platform".to_string()
+        },
+        compatible: is_extension_compatible(&manifest, project),
+        core_compatibility,
+        readiness: readiness.state,
+        ready: readiness.ready,
+        ready_reason: readiness.reason,
+        ready_detail: readiness.detail,
+        readiness_cache_age_seconds: readiness.cache_age_seconds,
+        readiness_probe_duration_ms: readiness.probe_duration_ms,
+        readiness_timeout_ms: readiness.timeout_ms,
+        readiness_follow_up_command: readiness.follow_up_command,
+        linked: is_extension_linked(&manifest.id),
+        path: manifest.extension_path.clone().unwrap_or_default(),
+        manifest_path: None,
+        error: None,
+        diagnostic: None,
+        symlink_target: None,
+        source_revision,
+        cli_tool,
+        cli_display_name,
+        actions: manifest
+            .actions
+            .iter()
+            .map(|action| ExtensionInventoryAction {
+                id: action.id.clone(),
+                label: action.label.clone(),
+                action_type: action.action_type.clone(),
+            })
+            .collect(),
+        repair_actions: Vec::new(),
+        notification_transports: manifest
+            .notification_transports
+            .iter()
+            .map(|transport| transport.descriptor())
+            .collect(),
+        has_setup: manifest
+            .runtime()
+            .and_then(|runtime| runtime.setup_command.as_ref())
+            .map(|_| true),
+        has_ready_check: manifest
+            .runtime()
+            .and_then(|runtime| runtime.ready_check.as_ref())
+            .map(|_| true),
+    }
+}
+
+fn invalid_extension_inventory_entry(entry: ExtensionApiCatalogEntry) -> ExtensionInventoryEntry {
+    let path = extension::catalog::extension_path(&entry.id);
+    let linked =
+        std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let symlink_target = linked
+        .then(|| std::fs::read_link(&path).ok())
+        .flatten()
+        .map(|target| target.to_string_lossy().to_string());
+    let diagnostic = entry.diagnostic;
+    let broken = diagnostic.as_ref().is_some_and(|diagnostic| {
+        diagnostic.code == ExtensionApiCatalogDiagnosticCode::BrokenInstallation
+    });
+    let category = diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.category.clone())
+        .unwrap_or_else(|| "catalog_projection_failed".to_string());
+    let detail = diagnostic
+        .map(|diagnostic| diagnostic.message)
+        .unwrap_or_else(|| "The extension has no v1 catalog descriptor.".to_string());
+
+    ExtensionInventoryEntry {
+        id: entry.id.clone(),
+        name: String::new(),
+        version: String::new(),
+        description: String::new(),
+        runtime: String::new(),
+        compatible: false,
+        core_compatibility: CoreCompatibilityReport::undeclared(None),
+        readiness: ExtensionApiReadinessState::NotReady,
+        ready: Some(false),
+        ready_reason: Some(category.clone()),
+        ready_detail: Some(detail.clone()),
+        readiness_cache_age_seconds: None,
+        readiness_probe_duration_ms: None,
+        readiness_timeout_ms: None,
+        readiness_follow_up_command: None,
+        linked,
+        path: path.to_string_lossy().to_string(),
+        manifest_path: Some(
+            path.join(format!("{}.json", entry.id))
+                .to_string_lossy()
+                .to_string(),
+        ),
+        error: Some(category),
+        diagnostic: Some(detail),
+        symlink_target,
+        source_revision: None,
+        cli_tool: None,
+        cli_display_name: None,
+        actions: Vec::new(),
+        repair_actions: if broken {
+            broken_extension_link_repair_actions(&entry.id)
+        } else {
+            Vec::new()
+        },
+        notification_transports: Vec::new(),
+        has_setup: None,
+        has_ready_check: None,
+    }
+}
+
 fn list(project: Option<String>, readiness: ExtensionReadinessMode) -> CmdResult<ExtensionOutput> {
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
-    let summaries = extension::catalog::list_summaries_with(project_config.as_ref(), readiness);
+    let summaries = extension_inventory(project_config.as_ref(), readiness);
 
     Ok((
         ExtensionOutput::List {
@@ -706,7 +985,7 @@ fn diff_installed(
         return runner_diff_installed(extension_id, runner_id);
     }
 
-    let rows = extension::catalog::list_summaries_with(None, ExtensionReadinessMode::Cached)
+    let rows = extension_inventory(None, ExtensionReadinessMode::Cached)
         .into_iter()
         .filter(|summary| extension_id.is_none_or(|id| summary.id == id))
         .map(installed_extension_diff)
@@ -831,7 +1110,7 @@ fn parse_runner_diff_installed(stdout: &str) -> homeboy::core::Result<Vec<Instal
     })
 }
 
-fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff {
+fn installed_extension_diff(summary: ExtensionInventoryEntry) -> InstalledExtensionDiff {
     let checkout_head_revision = git::head_sha_short(Path::new(&summary.path));
     let manifest_path = manifest_path_for_summary(&summary);
     let source_url = read_source_url_metadata(&summary.path);
@@ -875,7 +1154,7 @@ fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff
     }
 }
 
-fn manifest_path_for_summary(summary: &ExtensionSummary) -> String {
+fn manifest_path_for_summary(summary: &ExtensionInventoryEntry) -> String {
     if summary.path.is_empty() {
         return String::new();
     }
@@ -948,7 +1227,10 @@ fn installed_extension_diff_status(
     }
 }
 
-fn installed_extension_diff_next_command(summary: &ExtensionSummary, status: &str) -> String {
+fn installed_extension_diff_next_command(
+    summary: &ExtensionInventoryEntry,
+    status: &str,
+) -> String {
     match status {
         "current" => format!("homeboy extension show {}", shell_arg(&summary.id)),
         "stale" if summary.linked => format!(
@@ -2327,7 +2609,7 @@ mod tests {
 
     #[test]
     fn installed_extension_diff_next_command_guides_stale_local_iteration() {
-        let mut summary = ExtensionSummary {
+        let mut summary = ExtensionInventoryEntry {
             id: "rust".to_string(),
             name: "Rust".to_string(),
             version: "1.0.0".to_string(),
@@ -2336,7 +2618,7 @@ mod tests {
             compatible: true,
             core_compatibility:
                 extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
-            readiness: ExtensionReadinessState::Ready,
+            readiness: ExtensionApiReadinessState::Ready,
             ready: Some(true),
             ready_reason: None,
             ready_detail: None,
@@ -2392,7 +2674,7 @@ mod tests {
             )
             .expect("source metadata");
 
-            let summary = ExtensionSummary {
+            let summary = ExtensionInventoryEntry {
                 id: extension_id.to_string(),
                 name: "Copied Runtime".to_string(),
                 version: "1.2.3".to_string(),
@@ -2401,7 +2683,7 @@ mod tests {
                 compatible: true,
                 core_compatibility:
                     extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
-                readiness: ExtensionReadinessState::Ready,
+                readiness: ExtensionApiReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,
@@ -2443,7 +2725,7 @@ mod tests {
                 .ends_with("copied-runtime/copied-runtime.json"));
             assert_eq!(diff.next_command, "homeboy extension show copied-runtime");
 
-            let stale_summary = ExtensionSummary {
+            let stale_summary = ExtensionInventoryEntry {
                 source_revision: Some("abc1234".to_string()),
                 linked: false,
                 path: extension_dir.to_string_lossy().to_string(),
@@ -2455,7 +2737,7 @@ mod tests {
                 compatible: true,
                 core_compatibility:
                     extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
-                readiness: ExtensionReadinessState::Ready,
+                readiness: ExtensionApiReadinessState::Ready,
                 ready: Some(true),
                 ready_reason: None,
                 ready_detail: None,
