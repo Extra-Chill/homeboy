@@ -4,7 +4,8 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy::core::cleanup::{
-    self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput, ArtifactCleanupSort,
+    self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput, ArtifactCleanupScope,
+    ArtifactCleanupSort,
 };
 use homeboy::core::worktree::{
     self, CleanupPolicy, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions, WorktreeAdoptOutput,
@@ -742,6 +743,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                 Some(artifact_cleanup::cleanup_artifacts(
                     ArtifactCleanupOptions {
                         path: None,
+                        scope: ArtifactCleanupScope::ExactCheckout,
                         apply,
                         self_artifacts: true,
                         temp_roots: Vec::new(),

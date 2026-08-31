@@ -8,13 +8,14 @@ Aggregate `--apply` submits a durable asynchronous controller job by default. Fo
 
 ## `homeboy cleanup artifacts`
 
-Scans the current repository and its managed Git worktrees for built-in and declared artifact paths. The command defaults to dry-run output and only removes files when `--apply` is passed.
+Scans the current checkout for built-in and declared artifact paths. The command defaults to dry-run output and only removes files when `--apply` is passed. `--path` always resolves to that exact checkout, including under `--apply`; it cannot select artifacts from sibling worktrees. Use `--all-worktrees` to explicitly discover every Git worktree in the selected repository. The JSON `scope` field reports `exact_checkout` or `repository_worktrees` in both dry-run and apply output.
 
 Homeboy always treats Rust `target` directories as rebuildable artifacts. Projects can add repo-relative cleanup paths with `artifact_cleanup_paths` in `homeboy.json`.
 
 ```bash
 homeboy cleanup artifacts
 homeboy cleanup artifacts --path /path/to/checkout
+homeboy cleanup artifacts --path /path/to/checkout --all-worktrees
 homeboy cleanup artifacts --sort size --limit 10
 homeboy cleanup artifacts --merged-only --sort size --limit 10
 homeboy cleanup artifacts --min-age-days 7
@@ -197,7 +198,7 @@ A specialist survives only when it accepts a *narrowing* argument the aggregate
 cannot express, or when it is the operator escape hatch for a policy the
 aggregate deliberately never applies:
 
-- `cleanup artifacts` — `--path`, `--self`, `--temp-root`, `--sort`,
+- `cleanup artifacts` — `--path`, `--all-worktrees`, `--self`, `--temp-root`, `--sort`,
   `--merged-only`, `--min-age-days`, `--include-active-worktrees`.
 - `cleanup worktrees` — `--provider` selection.
 - `runs artifact cleanup-persisted` — `--run-id`, `--kind`, `--type`,

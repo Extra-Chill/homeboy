@@ -135,9 +135,12 @@ pub struct CleanupArtifactsArgs {
     /// Clean artifacts from the Homeboy source checkout that built this binary.
     #[arg(long = "self", conflicts_with = "path")]
     pub self_artifacts: bool,
-    /// Resolve managed worktrees from this checkout instead of the current directory.
+    /// Clean only this checkout instead of the current directory.
     #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
+    /// Discover artifacts across every Git worktree in the selected repository.
+    #[arg(long)]
+    pub all_worktrees: bool,
     /// Also scan this temp root for detached Homeboy build artifacts. Repeatable.
     #[arg(long, value_name = "PATH")]
     pub temp_root: Vec<PathBuf>,
@@ -381,6 +384,18 @@ mod tests {
         assert_eq!(args.sort, CleanupArtifactsSortArg::Size);
         assert_eq!(args.limit, Some(7));
         assert!(args.merged_only);
+
+        let parsed = CleanupParserTest::parse_from([
+            "cleanup",
+            "artifacts",
+            "--path",
+            "/repo/checkout",
+            "--all-worktrees",
+        ]);
+        let Some(CleanupCommand::Artifacts(args)) = parsed.cleanup.command else {
+            panic!("expected cleanup artifacts command");
+        };
+        assert!(args.all_worktrees);
 
         let parsed = CleanupParserTest::parse_from([
             "cleanup",
