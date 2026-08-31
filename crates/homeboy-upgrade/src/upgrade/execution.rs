@@ -139,6 +139,7 @@ pub(crate) fn execute_upgrade(
     previous_build_identity: Option<&str>,
     selected_release: Option<&SelectedRelease>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
+    mut progress: impl FnMut(&str),
 ) -> UpgradeExecutionResult {
     let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
@@ -150,12 +151,14 @@ pub(crate) fn execute_upgrade(
         .transpose()?;
     let output = match method {
         InstallMethod::Homebrew => {
+            progress("installing controller release");
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
             Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
                 Error::internal_io(e.to_string(), Some("run homebrew upgrade".to_string()))
             })?
         }
         InstallMethod::Secondary => {
+            progress("installing controller release");
             // Legacy cargo-installed binaries are replaced with the release
             // asset now that Homeboy's private workspace is not on crates.io.
             let cmd = &defaults.install_methods.binary.upgrade_command;
@@ -195,6 +198,7 @@ pub(crate) fn execute_upgrade(
                 &workspace_root,
                 explicit_source_path,
             )?;
+            progress("building controller candidate");
             run_source_upgrade_command(
                 &cmd,
                 &workspace_root,
@@ -205,6 +209,7 @@ pub(crate) fn execute_upgrade(
             // Source command output is streamed to the invoking process so
             // controller timeouts can distinguish a build from a stalled run.
             // It has already returned a precise error for non-zero exits.
+            progress("running controller candidate admission");
             return complete_source_upgrade(
                 workspace_root,
                 built_binary,
@@ -214,9 +219,11 @@ pub(crate) fn execute_upgrade(
                 previous_build_identity,
                 source_revision,
                 promotion_lease,
+                &mut progress,
             );
         }
         InstallMethod::Binary => {
+            progress("installing controller release");
             let cmd = &defaults.install_methods.binary.upgrade_command;
             // Pin the installer to the release this upgrade selected. Without
             // the pin the installer always resolves `latest/download`, so a
@@ -490,6 +497,7 @@ fn complete_source_upgrade(
     previous_build_identity: Option<&str>,
     source_revision: Option<String>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
+    progress: &mut impl FnMut(&str),
 ) -> UpgradeExecutionResult {
     let replacement_target = replacement_target.ok_or_else(|| {
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
@@ -528,8 +536,10 @@ fn complete_source_upgrade(
         Some(replacement_target),
     )?;
     promotion_lease.assert_generation()?;
+    progress("installing source-built controller candidate");
     upgrade_phase("installing source-built binary");
     install_source_built_binary(&built_binary, replacement_target)?;
+    progress("verifying installed controller candidate");
     upgrade_phase("verifying installed source binary");
 
     let (_verified_version, active_binary) = verify_upgrade_with_retry(

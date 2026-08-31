@@ -133,6 +133,14 @@ mod controller_upgrade_wait_tests {
                 event.owner_status_command.as_deref(),
                 Some(format!("homeboy upgrade status {owner_id}").as_str())
             );
+            let owner_status = super::super::load_upgrade_operation_status(Some(&owner_id))
+                .expect("owner status remains inspectable while it holds the lease");
+            assert_eq!(owner_status.operation_id, owner_id);
+            assert_eq!(owner_status.phase, "admitted for controller promotion");
+            assert_eq!(
+                owner_status.inspect_command.as_deref(),
+                Some(format!("homeboy upgrade status {owner_id}").as_str())
+            );
 
             drop(owner_lease);
             waiter
@@ -658,7 +666,7 @@ pub fn run_upgrade_with_method(
             extension_revalidation,
         ));
     }
-    operation.set_phase("mutating controller");
+    operation.set_phase("revalidating controller upgrade admission");
     let controller_upgrade = run_controller_mutation_after_runner_preflight(
         runner_preflight,
         || {
@@ -686,6 +694,7 @@ pub fn run_upgrade_with_method(
                 previous_build_identity.as_deref(),
                 selected_release.as_ref(),
                 Some(&controller_mutation_lease),
+                |phase| operation.set_phase(phase),
             )
         },
     )?;
@@ -706,6 +715,7 @@ pub fn run_upgrade_with_method(
         // This is deliberately a short switch, not a drain: records admitted
         // before it retain their immutable runtime pin and remain executable.
         let installed_executable = super::execution::active_binary_path()?;
+        operation.set_phase("rotating controller runtime generation");
         homeboy_core::controller_runtime::activate_installed_generation(&installed_executable)?;
         if success {
             operation.mark_controller_promoted("controller installation completed");
