@@ -1403,6 +1403,9 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let record = durable_read.record;
     let aggregate = durable_read.aggregate;
     let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe(&record);
+    let liveness = agent_task_service::liveness_for_record(&record, chrono::Utc::now());
+    let queued_runner_ownership =
+        queued_runner_ownership_diagnostic(&record, liveness, &runner_diagnostic_probe);
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
     // The current promotion lifecycle denial is the active blocker. Older
@@ -1411,11 +1414,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let mut nested_reasons = current_lifecycle_diagnostic
         .clone()
         .into_iter()
+        .chain(queued_runner_ownership.clone())
         .chain(persisted_cook_failure_diagnostic(&record))
         .collect::<Vec<_>>();
     let runner_cancellation = runner_cancellation_diagnostic(&record);
-    let causal_phase = runner_cancellation
+    let causal_phase = queued_runner_ownership
         .as_ref()
+        .or(runner_cancellation.as_ref())
         .and_then(|diagnostic| diagnostic.data["causal_phase"].as_str())
         .map(str::to_string);
     nested_reasons.extend(runner_cancellation.clone());
@@ -1471,7 +1476,10 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         .map(causal_chain_from_aggregate)
         .unwrap_or_default();
     if causal_chain.is_empty() {
-        if let Some(diagnostic) = runner_cancellation.as_ref() {
+        if let Some(diagnostic) = queued_runner_ownership
+            .as_ref()
+            .or(runner_cancellation.as_ref())
+        {
             causal_chain.push(json!({
                 "task_id": diagnostic.task_id,
                 "surface": "runner",
@@ -1487,6 +1495,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
         retry.continuation.as_ref(),
         current_lifecycle_diagnostic.is_some(),
+        queued_runner_ownership.is_some(),
     );
 
     let mut value = json!({
@@ -1537,6 +1546,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         retry.action.as_ref(),
         retry.continuation.as_ref(),
         runner_cancellation.is_some(),
+        queued_runner_ownership.is_some(),
         current_lifecycle_diagnostic.is_some(),
     );
     let recovery_prefix =
@@ -1674,6 +1684,7 @@ fn attach_diagnose_actionable(
     retry_action: Option<&CommandNextAction>,
     continuation_action: Option<&CommandNextAction>,
     runner_cancellation: bool,
+    queued_runner_ownership: bool,
     current_lifecycle_denial: bool,
 ) {
     let run_id = record.run_id.as_str();
@@ -1732,6 +1743,7 @@ fn attach_diagnose_actionable(
             runner_id,
             retry_action,
             runner_cancellation,
+            queued_runner_ownership,
         )
     };
     if let Value::Object(map) = value {
@@ -1763,6 +1775,7 @@ fn diagnose_next_actions(
     runner_id: Option<&str>,
     retry_action: Option<&CommandNextAction>,
     runner_cancellation: bool,
+    queued_runner_ownership: bool,
 ) -> (Vec<CommandNextAction>, &'static str) {
     let mut actions: Vec<CommandNextAction> = Vec::new();
     for failure in failures {
@@ -1777,6 +1790,20 @@ fn diagnose_next_actions(
         for action in runner_cancellation_next_actions(run_id, runner_id, retry_action) {
             push_unique_next_action(&mut actions, action);
         }
+    }
+    if queued_runner_ownership {
+        push_unique_next_action(
+            &mut actions,
+            CommandNextAction::new(
+                "inspect the queued runner-owned execution",
+                format!(
+                    "homeboy --runner {} agent-task diagnose {} --full",
+                    quote_arg(runner_id.unwrap_or("<runner>")),
+                    quote_arg(run_id)
+                ),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
     }
     if actions.is_empty() {
         return (
@@ -2680,6 +2707,7 @@ mod diagnose_actionable_tests {
             runner_id,
             Some(&retry),
             false,
+            false,
         );
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         actions
@@ -2840,7 +2868,7 @@ mod diagnose_actionable_tests {
         };
 
         let (actions, basis) =
-            diagnose_next_actions("run-1", &[failure], &[], None, Some(&retry), false);
+            diagnose_next_actions("run-1", &[failure], &[], None, Some(&retry), false, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -2860,7 +2888,8 @@ mod diagnose_actionable_tests {
             provider_budget_consumed: false,
         };
 
-        let (actions, basis) = diagnose_next_actions("run-1", &[failure], &[], None, None, false);
+        let (actions, basis) =
+            diagnose_next_actions("run-1", &[failure], &[], None, None, false, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -2897,6 +2926,7 @@ mod diagnose_actionable_tests {
             None,
             None,
             false,
+            false,
         );
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
@@ -2912,7 +2942,7 @@ mod diagnose_actionable_tests {
 
     #[test]
     fn a_run_with_no_diagnosis_at_all_falls_back_to_the_generic_set() {
-        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None, None, false);
+        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None, None, false, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
         assert_eq!(actions.len(), 3);
@@ -2925,7 +2955,8 @@ mod diagnose_actionable_tests {
             "missing": ["concept_packet", "design_packet"],
         })];
 
-        let (actions, basis) = diagnose_next_actions("run-1", &[], &missing, None, None, false);
+        let (actions, basis) =
+            diagnose_next_actions("run-1", &[], &missing, None, None, false, false);
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -2949,6 +2980,7 @@ mod diagnose_actionable_tests {
             &missing,
             None,
             None,
+            false,
             false,
         );
 
@@ -2986,6 +3018,7 @@ mod diagnose_actionable_tests {
             None,
             None,
             false,
+            false,
         );
 
         assert_eq!(
@@ -3000,8 +3033,15 @@ mod diagnose_actionable_tests {
     #[test]
     fn runner_cancellation_uses_runner_evidence_before_a_proven_replay() {
         let retry = owner_bound_retry_action("run-1", Some("homeboy-lab"), json!({}));
-        let (actions, basis) =
-            diagnose_next_actions("run-1", &[], &[], Some("homeboy-lab"), Some(&retry), true);
+        let (actions, basis) = diagnose_next_actions(
+            "run-1",
+            &[],
+            &[],
+            Some("homeboy-lab"),
+            Some(&retry),
+            true,
+            false,
+        );
 
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
@@ -4982,6 +5022,35 @@ fn runner_cancellation_diagnostic(record: &AgentTaskRunRecord) -> Option<Collect
     })
 }
 
+/// A queued runner-backed record must retain its ownership diagnosis until a
+/// runner job id is durably projected. The liveness model is shared with
+/// controller-upgrade admission so both surfaces explain the same blocker.
+fn queued_runner_ownership_diagnostic(
+    record: &AgentTaskRunRecord,
+    liveness: agent_task_service::AgentTaskLiveness,
+    probe: &agent_task_lifecycle::AgentTaskRunnerDiagnosticProbe,
+) -> Option<CollectedDiagnostic> {
+    (record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        && record.runner_id().is_some()
+        && probe.skipped_reason == Some("missing_runner_job_id"))
+    .then(|| CollectedDiagnostic {
+        task_id: "runner".to_string(),
+        class: "agent_task.runner_missing_pid".to_string(),
+        message: "Runner-owned execution is queued at provider_start without a runner PID."
+            .to_string(),
+        source: "runner_ownership".to_string(),
+        data: json!({
+            "causal_phase": record.metadata.pointer("/cook_progress/phase"),
+            "liveness": liveness.as_str(),
+            "liveness_reconcilable": liveness.is_reconcilable(),
+            "ownership": "runner",
+            "runner_id": record.runner_id(),
+            "runner_job_id": record.runner_job_id(),
+            "runner_execution_status": record.metadata.pointer("/runner_execution_record/status"),
+        }),
+    })
+}
+
 fn compact_items(value: Option<&Value>, fields: &[&str]) -> Value {
     Value::Array(
         value
@@ -5114,6 +5183,8 @@ fn collected_diagnostic_value_with_details(
     } else if item.source == "pre_execution_failure" {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if item.source == "lab_preacceptance_transport" {
+        value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
+    } else if item.source == "runner_ownership" {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if let Some(details) = item.data.get("worktree_provider_failure") {
         value["details"] = details.clone();
@@ -5571,6 +5642,7 @@ fn diagnose_next_commands(
     retry_action: Option<&CommandNextAction>,
     continuation_action: Option<&CommandNextAction>,
     current_lifecycle_denial: bool,
+    queued_runner_ownership: bool,
 ) -> Vec<String> {
     let owner = record
         .runner_id()
@@ -5582,6 +5654,11 @@ fn diagnose_next_commands(
             .into_iter()
             .map(|action| action.command)
             .collect();
+    }
+    if queued_runner_ownership {
+        return vec![format!(
+            "homeboy {owner} agent-task diagnose {run_id} --full"
+        )];
     }
     let mut commands = vec![
         format!("homeboy {owner} agent-task diagnose {run_id} --full"),
@@ -5918,7 +5995,7 @@ mod tests {
         }))
         .expect("minimal durable record");
 
-        let commands = diagnose_next_commands(&record, None, None, false);
+        let commands = diagnose_next_commands(&record, None, None, false, false);
 
         assert!(commands
             .iter()
@@ -5992,6 +6069,7 @@ mod tests {
             &record,
             retry.action.as_ref(),
             retry.continuation.as_ref(),
+            false,
             false,
         );
 

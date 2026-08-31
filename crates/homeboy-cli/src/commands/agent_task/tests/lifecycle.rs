@@ -2281,6 +2281,111 @@ fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
 }
 
 #[test]
+fn diagnose_surfaces_queued_runner_ownership_before_a_job_id_is_recorded() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-queued-runner-ownership";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.updated_at = Some(chrono::Utc::now().to_rfc3339());
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["runner_execution_record"] = json!({
+                "status": "planned",
+                "agent_task_run_id": run_id,
+                "runner_id": "homeboy-lab"
+            });
+            record.metadata["cook_progress"] = json!({ "phase": "provider_start" });
+        })
+        .expect("persist queued runner ownership");
+
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose queued runner ownership");
+
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "agent_task.runner_missing_pid"
+        );
+        assert_eq!(diagnosis["root_cause"]["details"]["liveness"], "active");
+        assert_eq!(
+            diagnosis["root_cause"]["details"]["liveness_reconcilable"],
+            false
+        );
+        assert_eq!(diagnosis["root_cause"]["details"]["ownership"], "runner");
+        assert_eq!(diagnosis["causal_phase"], "provider_start");
+        assert_eq!(
+            diagnosis["runner_diagnostic_probe"]["skipped_reason"],
+            "missing_runner_job_id"
+        );
+        assert_eq!(
+            diagnosis["next_commands"][0],
+            format!("homeboy --runner homeboy-lab agent-task diagnose {run_id} --full")
+        );
+        assert_eq!(diagnosis["next_action_basis"], "diagnosis");
+        assert_eq!(
+            diagnosis["_homeboy_actionable"]["next_actions"][0]["command"],
+            format!("homeboy --runner homeboy-lab agent-task diagnose {run_id} --full")
+        );
+    });
+}
+
+#[test]
+fn diagnose_keeps_running_runner_ownership_as_observation_not_root_cause() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-running-runner-ownership";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::Running;
+            record.updated_at = Some(chrono::Utc::now().to_rfc3339());
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["cook_progress"] = json!({ "phase": "provider_start" });
+        })
+        .expect("persist running runner ownership");
+
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose running runner ownership");
+
+        assert!(diagnosis["root_cause"].is_null());
+        assert_eq!(diagnosis["runner_diagnostic_probe"]["performed"], false);
+        assert_eq!(
+            diagnosis["runner_diagnostic_probe"]["skipped_reason"],
+            "missing_runner_job_id"
+        );
+    });
+}
+
+#[test]
+fn diagnose_keeps_a_successful_terminal_runner_record_healthy() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-successful-terminal-runner";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::Succeeded;
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["runner_job_id"] = json!("job-success");
+        })
+        .expect("persist successful runner record");
+
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose successful runner record");
+
+        assert!(diagnosis["root_cause"].is_null());
+        assert_eq!(diagnosis["runner_diagnostic_probe"]["performed"], false);
+        assert_eq!(
+            diagnosis["runner_diagnostic_probe"]["skipped_reason"],
+            "healthy_terminal_record"
+        );
+    });
+}
+
+#[test]
 fn logs_exposes_only_the_canonical_cursor_surface() {
     let cli = Cli::try_parse_from([
         "homeboy",

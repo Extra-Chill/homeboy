@@ -4839,8 +4839,11 @@ const RUNNER_DIAGNOSTIC_EVENT_LIMIT: usize = 12;
 pub fn runner_diagnostic_probe(record: &AgentTaskRunRecord) -> AgentTaskRunnerDiagnosticProbe {
     let runner_id = record.runner_id().map(str::to_string);
     let runner_job_id = record.runner_job_id().map(str::to_string);
-    let applicable = record.state == AgentTaskRunState::Running
-        || (record.state.is_terminal() && record.state != AgentTaskRunState::Succeeded);
+    let applicable = matches!(
+        record.state,
+        AgentTaskRunState::Queued | AgentTaskRunState::Running
+    ) || (record.state.is_terminal()
+        && record.state != AgentTaskRunState::Succeeded);
     let skipped_reason = if is_controller_local(record) {
         Some(RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL)
     } else if !applicable {
