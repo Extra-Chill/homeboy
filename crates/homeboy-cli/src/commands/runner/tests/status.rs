@@ -11,10 +11,11 @@ use homeboy::core::daemon::{
     DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonStaleReasonCode,
 };
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerDaemonGenerationStatus, RunnerKind, RunnerSession,
-    RunnerStatusReport, RunnerTunnelMode,
+    self as runner, Runner, RunnerDaemonGenerationStatus, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode,
 };
 use homeboy::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
+use homeboy_runner_contract::RunnerKind;
 
 use super::super::jobs::format_job_event;
 use super::super::status::{

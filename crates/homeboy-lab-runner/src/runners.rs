@@ -75,7 +75,7 @@ pub use crate::{
     RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDevSyncOptions, RunnerDevSyncOutput,
     RunnerDisconnectReport, RunnerDiscoveryService, RunnerExecDiagnostics, RunnerExecMode,
     RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
-    RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob, RunnerKind, RunnerLifecycleOwner,
+    RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob, RunnerLifecycleOwner,
     RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerRequiredTool,
     RunnerResourceMetrics, RunnerResult, RunnerSecretEnvMigrationPlan, RunnerSession,
     RunnerSessionRole, RunnerSessionState, RunnerSpec, RunnerStaleDaemonWarning,

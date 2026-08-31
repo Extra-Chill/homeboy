@@ -9,8 +9,11 @@ use crate::extension::catalog::{extension_path, load_extension, load_extension_i
 use crate::extension::invoke::ResolvedExtensionInvocationContext;
 use homeboy_extension_contract::{ExtensionCapability, ExtensionManifest};
 
+mod catalog_resolution;
 mod requirements;
 mod surface;
+
+use catalog_resolution::CapabilityCatalog;
 
 pub use requirements::{validate_extension_requirements, validate_required_extensions};
 pub use surface::{
@@ -270,6 +273,7 @@ fn resolve_extension_for_capability_if_available(
     if extensions.is_empty() {
         return Ok(None);
     }
+    let catalog = CapabilityCatalog::load()?;
 
     if let Some(extension_id) = explicit_capability_extension(component, capability) {
         if !extensions.contains_key(extension_id) {
@@ -290,8 +294,8 @@ fn resolve_extension_for_capability_if_available(
             ));
         }
 
-        let manifest = load_extension(extension_id)?;
-        if !capability.has_manifest_support(&manifest) {
+        let entry = catalog.resolvable_entry(extension_id)?;
+        if !catalog.provides(entry, capability) {
             return Err(Error::validation_invalid_argument(
                 format!("capability_extensions.{}", capability.label()),
                 format!(
@@ -308,85 +312,32 @@ fn resolve_extension_for_capability_if_available(
         return Ok(Some(extension_id.to_string()));
     }
 
-    let (mut matching, load_failures) = survey_linked_extensions(extensions.keys(), capability);
+    let (mut matching, catalog_failures) = catalog.candidates(extensions.keys(), capability);
 
     match matching.len() {
-        // Nothing advertises the capability. If every manifest loaded, that is
-        // an honest "not provided". If one did not, the answer is unknown
-        // rather than no, and the operator needs the name of the file to fix.
-        0 if load_failures.is_empty() => Ok(None),
-        0 => Err(unreadable_manifest_error(
+        // Nothing advertises the capability. Invalid catalog entries keep the
+        // answer unknown rather than silently reporting "not provided".
+        0 if catalog_failures.is_empty() => Ok(None),
+        0 => Err(unreadable_catalog_error(
             component,
             capability,
-            &load_failures,
+            &catalog_failures,
         )),
         1 => Ok(Some(matching.remove(0))),
         _ => disambiguate_capability_owner(component, capability, &matching).map(Some),
     }
 }
 
-/// A linked extension whose manifest would not load, kept beside the survey so
-/// a failure can be reported *if and only if* it turns out to matter.
-struct ExtensionLoadFailure {
-    extension_id: String,
-    error: Error,
-}
-
-/// Partition a component's linked extensions into those that advertise
-/// `capability` and those whose manifest would not load at all.
-///
-/// Before #11122 this was a `for` loop that did `load_extension(id)?`, so a
-/// single malformed manifest failed the whole resolution: a broken `wordpress`
-/// manifest made `nodejs`'s lint capability unresolvable, even though nodejs
-/// was intact and was the one being asked for. The sibling artifact resolver
-/// forty lines away already tolerated exactly this
-/// (`let Ok(manifest) = ... else { continue; }`); the two now agree.
-///
-/// This is not a hypothetical shape. `deny_unknown_fields` appears ~70 times
-/// across the manifest contract, so retiring a key in one nested struct is
-/// enough to make an older published manifest undeserializable — which is
-/// precisely why `ProvidesConfig` had the attribute removed.
-///
-/// Both outputs are sorted. Callers iterate `Component.extensions`, a `HashMap`
-/// whose order differs every process, and both the ambiguity error and the
-/// load-failure error list names.
-fn survey_linked_extensions<'a>(
-    extension_ids: impl Iterator<Item = &'a String>,
-    capability: ExtensionCapability,
-) -> (Vec<String>, Vec<ExtensionLoadFailure>) {
-    let mut matching = Vec::new();
-    let mut load_failures = Vec::new();
-
-    for extension_id in extension_ids {
-        match load_extension(extension_id) {
-            Ok(manifest) => {
-                if capability.has_manifest_support(&manifest) {
-                    matching.push(extension_id.clone());
-                }
-            }
-            Err(error) => load_failures.push(ExtensionLoadFailure {
-                extension_id: extension_id.clone(),
-                error,
-            }),
-        }
-    }
-
-    matching.sort();
-    load_failures.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
-    (matching, load_failures)
-}
-
 /// Reported only when a capability could not be satisfied *and* at least one
-/// linked manifest was unreadable — i.e. the unreadable manifest is a candidate
-/// explanation for the miss rather than unrelated collateral.
-fn unreadable_manifest_error(
+/// linked catalog entry was invalid or missing.
+fn unreadable_catalog_error(
     component: &Component,
     capability: ExtensionCapability,
-    load_failures: &[ExtensionLoadFailure],
+    failures: &[(String, String)],
 ) -> Error {
-    let names = load_failures
+    let names = failures
         .iter()
-        .map(|failure| failure.extension_id.as_str())
+        .map(|failure| failure.0.as_str())
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -397,28 +348,23 @@ fn unreadable_manifest_error(
              manifest(s) could not be read: {}",
             component.id,
             capability.label(),
-            load_failures.len(),
+            failures.len(),
             names
         ),
         None,
         Some(
-            load_failures
+            failures
                 .iter()
-                .map(|failure| {
-                    format!(
-                        "Extension '{}' failed to load: {}",
-                        failure.extension_id, failure.error.message
-                    )
-                })
+                .map(|failure| format!("Extension '{}' failed to load: {}", failure.0, failure.1))
                 .collect(),
         ),
     );
 
     err = err.with_hint(format!(
         "Repair or reinstall the named extension(s): homeboy extension install {}",
-        load_failures
+        failures
             .first()
-            .map(|failure| failure.extension_id.as_str())
+            .map(|failure| failure.0.as_str())
             .unwrap_or("<extension_id>")
     ));
 
@@ -627,7 +573,8 @@ pub fn has_linked_extension_for_capability(
     // what an unreadable manifest means, and "no provider" is the honest answer
     // for an optional capability — the caller that goes on to actually run it
     // gets the named load failure from `resolve_extension_for_capability`.
-    let (matching, _) = survey_linked_extensions(extensions.keys(), capability);
+    let catalog = CapabilityCatalog::load()?;
+    let (matching, _) = catalog.candidates(extensions.keys(), capability);
     Ok(!matching.is_empty())
 }
 
@@ -685,8 +632,9 @@ pub fn resolve_execution_context_for_extension(
         ));
     }
 
-    let manifest = load_extension(extension_id)?;
-    if !capability.has_manifest_support(&manifest) {
+    let catalog = CapabilityCatalog::load()?;
+    let entry = catalog.resolvable_entry(extension_id)?;
+    if !catalog.provides(entry, capability) {
         return Err(Error::validation_invalid_argument(
             "extension",
             format!(
@@ -1168,7 +1116,7 @@ mod tests {
     /// candidates in a different order every process and make both the
     /// ambiguity error and the load-failure error nondeterministic.
     #[test]
-    fn survey_orders_candidates_and_failures_deterministically() {
+    fn catalog_resolution_orders_candidates_and_failures_deterministically() {
         crate::test_support::with_isolated_home(|home| {
             for extension_id in ["zulu", "alpha", "mike"] {
                 write_extension_manifest(home.path(), extension_id, "deps");
@@ -1181,14 +1129,14 @@ mod tests {
                 .iter()
                 .map(|id| (*id).to_string())
                 .collect();
-            let (matching, failures) =
-                survey_linked_extensions(ids.iter(), ExtensionCapability::Deps);
+            let catalog = CapabilityCatalog::load().expect("v1 catalog");
+            let (matching, failures) = catalog.candidates(ids.iter(), ExtensionCapability::Deps);
 
             assert_eq!(matching, vec!["alpha", "mike", "zulu"]);
             assert_eq!(
                 failures
                     .iter()
-                    .map(|failure| failure.extension_id.as_str())
+                    .map(|failure| failure.0.as_str())
                     .collect::<Vec<_>>(),
                 vec!["bravo", "yankee"]
             );

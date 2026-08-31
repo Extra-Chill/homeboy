@@ -9,9 +9,10 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerActiveJobState, RunnerKind, RunnerSession, RunnerStatusReport,
+    self as runner, Runner, RunnerActiveJobState, RunnerSession, RunnerStatusReport,
     RunnerTunnelMode, RuntimeMaterializationStatus,
 };
+use homeboy_runner_contract::RunnerKind;
 
 use super::super::CmdResult;
 use super::controller_ancestry::{commits_are_ancestral, CommitAncestry};

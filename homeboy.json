@@ -670,7 +670,8 @@
           "glob": "crates/**",
           "patterns": [
             "\\bextension_execution\\b",
-            "\\bfind_extension_for_file_ext\\b"
+            "\\bfind_extension_for_file_ext\\b",
+            "\\b(?:survey_linked_extensions|ExtensionLoadFailure)\\b"
           ]
         },
         "name": "extensions-use-canonical-resolve-api"

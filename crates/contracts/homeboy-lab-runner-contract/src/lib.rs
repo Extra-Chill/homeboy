@@ -1,11 +1,10 @@
-//! Lab routing, handoff, and compatibility contracts used by `homeboy-core` and
+//! Lab routing and handoff contracts used by `homeboy-core` and
 //! the optional `homeboy-runner` feature crate.
 //!
 //! Runner is an optional Lab-offload feature; core must not depend on runner
-//! *behavior*. But some core code legitimately needs to name runner *concepts*
-//! (e.g. the runner kind, or the env-var markers used when an exec crosses a
-//! remote-runner boundary). Generic lifecycle data is canonical in
-//! `homeboy-runner-contract`; its established import is re-exported here.
+//! *behavior*. Generic runner concepts are canonical in
+//! `homeboy-runner-contract`; this crate owns only Lab-specific policy and
+//! handoff contracts.
 //!
 //! Two single-type crates were folded in here for the same reason they existed
 //! separately — both are behavior-free runner contracts below core, and both
@@ -27,42 +26,14 @@ pub use execution_placement::{
     ExecutionPlacementRequirement, ExecutionPlacementRunnerSelection, RunnerSelectionSource,
     CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
 };
-/// Compatibility exports for established Lab runner consumers. Generic runner
-/// execution-context vocabulary is canonical in `homeboy-runner-contract`.
-pub use homeboy_runner_contract::{
-    is_internal_control_env, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
-};
-/// Compatibility exports for established Lab runner consumers. Generic runner
-/// workspace state is canonical in `homeboy-runner-contract`.
-pub use homeboy_runner_contract::{
-    ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
-};
-/// Compatibility exports for established Lab runner consumers. Generic runner
-/// artifact results are canonical in `homeboy-runner-contract`.
-pub use homeboy_runner_contract::{RunnerArtifactRef, RunnerMutationArtifacts};
-/// Compatibility exports for established Lab runner consumers. Generic runner
-/// identity, lifecycle, capability, and readiness requests are canonical in
-/// `homeboy-runner-contract`.
-pub use homeboy_runner_contract::{
-    RunnerCapabilityPreflight, RunnerKind, RunnerLifecycleOwner, RunnerRequiredTool,
-    RunnerToolCapabilityRequirement, RunnerToolchainReadinessProbe,
-};
-/// Compatibility exports for established Lab runner consumers. Persisted
-/// session and tunnel records are canonical in `homeboy-runner-contract`.
-pub use homeboy_runner_contract::{
-    RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
-    RunnerTunnelProcessStartIdentity,
-};
-/// Compatibility exports for established Lab runner consumers. Generic runner
-/// resource telemetry is canonical in `homeboy-runner-contract`.
-pub use homeboy_runner_contract::{
-    RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
-};
 pub use placement::Placement;
 pub use provider_source_types::AgentTaskProviderRunnerSource;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use homeboy_runner_contract::{
+    RunnerCapabilityPreflight, RunnerRequiredTool, RunnerWorkspaceSyncMode,
+};
 use serde::{Deserialize, Serialize};
 
 /// Options controlling how a runner workspace is synced before a job runs.

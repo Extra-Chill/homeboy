@@ -4,7 +4,7 @@ use crate::Runner;
 use crate::RunnerExecOptions;
 use crate::RunnerStatusReport;
 use homeboy_core::Result;
-use homeboy_lab_runner_contract::RunnerKind;
+use homeboy_runner_contract::RunnerKind;
 use homeboy_upgrade::upgrade::version_is_newer;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::InstallMethod;

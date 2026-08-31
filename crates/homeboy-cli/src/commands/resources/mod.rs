@@ -11,6 +11,8 @@ mod memory;
 
 use crate::runner::runners::{self as runner, Runner};
 use classification::{classify_processes, classify_rig_leases, overall_recommendation};
+#[cfg(test)]
+use homeboy_runner_contract::RunnerKind;
 
 const RELEVANT_PROCESS_EXECUTABLES: &[&str] = &["homeboy"];
 const RESOURCE_PROCESS_MATCHES_ENV: &str = "HOMEBOY_DOCTOR_RESOURCE_PROCESS_MATCHES";
@@ -400,7 +402,7 @@ mod tests {
     fn uses_only_the_hosted_runner_capacity() {
         let configured = |id: &str, concurrency_limit| Runner {
             id: id.to_string(),
-            kind: runner::RunnerKind::Local,
+            kind: RunnerKind::Local,
             server_id: None,
             workspace_root: None,
             settings: homeboy::core::server::RunnerSettings {

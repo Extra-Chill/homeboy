@@ -1,6 +1,7 @@
 use homeboy::core::engine::shell;
 use homeboy::core::{server, Error};
 use homeboy::runner::runners::{self as runner};
+use homeboy_runner_contract::RunnerKind;
 
 use super::cli::RunnerBrokerCommand;
 use super::types::{RunnerBrokerCredentialSummary, RunnerBrokerOutput};
@@ -94,7 +95,7 @@ fn install_store_on_ssh_runner(
     store: &runner::BrokerAuthStore,
 ) -> Result<(), Error> {
     let configured_runner = runner::load(runner_id)?;
-    if configured_runner.kind != runner::RunnerKind::Ssh {
+    if configured_runner.kind != RunnerKind::Ssh {
         return Ok(());
     }
     let server_id = configured_runner.server_id.as_deref().ok_or_else(|| {

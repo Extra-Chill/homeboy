@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 
 use crate::runners::{
     self as runner, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
-    RunnerKind,
 };
 use homeboy_core::engine::shell;
 use homeboy_core::observation::{ArtifactRecord, ObservationStore};
@@ -23,6 +22,7 @@ use homeboy_fuzz::{
     parse_fuzz_observation_set_value, rank_fuzz_observation_set_hotspots, FUZZ_HOTSPOT_SET_SCHEMA,
     FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
+use homeboy_runner_contract::RunnerKind;
 
 /// The store-rooted counterpart of `promote_runner_exec_artifacts`.
 pub fn promote_runner_exec_artifacts_in_store(

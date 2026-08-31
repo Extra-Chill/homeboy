@@ -84,6 +84,12 @@ Component-aware owner election remains application policy over this primitive.
 The v1 wire contract does not serialize Homeboy's internal `Component` or
 `Project` models.
 
+Core component resolution reads capability candidates and invalid-installation
+diagnostics from one v1 catalog snapshot. Explicit ownership,
+`composition.includes` primacy, and genuine ambiguity remain application policy
+over those stable descriptors; execution-context assembly loads the selected
+manifest only for internal script paths and settings.
+
 ## Readiness
 
 `extension::catalog::readiness_api` returns readiness evidence for one explicit

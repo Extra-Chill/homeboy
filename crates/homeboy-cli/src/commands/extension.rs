@@ -9,7 +9,7 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
-use homeboy::runner::runners::{self, RunnerKind};
+use homeboy::runner::runners;
 use homeboy_core::error::ExecutableAction;
 use homeboy_core::extension::catalog::{
     broken_extension_link_repair_actions, is_extension_linked, load_extension,
@@ -30,6 +30,7 @@ use homeboy_extension_contract::update_output::UpdateEntry;
 use homeboy_extension_contract::{
     evaluate_core_compatibility, CoreCompatibilityReport, NotificationTransportDescriptor,
 };
+use homeboy_runner_contract::RunnerKind;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;

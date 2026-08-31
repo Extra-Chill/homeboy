@@ -685,7 +685,7 @@ mod tests {
 
     use super::*;
     use homeboy_core::runner_execution_envelope::RunnerExecutionRecord;
-    use homeboy_lab_runner_contract::{
+    use homeboy_runner_contract::{
         ByteFileCounts, RunnerLifecycleOwner, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease,
     };
     use tempfile::TempDir;

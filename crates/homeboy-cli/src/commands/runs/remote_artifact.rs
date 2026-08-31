@@ -17,7 +17,8 @@ use homeboy::core::Error;
 use homeboy::runner::artifact_attach::{
     self as runner_artifact_attach, RunnerAttachArtifactType, RunnerAttachSource,
 };
-use homeboy::runner::runners::{self as runner, Runner, RunnerKind};
+use homeboy::runner::runners::{self as runner, Runner};
+use homeboy_runner_contract::RunnerKind;
 
 use super::types::{
     RunsArtifactAttachArgs, RunsArtifactAttachOutput, RunsArtifactCaptureArgs,

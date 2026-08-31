@@ -5,7 +5,8 @@ use serde_json::Value;
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::MergeOutput;
-use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner, RunnerKind};
+use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner};
+use homeboy_runner_contract::RunnerKind;
 
 use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::{CmdResult, DynamicSetArgs};

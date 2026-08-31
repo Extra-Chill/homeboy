@@ -1695,6 +1695,81 @@ fn durable_finalization_discloses_terminal_successful_model_after_cross_backend_
 }
 
 #[test]
+fn durable_finalization_accepts_fingerprinted_candidate_from_successful_fallback() {
+    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+    lifecycle.provider_runtime = vec![
+        ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "quota-exhausted-provider".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "failure": "quota_exhausted", "model": "openai/gpt-5.6-sol" }),
+        },
+        ProviderRuntimeLifecycle {
+            task_id: "account-fallback".to_string(),
+            backend: "account-unavailable-provider".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "failure": "account_unavailable", "model": "openai/gpt-5.6-sol" }),
+        },
+        ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "fallback-provider".to_string(),
+            state: ProviderRuntimeState::Succeeded,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({ "model": "openai/gpt-5.6-terra" }),
+        },
+    ];
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle.clone()),
+        gate_proof: Some(successful_gate_proof()),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+
+    finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("successful fallback candidate finalizes");
+    assert_eq!(lifecycle.provider_runtime.len(), 3);
+    assert_eq!(
+        lifecycle.provider_runtime[0].state,
+        ProviderRuntimeState::Failed
+    );
+    assert_eq!(
+        lifecycle.provider_runtime[1].state,
+        ProviderRuntimeState::Failed
+    );
+
+    let mut failed_only = lifecycle.clone();
+    failed_only.provider_runtime[2].state = ProviderRuntimeState::Failed;
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(failed_only),
+        gate_proof: Some(successful_gate_proof()),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
+
+    let mut unbound_candidate = successful_gate_proof();
+    unbound_candidate.promotion.source.task_id = "other-task".to_string();
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle),
+        gate_proof: Some(unbound_candidate),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
+}
+
+#[test]
 fn finalization_keeps_internal_durable_refs_for_operators_but_not_reviewers() {
     let internal_ref = "homeboy://agent-task/run/run-9568/artifacts#task=cook&artifact=patch";
     let reviewer_ref = "https://github.com/Extra-Chill/homeboy/issues/9568";
@@ -3031,6 +3106,20 @@ fn successful_gate_proof() -> AgentTaskPrDurableGateProof {
             "to_worktree": "worktree", "target": { "worktree": "worktree", "path": "/repo" },
             "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch" },
             "operator_notification": { "status": "completed", "message": "complete" },
+            "provenance": {
+                "candidate": {
+                    "kind": "git",
+                    "fingerprint": {
+                        "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                        "target_path": "/repo",
+                        "head": "7f76933ef002d195ee1cc5bf21069e0f40b1c972",
+                        "base": "6f76933ef002d195ee1cc5bf21069e0f40b1c972",
+                        "changed_files": ["src/lib.rs"],
+                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "tree": "5f76933ef002d195ee1cc5bf21069e0f40b1c972"
+                    }
+                }
+            },
             "gate_results": [{ "id": "gate", "name": "cargo test", "kind": "command", "status": "passed" }]
         })).expect("promotion proof"),
     }
