@@ -6498,18 +6498,7 @@ fn run_cook_spine(
             }));
         }
 
-        let intentional_no_change = intentional_no_change_from_aggregate(&aggregate);
-        let has_substantive_candidate =
-            agent_task_lifecycle::select_cook_candidate_in_store(lifecycle_store, &cook_id)
-                .is_ok_and(|selection| {
-                    !selection.incomplete
-                        && selection.selected_task_id.is_some()
-                        && selection.selected_artifact_id.is_some()
-                });
-        if let Some(declaration) = intentional_no_change.filter(|declaration| {
-            !has_substantive_candidate
-                || declaration.verdict == AgentTaskIntentionalNoChangeVerdict::Blocked
-        }) {
+        if let Some(declaration) = intentional_no_change_from_aggregate(&aggregate) {
             let review_form = review_form_from_aggregate(&aggregate)?;
             let requires_candidate =
                 no_change_requires_substantive_candidate(&declaration, &source_request);
