@@ -108,7 +108,14 @@ pub(in crate::release) fn build_preflight_steps(
     // test gate. (#10402)
     steps.push(build_test_secret_env_step(options));
 
-    let dependencies_step = if options.skip_deps_hydration {
+    let dependencies_step = if options.pipeline.head {
+        disabled_step(
+            "preflight.dependencies",
+            "preflight.dependencies",
+            "Hydrate release dependencies",
+            string_config("reason", "tagged-head-recovery"),
+        )
+    } else if options.skip_deps_hydration {
         disabled_step(
             "preflight.dependencies",
             "preflight.dependencies",
@@ -199,8 +206,14 @@ fn build_test_secret_env_step(options: &ReleaseOptions) -> PlanStep {
 }
 
 fn quality_plan_options(options: &ReleaseOptions) -> QualityPlanOptions {
-    QualityPlanOptions::release_preflight("release", options.skip_checks)
-        .with_granular_skips(&options.skip_checks_granular)
+    let mut quality = QualityPlanOptions::release_preflight(
+        "release",
+        options.skip_checks || options.pipeline.head,
+    );
+    if options.pipeline.head && !options.skip_checks {
+        quality.skip_reason = "tagged-head-recovery".to_string();
+    }
+    quality.with_granular_skips(&options.skip_checks_granular)
 }
 
 fn build_extension_release_preflight_steps(extensions: &[ExtensionManifest]) -> Vec<PlanStep> {
@@ -226,7 +239,7 @@ fn build_extension_release_preflight_steps(extensions: &[ExtensionManifest]) -> 
 
 fn build_quality_steps(options: &ReleaseOptions) -> Vec<PlanStep> {
     let mut quality_options = quality_plan_options(options);
-    quality_options.lint_needs = vec![if options.skip_deps_hydration {
+    quality_options.lint_needs = vec![if options.skip_deps_hydration || options.pipeline.head {
         "preflight.bump_policy".to_string()
     } else {
         "preflight.dependencies".to_string()

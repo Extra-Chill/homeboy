@@ -345,7 +345,7 @@ mod tests {
         build_dry_run_preflight_plan, build_initial_preflight_plan, execute_plan_steps,
         initial_executable_preflight_ids, release_tag_version, resolve_head_release,
     };
-    use crate::release::types::{ReleaseOptions, ReleaseStepStatus};
+    use crate::release::types::{ReleaseOptions, ReleasePipelineOptions, ReleaseStepStatus};
     use homeboy_core::plan::PlanStepStatus;
     use semver::Version;
     use std::collections::HashSet;
@@ -511,6 +511,41 @@ mod tests {
             "tag availability must fail before the declared-test-secret gate runs"
         );
         assert_eq!(steps[tag].needs, vec!["preflight.remote_sync"]);
+    }
+
+    #[test]
+    fn tagged_head_recovery_initial_preflight_never_schedules_mutable_quality_gates() {
+        for from_artifacts in [None, Some("artifacts".to_string())] {
+            let options = ReleaseOptions {
+                bump_type: "head".to_string(),
+                pipeline: ReleasePipelineOptions {
+                    head: true,
+                    from_artifacts,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let plan = build_initial_preflight_plan("fixture", &options);
+
+            for step_id in [
+                "preflight.test_secret_env",
+                "preflight.dependencies",
+                "preflight.lint",
+                "preflight.test",
+            ] {
+                let step = plan
+                    .plan
+                    .steps
+                    .iter()
+                    .find(|step| step.id == step_id)
+                    .expect("mutable recovery preflight step");
+                assert_eq!(
+                    step.status,
+                    PlanStepStatus::Disabled,
+                    "{step_id} must not execute before release reconciliation"
+                );
+            }
+        }
     }
 
     /// A missing runner/service credential must be diagnosed before dependency
