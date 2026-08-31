@@ -1373,6 +1373,172 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
 }
 
 #[test]
+fn envelope_submission_replays_and_persists_no_legacy_execution_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.secret_env_names = vec!["TOKEN".to_string()];
+    let mut envelope = request.execution_envelope();
+    envelope.dispatch.as_mut().expect("dispatch").env.insert(
+        "HOMEBOY_RUNNER_PLACEMENT_RESOLVED".to_string(),
+        "internal".to_string(),
+    );
+    let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
+        schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+        api_version: homeboy_runner_contract::RUNNER_API_V1,
+        submission_key: "agent-task:v1:envelope".to_string(),
+        envelope,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+    };
+    let accepted = store
+        .submit_runner_api_request(submission.clone())
+        .expect("submit envelope");
+    assert_eq!(
+        store
+            .submit_runner_api_request(submission.clone())
+            .expect("replay envelope")
+            .id,
+        accepted.id
+    );
+    assert!(
+        store
+            .submit_runner_api_request({
+                let mut replay = submission.clone();
+                replay
+                    .envelope
+                    .dispatch
+                    .as_mut()
+                    .expect("dispatch")
+                    .env
+                    .insert("TOKEN".to_string(), "<redacted>".to_string());
+                replay
+            })
+            .is_err(),
+        "redacted secret placeholders cannot reach a worker as inline values"
+    );
+    let persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("durable JSON"))
+            .expect("parse durable JSON");
+    let remote = &persisted["jobs"][0]["remote_runner"];
+    assert!(remote.get("envelope").is_some());
+    assert!(remote.get("request").is_none());
+    assert!(remote["envelope"]["dispatch"]["env"].get("TOKEN").is_none());
+    assert!(remote["envelope"]["dispatch"]["env"]
+        .get("HOMEBOY_RUNNER_PLACEMENT_RESOLVED")
+        .is_none());
+    let mut drift = submission;
+    drift
+        .envelope
+        .dispatch
+        .as_mut()
+        .expect("dispatch")
+        .command
+        .push("drift".to_string());
+    assert!(store.submit_runner_api_request(drift).is_err());
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+        .expect("claim envelope")
+        .expect("claimed envelope");
+    assert_eq!(
+        claim.envelope.dispatch.as_ref().expect("dispatch").command,
+        request.command
+    );
+}
+
+#[test]
+fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let request = remote_runner_request("homeboy-lab", None);
+    store
+        .submit_remote_runner_job(request.clone())
+        .expect("legacy submit");
+    let mut dual: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("store JSON"))
+            .expect("parse store JSON");
+    dual["jobs"][0]["remote_runner"]["envelope"] =
+        serde_json::to_value(request.execution_envelope()).expect("envelope JSON");
+    assert!(JobStore::open_without_reconciliation_from_bytes(
+        temp.path().join("dual.json"),
+        &serde_json::to_vec(&dual).expect("dual JSON"),
+    )
+    .is_err());
+
+    let mut empty = dual;
+    empty["jobs"][0]["remote_runner"]
+        .as_object_mut()
+        .expect("remote job")
+        .remove("envelope");
+    empty["jobs"][0]["remote_runner"]
+        .as_object_mut()
+        .expect("remote job")
+        .remove("request");
+    assert!(JobStore::open_without_reconciliation_from_bytes(
+        temp.path().join("empty.json"),
+        &serde_json::to_vec(&empty).expect("empty JSON"),
+    )
+    .is_err());
+}
+
+#[test]
+fn legacy_request_workspace_owner_lease_renews_in_its_legacy_representation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let workspace = crate::workspace_claim::WorkspaceIdentity::new("test", "legacy-owner")
+        .expect("workspace identity");
+    let lease = crate::workspace_claim::WorkspaceOwnerLease {
+        schema: crate::workspace_claim::WORKSPACE_OWNER_LEASE_SCHEMA.to_string(),
+        protocol: crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
+        workspace,
+        owner_id: "owner".to_string(),
+        lifecycle_revision: 1,
+        token: "legacy-token".to_string(),
+        expires_at_ms: crate::api_jobs::timestamp_ms() + 60_000,
+    };
+    let job = store
+        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .expect("legacy submit");
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+        .expect("claim")
+        .expect("claimed");
+    let renewed = crate::workspace_claim::WorkspaceOwnerLease {
+        expires_at_ms: lease.expires_at_ms + 30_000,
+        ..lease.clone()
+    };
+    store
+        .renew_remote_runner_claim_with_workspace_owner_lease(
+            job.id,
+            "homeboy-lab",
+            claim.job.claim_id.as_deref().expect("claim id"),
+            30_000,
+            None,
+            Some(renewed.clone()),
+        )
+        .expect("renew legacy owner lease");
+    assert_eq!(
+        store
+            .remote_runner_workspace_owner_lease(job.id)
+            .expect("owner lease"),
+        Some(renewed)
+    );
+    let persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("persisted JSON"))
+            .expect("parse persisted JSON");
+    let remote = &persisted["jobs"][0]["remote_runner"];
+    assert!(remote.get("envelope").is_none());
+    assert_eq!(
+        remote["request"]["workspace_owner_lease"]["expires_at_ms"],
+        lease.expires_at_ms + 30_000
+    );
+    assert!(remote.get("workspace_owner_lease").is_none());
+}
+
+#[test]
 fn remote_runner_submit_and_claim_roll_back_after_a_durable_write_failure() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.json");

@@ -8,6 +8,7 @@
 
 use super::*;
 use homeboy_core::api_jobs::RemoteRunnerJobRequest;
+use homeboy_runner_contract::RunnerApiSubmitRequest;
 
 // The ambient `reconcile_active_lab_runner_handoffs()` shim that used to sit
 // above this resolved a root and delegated straight here. It had no callers, so
@@ -262,8 +263,20 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
     metadata["durable_run_id"] = json!(run_id);
     metadata["reconciled_from"] = json!("durable_detached_handoff_intent");
     request.metadata = Some(metadata);
-    match runner_continuation::with_runner_continuation(|provider| {
-        provider.submit_reverse_broker_job(&runner_id, request)
+    let envelope_request = intent
+        .get("replay_envelope_request")
+        .cloned()
+        .map(serde_json::from_value::<RunnerApiSubmitRequest>)
+        .transpose()
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse envelope runner replay request".to_string()),
+            )
+        })?;
+    match runner_continuation::with_runner_continuation(|provider| match envelope_request {
+        Some(request) => provider.submit_reverse_broker_envelope_job(&runner_id, request),
+        None => provider.submit_reverse_broker_job(&runner_id, request),
     }) {
         Ok(job) => {
             record_detached_lab_run_in_store(

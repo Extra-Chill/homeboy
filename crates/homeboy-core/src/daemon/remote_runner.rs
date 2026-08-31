@@ -9,6 +9,11 @@ use crate::api_jobs::{
 use crate::broker_auth::{BrokerAuthStore, BrokerScope};
 use crate::error::{Error, Result};
 use crate::paths;
+use homeboy_runner_contract::{
+    RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiSubmitOutcome,
+    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RUNNER_API_SUBMIT_RESPONSE_SCHEMA,
+    RUNNER_API_V1,
+};
 use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
 /// Per-request broker authentication context extracted from the network layer.
@@ -624,6 +629,88 @@ fn register_session(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Val
 }
 
 fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
+    if let Some(value) = body.clone() {
+        if let Ok(submission) = serde_json::from_value::<RunnerApiSubmitRequest>(value) {
+            let runner_id = submission
+                .envelope
+                .dispatch
+                .as_ref()
+                .map(|dispatch| dispatch.runner_id.as_str())
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "envelope.dispatch",
+                        "runner submission envelope requires dispatch",
+                        None,
+                        None,
+                    )
+                })?;
+            auth.authorize(BrokerScope::Submit, Some(runner_id))?;
+            let workspace_claim_binding = submission
+                .workspace_claim_binding
+                .as_ref()
+                .map(|binding| serde_json::from_value(binding.clone()))
+                .transpose()
+                .map_err(|error| {
+                    Error::validation_invalid_argument(
+                        "workspace_claim_binding",
+                        format!("malformed reverse runner workspace claim binding: {error}"),
+                        None,
+                        None,
+                    )
+                })?;
+            let workspace_owner_lease = submission
+                .workspace_owner_lease
+                .as_ref()
+                .map(|lease| serde_json::from_value(lease.clone()))
+                .transpose()
+                .map_err(|error| {
+                    Error::validation_invalid_argument(
+                        "workspace_owner_lease",
+                        format!("malformed reverse runner workspace owner lease: {error}"),
+                        None,
+                        None,
+                    )
+                })?;
+            authorize_workspace_claim_binding(workspace_claim_binding.as_ref())?;
+            authorize_workspace_owner_lease(workspace_owner_lease.as_ref())?;
+            let response = match job_store.submit_runner_api_request(submission) {
+                Ok(job) => RunnerApiSubmitResponse {
+                    schema: RUNNER_API_SUBMIT_RESPONSE_SCHEMA.to_string(),
+                    api_version: RUNNER_API_V1,
+                    outcome: RunnerApiSubmitOutcome::Accepted {
+                        job_id: job.id.to_string(),
+                        job_status: serde_json::to_value(job.status)
+                            .expect("serialize job status")
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                },
+                Err(error) => RunnerApiSubmitResponse {
+                    schema: RUNNER_API_SUBMIT_RESPONSE_SCHEMA.to_string(),
+                    api_version: RUNNER_API_V1,
+                    outcome: RunnerApiSubmitOutcome::Rejected {
+                        failure: RunnerApiOperationFailure {
+                            code: RunnerApiOperationFailureCode::SubmissionRejected,
+                            message: error.message,
+                        },
+                    },
+                },
+            };
+            let job = match &response.outcome {
+                RunnerApiSubmitOutcome::Accepted { job_id, .. } => {
+                    job_store.get(Uuid::parse_str(job_id).expect("accepted job id"))?
+                }
+                RunnerApiSubmitOutcome::Rejected { .. } => {
+                    return Ok(json!({ "response": response }))
+                }
+            };
+            return Ok(json!({
+                "response": response,
+                "job": job,
+            }));
+        }
+    }
     let mut request: RemoteRunnerJobRequest = parse_body(body, "remote runner job request")?;
     auth.authorize(BrokerScope::Submit, Some(request.runner_id.as_str()))?;
     authorize_workspace_claim_binding(request.workspace_claim_binding.as_ref())?;

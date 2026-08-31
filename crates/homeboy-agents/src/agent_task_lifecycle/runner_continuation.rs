@@ -17,6 +17,7 @@ use homeboy_core::api_jobs::{
 };
 use homeboy_core::error::{Error, Result};
 use homeboy_core::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
+use homeboy_runner_contract::RunnerApiSubmitRequest;
 
 /// Result of reconciling a runner job across its known daemon generations.
 ///
@@ -194,6 +195,35 @@ pub trait RunnerContinuationProvider: Send + Sync {
         request: RemoteRunnerJobRequest,
     ) -> Result<Job>;
 
+    fn submit_reverse_broker_envelope_job(
+        &self,
+        runner_id: &str,
+        request: RunnerApiSubmitRequest,
+    ) -> Result<Job> {
+        let mut legacy = homeboy_core::api_jobs::legacy_request_from_envelope(&request.envelope)?;
+        legacy.workspace_claim_binding = request
+            .workspace_claim_binding
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("decode replay workspace claim binding".to_string()),
+                )
+            })?;
+        legacy.workspace_owner_lease = request
+            .workspace_owner_lease
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("decode replay workspace owner lease".to_string()),
+                )
+            })?;
+        self.submit_reverse_broker_job(runner_id, legacy)
+    }
+
     fn lookup_reverse_broker_submission(
         &self,
         _runner_id: &str,
@@ -357,9 +387,48 @@ impl Drop for RunnerContinuationTestGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     struct LegacyProvider {
         runner_exists: bool,
+    }
+
+    #[derive(Default)]
+    struct AuthorityCaptureProvider {
+        submitted: Mutex<Option<RemoteRunnerJobRequest>>,
+    }
+
+    impl RunnerContinuationProvider for AuthorityCaptureProvider {
+        fn runner_job_log_snapshot(
+            &self,
+            _runner_id: &str,
+            _job_id: &str,
+        ) -> Result<RunnerJobLogSnapshot> {
+            Err(Error::internal_unexpected("unused in fixture"))
+        }
+
+        fn is_runner_connected(&self, _runner_id: &str) -> bool {
+            false
+        }
+
+        fn run_continuation_exec(
+            &self,
+            _runner_id: &str,
+            _cwd: &str,
+            _command: &[String],
+            _run_id: &str,
+        ) -> Result<i32> {
+            Err(Error::internal_unexpected("unused in fixture"))
+        }
+
+        fn submit_reverse_broker_job(
+            &self,
+            _runner_id: &str,
+            request: RemoteRunnerJobRequest,
+        ) -> Result<Job> {
+            *self.submitted.lock().expect("capture submission") = Some(request);
+            Err(Error::internal_unexpected("submission captured"))
+        }
     }
 
     impl RunnerContinuationProvider for LegacyProvider {
@@ -425,5 +494,58 @@ mod tests {
             .runner_authority("legacy-runner"),
             RunnerAuthority::Unknown
         );
+    }
+
+    #[test]
+    fn default_envelope_adapter_preserves_workspace_authority_sidecars() {
+        use homeboy_core::workspace_claim::{
+            WorkspaceClaimBinding, WorkspaceIdentity, WorkspaceOwnerLease,
+            WorkspaceOwnerLeaseProtocol, WORKSPACE_OWNER_LEASE_SCHEMA,
+        };
+
+        let workspace = WorkspaceIdentity::new("git", "example/repo").expect("workspace");
+        let claim_binding = WorkspaceClaimBinding {
+            workspace: workspace.clone(),
+            lifecycle_revision: 7,
+            claim: None,
+        };
+        let owner_lease = WorkspaceOwnerLease {
+            schema: WORKSPACE_OWNER_LEASE_SCHEMA.to_string(),
+            protocol: WorkspaceOwnerLeaseProtocol::current(),
+            workspace,
+            owner_id: "agent-task:test".to_string(),
+            lifecycle_revision: 7,
+            token: "lease-token".to_string(),
+            expires_at_ms: u64::MAX,
+        };
+        let legacy: RemoteRunnerJobRequest = serde_json::from_value(serde_json::json!({
+            "runner_id": "lab",
+            "command": ["homeboy", "test"]
+        }))
+        .expect("legacy request");
+        let request = RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: "agent-task:v1:lab:test".to_string(),
+            envelope: legacy.execution_envelope(),
+            workspace_claim_binding: Some(
+                serde_json::to_value(&claim_binding).expect("claim binding"),
+            ),
+            workspace_owner_lease: Some(serde_json::to_value(&owner_lease).expect("owner lease")),
+        };
+        let provider = AuthorityCaptureProvider::default();
+
+        provider
+            .submit_reverse_broker_envelope_job("lab", request)
+            .expect_err("fixture stops after capture");
+
+        let submitted = provider
+            .submitted
+            .lock()
+            .expect("captured submission")
+            .clone()
+            .expect("submitted request");
+        assert_eq!(submitted.workspace_claim_binding, Some(claim_binding));
+        assert_eq!(submitted.workspace_owner_lease, Some(owner_lease));
     }
 }

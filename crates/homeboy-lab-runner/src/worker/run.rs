@@ -351,7 +351,7 @@ fn run_once_output(
     // of mid-run (#5093). The local worker execution path runs this preflight
     // before handing the claimed job directly to the local runtime.
     let capability_preflight = reverse_worker_capability_preflight(&claim.request);
-    let mut execution_envelope = claim.request.execution_envelope();
+    let mut execution_envelope = claim.envelope.clone();
     // Authorize the exact durable owner lease immediately before any workspace,
     // private-file, or source materialization. This intentionally does not consume
     // the receipt; consume remains at the provider-invocation boundary below.

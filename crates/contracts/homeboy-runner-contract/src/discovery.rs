@@ -89,6 +89,7 @@ pub enum RunnerApiOperationFailureCode {
     InvalidRequestSchema,
     UnsupportedApiVersion,
     RunnerNotFound,
+    SubmissionRejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

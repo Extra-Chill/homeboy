@@ -14,6 +14,7 @@ pub mod path_materialization;
 mod resource;
 pub mod secret_env_plan;
 mod session;
+mod submission;
 mod workspace;
 
 pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
@@ -46,6 +47,10 @@ pub use resource::{
 pub use session::{
     RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
     RunnerTunnelProcessStartIdentity,
+};
+pub use submission::{
+    RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse,
+    RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA,
 };
 pub use workspace::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,

@@ -3338,6 +3338,71 @@ pub fn submit_reverse_broker_job(runner_id: &str, request: RemoteRunnerJobReques
     })
 }
 
+pub fn submit_reverse_broker_envelope_job(
+    runner_id: &str,
+    request: homeboy_runner_contract::RunnerApiSubmitRequest,
+) -> Result<Job> {
+    let dispatch = request.envelope.dispatch.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "envelope.dispatch",
+            "runner submission envelope requires dispatch",
+            None,
+            None,
+        )
+    })?;
+    if dispatch.runner_id != runner_id {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            "reverse broker submission runner does not match envelope runner",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    let broker_url = reverse_broker_url(runner_id)?;
+    let client = broker_client("build reverse broker envelope submission client")?;
+    let response = broker_http::post_json(
+        &client,
+        &broker_url,
+        "/runner/jobs",
+        serde_json::to_value(request).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize envelope reverse runner job".to_string()),
+            )
+        })?,
+        "replay reverse runner envelope submission",
+        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
+    )?;
+    if let Some(value) = response.get("response") {
+        let response: homeboy_runner_contract::RunnerApiSubmitResponse =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse replayed envelope runner submit response".to_string()),
+                )
+            })?;
+        if let homeboy_runner_contract::RunnerApiSubmitOutcome::Rejected { failure } =
+            response.outcome
+        {
+            return Err(Error::validation_invalid_argument(
+                "runner_submission",
+                failure.message,
+                None,
+                None,
+            ));
+        }
+    }
+    serde_json::from_value(response.get("job").cloned().ok_or_else(|| {
+        Error::internal_unexpected("reverse broker envelope submission returned no job")
+    })?)
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse replayed envelope reverse runner job".to_string()),
+        )
+    })
+}
+
 pub fn lookup_reverse_broker_submission(
     runner_id: &str,
     submission_key: &str,

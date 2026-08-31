@@ -478,7 +478,9 @@ impl JobStore {
                 stored
                     .remote_runner
                     .as_ref()
-                    .and_then(|remote| remote.request.lifecycle.as_ref())
+                    .and_then(|remote| remote.request().ok())
+                    .and_then(|request| request.lifecycle)
+                    .as_ref()
                     .and_then(|lifecycle| lifecycle.durable_run_id.clone())
                     .map(LinkedDurableRunResolution::Unresolved)
                     .unwrap_or(LinkedDurableRunResolution::None)
@@ -993,7 +995,7 @@ impl JobStore {
                     .map(|remote| {
                         super::super::summary::active_runner_job_summary(
                             &stored.job,
-                            &remote.request,
+                            &remote.request().expect("remote runner representation"),
                             now,
                         )
                     })
@@ -1052,7 +1054,7 @@ impl JobStore {
                 stored.job.status == JobStatus::Failed && stored.job.stale_reason.is_some()
             })
             .filter_map(|stored| {
-                let request = stored.remote_runner.as_ref()?.request.clone();
+                let request = stored.remote_runner.as_ref()?.request().ok()?;
                 Some(super::super::summary::active_runner_job_summary(
                     &stored.job,
                     &request,

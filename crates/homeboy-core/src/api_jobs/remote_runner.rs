@@ -25,7 +25,8 @@ use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
 use homeboy_lab_contract::lab::execution_envelope::runner_execution_envelope_from_workload;
 use homeboy_runner_contract::{
-    is_internal_control_env, RunnerMutationArtifacts, RunnerResourceMetrics,
+    is_internal_control_env, RunnerApiSubmitRequest, RunnerMutationArtifacts,
+    RunnerResourceMetrics, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
 };
 
 /// Broker metadata is durable queue input. Keep command-file payloads bounded
@@ -306,6 +307,13 @@ impl RemoteRunnerJobRequest {
         public
     }
 
+    /// Validate and normalize a request before it can be serialized into any
+    /// durable reverse-runner submission representation.
+    pub fn validate_durable_submission(&mut self) -> Result<()> {
+        let secret_env_plan = self.normalize();
+        reject_inline_durable_secret_env(self, &secret_env_plan)
+    }
+
     fn validate_command_assets(&self) -> Result<()> {
         let Some(assets) = self
             .metadata
@@ -430,6 +438,9 @@ fn merge_metadata_value(mut metadata: Value, key: &str, value: Value) -> Value {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteRunnerJobClaim {
     pub job: Job,
+    pub envelope: RunnerExecutionEnvelope,
+    /// Derived compatibility and authority projection. The envelope is the only
+    /// authoritative execution payload; workers must execute `envelope`.
     pub request: RemoteRunnerJobRequest,
     /// Authenticated execution authority derived from this durable claim.
     /// Older brokers omit it on the wire; workers refuse those claims rather
@@ -573,9 +584,14 @@ impl RemoteRunnerJobResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StoredRemoteRunnerJob {
-    #[serde(default, skip)]
-    pub(super) execution_request: Option<RemoteRunnerJobRequest>,
-    pub(super) request: RemoteRunnerJobRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) envelope: Option<RunnerExecutionEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) request: Option<RemoteRunnerJobRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     /// Presence records that this claim carried an authenticated execution
     /// context. Its absence is the persisted compatibility signal for legacy
     /// context-free claims.
@@ -585,6 +601,206 @@ pub(super) struct StoredRemoteRunnerJob {
     /// provider boundary after the worker has materialized its inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) execution_receipt: Option<RemoteRunnerExecutionReceipt>,
+}
+
+impl StoredRemoteRunnerJob {
+    pub(super) fn validate_representation(&self) -> Result<()> {
+        match (self.envelope.is_some(), self.request.is_some()) {
+            (true, false) | (false, true) => Ok(()),
+            (true, true) => Err(Error::internal_unexpected(
+                "remote runner job has conflicting envelope and legacy request representations",
+            )),
+            (false, false) => Err(Error::internal_unexpected(
+                "remote runner job has no execution representation",
+            )),
+        }
+    }
+
+    pub(super) fn request(&self) -> Result<RemoteRunnerJobRequest> {
+        self.validate_representation()?;
+        if let Some(request) = &self.request {
+            return Ok(request.clone());
+        }
+        self.envelope
+            .as_ref()
+            .ok_or_else(|| {
+                Error::internal_unexpected("remote runner job has no execution representation")
+            })
+            .and_then(legacy_request_from_envelope)
+    }
+
+    pub(super) fn envelope(&self) -> Result<RunnerExecutionEnvelope> {
+        self.validate_representation()?;
+        self.envelope
+            .clone()
+            .or_else(|| {
+                self.request
+                    .as_ref()
+                    .map(RemoteRunnerJobRequest::execution_envelope)
+            })
+            .ok_or_else(|| {
+                Error::internal_unexpected("remote runner job has no execution representation")
+            })
+    }
+
+    pub(super) fn workspace_owner_lease(
+        &self,
+    ) -> Option<crate::workspace_claim::WorkspaceOwnerLease> {
+        if self.envelope.is_some() {
+            self.workspace_owner_lease.clone()
+        } else {
+            self.request
+                .as_ref()
+                .and_then(|request| request.workspace_owner_lease.clone())
+        }
+    }
+
+    pub(super) fn replace_workspace_owner_lease(
+        &mut self,
+        expected: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
+        renewed: Option<crate::workspace_claim::WorkspaceOwnerLease>,
+    ) -> Result<()> {
+        self.validate_representation()?;
+        if self.envelope.is_some() {
+            if self.workspace_owner_lease.as_ref() != expected {
+                return Err(Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    "heartbeat owner lease does not match the durable job",
+                    None,
+                    None,
+                ));
+            }
+            self.workspace_owner_lease = renewed;
+            return Ok(());
+        }
+        if let Some(request) = self.request.as_mut() {
+            if request.workspace_owner_lease.as_ref() == expected {
+                request.workspace_owner_lease = renewed;
+                return Ok(());
+            }
+        }
+        Err(Error::validation_invalid_argument(
+            "workspace_owner_lease",
+            "heartbeat owner lease does not match the durable job",
+            None,
+            None,
+        ))
+    }
+}
+
+fn redacted_envelope_for_durable_replay(
+    mut envelope: RunnerExecutionEnvelope,
+) -> RunnerExecutionEnvelope {
+    let secret_env_names = envelope
+        .secret_env
+        .as_ref()
+        .map(SecretEnvPlan::secret_env_names)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if let Some(dispatch) = envelope.dispatch.as_mut() {
+        dispatch
+            .env
+            .retain(|name, _| !is_internal_control_env(name));
+        for (name, value) in &mut dispatch.env {
+            if secret_env_names.contains(name) {
+                *value = "<redacted>".to_string();
+            }
+        }
+    }
+    envelope
+}
+
+fn envelope_submission_payload_fingerprint(
+    envelope: &RunnerExecutionEnvelope,
+    workspace_claim_binding: &Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    workspace_owner_lease: &Option<crate::workspace_claim::WorkspaceOwnerLease>,
+) -> Result<String> {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "schema": "homeboy/runner-api-submission-payload/v1",
+        "envelope": envelope,
+        "workspace_claim_binding": workspace_claim_binding,
+        "workspace_owner_lease": workspace_owner_lease,
+    }))
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("fingerprint runner envelope submission".to_string()),
+        )
+    })?;
+    Ok(format!("sha256:{}", content_hash::sha256_hex(&bytes)))
+}
+
+pub(super) fn validate_stored_remote_runner_jobs(
+    jobs: impl IntoIterator<Item = impl std::borrow::Borrow<StoredJob>>,
+) -> Result<()> {
+    for stored in jobs {
+        if let Some(remote) = stored.borrow().remote_runner.as_ref() {
+            remote.validate_representation()?;
+        }
+    }
+    Ok(())
+}
+
+pub fn legacy_request_from_envelope(
+    envelope: &RunnerExecutionEnvelope,
+) -> Result<RemoteRunnerJobRequest> {
+    let dispatch = envelope.dispatch.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "envelope.dispatch",
+            "runner submission envelope requires dispatch",
+            None,
+            None,
+        )
+    })?;
+    let path_materialization_plan = envelope
+        .metadata
+        .get("path_materialization_plan")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode envelope path materialization plan".to_string()),
+            )
+        })?;
+    let lab_runner_workload = envelope
+        .runner_workload
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode envelope runner workload".to_string()),
+            )
+        })?;
+    Ok(RemoteRunnerJobRequest {
+        runner_id: dispatch.runner_id.clone(),
+        project_id: dispatch.project_id.clone(),
+        operation: dispatch.operation.clone(),
+        command: dispatch.command.clone(),
+        cwd: dispatch.cwd.clone(),
+        env: dispatch.env.clone(),
+        secret_env_names: envelope
+            .secret_env
+            .as_ref()
+            .map(SecretEnvPlan::secret_env_names)
+            .unwrap_or_default(),
+        secret_env_plan: envelope.secret_env.clone().unwrap_or_default(),
+        env_materialization: envelope.env_materialization.clone(),
+        capture_patch: envelope.mutation_policy.capture_patch,
+        source_snapshot: dispatch.source_snapshot.clone(),
+        path_materialization_plan,
+        require_paths: dispatch.require_paths.clone(),
+        extension_env_providers: dispatch.extension_env_providers.clone(),
+        lab_runner_workload,
+        lifecycle: envelope.lifecycle.clone(),
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+        metadata: (!envelope.metadata.is_null()).then(|| envelope.metadata.clone()),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -626,10 +842,12 @@ impl JobStore {
             .jobs
             .get(&job_id)
             .ok_or_else(|| job_not_found(job_id))?;
-        Ok(stored
-            .remote_runner
-            .as_ref()
-            .and_then(|remote| remote.request.workspace_claim_binding.clone()))
+        Ok(stored.remote_runner.as_ref().and_then(|remote| {
+            remote
+                .workspace_claim_binding
+                .clone()
+                .or_else(|| remote.request().ok()?.workspace_claim_binding)
+        }))
     }
 
     pub fn remote_runner_workspace_owner_lease(
@@ -644,7 +862,7 @@ impl JobStore {
         Ok(stored
             .remote_runner
             .as_ref()
-            .and_then(|remote| remote.request.workspace_owner_lease.clone()))
+            .and_then(|remote| remote.workspace_owner_lease()))
     }
 
     pub fn lookup_remote_runner_submission(
@@ -667,7 +885,81 @@ impl JobStore {
         RemoteRunnerSubmissionLookup::Absent
     }
 
-    pub fn submit_remote_runner_job(&self, mut request: RemoteRunnerJobRequest) -> Result<Job> {
+    /// Legacy request admission retained only for existing persisted intents and
+    /// callers that have not migrated to the envelope-first Runner API.
+    pub fn submit_remote_runner_job(&self, request: RemoteRunnerJobRequest) -> Result<Job> {
+        self.submit_remote_runner_job_inner(request, None, None)
+    }
+
+    pub fn submit_runner_api_request(&self, submission: RunnerApiSubmitRequest) -> Result<Job> {
+        if submission.schema != RUNNER_API_SUBMIT_REQUEST_SCHEMA
+            || submission.api_version != RUNNER_API_V1
+        {
+            return Err(Error::validation_invalid_argument(
+                "schema",
+                "unsupported Runner API submit request",
+                Some(submission.schema),
+                None,
+            ));
+        }
+        if submission.submission_key.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "submission_key",
+                "runner submission requires a caller-owned idempotency key",
+                None,
+                None,
+            ));
+        }
+        let envelope = redacted_envelope_for_durable_replay(submission.envelope);
+        let mut request = legacy_request_from_envelope(&envelope)?;
+        let mut metadata = request
+            .metadata
+            .take()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        metadata["submission_key"] = serde_json::json!(submission.submission_key);
+        request.metadata = Some(metadata);
+        request.workspace_claim_binding = submission
+            .workspace_claim_binding
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "workspace_claim_binding",
+                    error.to_string(),
+                    None,
+                    None,
+                )
+            })?;
+        request.workspace_owner_lease = submission
+            .workspace_owner_lease
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "workspace_owner_lease",
+                    error.to_string(),
+                    None,
+                    None,
+                )
+            })?;
+        let fingerprint = envelope_submission_payload_fingerprint(
+            &envelope,
+            &request.workspace_claim_binding,
+            &request.workspace_owner_lease,
+        )?;
+        self.submit_remote_runner_job_inner(request, Some(envelope), Some(fingerprint))
+    }
+
+    fn submit_remote_runner_job_inner(
+        &self,
+        mut request: RemoteRunnerJobRequest,
+        envelope: Option<RunnerExecutionEnvelope>,
+        supplied_submission_fingerprint: Option<String>,
+    ) -> Result<Job> {
+        let envelope_first = envelope.is_some();
         if request.runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
@@ -691,8 +983,8 @@ impl JobStore {
         if let Some(lease) = request.workspace_owner_lease.as_ref() {
             lease.verify_shape(timestamp_ms())?;
         }
-        let secret_env_plan = request.normalize();
-        reject_inline_durable_secret_env(&request, &secret_env_plan)?;
+        request.validate_durable_submission()?;
+        let secret_env_plan = request.secret_env_plan.clone();
         super::with_runner_job_preparation(|p| {
             p.validate_lab_runner_workload_dispatch(
                 request.lab_runner_workload.as_ref(),
@@ -709,7 +1001,10 @@ impl JobStore {
         let submission_key = request.submission_key().map(str::to_string);
         let submission_fingerprint = submission_key
             .as_ref()
-            .map(|_| request.submission_payload_fingerprint())
+            .map(|_| match supplied_submission_fingerprint {
+                Some(fingerprint) => Ok(fingerprint),
+                None => request.submission_payload_fingerprint(),
+            })
             .transpose()?;
         self.durable_transaction(|inner| {
         if let Some(submission_key) = submission_key.as_deref() {
@@ -833,8 +1128,14 @@ impl JobStore {
                     // Durable broker state intentionally contains only the
                     // redacted request. The runner hydrates named references
                     // immediately before dispatch.
-                    execution_request: None,
-                    request: public_request,
+                    envelope,
+                    request: (!envelope_first).then_some(public_request),
+                    workspace_claim_binding: envelope_first
+                        .then(|| request.workspace_claim_binding.clone())
+                        .flatten(),
+                    workspace_owner_lease: envelope_first
+                        .then(|| request.workspace_owner_lease.clone())
+                        .flatten(),
                     execution_context_id: None,
                     execution_receipt: None,
                 }),
@@ -1000,7 +1301,7 @@ impl JobStore {
                 .next()
                 .map(|candidate| candidate.job.id)
             {
-                let (job, request) = {
+                let (job, request, envelope) = {
                     let stored = inner.jobs.get_mut(&job_id).expect("candidate exists");
                     stored.job.status = JobStatus::Running;
                     stored.job.updated_at_ms = now;
@@ -1013,12 +1314,11 @@ impl JobStore {
                         .remote_runner
                         .as_ref()
                         .expect("filtered remote runner job has request");
-                    let request = remote_runner
-                        .execution_request
-                        .as_ref()
-                        .unwrap_or(&remote_runner.request)
-                        .dispatch_request();
-                    (stored.job.clone(), request)
+                    let mut request = remote_runner.request()?.dispatch_request();
+                    request.workspace_claim_binding = remote_runner.workspace_claim_binding.clone();
+                    request.workspace_owner_lease = remote_runner.workspace_owner_lease();
+                    let envelope = remote_runner.envelope()?;
+                    (stored.job.clone(), request, envelope)
                 };
                 let execution_context = match execution_protocol {
                     Some(protocol) => {
@@ -1074,12 +1374,12 @@ impl JobStore {
                         None => serde_json::json!({ "status": JobStatus::Running }),
                     }),
                 )?;
-                return Ok(Some((job, request, execution_context)));
+                return Ok(Some((job, request, envelope, execution_context)));
             }
             Ok(None)
         })?;
 
-        let Some((job, request, execution_context)) = claimed else {
+        let Some((job, request, envelope, execution_context)) = claimed else {
             return Ok(None);
         };
         let execution_protocol = execution_context
@@ -1093,6 +1393,7 @@ impl JobStore {
             .then(crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current);
         Ok(Some(RemoteRunnerJobClaim {
             job,
+            envelope,
             request,
             execution_context,
             execution_protocol,
@@ -1246,15 +1547,7 @@ impl JobStore {
                 .remote_runner
                 .as_mut()
                 .expect("checked remote runner");
-            if remote.request.workspace_owner_lease.as_ref() != expected_owner_lease {
-                return Err(Error::validation_invalid_argument(
-                    "workspace_owner_lease",
-                    "heartbeat owner lease does not match the durable job",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-            remote.request.workspace_owner_lease = renewed_owner_lease;
+            remote.replace_workspace_owner_lease(expected_owner_lease, renewed_owner_lease)?;
             stored.job.updated_at_ms = now;
             stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms.max(1)));
             Ok(stored.job.clone())
@@ -1307,14 +1600,11 @@ impl JobStore {
                         "runner execution receipt was already consumed",
                     ));
                 }
-                let request = remote_runner
-                    .execution_request
-                    .as_ref()
-                    .unwrap_or(&remote_runner.request);
+                let request = remote_runner.request()?;
                 let expected =
                     crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
                         &stored.job,
-                        request,
+                        &request,
                     )?;
                 if expected.id() != context_id {
                     return Err(crate::runner_job_execution_context::rejected(
@@ -1573,12 +1863,7 @@ fn reject_inline_durable_secret_env(
     let inline_secret_names = secret_env_plan
         .secret_env_names()
         .into_iter()
-        .filter(|name| {
-            request
-                .env
-                .get(name)
-                .is_some_and(|value| !value.is_empty() && value != "<redacted>")
-        })
+        .filter(|name| request.env.get(name).is_some_and(|value| !value.is_empty()))
         .collect::<Vec<_>>();
     if inline_secret_names.is_empty() {
         return Ok(());

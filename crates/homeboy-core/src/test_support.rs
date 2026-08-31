@@ -2139,12 +2139,46 @@ fn handle_reverse_broker_request(
         return ok(json!({ "registered": true }));
     }
     if request.method == "POST" && request.path == "/runner/jobs" {
-        let submitted: RemoteRunnerJobRequest =
-            serde_json::from_value(request.body).expect("parse reverse broker job submission");
-        let job = store
-            .submit_remote_runner_job(submitted)
-            .expect("submit broker job");
+        let typed_submission = serde_json::from_value::<
+            homeboy_runner_contract::RunnerApiSubmitRequest,
+        >(request.body.clone());
+        let is_typed_submission = typed_submission.is_ok();
+        let job = match typed_submission {
+            Ok(submitted) => store
+                .submit_runner_api_request(submitted)
+                .expect("submit envelope broker job"),
+            Err(_) => {
+                let submitted: RemoteRunnerJobRequest = serde_json::from_value(request.body)
+                    .expect("parse legacy reverse broker job submission");
+                store
+                    .submit_remote_runner_job(submitted)
+                    .expect("submit legacy broker job")
+            }
+        };
+        if is_typed_submission {
+            return ok(json!({
+                "response": homeboy_runner_contract::RunnerApiSubmitResponse {
+                    schema: homeboy_runner_contract::RUNNER_API_SUBMIT_RESPONSE_SCHEMA.to_string(),
+                    api_version: homeboy_runner_contract::RUNNER_API_V1,
+                    outcome: homeboy_runner_contract::RunnerApiSubmitOutcome::Accepted {
+                        job_id: job.id.to_string(),
+                        job_status: serde_json::to_value(job.status)
+                            .expect("serialize fixture job status")
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                },
+                "job": job,
+            }));
+        }
         return ok(json!({ "job": job }));
+    }
+    if request.method == "POST" && request.path == "/runner/jobs/submissions/lookup" {
+        let submission_key = request.body["submission_key"]
+            .as_str()
+            .expect("fixture submission key");
+        return ok(json!({ "result": store.lookup_remote_runner_submission(submission_key) }));
     }
     if request.method == "POST" && request.path == "/runner/jobs/claim" {
         let claim = store
@@ -2259,14 +2293,37 @@ fn handle_reverse_broker_request(
             "max_chunk_bytes": 64 * 1024,
         }));
     }
+    if request.method == "GET" && request.path.starts_with("/jobs/reconcile") {
+        return ok(json!({ "reconciled": [] }));
+    }
     if request.method == "GET" {
         if let Some(job_path) = request.path.strip_prefix("/jobs/") {
             let (job_id, action) = job_path.split_once('/').unwrap_or((job_path, ""));
-            let job_id = uuid::Uuid::parse_str(job_id).expect("broker job id");
+            let execution_context_probe_runner = matches!(action, "" | "events")
+                .then(|| job_id.strip_prefix("runner-exec:"))
+                .flatten()
+                .and_then(|runner| runner.strip_suffix(":reverse_broker"));
+            let job = uuid::Uuid::parse_str(job_id)
+                .ok()
+                .and_then(|job_id| store.get(job_id).ok())
+                .or_else(|| {
+                    execution_context_probe_runner
+                        .map(|probe_runner| {
+                            // The direct-session cancellation probe identifies the
+                            // planned execution, while the reverse broker owns UUID
+                            // job ids. Resolve only that exact planned-runner shape.
+                            store
+                                .list()
+                                .into_iter()
+                                .find(|job| job.target_runner_id.as_deref() == Some(probe_runner))
+                        })
+                        .flatten()
+                })
+                .expect("broker job");
             return match action {
-                "" => ok(json!({ "job": store.get(job_id).expect("broker job") })),
+                "" => ok(json!({ "job": job })),
                 "events" => ok(json!({
-                    "events": store.events(job_id).expect("broker job events")
+                    "events": store.events(job.id).expect("broker job events")
                 })),
                 _ => json!({
                     "success": false,

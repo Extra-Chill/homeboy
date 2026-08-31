@@ -251,6 +251,14 @@ impl RunnerContinuationProvider for RunnerContinuation {
         super::connection::submit_reverse_broker_job(runner_id, request)
     }
 
+    fn submit_reverse_broker_envelope_job(
+        &self,
+        runner_id: &str,
+        request: homeboy_runner_contract::RunnerApiSubmitRequest,
+    ) -> Result<Job> {
+        super::connection::submit_reverse_broker_envelope_job(runner_id, request)
+    }
+
     fn lookup_reverse_broker_submission(
         &self,
         runner_id: &str,
