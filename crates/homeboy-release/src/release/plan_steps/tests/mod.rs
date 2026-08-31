@@ -259,6 +259,53 @@ fn head_release_with_artifacts_skips_branch_and_working_tree_checks() {
 }
 
 #[test]
+fn tagged_head_recovery_skips_mutable_source_gates() {
+    for from_artifacts in [None, Some("artifacts".to_string())] {
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            pipeline: ReleasePipelineOptions {
+                head: true,
+                from_artifacts,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let steps = build_preflight_steps(&options, None, &[]);
+        for step_id in [
+            "preflight.test_secret_env",
+            "preflight.dependencies",
+            "preflight.audit",
+            "preflight.lint",
+            "preflight.test",
+        ] {
+            let step = steps
+                .iter()
+                .find(|step| step.id == step_id)
+                .expect("tagged recovery preflight step");
+            assert_eq!(step.status, PlanStepStatus::Disabled, "{step_id}");
+            assert_eq!(
+                step.inputs.get("reason").and_then(|value| value.as_str()),
+                Some("tagged-head-recovery"),
+                "{step_id}"
+            );
+        }
+
+        for step_id in ["preflight.head_identity", "preflight.remote_sync"] {
+            assert_eq!(
+                steps
+                    .iter()
+                    .find(|step| step.id == step_id)
+                    .expect("immutable recovery preflight step")
+                    .status,
+                PlanStepStatus::Ready,
+                "{step_id}"
+            );
+        }
+    }
+}
+
+#[test]
 fn release_plan_records_explicit_quality_preflights() {
     let options = ReleaseOptions {
         bump_type: "patch".to_string(),
