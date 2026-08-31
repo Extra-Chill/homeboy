@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.15.23] - 2026-08-31
+
+### Fixed
+- reconcile merged PR lifecycle state
+
 ## [2.15.22] - 2026-08-30
 
 ### Fixed
