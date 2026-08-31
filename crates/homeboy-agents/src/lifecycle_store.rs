@@ -1829,50 +1829,8 @@ fn merge_observation_metadata(mut existing: Value, typed: Value) -> Value {
 }
 
 pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
-    record_from_run_with_schema_policy(run, true)
-}
-
-fn record_and_aggregate_from_run(
-    run: &RunRecord,
-) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
-    Ok((record_from_run(run)?, aggregate_from_run(run)?))
-}
-
-/// Read a durable record without enforcing the supported-schema guard.
-///
-/// Record health reconciliation exists to migrate legacy schemas, so it is the
-/// one caller that must be able to read one. #11446 added the guard inside
-/// `record_from_run`, which is exactly what the migration branch calls, making
-/// legacy migration unreachable: the reconciler reported the unsupported-schema
-/// diagnostic instead of migrating.
-pub(super) fn record_from_run_allowing_legacy_schema(
-    run: &RunRecord,
-) -> Result<AgentTaskRunRecord> {
-    record_from_run_with_schema_policy(run, false)
-}
-
-fn record_from_run_with_schema_policy(
-    run: &RunRecord,
-    enforce_schema: bool,
-) -> Result<AgentTaskRunRecord> {
-    let value = run.metadata_json.get("agent_task_run").ok_or_else(|| {
-        Error::new(
-            ErrorCode::InternalJsonError,
-            format!(
-                "observation run {} is missing agent_task_run metadata",
-                run.id
-            ),
-            json!({ "context": run.id }),
-        )
-    })?;
-    let mut record: AgentTaskRunRecord =
-        serde_json::from_value(value.clone()).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("parse agent-task run {}", run.id)),
-            )
-        })?;
-    if enforce_schema && record.schema != super::records::schemas::RUN {
+    let record = parse_record_from_run(run)?;
+    if record.schema != super::records::schemas::RUN {
         return Err(Error::validation_invalid_argument(
             "agent_task_run.schema",
             format!(
@@ -1884,6 +1842,48 @@ fn record_from_run_with_schema_policy(
             None,
         ));
     }
+    normalize_decoded_record(run, record)
+}
+
+fn record_and_aggregate_from_run(
+    run: &RunRecord,
+) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
+    Ok((record_from_run(run)?, aggregate_from_run(run)?))
+}
+
+/// Decode a durable record without requiring the current schema.
+///
+/// Health reconciliation uses this boundary to classify and migrate legacy
+/// schemas. All normal reads go through [`record_from_run`], which accepts only
+/// the current schema.
+pub(super) fn decode_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
+    let record = parse_record_from_run(run)?;
+    normalize_decoded_record(run, record)
+}
+
+fn parse_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
+    let value = run.metadata_json.get("agent_task_run").ok_or_else(|| {
+        Error::new(
+            ErrorCode::InternalJsonError,
+            format!(
+                "observation run {} is missing agent_task_run metadata",
+                run.id
+            ),
+            json!({ "context": run.id }),
+        )
+    })?;
+    serde_json::from_value(value.clone()).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some(format!("parse agent-task run {}", run.id)),
+        )
+    })
+}
+
+fn normalize_decoded_record(
+    run: &RunRecord,
+    mut record: AgentTaskRunRecord,
+) -> Result<AgentTaskRunRecord> {
     record.hydrate_legacy_lab_handoff();
     if let Some(problem) = record.lab_handoff_validation_error() {
         return Err(Error::internal_json(
