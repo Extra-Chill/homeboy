@@ -3733,6 +3733,35 @@ pub fn take_cook_controller_failure_in_store(
     Ok(removed)
 }
 
+/// Persist cross-store compensation before atomically removing the controller
+/// failure. The caller's intention write runs under the same config lock as the
+/// SQLite mutation, so a crash can never erase the diagnostic without first
+/// leaving enough durable information to restore it.
+pub(crate) fn prepare_cook_controller_failure_rearm_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    persist_intention: impl FnOnce(Option<&Value>) -> Result<()>,
+) -> Result<Option<Value>> {
+    let run_id = sanitize_run_id(run_id);
+    lifecycle_store.with_config_lock(|| {
+        let record = lifecycle_store.read_record(&run_id)?;
+        let diagnostic = record.metadata.get("cook_controller_failure").cloned();
+        persist_intention(diagnostic.as_ref())?;
+        if diagnostic.is_some() {
+            lifecycle_store.mutate_record_locked_without_terminal_projection(
+                &run_id,
+                |record| {
+                    record
+                        .ensure_metadata_object()
+                        .remove("cook_controller_failure");
+                    true
+                },
+            )?;
+        }
+        Ok(diagnostic)
+    })
+}
+
 pub fn record_cook_progress_with_activity_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,

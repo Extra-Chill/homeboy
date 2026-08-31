@@ -3219,6 +3219,58 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 ))
             }
         };
+    if let Some(finalization) = record
+        .metadata
+        .get("cook_finalization")
+        .filter(|finalization| !finalization.is_null())
+    {
+        phases.push(serde_json::json!({
+            "phase": "finalization_receipt",
+            "status": "passed",
+            "reason": "authoritative_replay",
+        }));
+        let status = finalization["status"].as_str().unwrap_or("unknown");
+        let replay_succeeded = matches!(status, "review_ready" | "draft_published");
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-cook-continue-preflight/v1",
+                "admitted": replay_succeeded,
+                "pre_dispatch_admitted": replay_succeeded,
+                "status": status,
+                "execution_required": false,
+                "run_id": selected_run_id,
+                "selected_attempt": { "run_id": run_id },
+                "selected_artifact": { "artifact_id": args.artifact_id },
+                "candidate_fingerprint": candidate_fingerprint,
+                "promotion": {
+                    "behavior": "not_started",
+                    "reason": "authoritative_finalization_receipt",
+                    "candidate_fingerprint": Value::Null,
+                    "execution_only_checks": [],
+                },
+                "finalization": finalization,
+                "continuation_command": agent_task_service_direct::cook_continue_command(
+                    None,
+                    &run_id,
+                    args.rearm,
+                    args.artifact_id.as_deref(),
+                ),
+                "evidence_refs": [{
+                    "run_id": run_id,
+                    "ref": format!("homeboy://agent-task/run/{run_id}/evidence"),
+                }],
+                "continuation": {
+                    "path": "finalization_receipt_replay",
+                    "provider_replay": false,
+                    "provider_behavior": "not_replayed",
+                },
+                "execution_only_checks": [],
+                "phases": phases,
+                "side_effects": { "process_execution": false, "state_mutation": false, "provider_dispatch": false, "git_mutation": false, "git_index_mutation": false, "github_mutation": false, "finalization": false }
+            }),
+            i32::from(!replay_succeeded),
+        ));
+    }
     if !record.state.is_terminal() {
         let error = homeboy::core::Error::validation_invalid_argument(
             "cook_or_attempt_id",

@@ -24,6 +24,8 @@ use homeboy_core::{paths, Error, Result};
 
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
+const CONTINUATION_REARM_INTENTION_SCHEMA: &str =
+    "homeboy/agent-task-cook-continuation-rearm-intention/v1";
 // Base capture reaches the network while holding this lock. It must always
 // surface a wedged peer rather than inherit an operator-configured unbounded
 // config-lock wait.
@@ -415,6 +417,25 @@ pub struct AgentTaskCookContinuation {
     pub run_id: String,
     #[serde(default)]
     pub retries: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CookContinuationRearmIntention {
+    schema: String,
+    key: String,
+    cook_id: String,
+    run_id: String,
+    owner_pid: u32,
+    original_bytes: Vec<u8>,
+    diagnostic: Option<Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CookContinuationRearmCheckpoint {
+    BeforeResetPersistence,
+    AfterResetPersistence,
+    AfterClaimPublication,
 }
 
 #[derive(Debug)]
@@ -1591,15 +1612,17 @@ pub fn preflight_recipe_attempt_for_continuation_in_store(
     agent_task_lifecycle::AgentTaskRunRecord,
     Option<AgentTaskAggregate>,
 )> {
-    let (record, aggregate) = lifecycle_store.read_record_with_aggregate_bounded(run_id)?;
+    let record = lifecycle_store.read_record_bounded(run_id)?;
     validate_recipe_attempt_record_in_store(lifecycle_store, recipe, run_id, &record)?;
     if record
         .metadata
         .get("cook_finalization")
         .is_some_and(|finalization| !finalization.is_null())
     {
-        return Ok((record, aggregate));
+        return Ok((record, None));
     }
+    let (record, aggregate) = lifecycle_store.read_record_with_aggregate_bounded(run_id)?;
+    validate_recipe_attempt_record_in_store(lifecycle_store, recipe, run_id, &record)?;
     if super::cook_promotion::persisted_promotion_from_record(run_id, record.clone())?.is_some() {
         return Ok((record, aggregate));
     }
@@ -1999,7 +2022,7 @@ pub fn claim_continuation_for_recovery_in_store(
     let failed = root.join(format!("{hash}.failed"));
     let rearming = root.join(format!("{hash}.rearming.{}", std::process::id()));
     match fs::rename(&failed, &rearming) {
-        Ok(()) => {}
+        Ok(()) => sync_directory(&root)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(rearm_state_error(
                 cook_id,
@@ -2070,16 +2093,24 @@ pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
     cook_id: &str,
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
+    recover_continuation_rearm_in_store(store, lifecycle_store, cook_id, run_id)?;
     claim_continuation_for_recovery_and_clear_failure_with(
         store,
         cook_id,
         run_id,
-        || {
-            if agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, run_id)? {
-                agent_task_lifecycle::take_cook_controller_failure_in_store(lifecycle_store, run_id)
-            } else {
-                Ok(None)
+        |intention_path, intention| {
+            if !agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, run_id)? {
+                persist_rearm_intention(intention_path, intention)?;
+                return Ok(None);
             }
+            agent_task_lifecycle::prepare_cook_controller_failure_rearm_in_store(
+                lifecycle_store,
+                run_id,
+                |diagnostic| {
+                    intention.diagnostic = diagnostic.cloned();
+                    persist_rearm_intention(intention_path, intention)
+                },
+            )
         },
         |diagnostic| {
             agent_task_lifecycle::restore_cook_controller_failure_if_absent_in_store(
@@ -2096,6 +2127,7 @@ pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
             })?;
             sync_directory(to.parent().expect("claimed continuation has parent"))
         },
+        |_| Ok(()),
     )
 }
 
@@ -2103,10 +2135,11 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
     store: &CookRecipeStore,
     cook_id: &str,
     run_id: &str,
-    clear_failure: impl FnOnce() -> Result<Option<Value>>,
+    prepare_failure: impl FnOnce(&Path, &mut CookContinuationRearmIntention) -> Result<Option<Value>>,
     restore_failure: impl FnOnce(Value) -> Result<()>,
     persist_reset: impl FnOnce(&Path, &[u8]) -> Result<()>,
     publish_claim: impl FnOnce(&Path, &Path) -> Result<()>,
+    mut checkpoint: impl FnMut(CookContinuationRearmCheckpoint) -> Result<()>,
 ) -> Result<Option<ClaimedCookContinuation>> {
     let Some(claim) = claim_continuation_for_recovery_in_store(store, cook_id, run_id)? else {
         return Ok(None);
@@ -2137,7 +2170,22 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
             return Err(error);
         }
     };
-    let removed_failure = match clear_failure() {
+    let intention_path = continuation_rearm_intention_path(&claim.path);
+    let mut intention = CookContinuationRearmIntention {
+        schema: CONTINUATION_REARM_INTENTION_SCHEMA.to_string(),
+        key: claim.continuation.key.clone(),
+        cook_id: cook_id.to_string(),
+        run_id: run_id.to_string(),
+        owner_pid: std::process::id(),
+        original_bytes: claim
+            .recovery_rollback
+            .as_ref()
+            .expect("recovery claims retain rollback state")
+            .1
+            .clone(),
+        diagnostic: None,
+    };
+    let removed_failure = match prepare_failure(&intention_path, &mut intention) {
         Ok(removed) => removed,
         Err(error) => {
             let (failed, _) = claim
@@ -2159,58 +2207,259 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
     };
     let mut claim = claim;
     claim.continuation = reset_continuation;
+    checkpoint(CookContinuationRearmCheckpoint::BeforeResetPersistence)?;
     if let Err(error) = persist_reset(&claim.path, &reset_bytes) {
-        let (failed, original_bytes) = claim
-            .recovery_rollback
-            .as_ref()
-            .expect("recovery claims retain rollback state");
-        if let Some(diagnostic) = removed_failure {
-            restore_failure(diagnostic)?;
-        }
-        atomic_write_and_sync(&claim.path, original_bytes)?;
-        fs::rename(&claim.path, failed).map_err(|rollback| {
-            Error::internal_io(
-                format!(
-                    "persist reset recovery claim: {}; restore failed continuation: {rollback}",
-                    error.message
-                ),
-                Some(claim.path.display().to_string()),
-            )
-        })?;
-        sync_directory(failed.parent().expect("failed continuation has parent"))?;
-        return Err(error);
+        return Err(compensate_rearm_failure(
+            error,
+            &claim,
+            removed_failure,
+            restore_failure,
+            &intention_path,
+        ));
     }
+    checkpoint(CookContinuationRearmCheckpoint::AfterResetPersistence)?;
     let claimed = continuation_base_path(&claim.path)
         .with_extension(format!("claimed.{}", std::process::id()));
     if let Err(error) = publish_claim(&claim.path, &claimed) {
-        let (failed, original_bytes) = claim
-            .recovery_rollback
-            .as_ref()
-            .expect("recovery claims retain rollback state");
-        if let Some(diagnostic) = removed_failure {
-            restore_failure(diagnostic)?;
-        }
-        let rollback_path = if claimed.exists() {
-            &claimed
-        } else {
-            &claim.path
-        };
-        atomic_write_and_sync(rollback_path, original_bytes)?;
-        fs::rename(rollback_path, failed).map_err(|rollback| {
-            Error::internal_io(
-                format!("publish recovery claim: {error}; restore failed continuation: {rollback}"),
-                Some(rollback_path.display().to_string()),
-            )
-        })?;
-        sync_directory(failed.parent().expect("failed continuation has parent"))?;
-        return Err(Error::internal_io(
-            error.to_string(),
-            Some(claim.path.display().to_string()),
+        return Err(compensate_rearm_failure(
+            error,
+            &claim,
+            removed_failure,
+            restore_failure,
+            &intention_path,
         ));
     }
+    checkpoint(CookContinuationRearmCheckpoint::AfterClaimPublication)?;
+    remove_rearm_intention(&intention_path)?;
     claim.path = claimed;
     claim.recovery_rollback = None;
     Ok(Some(claim))
+}
+
+fn compensate_rearm_failure(
+    error: Error,
+    claim: &ClaimedCookContinuation,
+    removed_failure: Option<Value>,
+    restore_failure: impl FnOnce(Value) -> Result<()>,
+    intention_path: &Path,
+) -> Error {
+    let mut messages = vec![rearm_error_summary(&error)];
+    let mut compensation_errors = Vec::new();
+    if let Some(diagnostic) = removed_failure {
+        if let Err(compensation) = restore_failure(diagnostic) {
+            compensation_errors.push(format!(
+                "restore Cook controller failure: {}",
+                rearm_error_summary(&compensation)
+            ));
+        }
+    }
+    let (failed, original_bytes) = claim
+        .recovery_rollback
+        .as_ref()
+        .expect("recovery claims retain rollback state");
+    let claimed = continuation_base_path(&claim.path)
+        .with_extension(format!("claimed.{}", std::process::id()));
+    let rollback_path = if claimed.exists() {
+        &claimed
+    } else {
+        &claim.path
+    };
+    if let Err(compensation) = atomic_write_and_sync(rollback_path, original_bytes) {
+        compensation_errors.push(format!(
+            "restore failed continuation bytes: {}",
+            rearm_error_summary(&compensation)
+        ));
+    }
+    if let Err(compensation) = fs::rename(rollback_path, failed)
+        .map_err(|cause| {
+            Error::internal_io(cause.to_string(), Some(rollback_path.display().to_string()))
+        })
+        .and_then(|()| sync_directory(failed.parent().expect("failed continuation has parent")))
+    {
+        compensation_errors.push(format!(
+            "restore failed continuation ownership: {}",
+            rearm_error_summary(&compensation)
+        ));
+    }
+    if compensation_errors.is_empty() {
+        if let Err(compensation) = remove_rearm_intention(intention_path) {
+            compensation_errors.push(format!(
+                "remove rearm intention: {}",
+                rearm_error_summary(&compensation)
+            ));
+        }
+    }
+    messages.extend(compensation_errors.iter().cloned());
+    let mut combined = error;
+    combined.message = messages.join("; ");
+    combined.details["rearm_compensation_errors"] = serde_json::json!(compensation_errors);
+    combined
+}
+
+fn rearm_error_summary(error: &Error) -> String {
+    error.details["error"]
+        .as_str()
+        .unwrap_or(&error.message)
+        .to_string()
+}
+
+fn continuation_rearm_intention_path(path: &Path) -> PathBuf {
+    continuation_base_path(path).with_extension("rearm-intention.json")
+}
+
+fn persist_rearm_intention(path: &Path, intention: &CookContinuationRearmIntention) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(intention).map_err(|error| {
+        Error::internal_json(error.to_string(), Some(path.display().to_string()))
+    })?;
+    atomic_write_and_sync(path, &bytes)
+}
+
+fn remove_rearm_intention(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => sync_directory(path.parent().expect("rearm intention has parent")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(path.display().to_string()),
+        )),
+    }
+}
+
+fn recover_continuation_rearm_in_store(
+    store: &CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<()> {
+    let key = format!("{cook_id}:{run_id}");
+    let hash = content_hash::sha256_hex(key.as_bytes());
+    let root = store.queue_root();
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let intention_path = root.join(format!("{hash}.rearm-intention.json"));
+    let _recovery_lock = lock_continuation_rearm_recovery(&root, &hash)?;
+    let bytes = match fs::read(&intention_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(intention_path.display().to_string()),
+            ))
+        }
+    };
+    let intention: CookContinuationRearmIntention =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_continuation.rearm_intention",
+                format!("malformed durable continuation rearm intention: {error}"),
+                Some(intention_path.display().to_string()),
+                None,
+            )
+        })?;
+    if intention.schema != CONTINUATION_REARM_INTENTION_SCHEMA
+        || intention.key != key
+        || intention.cook_id != cook_id
+        || intention.run_id != run_id
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation.rearm_intention",
+            "durable continuation rearm intention does not match its Cook attempt",
+            Some(intention_path.display().to_string()),
+            None,
+        ));
+    }
+    if homeboy_core::process::pid_is_running(intention.owner_pid) {
+        return Ok(());
+    }
+
+    let claimed_prefix = format!("{hash}.claimed.");
+    let rearming_prefix = format!("{hash}.rearming.");
+    let mut claimed = None;
+    let mut rearming = None;
+    for entry in fs::read_dir(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
+    {
+        let path = entry
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(root.display().to_string()))
+            })?
+            .path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if name.starts_with(&claimed_prefix) {
+            claimed = Some(path);
+        } else if name.starts_with(&rearming_prefix) {
+            rearming = Some(path);
+        }
+    }
+    if claimed.is_some() {
+        return remove_rearm_intention(&intention_path);
+    }
+
+    let mut errors = Vec::new();
+    if let Some(diagnostic) = intention.diagnostic {
+        if let Err(error) = agent_task_lifecycle::restore_cook_controller_failure_if_absent_in_store(
+            lifecycle_store,
+            run_id,
+            &diagnostic,
+        ) {
+            errors.push(format!(
+                "restore Cook controller failure: {}",
+                error.message
+            ));
+        }
+    }
+    let failed = root.join(format!("{hash}.failed"));
+    let private = rearming.unwrap_or_else(|| failed.clone());
+    if let Err(error) = atomic_write_and_sync(&private, &intention.original_bytes) {
+        errors.push(format!(
+            "restore failed continuation bytes: {}",
+            error.message
+        ));
+    } else if private != failed {
+        if let Err(error) = fs::rename(&private, &failed)
+            .map_err(|cause| {
+                Error::internal_io(cause.to_string(), Some(private.display().to_string()))
+            })
+            .and_then(|()| sync_directory(&root))
+        {
+            errors.push(format!(
+                "restore failed continuation ownership: {}",
+                error.message
+            ));
+        }
+    }
+    if errors.is_empty() {
+        remove_rearm_intention(&intention_path)
+    } else {
+        Err(Error::internal_io(
+            errors.join("; "),
+            Some(intention_path.display().to_string()),
+        ))
+    }
+}
+
+fn lock_continuation_rearm_recovery(root: &Path, hash: &str) -> Result<File> {
+    use fs4::fs_std::FileExt;
+
+    let path = root.join(format!(".{hash}.rearm-recovery.lock"));
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options
+        .open(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    lock.lock_exclusive()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    Ok(lock)
 }
 
 fn atomic_write_and_sync(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -2223,13 +2472,16 @@ fn atomic_write_and_sync(path: &Path, bytes: &[u8]) -> Result<()> {
         Uuid::new_v4()
     ));
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| {
-                Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
-            })?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+        })?;
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|error| {
@@ -2988,10 +3240,16 @@ fn reclaim_dead_claims(root: &std::path::Path) -> Result<()> {
             continue;
         };
         if !homeboy_core::process::pid_is_running(pid) {
+            if continuation_rearm_intention_path(&path).is_file() {
+                // The paired-store recovery path must decide whether this
+                // journaled ownership is rolled back or committed.
+                continue;
+            }
             if recovery {
                 fs::rename(&path, continuation_state_path(&path, "failed")).map_err(|error| {
                     Error::internal_io(error.to_string(), Some(path.display().to_string()))
                 })?;
+                sync_directory(root)?;
                 continue;
             }
             let continuation: AgentTaskCookContinuation =
@@ -3009,6 +3267,7 @@ fn reclaim_dead_claims(root: &std::path::Path) -> Result<()> {
             fs::rename(&path, continuation_state_path(&path, "pending")).map_err(|error| {
                 Error::internal_io(error.to_string(), Some(path.display().to_string()))
             })?;
+            sync_directory(root)?;
         }
     }
     Ok(())
@@ -4235,7 +4494,7 @@ mod tests {
             &store,
             "cook",
             "run",
-            || {
+            |_, _| {
                 Err(Error::validation_invalid_argument(
                     "test.lifecycle_clear",
                     "injected lifecycle clear failure",
@@ -4250,6 +4509,7 @@ mod tests {
                     Error::internal_io(error.to_string(), Some(from.display().to_string()))
                 })
             },
+            |_| Ok(()),
         )
         .expect_err("lifecycle failure must abort recovery");
 
@@ -4289,7 +4549,12 @@ mod tests {
             &store,
             "cook",
             "run",
-            || Ok(Some(serde_json::json!({ "message": "original failure" }))),
+            |path, intention| {
+                let diagnostic = serde_json::json!({ "message": "original failure" });
+                intention.diagnostic = Some(diagnostic.clone());
+                persist_rearm_intention(path, intention)?;
+                Ok(Some(diagnostic))
+            },
             |diagnostic| {
                 restored.replace(Some(diagnostic));
                 Ok(())
@@ -4306,6 +4571,7 @@ mod tests {
                     Error::internal_io(error.to_string(), Some(from.display().to_string()))
                 })
             },
+            |_| Ok(()),
         )
         .expect_err("reset persistence failure compensates both stores");
 
@@ -4339,7 +4605,12 @@ mod tests {
             &store,
             "cook",
             "run",
-            || Ok(Some(serde_json::json!({ "message": "original failure" }))),
+            |path, intention| {
+                let diagnostic = serde_json::json!({ "message": "original failure" });
+                intention.diagnostic = Some(diagnostic.clone());
+                persist_rearm_intention(path, intention)?;
+                Ok(Some(diagnostic))
+            },
             |diagnostic| {
                 observed_private_ownership.set(
                     preflight_continuation_claim_in_store(&store, "cook", "run", true).is_err()
@@ -4358,6 +4629,7 @@ mod tests {
                     None,
                 ))
             },
+            |_| Ok(()),
         )
         .expect_err("injected claim publication failure rolls back both stores");
 
@@ -4371,6 +4643,248 @@ mod tests {
             restored.into_inner(),
             Some(serde_json::json!({ "message": "original failure" }))
         );
+    }
+
+    #[test]
+    fn recovery_claim_restores_queue_even_when_diagnostic_compensation_fails() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+        let hash = content_hash::sha256_hex(b"cook:run");
+        let failed = store.queue_root().join(format!("{hash}.failed"));
+        let original = fs::read(&failed).unwrap();
+
+        let error = claim_continuation_for_recovery_and_clear_failure_with(
+            &store,
+            "cook",
+            "run",
+            |path, intention| {
+                let diagnostic = serde_json::json!({ "message": "original failure" });
+                intention.diagnostic = Some(diagnostic.clone());
+                persist_rearm_intention(path, intention)?;
+                Ok(Some(diagnostic))
+            },
+            |_| {
+                Err(Error::internal_io(
+                    "injected diagnostic compensation failure",
+                    None,
+                ))
+            },
+            atomic_write_and_sync,
+            |_, _| {
+                Err(Error::internal_io(
+                    "injected claim publication failure",
+                    None,
+                ))
+            },
+            |_| Ok(()),
+        )
+        .expect_err("both compensation errors are preserved");
+
+        assert!(
+            error.message.contains("injected claim publication failure"),
+            "{error:?}"
+        );
+        assert!(error
+            .message
+            .contains("injected diagnostic compensation failure"));
+        assert_eq!(fs::read(&failed).unwrap(), original);
+        assert!(!store
+            .queue_root()
+            .join(format!("{hash}.rearming.{}", std::process::id()))
+            .exists());
+    }
+
+    #[test]
+    fn crashed_rearm_before_publication_restores_exact_failed_state() {
+        for crash_at in [
+            CookContinuationRearmCheckpoint::BeforeResetPersistence,
+            CookContinuationRearmCheckpoint::AfterResetPersistence,
+        ] {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let (store, lifecycle_store) = rooted_stores(&context);
+            let recipe = recipe();
+            store.persist_recipe(&recipe).unwrap();
+            lifecycle_store
+                .submit_plan_with_runtime_admission(&recipe.attempts[0].plan, "run", |_| {
+                    Ok(serde_json::json!({}))
+                })
+                .unwrap();
+            store.enqueue_terminal_continuation("cook", "run").unwrap();
+            store
+                .claim_continuation_for("cook", "run")
+                .unwrap()
+                .unwrap()
+                .fail("fixture failure")
+                .unwrap();
+            agent_task_lifecycle::record_cook_controller_failure_in_store(
+                &lifecycle_store,
+                "run",
+                &serde_json::json!({ "message": "original" }),
+            )
+            .unwrap();
+            let hash = content_hash::sha256_hex(b"cook:run");
+            let failed = store.queue_root().join(format!("{hash}.failed"));
+            let original = fs::read(&failed).unwrap();
+
+            claim_continuation_for_recovery_and_clear_failure_with(
+                &store,
+                "cook",
+                "run",
+                |path, intention| {
+                    agent_task_lifecycle::prepare_cook_controller_failure_rearm_in_store(
+                        &lifecycle_store,
+                        "run",
+                        |diagnostic| {
+                            intention.diagnostic = diagnostic.cloned();
+                            persist_rearm_intention(path, intention)
+                        },
+                    )
+                },
+                |diagnostic| {
+                    agent_task_lifecycle::restore_cook_controller_failure_if_absent_in_store(
+                        &lifecycle_store,
+                        "run",
+                        &diagnostic,
+                    )
+                },
+                atomic_write_and_sync,
+                |from, to| {
+                    fs::rename(from, to).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(from.display().to_string()))
+                    })?;
+                    sync_directory(to.parent().unwrap())
+                },
+                |checkpoint| {
+                    if checkpoint == crash_at {
+                        Err(Error::internal_io("injected rearm crash", None))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .expect_err("checkpoint interrupts without in-process compensation");
+            mark_rearm_intention_owner_dead(&store, &hash);
+
+            recover_continuation_rearm_in_store(&store, &lifecycle_store, "cook", "run").unwrap();
+
+            assert_eq!(fs::read(&failed).unwrap(), original, "{crash_at:?}");
+            assert_eq!(
+                lifecycle_store.read_record("run").unwrap().metadata["cook_controller_failure"]
+                    ["message"],
+                "original",
+                "{crash_at:?}"
+            );
+            assert!(!store
+                .queue_root()
+                .join(format!("{hash}.rearm-intention.json"))
+                .exists());
+        }
+    }
+
+    #[test]
+    fn crashed_rearm_after_publication_keeps_reset_claim_and_cleared_diagnostic() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        let recipe = recipe();
+        store.persist_recipe(&recipe).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&recipe.attempts[0].plan, "run", |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+        agent_task_lifecycle::record_cook_controller_failure_in_store(
+            &lifecycle_store,
+            "run",
+            &serde_json::json!({ "message": "original" }),
+        )
+        .unwrap();
+        let hash = content_hash::sha256_hex(b"cook:run");
+
+        claim_continuation_for_recovery_and_clear_failure_with(
+            &store,
+            "cook",
+            "run",
+            |path, intention| {
+                agent_task_lifecycle::prepare_cook_controller_failure_rearm_in_store(
+                    &lifecycle_store,
+                    "run",
+                    |diagnostic| {
+                        intention.diagnostic = diagnostic.cloned();
+                        persist_rearm_intention(path, intention)
+                    },
+                )
+            },
+            |_| Ok(()),
+            atomic_write_and_sync,
+            |from, to| {
+                fs::rename(from, to).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(from.display().to_string()))
+                })?;
+                sync_directory(to.parent().unwrap())
+            },
+            |checkpoint| {
+                if checkpoint == CookContinuationRearmCheckpoint::AfterClaimPublication {
+                    Err(Error::internal_io("injected rearm crash", None))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("checkpoint interrupts after public claim commit");
+        mark_rearm_intention_owner_dead(&store, &hash);
+        let live_named_claim = store
+            .queue_root()
+            .join(format!("{hash}.claimed.{}", std::process::id()));
+        let dead_named_claim = store
+            .queue_root()
+            .join(format!("{hash}.claimed.{}", u32::MAX));
+        fs::rename(&live_named_claim, &dead_named_claim).unwrap();
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Claimed,
+            "generic reclamation must not move a journaled public claim"
+        );
+
+        recover_continuation_rearm_in_store(&store, &lifecycle_store, "cook", "run").unwrap();
+
+        let continuation: AgentTaskCookContinuation =
+            serde_json::from_slice(&fs::read(dead_named_claim).unwrap()).unwrap();
+        assert_eq!(continuation.retries, 0);
+        assert!(lifecycle_store
+            .read_record("run")
+            .unwrap()
+            .metadata
+            .get("cook_controller_failure")
+            .is_none());
+        assert!(!store
+            .queue_root()
+            .join(format!("{hash}.rearm-intention.json"))
+            .exists());
+    }
+
+    fn mark_rearm_intention_owner_dead(store: &CookRecipeStore, hash: &str) {
+        let path = store
+            .queue_root()
+            .join(format!("{hash}.rearm-intention.json"));
+        let mut intention: CookContinuationRearmIntention =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        intention.owner_pid = u32::MAX;
+        persist_rearm_intention(&path, &intention).unwrap();
     }
 
     #[test]
@@ -4402,7 +4916,16 @@ mod tests {
             &store,
             "cook",
             "run",
-            || agent_task_lifecycle::take_cook_controller_failure_in_store(&lifecycle_store, "run"),
+            |path, intention| {
+                agent_task_lifecycle::prepare_cook_controller_failure_rearm_in_store(
+                    &lifecycle_store,
+                    "run",
+                    |diagnostic| {
+                        intention.diagnostic = diagnostic.cloned();
+                        persist_rearm_intention(path, intention)
+                    },
+                )
+            },
             |diagnostic| {
                 agent_task_lifecycle::restore_cook_controller_failure_if_absent_in_store(
                     &lifecycle_store,
@@ -4423,6 +4946,7 @@ mod tests {
                     None,
                 ))
             },
+            |_| Ok(()),
         )
         .expect_err("publication failure is compensated");
 
