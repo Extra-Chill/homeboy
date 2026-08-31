@@ -88,11 +88,22 @@ pub(super) fn agent_task_executor_providers_from_runtime_manifests(
         // it declares, so the partial is reported once per runtime.
         let mut reported_revision_probe_timeout = false;
         for provider_value in runtime_manifest.agent_task_executors.clone() {
-            let Ok(mut provider) =
-                serde_json::from_value::<AgentTaskExecutorProvider>(provider_value)
-            else {
-                continue;
-            };
+            let mut provider =
+                match serde_json::from_value::<AgentTaskExecutorProvider>(provider_value) {
+                    Ok(provider) => provider,
+                    Err(error) => {
+                        diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
+                            class: "agent_task_executor_provider.invalid_declaration".to_string(),
+                            message: format!(
+                            "agent-task provider declaration is invalid and was not loaded: {error}"
+                        ),
+                            runtime_id: Some(runtime_manifest.id.clone()),
+                            extension_id: runtime_manifest.extension_id.clone(),
+                            path: runtime_manifest.runtime_path.clone(),
+                        });
+                        continue;
+                    }
+                };
             normalize_agent_task_executor_provider_invocation(&mut provider);
             provider.extension_id = runtime_manifest.extension_id.clone();
             provider.extension_path = runtime_manifest.extension_path.clone();
@@ -324,5 +335,29 @@ mod revision_probe_tests {
         let identity = AgentRuntimeSelectedIdentity::default();
 
         assert!(revision_probe_timeout_diagnostic(&manifest(), &identity).is_none());
+    }
+
+    #[test]
+    fn invalid_readiness_timeout_is_a_scoped_discovery_diagnostic() {
+        let mut runtime = manifest();
+        runtime.agent_task_executors = vec![serde_json::json!({
+            "id": "opencode.agent-task-executor",
+            "backend": "opencode",
+            "readiness_invocation": { "argv": ["opencode-provider"], "timeout_ms": 120001 }
+        })];
+        let mut diagnostics = Vec::new();
+
+        let providers =
+            agent_task_executor_providers_from_runtime_manifests(vec![runtime], &mut diagnostics);
+
+        assert!(providers.is_empty());
+        assert_eq!(
+            diagnostics[0].class,
+            "agent_task_executor_provider.invalid_declaration"
+        );
+        assert!(diagnostics[0]
+            .message
+            .contains("readiness_invocation.timeout_ms"));
+        assert_eq!(diagnostics[0].runtime_id.as_deref(), Some("opencode"));
     }
 }
