@@ -409,10 +409,38 @@ pub fn record_fanout_run_batch_failure_in_store(
         for child in &mut batch.child_runs {
             child.state = AgentTaskRunState::Failed;
         }
+        project_terminal_failure_dependency_graph(&mut batch.metadata);
         batch.state = AgentTaskBatchState::Failed;
         batch.updated_at = Some(now_timestamp());
         store.write_batch(&batch)
     })
+}
+
+/// A coordinator rejection means no child can be dispatched. Keep the durable
+/// graph projection aligned with the failed child rows rather than preserving a
+/// stale pre-admission `ready` frontier.
+fn project_terminal_failure_dependency_graph(metadata: &mut Value) {
+    let Some(nodes) = metadata
+        .get("dependency_graph")
+        .and_then(|graph| graph.get("nodes"))
+        .cloned()
+        .and_then(|nodes| serde_json::from_value::<Vec<AgentTaskDependencyNode>>(nodes).ok())
+    else {
+        return;
+    };
+    let states = nodes
+        .iter()
+        .map(|node| (node.id.clone(), AgentTaskDependencyState::Failed))
+        .collect::<BTreeMap<_, _>>();
+    let Ok((edges, readiness)) = dependency_graph_readiness(&nodes, &states) else {
+        return;
+    };
+    metadata["dependency_graph"] = json!({
+        "schema": "homeboy/agent-task-fanout-dependency-graph/v1",
+        "nodes": nodes,
+        "edges": edges,
+        "readiness": readiness,
+    });
 }
 
 /// Record child failures that occurred before Cook could create a lifecycle
@@ -3348,7 +3376,19 @@ mod tests {
             run_id: "source-run".to_string(),
         }];
         store
-            .persist_fanout_run_batch("source-wave", "source-wave", &children, json!({}))
+            .persist_fanout_run_batch(
+                "source-wave",
+                "source-wave",
+                &children,
+                json!({
+                    "dependency_graph": {
+                        "nodes": [{
+                            "id": "source",
+                            "depends_on": []
+                        }]
+                    }
+                }),
+            )
             .expect("persist");
         let claim_id = store
             .claim_fanout_run_batch("source-wave")
@@ -3379,6 +3419,15 @@ mod tests {
         assert_eq!(
             status.next_actions[0],
             "homeboy agent-task fanout resume source-wave"
+        );
+        assert_eq!(
+            status.batch.metadata["dependency_graph"]["readiness"]["states"]["source"],
+            "failed"
+        );
+        assert!(
+            status.batch.metadata["dependency_graph"]["readiness"]["ready"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
         );
     }
 

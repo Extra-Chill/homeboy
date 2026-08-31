@@ -84,8 +84,9 @@ pub use credential_readiness::{
 };
 pub use dispatchability::{
     evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
-    preflight_plan_provider_dispatchability_with_providers, preflight_provider_dispatchability,
-    preflight_provider_dispatchability_with_config,
+    preflight_plan_provider_dispatchability_with_providers,
+    preflight_plan_provider_dispatchability_without_runtime_with_providers,
+    preflight_provider_dispatchability, preflight_provider_dispatchability_with_config,
     preflight_provider_dispatchability_without_runtime_with_config,
     AgentTaskProviderConfigurationDiagnosis, AgentTaskProviderCredentialStatus,
     AgentTaskProviderDispatchability, AgentTaskProviderOwner,
