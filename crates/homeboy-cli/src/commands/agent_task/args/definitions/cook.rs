@@ -706,9 +706,7 @@ mod tests {
     }
 
     fn rendered_cook_batch_help() -> String {
-        use clap::CommandFactory;
-
-        crate::cli_surface::Cli::command()
+        crate::cli_surface::Cli::command_with_scoped_lab_args()
             .find_subcommand("agent-task")
             .expect("agent-task command")
             .find_subcommand("fanout")
@@ -717,6 +715,19 @@ mod tests {
             .expect("cook-batch command")
             .clone()
             .render_long_help()
+            .to_string()
+    }
+
+    fn rendered_compact_cook_batch_help() -> String {
+        crate::cli_surface::Cli::command_with_scoped_lab_args()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("fanout")
+            .expect("fanout command")
+            .find_subcommand("cook-batch")
+            .expect("cook-batch command")
+            .clone()
+            .render_help()
             .to_string()
     }
 
@@ -729,6 +740,56 @@ mod tests {
         for help in [rendered_cook_help(), rendered_cook_batch_help()] {
             assert!(help.contains(PROVIDER_EVIDENCE_DECLARATION), "{help}");
         }
+    }
+
+    #[test]
+    fn cook_batch_compact_help_keeps_advanced_controls_in_help_full() {
+        let compact = rendered_compact_cook_batch_help();
+        let full = rendered_cook_batch_help();
+
+        for expected in [
+            "--help-full",
+            "--repo <REPO_SLUG_OR_PRIMARY_PATH>",
+            "--verify <COMMAND>",
+            "--verification-profiles <JSON>",
+            "--preview",
+            "--run-plan",
+            "--placement <PLACEMENT>",
+            "One repository per batch",
+            "Two phases:",
+            "Verification is required:",
+            "--placement lab",
+            "https://github.com/Extra-Chill/homeboy/issues/11088",
+        ] {
+            assert!(compact.contains(expected), "missing {expected}:\n{compact}");
+        }
+
+        for advanced in [
+            "--provider-config <JSON>",
+            "--gate-toolchain <COMMAND>",
+            "--gate-environment-mode <MODE>",
+            "--dry-run-planner-timeout-seconds <SECONDS>",
+            "--max-concurrency <N>",
+        ] {
+            assert!(
+                !compact.contains(advanced),
+                "compact help leaked {advanced}:\n{compact}"
+            );
+            assert!(
+                full.contains(advanced),
+                "full help omitted {advanced}:\n{full}"
+            );
+        }
+
+        assert!(
+            compact.len() <= 6_000,
+            "compact cook-batch help is {} bytes",
+            compact.len()
+        );
+        assert!(
+            full.len() > compact.len() * 2,
+            "full cook-batch help is not materially larger"
+        );
     }
 
     #[test]

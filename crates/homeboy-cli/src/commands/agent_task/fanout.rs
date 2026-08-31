@@ -7543,6 +7543,8 @@ fi
 
     fn cook_batch_args() -> AgentTaskFanoutCookBatchArgs {
         AgentTaskFanoutCookBatchArgs {
+            help: None,
+            help_full: None,
             issues: vec![
                 "https://github.com/Extra-Chill/homeboy/issues/6453".to_string(),
                 "https://github.com/Extra-Chill/homeboy/issues/6454".to_string(),

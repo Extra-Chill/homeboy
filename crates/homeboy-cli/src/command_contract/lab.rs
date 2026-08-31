@@ -71,9 +71,9 @@ pub(crate) fn scope_composed_lab_cli_arguments(
     scope_lab_cli_arguments_at_path(command, &[], &lab_args, composed_support, false)
 }
 
-/// Cook has a large control-plane surface, but the routine tracked-task path
-/// only needs a small set of flags. Clap renders `HelpShort` for `--help` and
-/// `HelpLong` for `--help-full`; keep the latter as the complete reference.
+/// Cook commands have a large control-plane surface, but routine tracked-task
+/// paths only need a small set of flags. Clap renders `HelpShort` for `--help`
+/// and `HelpLong` for `--help-full`; keep the latter as the complete reference.
 fn scope_cook_help(command: Command) -> Command {
     const COMMON_COOK_ARGUMENTS: &[&str] = &[
         "help",
@@ -96,16 +96,41 @@ fn scope_cook_help(command: Command) -> Command {
         "max_attempts",
         "placement",
     ];
+    const COMMON_COOK_BATCH_ARGUMENTS: &[&str] = &[
+        "help",
+        "help_full",
+        "issues",
+        "repo",
+        "backend",
+        "model",
+        "verify",
+        "verify_file",
+        "verification_profiles",
+        "preview",
+        "run_plan",
+        "placement",
+    ];
 
     fn visit(command: Command, path: &[String]) -> Command {
         let is_cook = path.iter().map(String::as_str).eq(["agent-task", "cook"]);
-        let command = if is_cook {
+        let is_cook_batch =
+            path.iter()
+                .map(String::as_str)
+                .eq(["agent-task", "fanout", "cook-batch"]);
+        let common_arguments = if is_cook {
+            Some(COMMON_COOK_ARGUMENTS)
+        } else if is_cook_batch {
+            Some(COMMON_COOK_BATCH_ARGUMENTS)
+        } else {
+            None
+        };
+        let command = if let Some(common_arguments) = common_arguments {
             let ids = command
                 .get_arguments()
                 .map(|arg| arg.get_id().to_string())
                 .collect::<Vec<_>>();
             ids.into_iter().fold(command, |command, id| {
-                if COMMON_COOK_ARGUMENTS.contains(&id.as_str()) {
+                if common_arguments.contains(&id.as_str()) {
                     command
                 } else {
                     command.mut_arg(id, |arg| arg.hide_short_help(true))

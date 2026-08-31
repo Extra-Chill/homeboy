@@ -755,6 +755,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 
 | Option | Value | Description |
 | --- | --- | --- |
+| `--help-full` | flag | Show the complete cook-batch option reference |
 | `--repo` | `<REPO_SLUG_OR_PRIMARY_PATH>` | Registered repository/component slug or exact registered primary checkout path |
 | `--from` | `<REF>` | Source ref used to create every child worktree. When omitted, this is inferred from the repository default branch. An explicit value wins and must resolve to the same commit as --base |
 | `--base` | `<BRANCH>` | Pull-request base branch. When omitted, Homeboy resolves the registered repository's remote default branch before any worktree mutation |
