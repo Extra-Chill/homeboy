@@ -275,4 +275,23 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn read_only_invoke_wire_shape_is_typed() {
+        let response = ExtensionApiInvokeResponse {
+            schema: EXTENSION_API_INVOKE_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            output: Some(serde_json::json!({ "warnings": [] })),
+            failure: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("invoke response JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_INVOKE_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "output": { "warnings": [] }
+            })
+        );
+    }
 }

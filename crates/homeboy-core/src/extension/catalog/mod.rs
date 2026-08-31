@@ -12,9 +12,8 @@ use homeboy_extension_contract::ExtensionManifest;
 mod api;
 mod manifest;
 
-pub use api::{
-    api_descriptor, list_api, negotiate_api, readiness_api, readiness_api_batch, resolve_api,
-};
+pub use api::{capability_provider_ids, list_api, readiness_api_batch};
+pub(crate) use api::{resolve_api, validate_operation_request};
 pub use manifest::{
     deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
     structured_sidecars,

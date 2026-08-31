@@ -684,6 +684,7 @@
             "\\bextension_scope\\b",
             "\\bextension::execution\\b",
             "\\bextension::(?:capability|env_provider|runner|runtime_helper)::",
+            "\\b(?:extensions_for_compiler_warning_contract|run_compiler_warning_contract_script|CompilerWarningContract)\\b",
             "\\bextension::(?:build_scenario_runner|env_provider_secret_names|exec_tool|resolve_installed_env_provider|resolve_installed_env_providers|EnvProviderCommandPayload|EnvProviderContribution|ENV_PROVIDER_COMMAND_PAYLOAD_ENV|ExtensionRunner|RunnerOutput|ScenarioRunnerOptions|STRICT_VALIDATION_DEPENDENCIES_ENV|declared_helper_env_names|helper_path|provision_declared_helpers|RuntimeHelperProvision|BASH_PREFLIGHT_ENV|COMMAND_CAPTURE_ENV|RUNNER_PRELUDE_ENV|RUNNER_STEPS_ENV|RUNTIME_SETTINGS_HELPER_ENV|RUNTIME_SETTINGS_HELPER_ID)\\b",
             "\\bextension::(execute_action|run_action|run_deployment_provider|run_extension|run_setup|ExtensionExecutionMode|ExtensionRunResult|ExtensionSetupResult|ExtensionStepFilter)\\b"
           ]
