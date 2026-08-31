@@ -14,6 +14,7 @@
   },
   "bin": {
     "homeboy-opencode-agent-task-executor": "./scripts/agent/homeboy-opencode-agent-task-executor.cjs",
+    "homeboy-opencode-provider-readiness": "./scripts/agent/homeboy-opencode-provider-readiness.cjs",
     "homeboy-opencode-external-storage-retention": "./scripts/agent/homeboy-opencode-external-storage-retention.cjs"
   },
   "scripts": {
@@ -23,7 +24,8 @@
     "test:opencode-agent-task-executor-boundary": "node tests/opencode-agent-task-executor-boundary.test.js",
     "test:opencode-progress-events": "node tests/opencode-progress-events.test.js",
     "test:opencode-progress-relay": "node tests/opencode-progress-relay.test.js",
-    "test:opencode-external-storage-retention": "node tests/opencode-external-storage-retention.test.js"
+    "test:opencode-external-storage-retention": "node tests/opencode-external-storage-retention.test.js",
+    "test:opencode-runtime-readiness": "node tests/opencode-runtime-readiness.test.js"
   },
   "engines": {
     "node": ">=18.12.0"
