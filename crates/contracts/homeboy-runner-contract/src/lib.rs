@@ -7,6 +7,7 @@
 mod artifact;
 mod capability;
 mod discovery;
+mod execution_context;
 mod lifecycle;
 mod resource;
 mod session;
@@ -21,6 +22,9 @@ pub use discovery::{
     RunnerCapabilities, RunnerDescriptor, RunnerInspection, RunnerKind, RunnerReadiness,
     RUNNER_CAPABILITIES_SCHEMA, RUNNER_DESCRIPTOR_SCHEMA, RUNNER_INSPECTION_SCHEMA,
     RUNNER_READINESS_SCHEMA,
+};
+pub use execution_context::{
+    is_internal_control_env, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{

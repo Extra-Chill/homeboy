@@ -12,6 +12,9 @@
 
 use std::sync::{OnceLock, RwLock};
 
+use homeboy_runner_contract::{
+    RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
+};
 use serde::{Deserialize, Serialize};
 
 /// Structured, serde-friendly snapshot of the resource-policy decision captured
@@ -158,7 +161,7 @@ pub fn reset_captured_context_for_test() {
 }
 
 pub fn is_runner_hosted_exec() -> bool {
-    std::env::var(homeboy_lab_runner_contract::RUNNER_HOSTED_EXEC_ENV)
+    std::env::var(RUNNER_HOSTED_EXEC_ENV)
         .ok()
         .is_some_and(|value| value == "1")
 }
@@ -202,25 +205,25 @@ pub fn is_ci_execution() -> bool {
 /// and daemon job preparation rather than trusting the resolved marker alone.
 pub fn is_managed_runner_placement_context() -> bool {
     is_runner_hosted_exec()
-        && std::env::var(homeboy_lab_runner_contract::RUNNER_PLACEMENT_RESOLVED_ENV)
+        && std::env::var(RUNNER_PLACEMENT_RESOLVED_ENV)
             .ok()
             .is_some_and(|value| value == "1")
-        && std::env::var(homeboy_lab_runner_contract::RUNNER_ID_ENV)
+        && std::env::var(RUNNER_ID_ENV)
             .ok()
             .is_some_and(|value| !value.trim().is_empty())
 }
 
 pub fn clear_runner_hosted_exec() {
-    std::env::remove_var(homeboy_lab_runner_contract::RUNNER_HOSTED_EXEC_ENV);
+    std::env::remove_var(RUNNER_HOSTED_EXEC_ENV);
 }
 
 /// Remove the private runner-placement transport context after CLI routing.
 /// Child workloads and persisted artifacts must not inherit controller routing
 /// markers once their single placement decision has been consumed.
 pub fn clear_managed_runner_placement_context() {
-    std::env::remove_var(homeboy_lab_runner_contract::RUNNER_HOSTED_EXEC_ENV);
-    std::env::remove_var(homeboy_lab_runner_contract::RUNNER_PLACEMENT_RESOLVED_ENV);
-    std::env::remove_var(homeboy_lab_runner_contract::RUNNER_ID_ENV);
+    std::env::remove_var(RUNNER_HOSTED_EXEC_ENV);
+    std::env::remove_var(RUNNER_PLACEMENT_RESOLVED_ENV);
+    std::env::remove_var(RUNNER_ID_ENV);
     // This legacy value selected a controller daemon. A runner-local child must
     // not pass it into provider preflight after the Lab handoff is accepted.
     std::env::remove_var("HOMEBOY_LAB_RUNNER_ID");
