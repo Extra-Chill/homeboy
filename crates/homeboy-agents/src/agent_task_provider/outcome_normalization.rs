@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_task_cook_loop::AgentTaskIntentionalNoChange;
 
 pub(super) fn normalize_provider_outcome_roles(
     outcome: &mut AgentTaskOutcome,
@@ -8,7 +9,7 @@ pub(super) fn normalize_provider_outcome_roles(
     normalize_provider_run_result_output(outcome, &provider.role_aliases);
     let result_contract_valid = normalize_provider_result_contract(outcome, provider);
     normalize_provider_runtime_contract(outcome, provider);
-    strip_reserved_artifact_metadata(outcome);
+    strip_reserved_provider_metadata(outcome);
     if result_contract_valid {
         surface_provider_run_result_diagnostics(outcome);
     }
@@ -45,10 +46,14 @@ fn normalize_provider_account_block(
 }
 
 const HOMEBOY_ARTIFACT_PROVENANCE_KEY: &str = "artifact_provenance";
+const HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY: &str = "intentional_no_change_verified";
 
-/// Provider payloads cannot assert Homeboy-internal artifact provenance. The
-/// scheduler adds this key only after it writes a generated patch itself.
-fn strip_reserved_artifact_metadata(outcome: &mut AgentTaskOutcome) {
+/// Provider payloads cannot assert Homeboy-owned verification or artifact
+/// provenance. Those fields are added only after local validation.
+fn strip_reserved_provider_metadata(outcome: &mut AgentTaskOutcome) {
+    if let Some(metadata) = outcome.metadata.as_object_mut() {
+        metadata.remove(HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY);
+    }
     for artifact in &mut outcome.artifacts {
         if let Some(metadata) = artifact.metadata.as_object_mut() {
             metadata.remove(HOMEBOY_ARTIFACT_PROVENANCE_KEY);
@@ -75,6 +80,10 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
         return;
     }
 
+    if let Some(metadata) = outcome.metadata.as_object_mut() {
+        metadata.remove(HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY);
+    }
+
     let Ok(artifact_root) = artifact_root.canonicalize() else {
         return;
     };
@@ -93,22 +102,28 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
         }
     }
 
-    if outcome.status == AgentTaskOutcomeStatus::Succeeded && has_known_empty_change_set(outcome) {
+    if outcome.status == AgentTaskOutcomeStatus::Succeeded {
         match intentional_no_change_verdict(outcome, workspace_root) {
-            IntentionalNoChangeVerdict::Verified => {
-                // Preserve Succeeded so promotion follows the empty-patch gate
-                // path and records a verified no-op rather than attempting a
-                // candidate recovery.
+            IntentionalNoChangeValidation::Verified => {
+                // Preserve Succeeded. Cook applies task policy before deciding
+                // whether this evidence-only result may terminalize.
+                if !outcome.metadata.is_object() {
+                    outcome.metadata = json!({});
+                }
+                outcome.metadata[HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY] = Value::Bool(true);
                 outcome.summary = Some(
                     "provider declared an intentional no-change review verdict bound to the verified workspace revision"
                         .to_string(),
                 );
             }
-            IntentionalNoChangeVerdict::Invalid(message) => {
+            IntentionalNoChangeValidation::Invalid(message) => {
                 outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
                 outcome.summary = Some(message);
             }
-            IntentionalNoChangeVerdict::Absent if has_substantive_non_change_evidence(outcome) => {
+            IntentionalNoChangeValidation::Absent
+                if has_known_empty_change_set(outcome)
+                    && has_substantive_non_change_evidence(outcome) =>
+            {
                 // An empty change artifact next to substantive work evidence
                 // (a transcript, report, log, or other content-bearing artifact)
                 // is not a clean "nothing happened" — it is a patch-capture
@@ -121,37 +136,21 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
                     .to_string(),
             );
             }
-            IntentionalNoChangeVerdict::Absent => {
+            IntentionalNoChangeValidation::Absent if has_known_empty_change_set(outcome) => {
                 outcome.status = AgentTaskOutcomeStatus::NoOp;
                 outcome.summary = Some("provider produced an empty change artifact".to_string());
             }
+            IntentionalNoChangeValidation::Absent => {}
         }
     }
 }
 
 const INTENTIONAL_NO_CHANGE_SCHEMA: &str = "homeboy/intentional-no-change/v1";
 
-enum IntentionalNoChangeVerdict {
+enum IntentionalNoChangeValidation {
     Absent,
     Verified,
     Invalid(String),
-}
-
-#[derive(serde::Deserialize)]
-struct IntentionalNoChangeDeclaration {
-    schema: String,
-    #[serde(rename = "verdict")]
-    _verdict: IntentionalNoChangeDisposition,
-    inspected_revision: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum IntentionalNoChangeDisposition {
-    Blocked,
-    AlreadySatisfied,
-    #[serde(alias = "no_change")]
-    InvestigationOnly,
 }
 
 /// A provider may declare a no-change review only through this versioned result
@@ -161,17 +160,17 @@ enum IntentionalNoChangeDisposition {
 fn intentional_no_change_verdict(
     outcome: &AgentTaskOutcome,
     workspace_root: Option<&std::path::Path>,
-) -> IntentionalNoChangeVerdict {
+) -> IntentionalNoChangeValidation {
     let Some(verdict) = outcome
         .outputs
         .get("provider_run_result")
         .and_then(|result| result.get("intentional_no_change"))
     else {
-        return IntentionalNoChangeVerdict::Absent;
+        return IntentionalNoChangeValidation::Absent;
     };
-    let Ok(declaration) = serde_json::from_value::<IntentionalNoChangeDeclaration>(verdict.clone())
+    let Ok(declaration) = serde_json::from_value::<AgentTaskIntentionalNoChange>(verdict.clone())
     else {
-        return IntentionalNoChangeVerdict::Invalid(
+        return IntentionalNoChangeValidation::Invalid(
             "provider declared an intentional no-change verdict without a valid schema, supported disposition, and inspected workspace revision; changes require recovery review"
                 .to_string(),
         );
@@ -179,20 +178,20 @@ fn intentional_no_change_verdict(
     if declaration.schema != INTENTIONAL_NO_CHANGE_SCHEMA
         || declaration.inspected_revision.trim().is_empty()
     {
-        return IntentionalNoChangeVerdict::Invalid(
+        return IntentionalNoChangeValidation::Invalid(
             "provider declared an invalid intentional no-change verdict; changes require recovery review"
                 .to_string(),
         );
     }
     let Some(workspace_root) = workspace_root else {
-        return IntentionalNoChangeVerdict::Invalid(
+        return IntentionalNoChangeValidation::Invalid(
             "provider declared an intentional no-change verdict but Homeboy has no workspace checkout to verify; changes require recovery review"
                 .to_string(),
         );
     };
     let head = git_output(workspace_root, &["rev-parse", "HEAD"]);
     if head.as_deref() != Some(declaration.inspected_revision.as_str()) {
-        return IntentionalNoChangeVerdict::Invalid(
+        return IntentionalNoChangeValidation::Invalid(
             "provider declared an intentional no-change verdict for a revision that does not match the workspace checkout; changes require recovery review"
                 .to_string(),
         );
@@ -203,12 +202,12 @@ fn intentional_no_change_verdict(
     )
     .is_none_or(|status| !status.is_empty())
     {
-        return IntentionalNoChangeVerdict::Invalid(
+        return IntentionalNoChangeValidation::Invalid(
             "provider declared an intentional no-change verdict but the workspace checkout changed; changes require recovery review"
                 .to_string(),
         );
     }
-    IntentionalNoChangeVerdict::Verified
+    IntentionalNoChangeValidation::Verified
 }
 
 fn git_output(workspace_root: &std::path::Path, args: &[&str]) -> Option<String> {

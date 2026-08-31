@@ -292,14 +292,44 @@ fn pre_artifact_interruption_phase(
 pub(crate) fn intentional_no_change_from_aggregate(
     aggregate: &crate::agent_task_scheduler::AgentTaskAggregate,
 ) -> Option<AgentTaskIntentionalNoChange> {
-    aggregate.outcomes.iter().find_map(|outcome| {
-        let declaration = outcome
-            .outputs
-            .get("provider_run_result")?
-            .get("intentional_no_change")?
-            .clone();
-        serde_json::from_value::<AgentTaskIntentionalNoChange>(declaration).ok()
-    })
+    let outcome = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    })?;
+    (outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Succeeded).then_some(())?;
+    (outcome.metadata["intentional_no_change_verified"] == Value::Bool(true)).then_some(())?;
+    let declaration = outcome
+        .outputs
+        .get("provider_run_result")?
+        .get("intentional_no_change")?
+        .clone();
+    serde_json::from_value::<AgentTaskIntentionalNoChange>(declaration)
+        .ok()
+        .filter(|declaration| declaration.schema == "homeboy/intentional-no-change/v1")
+}
+
+fn request_requires_substantive_candidate(request: &crate::agent_task::AgentTaskRequest) -> bool {
+    fn is_change_artifact(value: &str) -> bool {
+        matches!(
+            value,
+            "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
+        )
+    }
+
+    request.policy.write == "patch"
+        || request
+            .expected_artifacts
+            .iter()
+            .any(|artifact| is_change_artifact(artifact))
+        || request.artifact_declarations.iter().any(|artifact| {
+            artifact.required
+                && (is_change_artifact(&artifact.name)
+                    || artifact
+                        .artifact_type
+                        .as_deref()
+                        .is_some_and(is_change_artifact))
+        })
 }
 
 fn pre_artifact_execution_count(record: &agent_task_lifecycle::AgentTaskRunRecord) -> u32 {
@@ -6393,6 +6423,60 @@ fn run_cook_spine(
                 exit_code,
                 invocation_latest_run_id: Some(&run_id),
             }));
+        }
+
+        let intentional_no_change = intentional_no_change_from_aggregate(&aggregate);
+        let has_substantive_candidate =
+            agent_task_lifecycle::select_cook_candidate_in_store(lifecycle_store, &cook_id)
+                .is_ok_and(|selection| {
+                    !selection.incomplete
+                        && selection.selected_task_id.is_some()
+                        && selection.selected_artifact_id.is_some()
+                });
+        if let Some(declaration) = intentional_no_change.filter(|_| !has_substantive_candidate) {
+            let review_form = review_form_from_aggregate(&aggregate)?;
+            let requires_candidate = request_requires_substantive_candidate(&source_request);
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            let mut report = cook_report(CookReportInput {
+                cook_id,
+                status: if requires_candidate {
+                    "no_candidate"
+                } else {
+                    "intentional_no_change"
+                },
+                disposition: CookDisposition::Terminal,
+                attempts,
+                finalization: None,
+                stop_reason: Some(if requires_candidate {
+                    format!(
+                        "provider completed a verified {} review, but task policy requires a substantive candidate patch",
+                        declaration.verdict
+                    )
+                } else {
+                    format!(
+                        "provider completed a verified {} evidence-only review without a candidate patch; promotion and publication were skipped",
+                        declaration.verdict
+                    )
+                }),
+                exit_code: i32::from(requires_candidate),
+                invocation_latest_run_id: Some(&run_id),
+            });
+            report.value.intentional_no_change = Some(AgentTaskCookIntentionalNoChangeReport {
+                declaration,
+                review_form,
+            });
+            if requires_candidate {
+                report.value.terminal_phase = Some("candidate_selection".to_string());
+                report.value.terminal_failure_classification = Some("no_candidate".to_string());
+            }
+            return Ok(report);
         }
 
         // Gate dispatch boundary. Promotion is where the deterministic gates

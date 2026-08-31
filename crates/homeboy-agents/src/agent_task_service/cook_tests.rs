@@ -1890,6 +1890,170 @@ impl CookSideEffectService for SelectionRequiredSideEffects {
     }
 }
 
+#[derive(Clone)]
+struct NoChangeSideEffects {
+    promotions: Arc<AtomicUsize>,
+    finalizations: Arc<AtomicUsize>,
+}
+
+impl CookSideEffectService for NoChangeSideEffects {
+    fn promote(
+        &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
+        _options: &CookRequest,
+        _run_id: &str,
+    ) -> Result<AgentTaskPromotionReport> {
+        self.promotions.fetch_add(1, Ordering::SeqCst);
+        unreachable!("intentional no-change without a candidate must not promote")
+    }
+
+    fn recover_moving_base(
+        &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
+        _options: &CookRequest,
+        _recovery: &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport> {
+        unreachable!("intentional no-change cannot enter moving-base recovery")
+    }
+
+    fn finalize(
+        &mut self,
+        _lifecycle_store: &AgentTaskLifecycleStore,
+        _options: &CookRequest,
+        _run_id: &str,
+        _promotion: &AgentTaskPromotionReport,
+    ) -> Result<Value> {
+        self.finalizations.fetch_add(1, Ordering::SeqCst);
+        unreachable!("intentional no-change without a candidate must not finalize")
+    }
+}
+
+fn run_intentional_no_change_cook(
+    requires_candidate: bool,
+) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let policy = if requires_candidate {
+        "change"
+    } else {
+        "evidence"
+    };
+    let cook_id = format!("cook-13966-{policy}");
+    let run_id = format!("{cook_id}-attempt-1");
+    let mut options = batch_cook_options(&cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.identity.initial_run_id = run_id.clone();
+    options.finalization.no_finalize = false;
+    options.identity.initial_plan.tasks[0].policy.write = "patch".to_string();
+    options.identity.initial_plan.tasks[0].policy.apply = "manual".to_string();
+    options.identity.initial_plan.tasks[0].expected_artifacts = vec!["patch".to_string()];
+    if !requires_candidate {
+        let request = &mut options.identity.initial_plan.tasks[0];
+        request.policy.write = "none".to_string();
+        request.policy.apply = "none".to_string();
+        request.expected_artifacts.clear();
+        request.artifact_declarations.clear();
+    }
+    persist_initial_recipe(&options).expect("persist Cook recipe");
+    agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
+        .expect("submit Cook attempt");
+    agent_task_lifecycle::record_cook_attempt_in_store(
+        &test_lifecycle_store(),
+        &cook_id,
+        1,
+        &run_id,
+    )
+    .expect("record Cook attempt");
+    let mut aggregate = review_form_aggregate(&options.identity.initial_plan);
+    aggregate.outcomes[0].outputs["provider_run_result"] = serde_json::json!({
+        "status": "succeeded",
+        "intentional_no_change": {
+            "schema": "homeboy/intentional-no-change/v1",
+            "verdict": "no_change",
+            "inspected_revision": "0123456789abcdef",
+            "next_action": "Retain the review evidence.",
+            "source_evidence": ["provider://review/transcript"]
+        }
+    });
+    aggregate.outcomes[0].metadata["intentional_no_change_verified"] = Value::Bool(true);
+    aggregate.outcomes[0].evidence_refs = vec![crate::agent_task::AgentTaskEvidenceRef {
+        kind: "transcript".to_string(),
+        uri: "provider://review/transcript".to_string(),
+        label: Some("provider review transcript".to_string()),
+    }];
+    agent_task_lifecycle::record_run_aggregate(&run_id, &options.identity.initial_plan, &aggregate)
+        .expect("persist intentional no-change aggregate");
+
+    let promotions = Arc::new(AtomicUsize::new(0));
+    let finalizations = Arc::new(AtomicUsize::new(0));
+    let result = run_cook(CookContext {
+        side_effects: Some(Box::new(NoChangeSideEffects {
+            promotions: Arc::clone(&promotions),
+            finalizations: Arc::clone(&finalizations),
+        })),
+        ..CookContext::new(options, Arc::new(UnusedExecutor))
+    })
+    .expect("finalize intentional no-change Cook");
+    assert_eq!(promotions.load(Ordering::SeqCst), 0);
+    assert_eq!(finalizations.load(Ordering::SeqCst), 0);
+    assert_eq!(result.value.attempts.len(), 1);
+    assert!(result.value.attempts[0].promotion.is_none());
+    result
+}
+
+#[test]
+fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_policy() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let result = run_intentional_no_change_cook(false);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.value.status, "intentional_no_change");
+        assert_eq!(
+            result.value.lifecycle().lifecycle_status,
+            RunLifecycleStatus::Succeeded
+        );
+        assert!(result.value.failure_context.is_none());
+        let evidence = result
+            .value
+            .intentional_no_change
+            .expect("durable no-change evidence");
+        assert_eq!(evidence.declaration.inspected_revision, "0123456789abcdef");
+        assert_eq!(
+            evidence.declaration.source_evidence,
+            ["provider://review/transcript"]
+        );
+        assert!(evidence.review_form.is_some());
+    });
+}
+
+#[test]
+fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let result = run_intentional_no_change_cook(true);
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status, "no_candidate");
+        assert_eq!(
+            result.value.lifecycle().lifecycle_status,
+            RunLifecycleStatus::PartialFailure
+        );
+        assert_eq!(
+            result.value.terminal_failure_classification.as_deref(),
+            Some("no_candidate")
+        );
+        let context = result
+            .value
+            .failure_context
+            .as_ref()
+            .expect("typed refusal diagnosis");
+        assert_eq!(context.phase, "candidate_selection");
+        assert_eq!(context.reason_code, "no_candidate");
+        assert!(!context
+            .next_actions
+            .iter()
+            .any(|action| action.action == "resume"));
+        let encoded = serde_json::to_string(&result.value).expect("serialize refusal");
+        assert!(!encoded.contains("InternalIoError"));
+        assert!(encoded.contains("0123456789abcdef"));
+        assert!(encoded.contains("provider://review/transcript"));
+    });
+}
+
 #[test]
 fn cook_promotes_the_rotated_success_after_a_retained_timeout_with_aliases_collapsed() {
     homeboy_core::test_support::with_isolated_home(|_| {
