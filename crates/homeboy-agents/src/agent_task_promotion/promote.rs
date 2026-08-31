@@ -1996,24 +1996,12 @@ fn run_promotion_gates(
     let mut deterministic_gates = Vec::new();
     let mut blocking_gate_id = None;
     if let Some(plan) = options.gates.test_execution_plan.as_ref() {
-        let gate = if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
-            crate::agent_task_gate::AgentTaskGateReport::skipped(
-                "gate-1".to_string(),
-                plan.declared_command()
-                    .map_err(|message| Error::invalid_argument("test_execution_plan", message))?
-                    .to_vec(),
-                AgentTaskGateVisibility::Visible,
-                AgentTaskGateRevealPolicy::FullEvidence,
-                blocking_gate_id,
-            )
-        } else {
-            emit_promotion_progress(
-                "gate",
-                Some("gate-1".to_string()),
-                Some("starting declared test plan".to_string()),
-            );
-            run_declared_promotion_test(options, &gate_workspace, 1, plan)?
-        };
+        emit_promotion_progress(
+            "gate",
+            Some("gate-1".to_string()),
+            Some("starting declared test plan".to_string()),
+        );
+        let gate = run_declared_promotion_test(options, &gate_workspace, 1, plan)?;
         if gate.status == AgentTaskGateStatus::Failed
             && options.gates.execution_policy
                 == crate::agent_task_gate::AgentTaskGateExecutionPolicy::OrderedFailFast
@@ -2022,8 +2010,9 @@ fn run_promotion_gates(
         }
         deterministic_gates.push(gate);
     }
+    let legacy_gate_offset = deterministic_gates.len();
     for (index, (command, visibility, reveal_policy)) in declared_gates.enumerate() {
-        let index = index + deterministic_gates.len() + 1;
+        let index = index + legacy_gate_offset + 1;
         let gate = if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
             crate::agent_task_gate::AgentTaskGateReport::skipped(
                 format!("gate-{index}"),

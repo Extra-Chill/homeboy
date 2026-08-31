@@ -1671,6 +1671,94 @@ fn continue_all_gate_policy_runs_downstream_command_after_failure() {
         report.deterministic_gates[1].status,
         AgentTaskGateStatus::Succeeded
     );
+    assert_eq!(
+        report
+            .deterministic_gates
+            .iter()
+            .map(|gate| gate.id.as_str())
+            .collect::<Vec<_>>(),
+        ["gate-1", "gate-2"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let bin = temp.path().join("bin");
+    std::fs::create_dir(&bin).expect("bin");
+    let homeboy = bin.join("homeboy");
+    std::fs::write(
+        &homeboy,
+        "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test\n",
+    )
+    .expect("homeboy adapter");
+    let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&homeboy, permissions).unwrap();
+    let mut environment = AgentTaskGateEnvironmentPolicy::default();
+    environment
+        .variables
+        .insert("PATH".to_string(), format!("{}:/bin", bin.display()));
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace),
+        apply_to_git: true,
+        run_verify_command: true,
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("typed-and-legacy-ids".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                test_execution_plan: Some(
+                    homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+                        vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+                        30,
+                    )
+                    .expect("plan"),
+                ),
+                gate_environment: environment,
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("promotion");
+
+    assert_eq!(
+        report
+            .deterministic_gates
+            .iter()
+            .map(|gate| gate.id.as_str())
+            .collect::<Vec<_>>(),
+        ["gate-1", "gate-2"]
+    );
 }
 
 #[test]

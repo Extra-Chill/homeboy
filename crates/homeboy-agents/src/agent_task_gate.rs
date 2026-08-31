@@ -891,11 +891,23 @@ impl AgentTaskGateInvocation {
     }
 
     pub(crate) fn identity_digest(&self) -> Result<String> {
-        let encoded = serde_json::to_vec(self)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        Ok(homeboy_engine_primitives::content_hash::sha256_hex(
-            &encoded,
-        ))
+        match self {
+            // Finalization receipts persisted this exact digest before typed
+            // plans existed; preserving it keeps inherited proof stable across
+            // a controller upgrade.
+            Self::LegacyShell { command } => Ok(
+                homeboy_engine_primitives::content_hash::nul_separated_digest([
+                    "sh", "-lc", command,
+                ]),
+            ),
+            Self::DeclaredTest { .. } => {
+                let encoded = serde_json::to_vec(self)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+                Ok(homeboy_engine_primitives::content_hash::sha256_hex(
+                    &encoded,
+                ))
+            }
+        }
     }
 }
 
@@ -4938,6 +4950,22 @@ mod tests {
             AgentTaskGateInvocation::DeclaredTest { plan: changed_argv }
                 .identity_digest()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_shell_invocation_keeps_the_historical_gate_command_digest() {
+        let command = "cargo test --locked".to_string();
+        let invocation = AgentTaskGateInvocation::LegacyShell {
+            command: command.clone(),
+        };
+        assert_eq!(
+            invocation.identity_digest().unwrap(),
+            homeboy_engine_primitives::content_hash::nul_separated_digest([
+                "sh",
+                "-lc",
+                command.as_str(),
+            ])
         );
     }
 
