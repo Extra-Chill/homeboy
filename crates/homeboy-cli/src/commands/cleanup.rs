@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use fs4::fs_std::FileExt;
 use homeboy::core::cleanup::{
-    self, ArtifactCleanupOptions, ArtifactCleanupSort, CleanupPolicy, CleanupPolicyOverrides,
-    ResourceCleanupOptions,
+    self, ArtifactCleanupOptions, ArtifactCleanupScope, ArtifactCleanupSort, CleanupPolicy,
+    CleanupPolicyOverrides, ResourceCleanupOptions,
 };
 use homeboy::core::controller_runtime::{self, ControllerRuntimeRetentionOverrides};
 use homeboy::core::daemon::controller_job_driver::{
@@ -189,6 +189,10 @@ pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> Cmd
                 intent: cleanup_intent(args.apply),
                 artifacts: Some(ArtifactCleanupOptions {
                     path: args.path,
+                    scope: args
+                        .all_worktrees
+                        .then_some(ArtifactCleanupScope::RepositoryWorktrees)
+                        .unwrap_or_default(),
                     apply: args.apply,
                     self_artifacts: args.self_artifacts,
                     temp_roots: args.temp_root,
@@ -3598,6 +3602,7 @@ fn repo_artifact_roots(
                 "configured_component",
                 ArtifactCleanupOptions {
                     path: Some(root),
+                    scope: ArtifactCleanupScope::RepositoryWorktrees,
                     apply,
                     self_artifacts: false,
                     temp_roots: Vec::new(),
@@ -3616,6 +3621,7 @@ fn repo_artifact_roots(
             "homeboy_source_checkout",
             ArtifactCleanupOptions {
                 path: None,
+                scope: ArtifactCleanupScope::RepositoryWorktrees,
                 apply,
                 self_artifacts: true,
                 temp_roots: Vec::new(),

@@ -111,6 +111,10 @@ pub(crate) const SELF_TEMP_ARTIFACT_READINESS: &str = READINESS_REBUILD_ON_DEMAN
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactCleanupOptions {
     pub path: Option<PathBuf>,
+    /// The checkout set inspected by this invocation. Exact checkout is the
+    /// safe default for a destructive path-scoped command; repository-wide
+    /// discovery is an explicit operator choice.
+    pub scope: ArtifactCleanupScope,
     pub apply: bool,
     pub self_artifacts: bool,
     pub temp_roots: Vec<PathBuf>,
@@ -138,6 +142,14 @@ pub struct ArtifactCleanupOptions {
     /// discarding every byte it had reclaimed and reporting zero progress
     /// forever on a workspace too large to inventory inside that wall (#12727).
     pub max_scan_duration: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactCleanupScope {
+    #[default]
+    ExactCheckout,
+    RepositoryWorktrees,
 }
 
 #[derive(Clone, Copy)]
@@ -333,6 +345,7 @@ fn run_automatic_artifact_retention_in(
     ));
     let options = ArtifactCleanupOptions {
         apply: true,
+        scope: ArtifactCleanupScope::RepositoryWorktrees,
         sort: ArtifactCleanupSort::Size,
         limit: Some(policy.scan_limit()),
         ..Default::default()
@@ -438,6 +451,8 @@ pub struct ResourceCleanupOutput {
 pub struct ArtifactCleanupOutput {
     pub command: &'static str,
     pub mode: &'static str,
+    /// The resolved checkout selection, shared by dry-run and apply output.
+    pub scope: ArtifactCleanupScope,
     pub root: String,
     pub worktree_count: usize,
     /// Number of artifact paths that reached bounded Git and usage inspection.
@@ -875,7 +890,10 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
         crate::worktree::reconcile_malformed_task_worktree_records(options.apply)?;
     crate::worktree::with_task_worktree_registry_read_lock(|| {
         let root = resolve_root(&options)?;
-        let worktrees = discover_worktrees(&root)?;
+        let worktrees = match options.scope {
+            ArtifactCleanupScope::ExactCheckout => vec![WorktreeInfo { path: root.clone() }],
+            ArtifactCleanupScope::RepositoryWorktrees => discover_worktrees(&root)?,
+        };
         let bounds = ArtifactInventoryBounds {
             deadline: options
                 .max_scan_duration
@@ -1343,6 +1361,7 @@ fn cleanup_artifacts_in_worktrees(
     let output = ArtifactCleanupOutput {
         command: "cleanup.artifacts",
         mode: if options.apply { "apply" } else { "dry_run" },
+        scope: options.scope,
         root: root.to_string_lossy().to_string(),
         worktree_count: worktrees.len(),
         inspected_count,
@@ -1397,6 +1416,9 @@ fn artifact_cleanup_apply_command(options: &ArtifactCleanupOptions) -> String {
         command.push_str(" --self");
     } else if let Some(path) = &options.path {
         command.push_str(&format!(" --path {}", quote_arg(&path.to_string_lossy())));
+    }
+    if options.scope == ArtifactCleanupScope::RepositoryWorktrees {
+        command.push_str(" --all-worktrees");
     }
     for temp_root in &options.temp_roots {
         command.push_str(&format!(
@@ -2743,6 +2765,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -3375,6 +3398,7 @@ mod tests {
                 intent: ResourceCleanupIntent::DryRun,
                 artifacts: Some(ArtifactCleanupOptions {
                     path: Some(repo.path().to_path_buf()),
+                    scope: ArtifactCleanupScope::ExactCheckout,
                     apply: true,
                     self_artifacts: false,
                     temp_roots: Vec::new(),
@@ -3440,6 +3464,7 @@ mod tests {
                 intent: ResourceCleanupIntent::Apply,
                 artifacts: Some(ArtifactCleanupOptions {
                     path: Some(repo.path().to_path_buf()),
+                    scope: ArtifactCleanupScope::ExactCheckout,
                     apply: false,
                     self_artifacts: false,
                     temp_roots: Vec::new(),
@@ -3566,6 +3591,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let err = resolve_root(&ArtifactCleanupOptions {
             path: Some(tmp.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: true,
             temp_roots: Vec::new(),
@@ -3586,6 +3612,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let err = resolve_root(&ArtifactCleanupOptions {
             path: Some(tmp.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -3630,6 +3657,7 @@ mod tests {
 
         let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
             path: None,
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
@@ -3677,6 +3705,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
@@ -3717,6 +3746,7 @@ mod tests {
 
         let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
             path: None,
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
@@ -3752,6 +3782,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
@@ -3787,6 +3818,7 @@ mod tests {
 
         let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
             path: None,
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
@@ -3816,6 +3848,7 @@ mod tests {
 
         let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
             path: None,
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
@@ -3846,6 +3879,7 @@ mod tests {
 
         let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
             path: None,
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
@@ -3873,6 +3907,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
@@ -3898,6 +3933,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -3920,7 +3956,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_reports_artifact_candidates_across_worktrees() {
+    fn exact_checkout_scope_keeps_dry_run_and_apply_off_sibling_worktrees() {
         let repo = git_repo();
         let sibling_parent = TempDir::new().expect("sibling parent");
         let sibling = sibling_parent.path().join("artifact-worktree");
@@ -3933,6 +3969,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -3946,18 +3983,55 @@ mod tests {
         .expect("dry-run cleanup");
 
         assert_eq!(output.mode, "dry_run");
+        assert_eq!(output.scope, ArtifactCleanupScope::ExactCheckout);
         assert_eq!(output.applied_count, 0);
         assert!(output.candidates.iter().any(|row| row
             .worktree
             .ends_with(repo.path().file_name().unwrap().to_str().unwrap())
             && row.relative_path == "target"));
+        assert!(!output
+            .candidates
+            .iter()
+            .any(|row| row.worktree.ends_with("artifact-worktree")));
+        assert!(repo.path().join("target/debug/app").exists());
+        assert!(sibling.join("node_modules/pkg/index.js").exists());
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            apply: true,
+            ..dry_run_options(repo.path())
+        })
+        .expect("apply cleanup");
+        assert_eq!(output.scope, ArtifactCleanupScope::ExactCheckout);
+        assert!(!repo.path().join("target").exists());
+        assert!(
+            sibling.join("node_modules/pkg/index.js").exists(),
+            "apply must use the same exact-checkout scope as the dry run"
+        );
+    }
+
+    #[test]
+    fn repository_worktrees_scope_discovers_sibling_artifacts() {
+        let repo = git_repo();
+        let sibling_parent = TempDir::new().expect("sibling parent");
+        let sibling = sibling_parent.path().join("artifact-worktree");
+        git(repo.path(), &["worktree", "add", sibling.to_str().unwrap()]);
+        write_file(
+            &sibling.join("node_modules/pkg/index.js"),
+            "dependency artifact",
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            scope: ArtifactCleanupScope::RepositoryWorktrees,
+            ..dry_run_options(repo.path())
+        })
+        .expect("repository-wide dry run");
+
+        assert_eq!(output.scope, ArtifactCleanupScope::RepositoryWorktrees);
         assert!(output
             .candidates
             .iter()
             .any(|row| row.worktree.ends_with("artifact-worktree")
                 && row.relative_path == "node_modules"));
-        assert!(repo.path().join("target/debug/app").exists());
-        assert!(sibling.join("node_modules/pkg/index.js").exists());
     }
 
     #[test]
@@ -3972,6 +4046,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -4006,6 +4081,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -4041,6 +4117,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -4072,6 +4149,7 @@ mod tests {
 
         let first = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -4100,6 +4178,7 @@ mod tests {
 
         let second = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -4277,6 +4356,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -4418,6 +4498,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -4454,6 +4535,7 @@ mod tests {
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
@@ -4474,6 +4556,7 @@ mod tests {
     fn artifact_cleanup_preview_apply_command_preserves_reviewed_scope() {
         let options = ArtifactCleanupOptions {
             path: Some(PathBuf::from("/tmp/review scope")),
+            scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: vec![
@@ -4492,6 +4575,12 @@ mod tests {
             artifact_cleanup_apply_command(&options),
             "homeboy cleanup artifacts --path '/tmp/review scope' --temp-root '/tmp/first root' --temp-root /tmp/second --sort size --limit 7 --merged-only --apply"
         );
+
+        let repository_options = ArtifactCleanupOptions {
+            scope: ArtifactCleanupScope::RepositoryWorktrees,
+            ..options.clone()
+        };
+        assert!(artifact_cleanup_apply_command(&repository_options).contains("--all-worktrees"));
 
         assert_eq!(
             artifact_cleanup_apply_command(&ArtifactCleanupOptions {

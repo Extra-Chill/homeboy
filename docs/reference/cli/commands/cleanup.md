@@ -53,7 +53,8 @@ Inspect or remove declared reconstructable artifacts across repo worktrees
 | --- | --- | --- |
 | `--apply` | flag | Apply cleanup. Omit for dry-run output |
 | `--self` | flag | Clean artifacts from the Homeboy source checkout that built this binary |
-| `--path` | `<PATH>` | Resolve managed worktrees from this checkout instead of the current directory |
+| `--path` | `<PATH>` | Clean only this checkout instead of the current directory |
+| `--all-worktrees` | flag | Discover artifacts across every Git worktree in the selected repository |
 | `--temp-root` | `<PATH>` | Also scan this temp root for detached Homeboy build artifacts. Repeatable |
 | `--sort` | `<SORT>` | Sort artifact candidates before reporting or applying cleanup Values: `discovery`, `size`. |
 | `--limit` | `<N>` | Limit artifact candidates reported or removed after sorting. A positive limit ensures a continuation always makes progress |
