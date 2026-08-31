@@ -1030,15 +1030,10 @@ pub fn record_replacement_gate_proof(
         accept_inherited_failures,
     )?;
     validate_legacy_replacement_candidate_checkout(run_id, &original, &replacement)?;
-    let expected_candidate = original.provenance.get("candidate");
-    let observed_candidate = replacement.provenance.get("candidate");
-    let same_candidate = observed_candidate == expected_candidate
-        && (original
-            .provenance
-            .get("candidate_checkout")
-            .is_none_or(Value::is_null)
-            || replacement.provenance.get("candidate_checkout")
-                == original.provenance.get("candidate_checkout"));
+    let expected_candidate = canonical_candidate_fingerprint(original.provenance.get("candidate"));
+    let observed_candidate =
+        canonical_candidate_fingerprint(replacement.provenance.get("candidate"));
+    let same_candidate = observed_candidate == expected_candidate;
     let drifted = serde_json::json!({
         "run_id": replacement.source.run_id.as_deref() != Some(run_id),
         "target": replacement.target.worktree != original.target.worktree || replacement.target.path != original.target.path,
@@ -1060,8 +1055,8 @@ pub fn record_replacement_gate_proof(
         );
         error.details["drift"] = drifted;
         error.details["candidate_fingerprint"] = serde_json::json!({
-            "expected": bounded_candidate_fingerprint(expected_candidate),
-            "observed": bounded_candidate_fingerprint(observed_candidate),
+            "expected": expected_candidate,
+            "observed": observed_candidate,
         });
         return Err(error);
     }
@@ -1121,40 +1116,15 @@ pub fn record_replacement_gate_proof(
     Ok(replacement)
 }
 
-fn bounded_candidate_fingerprint(candidate: Option<&Value>) -> Value {
-    const MAX_CHANGED_FILES: usize = 32;
-
+fn canonical_candidate_fingerprint(candidate: Option<&Value>) -> Value {
     let Some(candidate) = candidate else {
         return Value::Null;
     };
-    let Some(fingerprint) = candidate.get("fingerprint") else {
-        return serde_json::json!({ "kind": candidate.get("kind") });
-    };
-    let changed_files = fingerprint
-        .get("changed_files")
-        .and_then(Value::as_array)
-        .map(|files| {
-            files
-                .iter()
-                .take(MAX_CHANGED_FILES)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    serde_json::json!({
-        "kind": candidate.get("kind"),
-        "schema": fingerprint.get("schema"),
-        "target_path": fingerprint.get("target_path"),
-        "head": fingerprint.get("head"),
-        "base": fingerprint.get("base"),
-        "tree": fingerprint.get("tree"),
-        "sha256": fingerprint.get("sha256"),
-        "changed_files": changed_files,
-        "changed_files_truncated": fingerprint
-            .get("changed_files")
-            .and_then(Value::as_array)
-            .is_some_and(|files| files.len() > MAX_CHANGED_FILES),
-    })
+    serde_json::from_value::<AgentTaskPromotionCandidate>(candidate.clone())
+        .and_then(|candidate| serde_json::to_value(candidate).map_err(Into::into))
+        // Preserve malformed legacy data verbatim so an identity mismatch is
+        // still inspectable rather than silently treated as equivalent.
+        .unwrap_or_else(|_| candidate.clone())
 }
 
 /// Older failed promotions did not retain the checkout used by their gates.
