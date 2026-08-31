@@ -169,6 +169,8 @@ pub struct LocalControllerJobClient {
 pub enum ControllerJobSubmissionDisposition {
     Created,
     Reused,
+    /// An older daemon accepted the request before submission receipts existed.
+    Unknown,
 }
 
 /// A controller job plus the admission decision that selected it.
@@ -360,11 +362,12 @@ impl LocalControllerJobClient {
         {
             Some("created") => ControllerJobSubmissionDisposition::Created,
             Some("reused") => ControllerJobSubmissionDisposition::Reused,
-            _ => {
+            Some(_) => {
                 return Err(Error::internal_unexpected(
                     "local controller-job submission response has no recognized disposition",
                 ));
             }
+            None => ControllerJobSubmissionDisposition::Unknown,
         };
         let response = self
             .client
@@ -1031,6 +1034,8 @@ struct ControllerJobRequest {
     job_type: String,
     version: u32,
     idempotency_key: String,
+    #[serde(default)]
+    active_idempotency_key: Option<String>,
     request: serde_json::Value,
 }
 
@@ -3712,6 +3717,11 @@ fn enqueue_controller_job(
         request: request.request.clone(),
         public_request,
         request_digest,
+        active_idempotency_key: request
+            .active_idempotency_key
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+            .map(str::to_string),
         linked_durable_run_id,
         checkpoint: None,
         cancellation_requested: false,
@@ -4371,6 +4381,7 @@ mod tests {
                     request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
                     public_request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
                     request_digest: format!("digest-{}", uuid::Uuid::new_v4()),
+                    active_idempotency_key: None,
                     linked_durable_run_id: run_id.map(str::to_string),
                     checkpoint: None,
                     cancellation_requested: false,

@@ -513,13 +513,17 @@ fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
     // A completed cleanup describes the inventory that existed when it ran, not
     // a standing claim over future inventory with the same command arguments.
     let invocation_id = uuid::Uuid::new_v4();
-    let submission =
-        LocalControllerJobClient::connect()?.submit_with_disposition(serde_json::json!({
+    let active_request_id =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, request.to_string().as_bytes());
+    let submission = LocalControllerJobClient::connect_current_build()?.submit_with_disposition(
+        serde_json::json!({
             "type": CLEANUP_JOB_TYPE,
             "version": CLEANUP_JOB_VERSION,
             "idempotency_key": format!("cleanup-inventory-{invocation_id}"),
+            "active_idempotency_key": format!("cleanup-inventory-active-{active_request_id}"),
             "request": request,
-        }))?;
+        }),
+    )?;
     Ok(compact_cleanup_submission(&submission))
 }
 
@@ -562,6 +566,7 @@ fn compact_cleanup_submission(submission: &ControllerJobSubmission) -> Value {
         "disposition": match submission.disposition {
             ControllerJobSubmissionDisposition::Created => "created",
             ControllerJobSubmissionDisposition::Reused => "reused",
+            ControllerJobSubmissionDisposition::Unknown => "unknown",
         },
     });
     output
