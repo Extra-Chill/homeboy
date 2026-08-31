@@ -23,6 +23,7 @@ use crate::runner_execution_envelope::{
 };
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
+use homeboy_lab_contract::lab::execution_envelope::runner_execution_envelope_from_workload;
 use homeboy_runner_contract::{
     is_internal_control_env, RunnerMutationArtifacts, RunnerResourceMetrics,
 };
@@ -232,7 +233,7 @@ impl RemoteRunnerJobRequest {
         let mut envelope = request
             .lab_runner_workload
             .clone()
-            .map(RunnerExecutionEnvelope::from_lab_runner_workload)
+            .map(runner_execution_envelope_from_workload)
             .unwrap_or_else(|| {
                 RunnerExecutionEnvelope::planned(&envelope_id, "remote_runner_job_request")
             });
@@ -278,7 +279,7 @@ impl RemoteRunnerJobRequest {
                 .or_else(|| metadata_run_id(&envelope.metadata));
         }
         if envelope.result_refs.artifacts.is_empty() {
-            if let Some(workload) = envelope.lab_runner_workload.as_ref() {
+            if let Some(workload) = request.lab_runner_workload.as_ref() {
                 envelope.result_refs = RunnerExecutionResultRefs {
                     artifacts: workload.result_refs.artifacts.clone(),
                     ..envelope.result_refs.clone()

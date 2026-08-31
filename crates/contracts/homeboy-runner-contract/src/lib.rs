@@ -7,9 +7,12 @@
 mod artifact;
 mod capability;
 mod discovery;
+pub mod env_materialization_plan;
 mod execution_context;
 mod lifecycle;
+pub mod path_materialization;
 mod resource;
+pub mod secret_env_plan;
 mod session;
 mod workspace;
 
@@ -52,9 +55,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use homeboy_lab_contract::env_materialization_plan::EnvMaterializationPlan;
-use homeboy_lab_contract::lab::workload::LabRunnerWorkload;
-use homeboy_lab_contract::secret_env_plan::SecretEnvPlan;
+use crate::env_materialization_plan::EnvMaterializationPlan;
+use crate::secret_env_plan::SecretEnvPlan;
 use homeboy_source_snapshot_contract::SourceSnapshot;
 
 /// The one artifact reference carried by runner execution records,
@@ -63,31 +65,47 @@ use homeboy_source_snapshot_contract::SourceSnapshot;
 /// This module used to define its own `RunnerExecutionArtifactRef` with the
 /// four fields `{id, name, path, url}`, while the same file already imported
 /// `JobArtifactMetadata` for `RunnerExecutionResultRefs.artifacts`. Two names,
-/// one shape, one file. Collapsed onto the leaf-contract type in #10310.
+/// one shape, one file. Collapsed onto this canonical runner type in #10310.
 ///
 /// #11137 then collapsed `LabRunnerWorkloadArtifactRef` -- the last remaining
 /// `{id, name, path, url}` twin, and a strict field-subset of this type -- onto
 /// it as well, which removed the lossy `job_artifact_refs` rebuild that silently
 /// dropped `mime`, `size_bytes` and `sha256`. The serialized shape is unchanged
 /// in both collapses: every extra field is `Option` + `skip_serializing_if`.
-pub use homeboy_lab_contract::lab::workload::JobArtifactMetadata;
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobArtifactMetadata {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
 pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
 pub const ORCHESTRATION_TARGET_PROVENANCE_SCHEMA: &str =
     "homeboy/orchestration-target-provenance/v1";
 
-// Path materialization types live in the leaf `core::path_materialization`
-// module so the lab-contract type layer can hold a `PathMaterializationPlan`
-// field without pulling in this envelope's runner machinery. Re-exported here to
-// keep existing `runner_execution_envelope::PathMaterialization*` call sites stable.
-pub use homeboy_lab_contract::path_materialization::{
+// Path materialization belongs to the canonical runner contract. Re-export it
+// here to keep existing `runner_execution_envelope::PathMaterialization*` call
+// sites stable.
+pub use crate::path_materialization::{
     PathMaterializationEntry, PathMaterializationMode, PathMaterializationPathRemap,
     PathMaterializationPlan, PathMaterializationPlanProjection, PathMaterializationProjection,
     PATH_MATERIALIZATION_MODE_EXISTING_REMOTE, PATH_MATERIALIZATION_MODE_GIT,
-    PATH_MATERIALIZATION_MODE_SNAPSHOT, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
-    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
+    PATH_MATERIALIZATION_MODE_SNAPSHOT, PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
     PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT, PATH_MATERIALIZATION_PLAN_SCHEMA,
     PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE, PATH_MATERIALIZATION_ROLE_REQUIRED_PATH,
     PATH_MATERIALIZATION_STATUS_MATERIALIZED, PATH_MATERIALIZATION_STATUS_VALIDATED,
@@ -105,7 +123,7 @@ pub struct RunnerExecutionEnvelope {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub lab_runner_workload: Option<LabRunnerWorkload>,
+    pub runner_workload: Option<Value>,
     /// The originating agent-task request, carried opaquely as JSON so core does
     /// not depend on the agent-task subsystem. The agent-task layer owns
     /// deserialization back into its request type.
@@ -524,7 +542,7 @@ impl RunnerExecutionEnvelope {
                 kind: source_kind.into(),
                 ref_id: Some(envelope_id),
             },
-            lab_runner_workload: None,
+            runner_workload: None,
             agent_task: None,
             secret_env: None,
             env_materialization: None,
@@ -585,44 +603,6 @@ impl RunnerExecutionEnvelope {
         self.metadata = metadata;
         self
     }
-
-    pub fn from_lab_runner_workload(workload: LabRunnerWorkload) -> Self {
-        let mutation_policy = RunnerExecutionMutationPolicy {
-            capture_patch: workload.mutation_policy.capture_patch,
-            mutation_flag: workload.mutation_policy.mutation_flag.clone(),
-            allow_dirty_workspace: workload.mutation_policy.allow_dirty_lab_workspace,
-        };
-        let result_refs = RunnerExecutionResultRefs {
-            plan_id: Some(workload.result_refs.plan_id.clone()),
-            job_id: workload.result_refs.job_id.clone(),
-            run_id: workload.result_refs.proof_id.clone(),
-            mirror_run_id: workload.result_refs.mirror_run_id.clone(),
-            artifacts: workload.result_refs.artifacts.clone(),
-            ..RunnerExecutionResultRefs::default()
-        };
-
-        Self {
-            schema: RUNNER_EXECUTION_ENVELOPE_SCHEMA.to_string(),
-            envelope_id: workload.workload_id.clone(),
-            source: RunnerExecutionSource {
-                kind: "runner_workload".to_string(),
-                ref_id: Some(workload.workload_id.clone()),
-            },
-            lab_runner_workload: Some(workload),
-            agent_task: None,
-            secret_env: None,
-            env_materialization: None,
-            dispatch: None,
-            lifecycle: None,
-            lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
-            artifact_declarations: Vec::new(),
-            loop_policy: RunnerExecutionLoopPolicy::default(),
-            mutation_policy,
-            publication_intent: RunnerExecutionPublicationIntent::default(),
-            result_refs,
-            metadata: Value::Null,
-        }
-    }
 }
 
 fn runner_execution_envelope_schema() -> String {
@@ -642,77 +622,22 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use homeboy_lab_contract::lab::workload::{
-        LabRunnerWorkloadAssignment, LabRunnerWorkloadCommandFamily, LabRunnerWorkloadKind,
-        LabRunnerWorkloadMutationPolicy, LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets,
-        LabRunnerWorkloadState, LabRunnerWorkloadWorkspaceMappings, LAB_RUNNER_WORKLOAD_SCHEMA,
-    };
-
     #[test]
-    fn lab_runner_workload_compiles_into_versioned_execution_envelope() {
-        let workload = LabRunnerWorkload {
-            schema: LAB_RUNNER_WORKLOAD_SCHEMA.to_string(),
-            workload_id: "plan-1.runner_workload".to_string(),
-            kind: LabRunnerWorkloadKind {
-                command_label: "test".to_string(),
-                command_family: LabRunnerWorkloadCommandFamily::Quality,
-            },
-            agent_task: None,
-            notification_route: None,
-            workspace_mappings: LabRunnerWorkloadWorkspaceMappings {
-                source_path_mode: "cwd_or_path_flag".to_string(),
-                workspace_mode_policy: "git".to_string(),
-                mapping_ref: Some("mapping-1".to_string()),
-            },
-            required_capabilities: Vec::new(),
-            required_secrets: LabRunnerWorkloadSecrets {
-                categories: Vec::new(),
-                secret_env_plan: SecretEnvPlan::default(),
-            },
-            required_extensions: Vec::new(),
-            required_extension_revisions: Vec::new(),
-            mutation_policy: LabRunnerWorkloadMutationPolicy {
-                capture_patch: true,
-                mutation_flag: Some("--apply".to_string()),
-                allow_dirty_lab_workspace: false,
-            },
-            assignment: LabRunnerWorkloadAssignment {
-                runner_id: Some("runner-a".to_string()),
-                runner_mode: Some("ssh".to_string()),
-                source: Some("default".to_string()),
-            },
-            state: LabRunnerWorkloadState {
-                status: "assigned".to_string(),
-                remote_workspace: Some("/workspace/project".to_string()),
-                fallback_reason: None,
-            },
-            result_refs: LabRunnerWorkloadResultRefs {
-                plan_id: "plan-1".to_string(),
-                proof_id: Some("proof-1".to_string()),
-                workspace_mapping_ref: Some("mapping-1".to_string()),
-                job_id: Some("job-1".to_string()),
-                mirror_run_id: None,
-                artifacts: vec![JobArtifactMetadata {
-                    id: "artifact-1".to_string(),
-                    name: Some("report".to_string()),
-                    path: Some("artifacts/report.json".to_string()),
-                    url: None,
-                    ..Default::default()
-                }],
-            },
-        };
+    fn opaque_runner_workload_round_trips_without_interpreting_extension_policy() {
+        let workload = json!({
+            "schema": "homeboy/runner-workload/v1",
+            "workload_id": "plan-1.runner_workload",
+            "lab_policy": { "required_extensions": ["example"] }
+        });
+        let mut envelope = RunnerExecutionEnvelope::planned("plan-1", "runner_workload");
+        envelope.runner_workload = Some(workload.clone());
 
-        let envelope = RunnerExecutionEnvelope::from_lab_runner_workload(workload.clone());
         let encoded = serde_json::to_value(&envelope).expect("serialize envelope");
         let decoded: RunnerExecutionEnvelope =
             serde_json::from_value(encoded).expect("decode envelope");
 
         assert_eq!(decoded.schema, RUNNER_EXECUTION_ENVELOPE_SCHEMA);
-        assert_eq!(decoded.lab_runner_workload, Some(workload));
-        assert!(decoded.mutation_policy.capture_patch);
-        assert_eq!(decoded.result_refs.plan_id.as_deref(), Some("plan-1"));
-        assert_eq!(decoded.result_refs.job_id.as_deref(), Some("job-1"));
-        assert_eq!(decoded.result_refs.artifacts.len(), 1);
+        assert_eq!(decoded.runner_workload, Some(workload));
     }
 
     #[test]
@@ -837,7 +762,7 @@ mod tests {
             ),
             PathMaterializationEntry::required_existing_remote("/runner/cache"),
             PathMaterializationEntry::primary_workspace_materialized(
-                PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+                "test.provider_config",
                 Some("".to_string()),
                 "/runner/empty-local",
                 PathMaterializationMode::Snapshot.to_string(),

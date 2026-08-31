@@ -606,7 +606,7 @@ mod provider_config_remap_tests {
     fn remap_provider_config_uses_typed_materialization_plan_projection() {
         let plan = homeboy_core::runner_execution_envelope::PathMaterializationPlan::new(vec![
             homeboy_core::runner_execution_envelope::PathMaterializationEntry::primary_workspace_materialized(
-                homeboy_core::runner_execution_envelope::PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+                homeboy_lab_contract::path_materialization::PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
                 Some("/Users/user/Developer/provider-runtime".to_string()),
                 "/home/user/_lab_workspaces/provider-runtime",
                 "snapshot",

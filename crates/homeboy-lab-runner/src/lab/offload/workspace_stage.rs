@@ -7,9 +7,11 @@ use crate::offload_changed_since::{
     degrade_changed_since_to_full_scope, remove_controller_changed_since_args,
 };
 use homeboy_core::runner_execution_envelope::{
-    PathMaterializationEntry, PathMaterializationPlan,
+    PathMaterializationEntry, PathMaterializationPlan, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+};
+use homeboy_lab_contract::path_materialization::{
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
 };
 use std::path::{Path, PathBuf};
 

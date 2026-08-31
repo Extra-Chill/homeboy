@@ -4,10 +4,10 @@ use crate::{
     RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
 };
 use homeboy_core::runner_execution_envelope::{
-    PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-    PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+    PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
 use homeboy_core::{notification_route::NotificationRoute, observation::RunRecord};
+use homeboy_lab_contract::path_materialization::PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
