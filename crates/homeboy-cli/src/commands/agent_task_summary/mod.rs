@@ -264,6 +264,9 @@ fn render_providers_summary(payload: &Value) -> Option<String> {
 }
 
 fn render_cook_summary(payload: &Value) -> Option<String> {
+    if payload.get("schema").and_then(Value::as_str) == Some("homeboy/agent-task-cook-preview/v1") {
+        return render_cook_preview_summary(payload);
+    }
     let run_id =
         string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["latest_run_id"]))?;
     let raw_state = string_value(payload, &["state"])
@@ -384,6 +387,64 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
     } else {
         lines.push(format!("Next: homeboy agent-task logs {run_id}"));
+    }
+    Some(finish(lines))
+}
+
+fn render_cook_preview_summary(payload: &Value) -> Option<String> {
+    let resolved = payload.get("resolved")?;
+    let placement = resolved
+        .pointer("/placement/requested")
+        .and_then(Value::as_str)?;
+    let provider = resolved
+        .get("provider")
+        .and_then(Value::as_object)
+        .and_then(|provider| {
+            provider.get("backend").and_then(|backend| {
+                backend
+                    .as_str()
+                    .or_else(|| backend.get("state").and_then(Value::as_str))
+            })
+        })
+        .unwrap_or("unresolved");
+    let destination = resolved
+        .pointer("/workspace/path")
+        .and_then(Value::as_str)
+        .or_else(|| resolved.get("worktree").and_then(Value::as_str))
+        .or_else(|| {
+            resolved
+                .pointer("/workspace/action")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("unresolved");
+    let public_gates = resolved
+        .pointer("/gates/public")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let private_gates = resolved
+        .pointer("/gates/private")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let replay = payload
+        .get("replay_argv")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        "Cook preview".to_string(),
+        format!("Placement: {placement}"),
+        format!("Provider: {provider}"),
+        format!("Destination: {destination}"),
+        format!("Gates: {public_gates} public, {private_gates} private"),
+        format!(
+            "Replay: {}",
+            homeboy::core::engine::shell::quote_args(&replay)
+        ),
+    ];
+    if let Some(failure) = payload.pointer("/failure/message").and_then(Value::as_str) {
+        lines.push(format!("Blocked: {failure}"));
     }
     Some(finish(lines))
 }
@@ -966,6 +1027,25 @@ fn finish(lines: Vec<String>) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cook_preview_summary_renders_the_terminal_preview_payload() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": { "requested": "local" },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 2 },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        assert_eq!(
+            render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
+            Some("Cook preview\nPlacement: local\nProvider: fixture\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
+        );
+    }
 
     #[test]
     fn providers_summary_presents_selection_without_calling_it_blocked() {

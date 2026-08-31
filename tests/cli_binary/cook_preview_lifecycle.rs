@@ -45,7 +45,10 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
     let preview = &envelope["data"];
     assert_eq!(preview["schema"], "homeboy/agent-task-cook-preview/v1");
     assert_eq!(preview["mutates"], false);
-    assert_eq!(preview["resolved"]["backend"]["default_policy"], "missing");
+    assert_eq!(
+        preview["resolved"]["provider"]["backend"]["default_policy"],
+        "missing"
+    );
 
     let replay = preview["replay_argv"]
         .as_array()
@@ -55,7 +58,7 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
     assert_eq!(run_id, attempt_run_id);
     assert!(run_id.starts_with("agent-task-"), "{run_id}");
 
-    for choice in preview["resolved"]["backend"]["ready_choices"]
+    for choice in preview["resolved"]["provider"]["backend"]["ready_choices"]
         .as_array()
         .expect("ready backend choices")
     {
