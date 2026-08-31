@@ -488,6 +488,22 @@ fn installer_controller_death_fixture() {
 }
 
 #[cfg(unix)]
+fn wait_for_installer_pid(path: &Path, deadline: Instant) -> u32 {
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                return pid;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "installer fixture did not publish its PID"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn controller_death_cannot_leave_an_installer_to_mutate_after_successor_handoff() {
     let workspace = tempfile::tempdir().expect("workspace");
@@ -509,16 +525,7 @@ fn controller_death_cannot_leave_an_installer_to_mutate_after_successor_handoff(
         .stderr(Stdio::null());
     let mut controller = controller.spawn().expect("spawn controller fixture");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !pid_file.exists() {
-        assert!(Instant::now() < deadline, "installer fixture did not start");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let installer_pid = std::fs::read_to_string(&pid_file)
-        .expect("installer pid")
-        .trim()
-        .parse::<u32>()
-        .expect("numeric installer pid");
+    let installer_pid = wait_for_installer_pid(&pid_file, Instant::now() + Duration::from_secs(5));
     controller.kill().expect("kill old controller");
     controller.wait().expect("reap old controller");
 
@@ -573,11 +580,7 @@ fn controller_death_before_guard_attachment_cannot_start_installer_mutation() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    let installer_pid = std::fs::read_to_string(&pid_file)
-        .expect("installer pid")
-        .trim()
-        .parse::<u32>()
-        .expect("numeric installer pid");
+    let installer_pid = wait_for_installer_pid(&pid_file, deadline);
     controller
         .kill()
         .expect("kill controller before guard attachment");
