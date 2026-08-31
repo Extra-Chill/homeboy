@@ -86,7 +86,8 @@ pub fn build_plan(file: &str, root: &Path, strategy: &str) -> Result<DecomposePl
         "Review projected audit impact before applying".to_string(),
         "Apply grouped extraction in one deterministic pass (homeboy refactor decompose --write)"
             .to_string(),
-        "Run cargo test and homeboy review audit --changed-since origin/main".to_string(),
+        "Run homeboy review test <component> and homeboy review audit --changed-since origin/main"
+            .to_string(),
     ];
 
     Ok(DecomposePlan {

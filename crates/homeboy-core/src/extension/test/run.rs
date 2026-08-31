@@ -57,6 +57,7 @@ pub struct TestRunWorkflowArgs {
     pub restore_checkout: bool,
     pub ci_env: Vec<(String, String)>,
     pub passthrough_args: Vec<String>,
+    pub test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
 }
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
@@ -365,14 +366,10 @@ fn execution_fingerprint(
     )
 }
 
-pub(crate) fn test_timeout() -> Duration {
-    homeboy_engine_primitives::test_execution::suite_timeout_from_env().suite_timeout()
-}
-
 /// Resolve the optional changed-scope selection cap.
 ///
-/// Mirrors `test_timeout()`: the value is read from the process environment
-/// (what a workflow step `env:` block sets and the CLI process inherits),
+/// The value is read from the process environment (what a workflow step `env:`
+/// block sets and the CLI process inherits),
 /// must parse as a positive integer, and unset, unparseable, or zero values
 /// disable the guard entirely. Every existing consumer is therefore
 /// byte-for-byte unaffected when the cap is not configured (#12365).
@@ -1555,8 +1552,7 @@ fn run_main_test_workflow_inner(
     let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
     let no_tests_nonce = uuid::Uuid::new_v4().to_string();
     let write_results_helper = write_test_results_helper(run_dir)?;
-    let test_plan = homeboy_engine_primitives::test_execution::suite_timeout_from_env();
-    let (suite_timeout_env, suite_timeout_value) = test_plan.suite_timeout_env();
+    let (suite_timeout_env, suite_timeout_value) = args.test_execution_plan.suite_timeout_env();
     let inventory_profile = test_context.as_ref().and_then(|_| {
         InventoryProfile::resolve(
             test_config
@@ -1625,7 +1621,7 @@ fn run_main_test_workflow_inner(
                             .env_remove_if(true, "HOMEBOY_CHANGED_SINCE")
                             .env_remove_if(true, "HOMEBOY_CHANGED_TEST_FILES")
                             .passthrough(false)
-                            .timeout(Some(test_timeout()))
+                            .timeout(Some(args.test_execution_plan.suite_timeout()))
                             .run()?;
                         if !output.success {
                             let _ = unlink_test_inventory(&binding);
@@ -1740,7 +1736,7 @@ fn run_main_test_workflow_inner(
         vec![("test runner".to_string(), args.component_label.clone())],
     )?;
     progress.start(0)?;
-    let timeout = test_plan.suite_timeout();
+    let timeout = args.test_execution_plan.suite_timeout();
     homeboy_core::log_status!(
         "test",
         "phase=child command=test runner timeout={}s; streaming bounded child supervision",
@@ -2601,12 +2597,14 @@ pub fn run_self_check_test_workflow(
     source_path: &Path,
     component_label: String,
     json_summary: bool,
+    test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> homeboy_core::Result<TestRunWorkflowResult> {
     run_self_check_test_workflow_with_progress(
         component,
         source_path,
         component_label,
         json_summary,
+        test_execution_plan,
         None,
         None,
     )
@@ -2617,6 +2615,7 @@ pub fn run_self_check_test_workflow_with_progress(
     source_path: &Path,
     component_label: String,
     json_summary: bool,
+    _test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
     run_dir: Option<&RunDir>,
     observation: Option<&homeboy_core::observation::ActiveObservation>,
 ) -> homeboy_core::Result<TestRunWorkflowResult> {
@@ -3076,6 +3075,11 @@ mod tests {
             restore_checkout: false,
             ci_env: Vec::new(),
             passthrough_args: Vec::new(),
+            test_execution_plan:
+                homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                    Duration::from_secs(42),
+                )
+                .expect("positive timeout"),
         }
     }
 
@@ -3263,6 +3267,7 @@ mod tests {
                     restore_checkout: false,
                     ci_env: Vec::new(),
                     passthrough_args: Vec::new(),
+                    test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(Duration::from_secs(42)).expect("positive timeout"),
                 },
                 &run_dir,
             )
@@ -3451,7 +3456,13 @@ mod tests {
             Err(Error::internal_unexpected("fixture setup failed"))
         })
         .expect("setup failure should become a test result");
-        let (output, exit_code) = super::super::report::from_main_workflow(result);
+        let (output, exit_code) = super::super::report::from_main_workflow(
+            result,
+            &homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(42),
+            )
+            .expect("positive timeout"),
+        );
         let json = serde_json::to_value(output).expect("structured output");
 
         assert_eq!(exit_code, 2);
@@ -3503,7 +3514,13 @@ mod tests {
             })
         })
         .expect("test failure should remain a test result");
-        let (output, exit_code) = super::super::report::from_main_workflow(result);
+        let (output, exit_code) = super::super::report::from_main_workflow(
+            result,
+            &homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(42),
+            )
+            .expect("positive timeout"),
+        );
         let json = serde_json::to_value(output).expect("structured output");
 
         assert_eq!(exit_code, 1);
@@ -3574,31 +3591,37 @@ mod tests {
 "#;
         let input = parse_compiler_failures(output, "").expect("compiler finding");
         let findings = homeboy_findings_from_test_analysis_input(&input).expect("findings");
-        let (report, exit_code) = super::super::report::from_main_workflow(TestRunWorkflowResult {
-            status: "failed".to_string(),
-            component: "homeboy".to_string(),
-            exit_code: 101,
-            runner_exit_code: None,
-            test_counts: None,
-            test_inventory: None,
-            test_inventory_rejection: None,
-            test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
-                reason: "compiler failure did not map to an executed test identity".to_string(),
-            }),
-            test_durations: None,
-            findings: Some(findings),
-            failure_analysis_input: Some(input),
-            coverage: None,
-            baseline_comparison: None,
-            analysis: None,
-            autofix: None,
-            hints: None,
-            test_scope: None,
-            summary: None,
-            raw_output: None,
-            extension_phase_timings: Vec::new(),
-            cargo_target: None,
-        });
+        let (report, exit_code) = super::super::report::from_main_workflow(
+            TestRunWorkflowResult {
+                status: "failed".to_string(),
+                component: "homeboy".to_string(),
+                exit_code: 101,
+                runner_exit_code: None,
+                test_counts: None,
+                test_inventory: None,
+                test_inventory_rejection: None,
+                test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
+                    reason: "compiler failure did not map to an executed test identity".to_string(),
+                }),
+                test_durations: None,
+                findings: Some(findings),
+                failure_analysis_input: Some(input),
+                coverage: None,
+                baseline_comparison: None,
+                analysis: None,
+                autofix: None,
+                hints: None,
+                test_scope: None,
+                summary: None,
+                raw_output: None,
+                extension_phase_timings: Vec::new(),
+                cargo_target: None,
+            },
+            &homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(42),
+            )
+            .expect("positive timeout"),
+        );
         let json = serde_json::to_value(report).expect("report json");
 
         assert_eq!(exit_code, 101);
@@ -5897,9 +5920,17 @@ printf 'not json\n'
             deps: Vec::new(),
         });
 
-        let result =
-            run_self_check_test_workflow(&component, dir.path(), "fixture".to_string(), true)
-                .expect("test self-check should run");
+        let result = run_self_check_test_workflow(
+            &component,
+            dir.path(),
+            "fixture".to_string(),
+            true,
+            homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+                Duration::from_secs(42),
+            )
+            .expect("positive timeout"),
+        )
+        .expect("test self-check should run");
 
         assert_eq!(result.status, "passed");
         assert_eq!(result.exit_code, 0);

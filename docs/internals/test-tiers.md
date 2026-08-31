@@ -1,7 +1,7 @@
 # Test Tiers
 
 The commands in this section are the **local** edit-loop tiers. CI does not run
-any of them: the CI gate is `cargo test`, for the reasons in
+any of them: the CI gate is `homeboy review test homeboy`, for the reasons in
 [Process-per-test isolation](#process-per-test-isolation-cargo-nextest). Read
 that section before assuming a local nextest pass predicts a CI pass.
 

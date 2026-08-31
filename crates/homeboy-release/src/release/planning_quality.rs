@@ -2,6 +2,7 @@ use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{ActionSafety, CommandEvidence, Error, ExecutableAction, Result};
 use homeboy_core::extension;
+use homeboy_engine_primitives::test_execution::suite_timeout_from_env;
 use homeboy_extension_contract::runner_contract::GENERIC_INFRASTRUCTURE_FAILURE_MARKERS;
 use homeboy_extension_contract::ExtensionCapability;
 use std::path::Path;
@@ -310,6 +311,7 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
             Path::new(&component.local_path),
             component.id.clone(),
             false,
+            suite_timeout_from_env(),
         )
         .map_err(|e| quality_error("test", format!("Test runner error: {}", e)))?;
 
