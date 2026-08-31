@@ -444,6 +444,135 @@ fn status_omits_scope_for_an_ordinary_non_cook_attempt() {
 }
 
 #[test]
+fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
+    with_isolated_home(|_| {
+        let run_id = "status-unpromoted-recoverable-candidate";
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+        let aggregate = AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    task_id: "candidate-task".to_string(),
+                    status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                    artifacts: vec![AgentTaskArtifact {
+                        id: "patch".to_string(),
+                        kind: "patch".to_string(),
+                        path: Some("/durable/artifacts/patch.diff".to_string()),
+                        size_bytes: Some(17_000),
+                        sha256: Some("a".repeat(64)),
+                        url: Some(format!("homeboy://agent-task/run/{run_id}/artifacts#patch")),
+                        metadata: json!({
+                            "executor_artifact_finalized": true,
+                            "changed_files": ["src/lib.rs"],
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            };
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
+            .expect("persist recoverable aggregate");
+
+        let (value, exit_code) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: true,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+            ..Default::default()
+        })
+        .expect("actual status command");
+        let rendered = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+            &value,
+        )
+        .expect("actual status payload renders");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["state"], "candidate_recoverable");
+        assert_eq!(
+            value["durable_candidate"]["canonical_candidate"]["state"],
+            "patch_available"
+        );
+        assert!(
+            rendered.contains("Status: candidate_recoverable"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Candidate state: patch_available"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Patch candidates: 1 non-empty / 0 empty"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Artifacts: 1"), "{rendered}");
+
+        let report = json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "cook_id": "cook-unpromoted-recoverable-candidate",
+            "latest_run_id": run_id,
+            "status": "candidate_recoverable",
+            "attempts": [{
+                "attempt": 1,
+                "run_id": run_id,
+                "run_state": "candidate_recoverable",
+            }],
+            "selected_candidate": {
+                "run_id": run_id,
+                "selected_task_id": "candidate-task",
+                "selected_artifact_id": "patch",
+            },
+        });
+        let compact = super::super::status::compact_cook_report(report.clone(), false);
+        let full = super::super::status::compact_cook_report(report, true);
+        let render_cook = |payload: &Value| {
+            crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+                payload,
+            )
+            .expect("Cook payload renders")
+        };
+        for summary in [render_cook(&compact), render_cook(&full)] {
+            assert!(
+                summary.contains("Candidate state: patch_available"),
+                "{summary}"
+            );
+            assert!(
+                summary.contains("Patch candidates: 1 non-empty / 0 empty"),
+                "{summary}"
+            );
+            assert!(
+                summary.contains("Retained candidate: task candidate-task, artifact patch"),
+                "{summary}"
+            );
+        }
+        assert_eq!(compact["durable_candidate"]["artifact_count"], 1);
+        let shipped_full = super::super::status::bounded_full_operation_report(full, "cook");
+        let shipped_summary = render_cook(&shipped_full);
+        assert!(
+            shipped_summary.contains("Candidate state: patch_available"),
+            "{shipped_summary}"
+        );
+        assert!(
+            shipped_summary.contains("Retained candidate: task candidate-task, artifact patch"),
+            "{shipped_summary}"
+        );
+        assert!(
+            shipped_summary.contains("Tasks attempted: 1"),
+            "{shipped_summary}"
+        );
+    });
+}
+
+#[test]
 fn canonical_status_omits_unrelated_high_cardinality_cleanup_inventory() {
     with_isolated_home(|_| {
         let run_id = "status-scoped-cleanup";
@@ -3275,6 +3404,75 @@ fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
             .expect("process streams")
             .iter()
             .any(|stream| stream["excerpt"] == "token=[REDACTED]"));
+    });
+}
+
+#[test]
+fn diagnose_ranks_structured_provider_rejection_before_missing_required_outputs() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        let provider_event = json!({
+            "type": "error",
+            "error": {
+                "name": "APIError",
+                "data": {
+                    "message": "Account has insufficient credits for this request",
+                    "statusCode": 403,
+                    "isRetryable": false,
+                }
+            }
+        })
+        .to_string();
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "structured_error": {
+                    "schema": "homeboy/provider-structured-error/v1",
+                    "message": "Account has insufficient credits for this request",
+                    "status_code": 403,
+                    "retryable": false,
+                    "failure_classification": "provider_account_blocked",
+                    "error_name": "APIError",
+                },
+                "diagnostics": [{
+                    "class": "opencode.required_outputs_missing",
+                    "message": "Required outputs were not produced: review_form",
+                    "data": { "stdout": provider_event, "stderr": "" }
+                }]
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-structured-rejection-and-missing-output";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            }),
+        )
+        .expect("failed outcome persisted");
+        let (value, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnosis");
+
+        assert_eq!(value["root_cause"]["class"], "provider.structured_error");
+        assert_eq!(
+            value["root_cause"]["details"]["failure_classification"],
+            "provider_account_blocked"
+        );
+        assert!(value["diagnostic_chain"]
+            .as_array()
+            .expect("diagnostic chain")
+            .iter()
+            .any(|diagnostic| diagnostic["class"] == "opencode.required_outputs_missing"));
+        assert!(!value
+            .to_string()
+            .contains("provider.process_stream\",\"message\":null"));
     });
 }
 

@@ -2314,15 +2314,15 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
     let cook_id = "rooted-read-cook";
     let attempt_run_id = "rooted-read-cook-attempt-1-a";
     let plan = test_plan();
-    seeded
+    let record = seeded
         .submit_plan_with_runtime_admission(&plan, attempt_run_id, |_| Ok(json!({})))
         .expect("submit attempt into the seeded store");
     seeded
         .write_cook_index_attempt(cook_id, 1, attempt_run_id, now_timestamp(), None)
         .expect("register the Cook attempt in the seeded store");
     seeded
-        .write_aggregate(attempt_run_id, &succeeded_aggregate(&plan))
-        .expect("persist the attempt aggregate in the seeded store");
+        .write_aggregate_and_record(&record, &succeeded_aggregate(&plan))
+        .expect("persist the authoritative attempt pair in the seeded store");
     let aggregate_path = seeded.aggregate_path(attempt_run_id);
 
     // Every read answers from the store it was handed.
@@ -3881,10 +3881,6 @@ fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transpo
     assert_eq!(record.metadata["runner_job_status"], "succeeded");
 }
 
-/// Stays on `with_isolated_home` (#7505). `store::interrupt_after_terminal_commit_for_test`
-/// arms a process-global `AtomicBool`, exactly like the record-write fault
-/// above; the hermetic home's global mutex is what stops a peer test from
-/// consuming the injected interruption.
 #[test]
 fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retry_is_idempotent() {
     with_isolated_home(|_| {
@@ -3897,7 +3893,29 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             remote_command: &command,
         })
         .expect("running proxy");
-        let snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        let patch = b"recoverable patch";
+        let patch_sha256 = format!("{:x}", sha2::Sha256::digest(patch));
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.status = AgentTaskAggregateStatus::CandidateRecoverable;
+        aggregate.totals.succeeded = 0;
+        aggregate.totals.candidate_recoverable = 1;
+        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "recoverable.patch".to_string(),
+            kind: "patch".to_string(),
+            url: Some(
+                "homeboy://agent-task/run/agent-task-disconnected-child/artifacts#task=task-a&artifact=recoverable.patch"
+                    .to_string(),
+            ),
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(patch_sha256.clone()),
+            metadata: json!({ "executor_artifact_finalized": true }),
+            ..Default::default()
+        });
+        aggregate.events[0].state = AgentTaskState::CandidateRecoverable;
+        let snapshot = terminal_child_snapshot(&aggregate);
         store::interrupt_after_terminal_commit_for_test();
 
         reconcile_runner_job_snapshot(&mut record, &snapshot)
@@ -3907,8 +3925,25 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             store::read_record("agent-task-disconnected-child")
                 .expect("committed controller projection")
                 .state,
-            AgentTaskRunState::Succeeded
+            AgentTaskRunState::CandidateRecoverable
         );
+        assert!(
+            !store::aggregate_path(&record.run_id)
+                .expect("aggregate path")
+                .exists(),
+            "the injected fault must run before aggregate.json is cached"
+        );
+        let durable = durable_local_read(&record.run_id).expect("committed durable pair");
+        let durable_aggregate = durable.aggregate.expect("mirrored aggregate");
+        assert_eq!(
+            durable_aggregate.status,
+            AgentTaskAggregateStatus::CandidateRecoverable
+        );
+        let durable_patch = &durable_aggregate.outcomes[0].artifacts[0];
+        assert_eq!(durable_patch.id, "recoverable.patch");
+        assert_eq!(durable_patch.size_bytes, Some(patch.len() as u64));
+        assert_eq!(durable_patch.sha256.as_deref(), Some(patch_sha256.as_str()));
+        assert!(durable.unavailable_sources.is_empty());
         let (status_record, log, artifacts) = std::thread::scope(|scope| {
             let status_reader = scope.spawn(|| reconcile_status("agent-task-disconnected-child"));
             let log_reader = scope.spawn(|| logs("agent-task-disconnected-child"));
@@ -3928,15 +3963,59 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
                     .expect("committed artifacts"),
             )
         });
-        assert_eq!(status_record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events[0].data["state"], "succeeded");
-        assert!(artifacts.artifacts.is_empty());
+        assert_eq!(status_record.state, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(log.events[0].data["state"], "candidate_recoverable");
+        assert_eq!(artifacts.artifacts[0].id, "recoverable.patch");
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
-        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(record.state, AgentTaskRunState::CandidateRecoverable);
         assert!(store::aggregate_path(&record.run_id)
             .expect("aggregate path")
             .exists());
+    });
+}
+
+#[test]
+fn terminal_projection_ignores_a_stale_aggregate_cache_after_commit() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-stale-terminal-cache",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let committed_aggregate = succeeded_aggregate(&test_plan());
+        let mut stale_aggregate = committed_aggregate.clone();
+        stale_aggregate.outcomes[0].summary = Some("stale aggregate cache".to_string());
+        store::interrupt_after_terminal_commit_for_test();
+        let mut snapshot = terminal_child_snapshot(&committed_aggregate);
+        snapshot.events[0].data.as_mut().expect("lifecycle event")["identity"]
+            ["persisted_run_id"] = json!(record.run_id);
+        snapshot.events[0].data.as_mut().expect("lifecycle event")["identity"]["run_id"] =
+            json!(record.run_id);
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot)
+            .expect_err("interruption precedes aggregate cache publication");
+        store::write_aggregate(&record.run_id, &stale_aggregate)
+            .expect("replace the missing cache with stale bytes");
+
+        assert_eq!(
+            store::read_aggregate_bounded(&record.run_id)
+                .expect("stale cache remains readable")
+                .outcomes[0]
+                .summary
+                .as_deref(),
+            Some("stale aggregate cache")
+        );
+        let durable = durable_local_read(&record.run_id).expect("committed durable pair");
+        assert_eq!(durable.record.state, AgentTaskRunState::Succeeded);
+        let aggregate = durable.aggregate.expect("mirrored aggregate");
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.outcomes[0].summary.as_deref(), Some("ok"));
+        assert!(durable.unavailable_sources.is_empty());
     });
 }
 

@@ -138,6 +138,7 @@ impl CandidateResult {
 pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
     if let Some(projected) = payload
         .get("canonical_candidate")
+        .or_else(|| payload.pointer("/durable_candidate/canonical_candidate"))
         .and_then(candidate_result_from_projection)
     {
         return projected;

@@ -29,7 +29,7 @@ use super::args::{
     CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs, QuarantineArgs, RearmArgs,
     ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
-use super::candidate::{classify_candidates, CandidateState};
+use super::candidate::{canonical_candidate_projection, classify_candidates, CandidateState};
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
@@ -116,7 +116,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
             "export_command": format!("{evidence_command} --output <path>"),
         }));
     }
-    let output = json!({
+    let mut output = json!({
         "actionable": {
             "operation": operation,
             "terminal_state": bounded_value(&status),
@@ -127,6 +127,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
         "schema": source_schema,
         "presentation": "bounded_operator_projection",
         "run_id": bounded_value(&Value::String(run_id.to_string())),
+        "status": bounded_value(&status),
         "evidence_refs": evidence_refs,
         "output_budget": {
             "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
@@ -135,6 +136,17 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
             "truncated": true,
         },
     });
+    if operation == "cook" {
+        if let Some(candidate) = value.get("durable_candidate") {
+            output["durable_candidate"] = candidate.clone();
+        }
+        if let Some(selected) = value.get("selected_candidate") {
+            output["selected_candidate"] = compact_fields(
+                selected,
+                &["run_id", "selected_task_id", "selected_artifact_id"],
+            );
+        }
+    }
     if serialized_len(&output) <= BOUNDED_FULL_STATUS_BYTE_LIMIT {
         output
     } else {
@@ -271,7 +283,63 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     } else {
         0
     };
-    Ok((serde_json::to_value(run).unwrap_or(Value::Null), exit_code))
+    let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
+    if matches!(
+        value.get("state").and_then(Value::as_str),
+        Some("candidate_recoverable" | "partial_recoverable")
+    ) {
+        value["durable_candidate"] = durable_candidate_projection(&target.run_id);
+        if let Some(selection) = target.selection {
+            value["selected_candidate"] = selection;
+        }
+    }
+    Ok((value, exit_code))
+}
+
+fn durable_candidate_projection(run_id: &str) -> Value {
+    match agent_task_lifecycle::durable_local_read(run_id) {
+        Ok(snapshot) => {
+            let Some(aggregate) = snapshot.aggregate else {
+                return json!({
+                    "status": "unavailable",
+                    "run_id": snapshot.record.run_id,
+                    "reason": bounded_value(&Value::String(snapshot.unavailable_sources.first().map(|source| source.detail.as_str()).unwrap_or("the authoritative observation has no aggregate").to_string())),
+                });
+            };
+            let record = serde_json::to_value(&snapshot.record).unwrap_or(Value::Null);
+            let aggregate_value = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
+            let candidate = classify_candidates(&json!({
+                "record": record,
+                "aggregate": aggregate_value,
+            }));
+            let artifact_count = aggregate
+                .outcomes
+                .iter()
+                .map(|outcome| outcome.artifacts.len())
+                .sum::<usize>();
+            let outcome_count = aggregate.outcomes.len();
+            let provider_execution_count = candidate
+                .provider_executions
+                .map(|count| count.max(outcome_count))
+                .unwrap_or(outcome_count);
+            json!({
+                "status": "available",
+                "run_id": snapshot.record.run_id,
+                "state": snapshot.record.state,
+                "task_count": snapshot.record.tasks.len(),
+                "aggregate_path": snapshot.record.aggregate_path,
+                "outcome_count": outcome_count,
+                "provider_execution_count": provider_execution_count,
+                "artifact_count": artifact_count,
+                "canonical_candidate": canonical_candidate_projection(candidate),
+            })
+        }
+        Err(error) => json!({
+            "status": "unavailable",
+            "run_id": run_id,
+            "reason": bounded_value(&Value::String(error.message)),
+        }),
+    }
 }
 
 fn control_plane_run_requires_action(
@@ -767,14 +835,29 @@ const OPERATOR_HEAVY_COLLECTIONS: &[&str] =
     &["raw_events", "resource_timeline", "cook_resource_timeline"];
 
 pub(crate) fn project_operator_output(value: &mut Value) {
-    project_operator_value(value, false);
+    project_operator_value(value, false, &mut RawFailureBudget::default());
 }
 
-fn project_operator_value(value: &mut Value, evidence_content: bool) {
+const RAW_FAILURE_COUNT_LIMIT: usize = 8;
+const RAW_FAILURE_BYTE_LIMIT: usize = 8 * 1024;
+const RAW_FAILURE_PARSE_BYTE_LIMIT: usize = 32 * 1024;
+const RAW_FAILURE_JSON_DEPTH_LIMIT: usize = 8;
+
+#[derive(Default)]
+struct RawFailureBudget {
+    retained: usize,
+    bytes: usize,
+}
+
+fn project_operator_value(
+    value: &mut Value,
+    evidence_content: bool,
+    failure_budget: &mut RawFailureBudget,
+) {
     match value {
         Value::Array(items) => {
             for item in items {
-                project_operator_value(item, evidence_content);
+                project_operator_value(item, evidence_content, failure_budget);
             }
         }
         Value::Object(fields) => {
@@ -788,14 +871,16 @@ fn project_operator_value(value: &mut Value, evidence_content: bool) {
                 .cloned()
                 .collect::<Vec<_>>();
             for key in collection_keys {
-                project_heavy_collection(fields, &key);
+                project_heavy_collection(fields, &key, failure_budget);
             }
             for (key, item) in fields.iter_mut() {
                 if OPERATOR_HEAVY_FIELDS.contains(&key.as_str())
                     || (evidence_content && key == "body")
                 {
                     if let Value::String(text) = item {
-                        if text.len() > COMPACT_TEXT_LIMIT && !is_bounded_failure_result(text) {
+                        if let Some(redacted) = bounded_failure_result(text, failure_budget) {
+                            *text = redacted;
+                        } else if is_failure_result(text) || text.len() > COMPACT_TEXT_LIMIT {
                             let digest = content_hash::sha256_hex(text.as_bytes());
                             *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
                         }
@@ -805,21 +890,49 @@ fn project_operator_value(value: &mut Value, evidence_content: bool) {
                 if OPERATOR_HEAVY_COLLECTIONS.contains(&key.as_str()) {
                     continue;
                 }
-                project_operator_value(item, hydrated_evidence && key == "content");
+                project_operator_value(item, hydrated_evidence && key == "content", failure_budget);
             }
         }
         _ => {}
     }
 }
 
-fn is_bounded_failure_result(text: &str) -> bool {
-    if text.len() > 8_192 {
-        return false;
+fn bounded_failure_result(text: &str, budget: &mut RawFailureBudget) -> Option<String> {
+    if text.len() > RAW_FAILURE_PARSE_BYTE_LIMIT {
+        return None;
     }
     let Ok(Value::Object(result)) = serde_json::from_str(text) else {
-        return false;
+        return None;
     };
-    let failed = result.get("success").and_then(Value::as_bool) == Some(false)
+    if !failure_result_object(&result) {
+        return None;
+    }
+    let mut redacted =
+        homeboy::core::redaction::RedactionPolicy::default().redact_json(&Value::Object(result));
+    redact_json_encoded_strings(&mut redacted, 0);
+    let serialized = serde_json::to_string(&redacted).ok()?;
+    if budget.retained >= RAW_FAILURE_COUNT_LIMIT
+        || budget.bytes.saturating_add(serialized.len()) > RAW_FAILURE_BYTE_LIMIT
+    {
+        return None;
+    }
+    budget.retained += 1;
+    budget.bytes += serialized.len();
+    Some(serialized)
+}
+
+fn is_failure_result(text: &str) -> bool {
+    if text.len() > RAW_FAILURE_PARSE_BYTE_LIMIT {
+        return false;
+    }
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| value.as_object().map(failure_result_object))
+        .unwrap_or(false)
+}
+
+fn failure_result_object(result: &serde_json::Map<String, Value>) -> bool {
+    result.get("success").and_then(Value::as_bool) == Some(false)
         || result
             .get("status")
             .and_then(Value::as_str)
@@ -828,13 +941,54 @@ fn is_bounded_failure_result(text: &str) -> bool {
                     status.to_ascii_lowercase().as_str(),
                     "blocked" | "error" | "failed" | "failure" | "timed_out" | "timeout"
                 )
-            });
-    failed
+            })
+}
+
+fn redact_json_encoded_strings(value: &mut Value, depth: usize) {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| redact_json_encoded_strings(item, depth + 1)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|item| redact_json_encoded_strings(item, depth + 1)),
+        Value::String(text) => {
+            if text == "[REDACTED]" {
+                return;
+            }
+            let json_shaped = matches!(text.trim_start().as_bytes().first(), Some(b'{' | b'['));
+            if !json_shaped {
+                return;
+            }
+            if depth >= RAW_FAILURE_JSON_DEPTH_LIMIT {
+                *text = "[omitted JSON beyond redaction depth]".to_string();
+                return;
+            }
+            let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+                *text = "[omitted invalid encoded JSON]".to_string();
+                return;
+            };
+            if !matches!(parsed, Value::Array(_) | Value::Object(_)) {
+                return;
+            }
+            let mut parsed =
+                homeboy::core::redaction::RedactionPolicy::default().redact_json(&parsed);
+            redact_json_encoded_strings(&mut parsed, depth + 1);
+            if let Ok(serialized) = serde_json::to_string(&parsed) {
+                *text = serialized;
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
 mod bounded_failure_result_tests {
-    use super::{is_bounded_failure_result, COMPACT_TEXT_LIMIT};
+    use super::{
+        bounded_failure_result, project_operator_output, RawFailureBudget, COMPACT_TEXT_LIMIT,
+        RAW_FAILURE_BYTE_LIMIT, RAW_FAILURE_COUNT_LIMIT, RAW_FAILURE_JSON_DEPTH_LIMIT,
+        RAW_FAILURE_PARSE_BYTE_LIMIT,
+    };
 
     #[test]
     fn retains_code_less_payloads_for_every_liftable_failure_status() {
@@ -852,7 +1006,10 @@ mod bounded_failure_result_tests {
             })
             .to_string();
             assert!(payload.len() > COMPACT_TEXT_LIMIT);
-            assert!(is_bounded_failure_result(&payload), "status={status}");
+            assert!(
+                bounded_failure_result(&payload, &mut RawFailureBudget::default()).is_some(),
+                "status={status}"
+            );
         }
     }
 
@@ -863,13 +1020,128 @@ mod bounded_failure_result_tests {
             "message": "x".repeat(COMPACT_TEXT_LIMIT),
         })
         .to_string();
-        assert!(is_bounded_failure_result(&payload));
+        assert!(bounded_failure_result(&payload, &mut RawFailureBudget::default()).is_some());
+    }
+
+    #[test]
+    fn redacts_nested_and_json_encoded_secrets() {
+        let payload = serde_json::json!({
+            "success": false,
+            "token": "outer-secret",
+            "nested": { "authorization": "Bearer inner-secret" },
+            "encoded": serde_json::json!({ "api_key": "encoded-secret" }).to_string(),
+        })
+        .to_string();
+        let retained = bounded_failure_result(&payload, &mut RawFailureBudget::default()).unwrap();
+        for secret in ["outer-secret", "inner-secret", "encoded-secret"] {
+            assert!(!retained.contains(secret));
+        }
+        assert!(retained.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn omits_json_encoded_content_at_the_recursion_limit() {
+        let mut nested = serde_json::json!({
+            "encoded": serde_json::json!({ "token": "depth-secret" }).to_string(),
+        });
+        for _ in 0..RAW_FAILURE_JSON_DEPTH_LIMIT {
+            nested = serde_json::json!({ "nested": nested });
+        }
+        let payload = serde_json::json!({
+            "status": "failed",
+            "details": nested,
+        })
+        .to_string();
+        let retained = bounded_failure_result(&payload, &mut RawFailureBudget::default()).unwrap();
+
+        assert!(!retained.contains("depth-secret"));
+        assert!(retained.contains("omitted JSON beyond redaction depth"));
+    }
+
+    #[test]
+    fn omits_json_encoded_content_that_exceeds_the_parser_recursion_limit() {
+        let encoded = format!(
+            "{}{{\"token\":\"parser-depth-secret\"}}{}",
+            "[".repeat(256),
+            "]".repeat(256)
+        );
+        let payload = serde_json::json!({
+            "status": "failed",
+            "encoded": encoded,
+        })
+        .to_string();
+        let retained = bounded_failure_result(&payload, &mut RawFailureBudget::default()).unwrap();
+
+        assert!(!retained.contains("parser-depth-secret"));
+        assert!(retained.contains("omitted invalid encoded JSON"));
+    }
+
+    #[test]
+    fn enforces_one_count_and_byte_budget_across_many_payloads() {
+        let payload = serde_json::json!({
+            "status": "failed",
+            "message": "x".repeat(RAW_FAILURE_BYTE_LIMIT / RAW_FAILURE_COUNT_LIMIT),
+        })
+        .to_string();
+        let mut budget = RawFailureBudget::default();
+        let retained = (0..RAW_FAILURE_COUNT_LIMIT * 2)
+            .filter(|_| bounded_failure_result(&payload, &mut budget).is_some())
+            .count();
+        assert!(retained <= RAW_FAILURE_COUNT_LIMIT);
+        assert!(budget.bytes <= RAW_FAILURE_BYTE_LIMIT);
+    }
+
+    #[test]
+    fn omits_oversized_failure_json_before_parsing() {
+        let payload = serde_json::json!({
+            "status": "failed",
+            "message": "x".repeat(RAW_FAILURE_PARSE_BYTE_LIMIT),
+        })
+        .to_string();
+
+        assert!(bounded_failure_result(&payload, &mut RawFailureBudget::default()).is_none());
+    }
+
+    #[test]
+    fn operator_projection_redacts_and_bounds_recursive_failure_payloads_globally() {
+        let original = serde_json::json!({
+            "attempts": (0..RAW_FAILURE_COUNT_LIMIT * 3).map(|index| serde_json::json!({
+                "content": {
+                    "body": serde_json::json!({
+                        "status": "failed",
+                        "token": format!("secret-{index}"),
+                        "message": "x".repeat(700),
+                    }).to_string()
+                },
+                "kind": "executor_result",
+                "uri": format!("file:///tmp/{index}"),
+                "status": "available",
+            })).collect::<Vec<_>>()
+        });
+        let mut projected = original.clone();
+        project_operator_output(&mut projected);
+        let text = projected.to_string();
+
+        assert_eq!(
+            original["attempts"][0]["content"]["body"]
+                .as_str()
+                .is_some(),
+            true
+        );
+        assert!(!text.contains("secret-"));
+        assert!(text.matches("[omitted ").count() >= RAW_FAILURE_COUNT_LIMIT);
+        assert!(text.matches("[REDACTED]").count() <= RAW_FAILURE_COUNT_LIMIT);
+        assert!(text.len() < original.to_string().len());
     }
 }
 
 /// Known event streams retain their array/item schema. The owning evidence
 /// object receives additive metadata describing the omitted durable events.
-fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &str) {
+fn project_heavy_collection(
+    fields: &mut serde_json::Map<String, Value>,
+    key: &str,
+    failure_budget: &mut RawFailureBudget,
+) {
     let projection = {
         let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
             return;
@@ -890,7 +1162,7 @@ fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &s
             })
         });
         for item in items {
-            project_operator_value(item, true);
+            project_operator_value(item, true, failure_budget);
         }
         projection
     };
@@ -4307,14 +4579,16 @@ fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
         0
     } else if is_policy_denial(&class, &text) {
         0
-    } else if is_required_output_diagnostic(&class) {
-        1
     } else if is_provider_structured_error(&class) {
         // The provider's own terminal error event, already normalized by the
         // provider adapter: the most specific execution-layer cause there is.
         1
-    } else if is_provider_contract_diagnostic(&class) {
+    } else if is_required_output_diagnostic(&class) {
+        // Missing required outputs are retained as a consequence, but a typed
+        // provider rejection explains why those outputs were never produced.
         2
+    } else if is_provider_contract_diagnostic(&class) {
+        3
     } else if is_successful_process_exit(&text) {
         // A successful provider process can be useful context, but it cannot
         // explain why the task failed.
@@ -4710,7 +4984,27 @@ fn serialized_len(value: &Value) -> usize {
 /// diagnostic cause. Output only grows on the failure path: `failure_context` is `None`
 /// whenever `exit_code == 0`.
 pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
+    let mut value = value;
+    let recoverable = matches!(
+        value.get("status").and_then(Value::as_str),
+        Some("candidate_recoverable" | "partial_recoverable")
+    );
+    let candidate_run_id = recoverable
+        .then(|| {
+            value
+                .pointer("/selected_candidate/run_id")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("latest_run_id").and_then(Value::as_str))
+                .map(str::to_string)
+        })
+        .flatten();
+    let candidate_projection = candidate_run_id
+        .as_deref()
+        .map(durable_candidate_projection);
     if full {
+        if let Some(candidate) = candidate_projection.as_ref() {
+            value["durable_candidate"] = candidate.clone();
+        }
         return value;
     }
     let attempts = value
@@ -4734,6 +5028,9 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         "finalization": value.get("finalization").map(|finalization| compact_fields(finalization, &["schema", "status", "pr_number", "pr_url", "updated_at", "created_at"])),
         "selected_candidate": value.get("selected_candidate").map(|candidate| compact_fields(candidate, &["latest_attempt_run_id", "run_id", "attempt", "invocation_scoped", "selected_task_id", "selected_artifact_id", "reason", "incomplete", "skipped_newer_attempts", "applied_promotion"])),
     });
+    if let Some(candidate) = candidate_projection {
+        summary["durable_candidate"] = candidate.clone();
+    }
     // The run ids this invocation actually dispatched, so a caller can tell them
     // apart from the cross-invocation history `latest_run_id` may be drawn from.
     if let Some(invocation_run_ids) = value.get("invocation_run_ids") {
@@ -5212,7 +5509,7 @@ fn is_policy_denial(class: &str, text: &str) -> bool {
 }
 
 fn is_required_output_diagnostic(class: &str) -> bool {
-    class.contains("required_output_missing")
+    class.contains("required_output_missing") || class.contains("required_outputs_missing")
 }
 
 fn is_provider_structured_error(class: &str) -> bool {
@@ -6443,6 +6740,8 @@ mod tests {
         assert!(recovery.get("promotion").is_none());
         assert!(recovery.get("passed_gates").is_none());
 
-        assert_eq!(compact_cook_report(report.clone(), true), report);
+        let full = compact_cook_report(report.clone(), true);
+        assert_eq!(full["moving_base_recovery"], report["moving_base_recovery"]);
+        assert_eq!(full["durable_candidate"]["status"], "unavailable");
     }
 }

@@ -3294,7 +3294,7 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
         assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
         assert_eq!(
             snapshot.unavailable_sources[0].reason_code,
-            "durable_read.unavailable"
+            "durable_read.authoritative_aggregate_absent"
         );
         assert_eq!(artifacts.run_id, "runner-backed-durable-read");
         assert_eq!(
@@ -3310,11 +3310,8 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
 /// itself names and read back through the sibling handed the same store, so the
 /// partial-read evidence asserted below is about this home's aggregate file.
 ///
-/// `store::DURABLE_AGGREGATE_MAX_BYTES` is the one surviving `store::` token in
-/// this body. It is a `pub(super)` byte-count constant, not a root resolution —
-/// there is no other path to it — so it reaches no ambient state.
 #[test]
-fn durable_aggregate_read_rejects_an_oversized_file_before_deserializing_it() {
+fn durable_aggregate_read_does_not_pair_a_record_with_an_unmirrored_cache() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -3339,7 +3336,7 @@ fn durable_aggregate_read_rejects_an_oversized_file_before_deserializing_it() {
     assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
     assert_eq!(
         snapshot.unavailable_sources[0].reason_code,
-        "durable_read.oversized"
+        "durable_read.authoritative_aggregate_absent"
     );
 }
 

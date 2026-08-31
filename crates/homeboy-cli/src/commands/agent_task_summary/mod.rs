@@ -268,25 +268,29 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
         string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["latest_run_id"]))?;
     let raw_state = string_value(payload, &["state"])
         .or_else(|| string_value(payload, &["record", "state"]))
+        .or_else(|| string_value(payload, &["status"]))
         .unwrap_or("unknown");
+    let durable_unavailable =
+        string_value(payload, &["durable_candidate", "status"]) == Some("unavailable");
     let tasks_planned = usize_value(payload, &["task_count"])
-        .or_else(|| array_len(payload, &["record", "tasks"]))
-        .unwrap_or(0);
+        .or_else(|| usize_value(payload, &["durable_candidate", "task_count"]))
+        .or_else(|| array_len(payload, &["record", "tasks"]));
     let canonical = classify_candidates(payload);
-    let tasks_attempted = canonical
-        .provider_executions
-        .or_else(|| aggregate_outcome_count(payload))
-        .unwrap_or(0);
+    let tasks_attempted = usize_value(payload, &["durable_candidate", "provider_execution_count"])
+        .or(canonical.provider_executions)
+        .or_else(|| aggregate_outcome_count(payload));
     let aggregate_path = string_value(payload, &["aggregate_path"])
+        .or_else(|| string_value(payload, &["durable_candidate", "aggregate_path"]))
         .or_else(|| string_value(payload, &["record", "aggregate_path"]));
     let metrics = code_production_metrics(payload);
     let state = effective_run_state(
         raw_state,
-        tasks_attempted,
+        tasks_attempted.unwrap_or(0),
         metrics.candidate_state,
         metrics.candidate_scan_degraded,
     );
-    let artifact_count = aggregate_artifact_count(payload);
+    let artifact_count = usize_value(payload, &["durable_candidate", "artifact_count"])
+        .or_else(|| Some(aggregate_artifact_count(payload)).filter(|_| !durable_unavailable));
     let first_artifact = string_value(
         payload,
         &["aggregate", "outcomes", "0", "artifacts", "0", "path"],
@@ -323,19 +327,56 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
             lines.push(format!("Next: {command}"));
         }
     }
+    let unavailable_or_zero = || {
+        if durable_unavailable {
+            "unavailable".to_string()
+        } else {
+            "0".to_string()
+        }
+    };
     lines.extend([
         format!("Run: {run_id}"),
         format!("Status: {state}"),
-        format!("Tasks planned: {tasks_planned}"),
-        format!("Tasks attempted: {tasks_attempted}"),
+        format!(
+            "Tasks planned: {}",
+            tasks_planned
+                .map(|count| count.to_string())
+                .unwrap_or_else(unavailable_or_zero)
+        ),
+        format!(
+            "Tasks attempted: {}",
+            tasks_attempted
+                .map(|count| count.to_string())
+                .unwrap_or_else(unavailable_or_zero)
+        ),
     ]);
-    lines.extend(code_production_lines(&metrics));
+    if durable_unavailable {
+        let reason = string_value(payload, &["durable_candidate", "reason"])
+            .unwrap_or("authoritative candidate evidence could not be read");
+        lines.push(format!("Candidate evidence: unavailable ({reason})"));
+    } else {
+        lines.extend(code_production_lines(&metrics));
+    }
     if let Some(path) = aggregate_path {
         lines.push(format!("Aggregate: {path}"));
     }
-    lines.push(format!("Artifacts: {artifact_count}"));
+    lines.push(format!(
+        "Artifacts: {}",
+        artifact_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(unavailable_or_zero)
+    ));
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
+    }
+    if matches!(raw_state, "candidate_recoverable" | "partial_recoverable") {
+        if let Some(task) = string_value(payload, &["selected_candidate", "selected_task_id"]) {
+            let artifact = string_value(payload, &["selected_candidate", "selected_artifact_id"])
+                .unwrap_or("unknown");
+            lines.push(format!(
+                "Retained candidate: task {task}, artifact {artifact}"
+            ));
+        }
     }
     if primary_failure.is_some() {
         // Its exact action already leads the report.
@@ -348,12 +389,13 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
 }
 
 fn render_status_summary(payload: &Value) -> Option<String> {
-    let run_id = string_value(payload, &["run_id"])?;
+    let run_id = string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["run"]))?;
     let raw_state = string_value(payload, &["state"]).unwrap_or("unknown");
-    let tasks_planned = array_len(payload, &["tasks"]).unwrap_or(0);
+    let tasks_planned = array_len(payload, &["tasks"])
+        .or_else(|| usize_value(payload, &["durable_candidate", "task_count"]));
     let canonical = classify_candidates(payload);
-    let tasks_attempted = canonical
-        .provider_executions
+    let tasks_attempted = usize_value(payload, &["durable_candidate", "provider_execution_count"])
+        .or(canonical.provider_executions)
         .unwrap_or_else(|| status_attempted_task_count(payload));
     let metrics = code_production_metrics(payload);
     let candidate_state = status_scope_candidate(payload).unwrap_or(metrics.candidate_state);
@@ -370,8 +412,11 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         });
     let completion = cook_completion_summary(payload);
     let cook = cook_outcome_summary(payload, state, candidate_state, completion.as_ref());
-    let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
-    let aggregate_path = string_value(payload, &["aggregate_path"]);
+    let artifact_count = array_len(payload, &["artifact_refs"])
+        .or_else(|| array_len(payload, &["artifacts"]))
+        .or_else(|| usize_value(payload, &["durable_candidate", "artifact_count"]));
+    let aggregate_path = string_value(payload, &["aggregate_path"])
+        .or_else(|| string_value(payload, &["durable_candidate", "aggregate_path"]));
 
     let mut lines = vec!["Agent task status".to_string()];
     if let Some(cook) = cook.as_ref() {
@@ -390,10 +435,11 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Status: {state}"));
         lines.push(format!("Run: {run_id}"));
     }
-    lines.extend([
-        format!("Tasks planned: {tasks_planned}"),
-        format!("Tasks attempted: {tasks_attempted}"),
-    ]);
+    lines.push(tasks_planned.map_or_else(
+        || "Tasks planned: unavailable".to_string(),
+        |count| format!("Tasks planned: {count}"),
+    ));
+    lines.push(format!("Tasks attempted: {tasks_attempted}"));
     let mut production_lines = code_production_lines(&metrics);
     if let Some(candidate) = string_value(payload, &["execution_states", "candidate", "state"]) {
         production_lines[1] = format!("Candidate state: {candidate}");
@@ -402,7 +448,10 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
-    lines.push(format!("Artifacts: {artifact_count}"));
+    lines.push(artifact_count.map_or_else(
+        || "Artifacts: unavailable".to_string(),
+        |count| format!("Artifacts: {count}"),
+    ));
     if let Some(cook) = cook {
         lines.push(format!("Next: {}", cook.next_action(run_id)));
     } else if metrics.candidate_state.is_available() {
@@ -718,6 +767,7 @@ fn first_diagnostic_message<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a
 
 fn aggregate_outcome_count(payload: &Value) -> Option<usize> {
     array_len(payload, &["aggregate", "outcomes"])
+        .or_else(|| usize_value(payload, &["durable_candidate", "outcome_count"]))
 }
 
 fn aggregate_artifact_count(payload: &Value) -> usize {
@@ -965,6 +1015,58 @@ mod tests {
         assert!(summary.contains("First artifact: /tmp/patch.diff\n"));
         assert!(summary.contains("Next: homeboy agent-task review homeboy-4345\n"));
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn cook_summary_marks_authoritative_candidate_counts_unavailable() {
+        let payload = json!({
+            "run_id": "candidate-read-unavailable",
+            "status": "candidate_recoverable",
+            "durable_candidate": {
+                "status": "unavailable",
+                "reason": "the authoritative observation has no aggregate"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(
+            summary.contains("Tasks planned: unavailable\n"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Tasks attempted: unavailable\n"),
+            "{summary}"
+        );
+        assert!(summary.contains("Artifacts: unavailable\n"), "{summary}");
+        assert!(summary.contains(
+            "Candidate evidence: unavailable (the authoritative observation has no aggregate)\n"
+        ));
+        assert!(!summary.contains("Candidate state: unknown"), "{summary}");
+    }
+
+    #[test]
+    fn cook_summary_prefers_durable_provider_executions_over_outcomes() {
+        let payload = json!({
+            "run_id": "candidate-after-retries",
+            "status": "candidate_recoverable",
+            "durable_candidate": {
+                "status": "available",
+                "outcome_count": 1,
+                "provider_execution_count": 3,
+                "canonical_candidate": {
+                    "schema": "homeboy/agent-task-candidate/v1",
+                    "state": "patch_available",
+                    "provider_executions": 3,
+                    "counts": { "patch_available": 1 },
+                    "scan": {}
+                }
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Tasks attempted: 3\n"), "{summary}");
     }
 
     #[test]
