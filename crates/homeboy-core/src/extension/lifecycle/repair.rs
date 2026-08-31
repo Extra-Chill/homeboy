@@ -787,6 +787,95 @@ mod tests {
     }
 
     #[test]
+    fn relink_nested_runtime_package_publishes_active_generation() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let new_source = home.join("new-source");
+            let boundary_source = home.join("boundary-source");
+            write_extension_fixture(&old_source, "opencode");
+            write_extension_fixture_with_version(
+                &new_source.join("agent-runtimes"),
+                "opencode",
+                "2.0.0",
+            );
+            write_declared_runtime_shared_assets(&new_source);
+            fs::create_dir_all(&boundary_source).expect("boundary source");
+            write_shared_asset_manifest(&boundary_source, &[]);
+
+            install(
+                &old_source.join("opencode").to_string_lossy(),
+                Some("opencode"),
+            )
+            .expect("install linked extension");
+            crate::runtime_package::refresh_shared_assets(&boundary_source)
+                .expect("activate runtime generation boundary");
+
+            relink(
+                "opencode",
+                &new_source.join("agent-runtimes/opencode").to_string_lossy(),
+            )
+            .expect("relink should publish declared runtime assets");
+
+            assert!(home
+                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .exists());
+            assert_eq!(
+                fs::read_link(home.join(".config/homeboy/extensions/opencode"))
+                    .expect("read replacement link"),
+                new_source.join("agent-runtimes/opencode")
+            );
+        });
+    }
+
+    #[test]
+    fn relink_malformed_runtime_root_preserves_active_generation_and_link() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let new_source = home.join("new-source");
+            let boundary_source = home.join("boundary-source");
+            write_extension_fixture(&old_source, "opencode");
+            write_extension_fixture_with_version(
+                &new_source.join("agent-runtimes"),
+                "opencode",
+                "2.0.0",
+            );
+            fs::write(new_source.join("homeboy-extension-root.json"), "not json")
+                .expect("malformed root manifest");
+            fs::create_dir_all(&boundary_source).expect("boundary source");
+            write_shared_asset_manifest(&boundary_source, &[]);
+
+            install(
+                &old_source.join("opencode").to_string_lossy(),
+                Some("opencode"),
+            )
+            .expect("install linked extension");
+            crate::runtime_package::refresh_shared_assets(&boundary_source)
+                .expect("activate runtime generation boundary");
+            let current = fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
+                .expect("active generation");
+
+            relink(
+                "opencode",
+                &new_source.join("agent-runtimes/opencode").to_string_lossy(),
+            )
+            .expect_err("malformed root manifest should reject relink");
+
+            assert_eq!(
+                fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
+                    .expect("preserved generation"),
+                current
+            );
+            assert_eq!(
+                fs::read_link(home.join(".config/homeboy/extensions/opencode"))
+                    .expect("preserved extension link"),
+                old_source.join("opencode")
+            );
+        });
+    }
+
+    #[test]
     fn replace_from_monorepo_root_with_id_materializes_declared_shared_agent_runtimes() {
         with_isolated_home(|home| {
             let home = home.path();
