@@ -871,7 +871,7 @@ fn project_operator_value(
                 .cloned()
                 .collect::<Vec<_>>();
             for key in collection_keys {
-                project_heavy_collection(fields, &key);
+                project_heavy_collection(fields, &key, failure_budget);
             }
             for (key, item) in fields.iter_mut() {
                 if OPERATOR_HEAVY_FIELDS.contains(&key.as_str())
@@ -1137,7 +1137,11 @@ mod bounded_failure_result_tests {
 
 /// Known event streams retain their array/item schema. The owning evidence
 /// object receives additive metadata describing the omitted durable events.
-fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &str) {
+fn project_heavy_collection(
+    fields: &mut serde_json::Map<String, Value>,
+    key: &str,
+    failure_budget: &mut RawFailureBudget,
+) {
     let projection = {
         let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
             return;
@@ -1158,7 +1162,7 @@ fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &s
             })
         });
         for item in items {
-            project_operator_value(item, true);
+            project_operator_value(item, true, failure_budget);
         }
         projection
     };

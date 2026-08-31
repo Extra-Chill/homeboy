@@ -3893,7 +3893,29 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             remote_command: &command,
         })
         .expect("running proxy");
-        let snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        let patch = b"recoverable patch";
+        let patch_sha256 = format!("{:x}", sha2::Sha256::digest(patch));
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.status = AgentTaskAggregateStatus::CandidateRecoverable;
+        aggregate.totals.succeeded = 0;
+        aggregate.totals.candidate_recoverable = 1;
+        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "recoverable.patch".to_string(),
+            kind: "patch".to_string(),
+            url: Some(
+                "homeboy://agent-task/run/agent-task-disconnected-child/artifacts#task=task-a&artifact=recoverable.patch"
+                    .to_string(),
+            ),
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(patch_sha256.clone()),
+            metadata: json!({ "executor_artifact_finalized": true }),
+            ..Default::default()
+        });
+        aggregate.events[0].state = AgentTaskState::CandidateRecoverable;
+        let snapshot = terminal_child_snapshot(&aggregate);
         store::interrupt_after_terminal_commit_for_test();
 
         reconcile_runner_job_snapshot(&mut record, &snapshot)
@@ -3903,7 +3925,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             store::read_record("agent-task-disconnected-child")
                 .expect("committed controller projection")
                 .state,
-            AgentTaskRunState::Succeeded
+            AgentTaskRunState::CandidateRecoverable
         );
         assert!(
             !store::aggregate_path(&record.run_id)
@@ -3912,10 +3934,15 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             "the injected fault must run before aggregate.json is cached"
         );
         let durable = durable_local_read(&record.run_id).expect("committed durable pair");
+        let durable_aggregate = durable.aggregate.expect("mirrored aggregate");
         assert_eq!(
-            durable.aggregate.expect("mirrored aggregate").status,
-            AgentTaskAggregateStatus::Succeeded
+            durable_aggregate.status,
+            AgentTaskAggregateStatus::CandidateRecoverable
         );
+        let durable_patch = &durable_aggregate.outcomes[0].artifacts[0];
+        assert_eq!(durable_patch.id, "recoverable.patch");
+        assert_eq!(durable_patch.size_bytes, Some(patch.len() as u64));
+        assert_eq!(durable_patch.sha256.as_deref(), Some(patch_sha256.as_str()));
         assert!(durable.unavailable_sources.is_empty());
         let (status_record, log, artifacts) = std::thread::scope(|scope| {
             let status_reader = scope.spawn(|| reconcile_status("agent-task-disconnected-child"));
@@ -3936,12 +3963,12 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
                     .expect("committed artifacts"),
             )
         });
-        assert_eq!(status_record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events[0].data["state"], "succeeded");
-        assert!(artifacts.artifacts.is_empty());
+        assert_eq!(status_record.state, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(log.events[0].data["state"], "candidate_recoverable");
+        assert_eq!(artifacts.artifacts[0].id, "recoverable.patch");
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
-        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(record.state, AgentTaskRunState::CandidateRecoverable);
         assert!(store::aggregate_path(&record.run_id)
             .expect("aggregate path")
             .exists());
