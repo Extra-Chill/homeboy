@@ -22,19 +22,22 @@ pub(crate) use types::{ImportRewrite, ModuleIndexEntry, MoveOptions};
 pub use types::{ItemKind, MoveFileResult, MoveResult, MovedItem};
 pub use whole_file_move::move_file;
 
+use crate::refactor_provider::{
+    invoke_refactor_value, AdjustedItem, ParsedItem, RefactorProvider, RelatedTests,
+    ResolvedImports,
+};
 use extension_integration::find_refactor_extension;
-use homeboy_core::extension;
 
 use std::path::{Path, PathBuf};
 
 use homeboy_core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 use homeboy_core::engine::symbol_graph::module_path_from_file;
 use homeboy_core::Result;
-use homeboy_core::{
-    self,
-    extension::{AdjustedItem, ParsedItem, RelatedTests, ResolvedImports},
-};
-use homeboy_extension_contract::ExtensionManifest;
+use homeboy_core::{self};
+
+fn file_extension(file_path: &str) -> Option<&str> {
+    Path::new(file_path).extension()?.to_str()
+}
 
 impl ItemKind {
     fn from_str(s: &str) -> Self {
@@ -59,7 +62,8 @@ impl ItemKind {
 
 /// Ask an extension to parse all top-level items in a source file.
 pub(crate) fn ext_parse_items(
-    ext: &ExtensionManifest,
+    ext: &RefactorProvider,
+    root: &Path,
     content: &str,
     file_path: &str,
 ) -> Option<Vec<ParsedItem>> {
@@ -68,13 +72,14 @@ pub(crate) fn ext_parse_items(
         "file_path": file_path,
         "content": content,
     });
-    let result = extension::run_refactor_script(ext, &cmd)?;
+    let result = invoke_refactor_value(ext, root, file_extension(file_path)?, cmd)?;
     serde_json::from_value(result.get("items")?.clone()).ok()
 }
 
 /// Ask an extension to resolve imports needed in the destination file.
 fn ext_resolve_imports(
-    ext: &ExtensionManifest,
+    ext: &RefactorProvider,
+    root: &Path,
     moved_items: &[ParsedItem],
     source_content: &str,
     source_path: &str,
@@ -87,13 +92,14 @@ fn ext_resolve_imports(
         "source_path": source_path,
         "dest_path": dest_path,
     });
-    let result = extension::run_refactor_script(ext, &cmd)?;
+    let result = invoke_refactor_value(ext, root, file_extension(source_path)?, cmd)?;
     serde_json::from_value(result).ok()
 }
 
 /// Ask an extension to find test functions related to the moved items.
 fn ext_find_related_tests(
-    ext: &ExtensionManifest,
+    ext: &RefactorProvider,
+    root: &Path,
     item_names: &[&str],
     content: &str,
     file_path: &str,
@@ -104,13 +110,14 @@ fn ext_find_related_tests(
         "content": content,
         "file_path": file_path,
     });
-    let result = extension::run_refactor_script(ext, &cmd)?;
+    let result = invoke_refactor_value(ext, root, file_extension(file_path)?, cmd)?;
     serde_json::from_value(result).ok()
 }
 
 /// Ask an extension to adjust visibility of items for cross-module use.
 fn ext_adjust_visibility(
-    ext: &ExtensionManifest,
+    ext: &RefactorProvider,
+    root: &Path,
     items: &[ParsedItem],
     source_path: &str,
     dest_path: &str,
@@ -121,14 +128,15 @@ fn ext_adjust_visibility(
         "source_path": source_path,
         "dest_path": dest_path,
     });
-    let result = extension::run_refactor_script(ext, &cmd)?;
+    let result = invoke_refactor_value(ext, root, file_extension(source_path)?, cmd)?;
     serde_json::from_value(result.get("items")?.clone()).ok()
 }
 
 /// Ask an extension to rewrite import paths across the codebase after a move.
 /// Returns a list of (file_path, old_line, new_line) replacements.
 fn ext_rewrite_caller_imports(
-    ext: &ExtensionManifest,
+    ext: &RefactorProvider,
+    root: &Path,
     item_names: &[&str],
     source_module_path: &str,
     dest_module_path: &str,
@@ -143,7 +151,7 @@ fn ext_rewrite_caller_imports(
         "file_content": file_content,
         "file_path": file_path,
     });
-    let result = extension::run_refactor_script(ext, &cmd)?;
+    let result = invoke_refactor_value(ext, root, file_extension(file_path)?, cmd)?;
     serde_json::from_value(result.get("rewrites")?.clone()).ok()
 }
 
@@ -153,11 +161,12 @@ fn ext_rewrite_caller_imports(
 /// mod.rs and needs `mod submodule;` declarations plus `pub use submodule::*;`
 /// re-exports so callers can still find the moved items.
 pub(crate) fn ext_generate_module_index(
+    root: &Path,
     file_path: &str,
     submodules: &[ModuleIndexEntry],
     remaining_content: &str,
 ) -> Option<String> {
-    let ext = find_refactor_extension(file_path)?;
+    let ext = find_refactor_extension(root, file_path)?;
     let subs: Vec<serde_json::Value> = submodules
         .iter()
         .map(|sub| {
@@ -172,7 +181,7 @@ pub(crate) fn ext_generate_module_index(
         "submodules": subs,
         "remaining_content": remaining_content,
     });
-    let result = extension::run_refactor_script(&ext, &cmd)?;
+    let result = invoke_refactor_value(&ext, root, file_extension(file_path)?, cmd)?;
     result.get("content")?.as_str().map(|s| s.to_string())
 }
 
@@ -221,7 +230,7 @@ pub(crate) fn move_items_with_options(
     })?;
 
     // Try to find a refactor-capable extension for this file type
-    let ext = find_refactor_extension(from);
+    let ext = find_refactor_extension(root, from);
     let mut warnings: Vec<String> = Vec::new();
 
     // ── Phase 1: Parse items ────────────────────────────────────────────
@@ -232,11 +241,14 @@ pub(crate) fn move_items_with_options(
     // parser, but broad autofix showed that for Rust structural splits the
     // extension parser is currently more trustworthy.
     let all_items: Vec<ParsedItem> = if let Some(ref ext) = ext {
-        ext_parse_items(ext, &content, from).unwrap_or_else(|| {
-            core_parse_items(ext, &content).unwrap_or_else(|| {
-                warnings.push("Extension parse_items failed, using fallback parser".to_string());
-                Vec::new()
-            })
+        ext_parse_items(ext, root, &content, from).unwrap_or_else(|| {
+            file_extension(from)
+                .and_then(|file_extension| core_parse_items(ext, file_extension, &content))
+                .unwrap_or_else(|| {
+                    warnings
+                        .push("Extension parse_items failed, using fallback parser".to_string());
+                    Vec::new()
+                })
         })
     } else {
         warnings.push(
@@ -293,7 +305,7 @@ pub(crate) fn move_items_with_options(
     // ── Phase 2: Find related tests ─────────────────────────────────────
     let related_tests: Vec<ParsedItem> = if options.move_related_tests {
         if let Some(ref ext) = ext {
-            ext_find_related_tests(ext, item_names, &content, from)
+            ext_find_related_tests(ext, root, item_names, &content, from)
                 .map(|rt| {
                     for name in &rt.ambiguous {
                         warnings.push(format!(
@@ -314,7 +326,7 @@ pub(crate) fn move_items_with_options(
     // ── Phase 3: Adjust visibility ──────────────────────────────────────
     let adjusted_items: Vec<(String, bool)> = if let Some(ref ext) = ext {
         let items_to_adjust: Vec<ParsedItem> = found_items.iter().map(|i| (*i).clone()).collect();
-        ext_adjust_visibility(ext, &items_to_adjust, from, to)
+        ext_adjust_visibility(ext, root, &items_to_adjust, from, to)
             .map(|adjusted| {
                 adjusted
                     .into_iter()
@@ -339,7 +351,7 @@ pub(crate) fn move_items_with_options(
         Vec::new()
     } else if let Some(ref ext) = ext {
         let items_for_resolve: Vec<ParsedItem> = found_items.iter().map(|i| (*i).clone()).collect();
-        ext_resolve_imports(ext, &items_for_resolve, &content, from, to)
+        ext_resolve_imports(ext, root, &items_for_resolve, &content, from, to)
             .map(|ri| {
                 for w in &ri.warnings {
                     warnings.push(w.clone());
@@ -566,6 +578,7 @@ pub(crate) fn move_items_with_options(
 
                 if let Some(rewrites) = ext_rewrite_caller_imports(
                     ext,
+                    root,
                     item_names,
                     &source_module,
                     &dest_module,

@@ -10,6 +10,8 @@ pub const COMPILER_WARNINGS_INPUT_SCHEMA: &str = "homeboy/compiler-warnings-inpu
 pub const COMPILER_WARNINGS_OUTPUT_SCHEMA: &str = "homeboy/compiler-warnings-output/v1";
 pub const COMPILER_WARNING_FIXES_INPUT_SCHEMA: &str = "homeboy/compiler-warning-fixes-input/v1";
 pub const COMPILER_WARNING_FIXES_OUTPUT_SCHEMA: &str = "homeboy/compiler-warning-fixes-output/v1";
+pub const REFACTOR_ANALYSIS_INPUT_SCHEMA: &str = "homeboy/refactor-analysis-input/v1";
+pub const REFACTOR_ANALYSIS_OUTPUT_SCHEMA: &str = "homeboy/refactor-analysis-output/v1";
 
 /// Execute one explicitly selected non-mutating capability on the serving host.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,4 +32,20 @@ pub struct ExtensionApiInvokeResponse {
     pub output: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<ExtensionApiOperationFailure>,
+    /// Captured process evidence when capability execution reached a child process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ExtensionApiInvocationProcessEvidence>,
+}
+
+/// Bounded evidence from a synchronous capability process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionApiInvocationProcessEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed_output: Option<serde_json::Value>,
 }

@@ -20,7 +20,8 @@ use homeboy_extension_contract::api::v1::{
     EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA, EXTENSION_API_READINESS_REQUEST_SCHEMA,
     EXTENSION_API_READINESS_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
     EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1, FINGERPRINT_FILE_CAPABILITY_PREFIX,
-    FORMAT_FILE_CAPABILITY_PREFIX, REFACTOR_FILE_CAPABILITY_PREFIX,
+    FORMAT_FILE_CAPABILITY_PREFIX, REFACTOR_ANALYSIS_INPUT_SCHEMA, REFACTOR_ANALYSIS_OUTPUT_SCHEMA,
+    REFACTOR_FILE_CAPABILITY_PREFIX,
 };
 use homeboy_extension_contract::{evaluate_core_compatibility, ExtensionCapability};
 
@@ -125,9 +126,11 @@ fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
                 .provided_file_extensions()
                 .iter()
                 .map(|file_extension| {
-                    capability_descriptor(&format!(
-                        "{REFACTOR_FILE_CAPABILITY_PREFIX}{file_extension}"
-                    ))
+                    schema_capability_descriptor(
+                        &format!("{REFACTOR_FILE_CAPABILITY_PREFIX}{file_extension}"),
+                        REFACTOR_ANALYSIS_INPUT_SCHEMA,
+                        REFACTOR_ANALYSIS_OUTPUT_SCHEMA,
+                    )
                 }),
         );
     }
@@ -797,6 +800,25 @@ mod tests {
                     .as_ref()
                     .map(|schema| schema.schema.as_str()),
                 Some(COMPILER_WARNINGS_OUTPUT_SCHEMA)
+            );
+            let refactor = descriptor
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == "refactor.rs")
+                .expect("refactor capability");
+            assert_eq!(
+                refactor
+                    .input_schema
+                    .as_ref()
+                    .map(|schema| schema.schema.as_str()),
+                Some(REFACTOR_ANALYSIS_INPUT_SCHEMA)
+            );
+            assert_eq!(
+                refactor
+                    .output_schema
+                    .as_ref()
+                    .map(|schema| schema.schema.as_str()),
+                Some(REFACTOR_ANALYSIS_OUTPUT_SCHEMA)
             );
             assert!(descriptor.readiness.runtime_probe);
             assert_eq!(descriptor.readiness.toolchain_probe_ids, ["alpha", "zeta"]);

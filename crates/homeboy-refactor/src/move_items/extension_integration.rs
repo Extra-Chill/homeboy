@@ -2,34 +2,32 @@
 
 use std::path::Path;
 
-use homeboy_core::{self, extension::ParsedItem};
-use homeboy_engine_primitives::grammar::{self, items as grammar_items};
-use homeboy_extension_contract::api::v1::REFACTOR_FILE_CAPABILITY_PREFIX;
-use homeboy_extension_contract::ExtensionManifest;
+use crate::refactor_provider::{find_refactor_provider, RefactorProvider};
 
 /// Find a refactor-capable extension for a file based on its extension.
-pub(crate) fn find_refactor_extension(file_path: &str) -> Option<ExtensionManifest> {
+pub(crate) fn find_refactor_extension(root: &Path, file_path: &str) -> Option<RefactorProvider> {
     let ext = Path::new(file_path).extension().and_then(|e| e.to_str())?;
-    find_refactor_extension_for_extension(ext)
+    find_refactor_extension_for_extension(root, ext)
 }
 
 pub(crate) fn find_refactor_extension_for_extension(
+    root: &Path,
     file_extension: &str,
-) -> Option<ExtensionManifest> {
-    let capability_id = format!("{REFACTOR_FILE_CAPABILITY_PREFIX}{file_extension}");
-    let extension_id =
-        homeboy_core::extension::resolve::find_installed_capability_provider(&capability_id)?;
-    homeboy_core::extension::catalog::load_extension(&extension_id).ok()
+) -> Option<RefactorProvider> {
+    find_refactor_provider(root, file_extension)
 }
 
-/// Try parsing items using the core grammar engine (no extension script needed).
-pub(crate) fn core_parse_items(ext: &ExtensionManifest, content: &str) -> Option<Vec<ParsedItem>> {
-    let ext_path = ext.extension_path.as_deref()?;
-    let file_ext = ext.provided_file_extensions().first()?.clone();
-    let grammar = grammar::load_for_extension_path(Path::new(ext_path), &file_ext)?;
-    let items = grammar_items::parse_items(content, &grammar);
-    if items.is_empty() {
+pub(crate) fn core_parse_items(
+    provider: &RefactorProvider,
+    file_extension: &str,
+    content: &str,
+) -> Option<Vec<crate::refactor_provider::ParsedItem>> {
+    if !provider.handles_file_extension(file_extension) {
         return None;
     }
-    Some(items.into_iter().map(ParsedItem::from).collect())
+    homeboy_core::extension::grammar::parse_items_with_extension_grammar(
+        &provider.extension_id,
+        file_extension,
+        content,
+    )
 }

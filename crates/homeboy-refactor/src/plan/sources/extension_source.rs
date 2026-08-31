@@ -1,6 +1,5 @@
 use crate::auto::{self, FixApplied};
 use homeboy_core::component::Component;
-use homeboy_core::extension;
 use homeboy_core::Error;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -33,7 +32,30 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
     let Some(extension_id) = setting_value(settings, &setting_key) else {
         return Ok(None);
     };
-    let manifest = homeboy_core::extension::catalog::load_extension(extension_id)?;
+    let provider = crate::refactor_provider::refactor_providers()
+        .into_iter()
+        .find(|provider| provider.extension_id == extension_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                setting_key.clone(),
+                format!(
+                    "Extension '{}' does not provide a refactor capability",
+                    extension_id
+                ),
+                None,
+                Some(vec![
+                    "Install an extension that declares refactor.<file-extension> capabilities."
+                        .to_string(),
+                ]),
+            )
+        })?;
+    // Source-level commands are not tied to one file. Any advertised refactor
+    // capability resolves to the provider's shared analysis entrypoint.
+    let file_extension = provider
+        .file_extensions
+        .first()
+        .expect("refactor providers advertise at least one file extension")
+        .clone();
     let command = serde_json::json!({
         "command": "refactor_source",
         "source": source,
@@ -43,31 +65,15 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
         "write": write,
         "settings": settings.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
     });
-    let value = match extension::run_refactor_script_result(&manifest, &command) {
-        Ok(value) => value,
-        Err(failure) if failure.kind == extension::RefactorScriptFailureKind::MissingScript => {
-            return Err(Error::validation_invalid_argument(
-                setting_key.clone(),
-                format!(
-                    "Extension '{}' did not handle refactor source '{}'",
-                    extension_id, source
-                ),
-                None,
-                Some(vec![
-                    "Remove the setting to use Homeboy's built-in refactor source".to_string(),
-                    "Or update the extension refactor script to support command=refactor_source"
-                        .to_string(),
-                ]),
-            ));
-        }
-        Err(failure) => {
-            return Err(extension_refactor_source_failure_error(
-                &setting_key,
-                extension_id,
-                source,
-                failure,
-            ));
-        }
+    let invocation =
+        crate::refactor_provider::invoke_refactor(&provider, root, &file_extension, command);
+    let Some(value) = invocation.output.clone() else {
+        return Err(extension_refactor_source_failure_error(
+            &setting_key,
+            extension_id,
+            source,
+            invocation,
+        ));
     };
     let response_value = unwrap_refactor_source_payload(value);
     let response: ExtensionRefactorSourceResponse = serde_json::from_value(response_value)
@@ -135,32 +141,19 @@ fn extension_refactor_source_failure_error(
     setting_key: &str,
     extension_id: &str,
     source: &str,
-    failure: extension::RefactorScriptFailure,
+    response: homeboy_extension_contract::api::v1::ExtensionApiInvokeResponse,
 ) -> Error {
-    let summary = refactor_script_failure_summary(&failure);
-    let mut message = match failure.kind {
-        extension::RefactorScriptFailureKind::SpawnFailed => format!(
-            "Extension '{}' failed to run refactor source '{}'",
-            extension_id, source
-        ),
-        extension::RefactorScriptFailureKind::NonZeroExit => format!(
-            "Extension '{}' failed refactor source '{}'",
-            extension_id, source
-        ),
-        extension::RefactorScriptFailureKind::InvalidJson => format!(
-            "Extension '{}' returned invalid JSON for refactor source '{}'",
-            extension_id, source
-        ),
-        extension::RefactorScriptFailureKind::MissingScript => format!(
-            "Extension '{}' did not handle refactor source '{}'",
-            extension_id, source
-        ),
-    };
-
-    if let Some(exit_code) = failure.exit_code {
+    let failure = response.failure.expect("failed invocation has failure");
+    let process = response.process;
+    let summary = process.as_ref().and_then(process_failure_summary);
+    let mut message = format!(
+        "Extension '{}' failed refactor source '{}': {}",
+        extension_id, source, failure.message
+    );
+    if let Some(exit_code) = process.as_ref().and_then(|process| process.exit_code) {
         message.push_str(&format!(" (exit code {exit_code})"));
     }
-    if !summary.is_empty() {
+    if let Some(summary) = summary {
         message.push_str(": ");
         message.push_str(&summary);
     }
@@ -173,23 +166,24 @@ fn extension_refactor_source_failure_error(
             "problem": message,
             "extension_id": extension_id,
             "source": source,
-            "failure_kind": format!("{:?}", failure.kind),
-            "exit_code": failure.exit_code,
-            "stdout": failure.stdout,
-            "stderr": failure.stderr,
-            "refactor_source_response": failure.parsed_stdout,
+            "failure_kind": failure.code,
+            "exit_code": process.as_ref().and_then(|process| process.exit_code),
+            "stdout": process.as_ref().map(|process| process.stdout.clone()).unwrap_or_default(),
+            "stderr": process.as_ref().map(|process| process.stderr.clone()).unwrap_or_default(),
+            "refactor_source_response": process.as_ref().and_then(|process| process.parsed_output.clone()),
         }),
     )
 }
 
-fn refactor_script_failure_summary(failure: &extension::RefactorScriptFailure) -> String {
-    failure
-        .parsed_stdout
+fn process_failure_summary(
+    process: &homeboy_extension_contract::api::v1::ExtensionApiInvocationProcessEvidence,
+) -> Option<String> {
+    process
+        .parsed_output
         .as_ref()
         .and_then(refactor_source_failure_message)
-        .or_else(|| trimmed_non_empty(&failure.stderr))
-        .or_else(|| trimmed_non_empty(&failure.stdout))
-        .unwrap_or_default()
+        .or_else(|| trimmed_non_empty(&process.stderr))
+        .or_else(|| trimmed_non_empty(&process.stdout))
 }
 
 fn refactor_source_failure_message(value: &serde_json::Value) -> Option<String> {
@@ -259,7 +253,8 @@ mod tests {
                 "version": "0.0.0",
                 "scripts": {
                     "refactor": "refactor-source.sh"
-                }
+                },
+                "provides": { "file_extensions": ["rs"] }
             })
             .to_string(),
         )
@@ -294,7 +289,8 @@ mod tests {
                 "version": "0.0.0",
                 "scripts": {
                     "refactor": "refactor-source.sh"
-                }
+                },
+                "provides": { "file_extensions": ["rs"] }
             })
             .to_string(),
         )
@@ -423,7 +419,7 @@ mod tests {
             );
             assert_eq!(err.details["extension_id"], "fatal-source");
             assert_eq!(err.details["source"], "audit");
-            assert_eq!(err.details["failure_kind"], "NonZeroExit");
+            assert_eq!(err.details["failure_kind"], "capability_execution_failed");
             assert_eq!(err.details["exit_code"], 7);
             assert_eq!(err.details["stderr"], "extension stderr detail\n");
             assert_eq!(

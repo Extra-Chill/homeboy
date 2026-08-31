@@ -120,13 +120,18 @@ non-mutating capability after resolving it through v1. Requests carry the
 extension ID, capability ID, JSON input, and an explicit working directory.
 Core keeps script paths private, bounds captured output, and accepts only JSON
 stdout. Resolution, process, and output failures use typed operation failure
-codes.
+codes. Process failures optionally include `process` evidence with the exit
+code, bounded stdout and stderr, and parsed stdout when it was valid JSON. The
+optional field is omitted for existing successful invocation responses.
 
-The `compiler-warnings` and `compiler-warning-fixes` capabilities are the first
-adopters. Their descriptors reference versioned input and output schemas; audit
-and refactor consume invocation responses rather than loading manifests or
-running scripts directly. Component-linked providers take precedence when they
-offer the requested capability, with installed providers as the deterministic
+The `compiler-warnings`, `compiler-warning-fixes`, and
+`refactor.<file-extension>` capabilities are adopters. Their descriptors
+reference versioned input and output schemas; audit and refactor consume
+invocation responses rather than loading manifests or running scripts directly.
+Refactor commands remain extension-owned JSON payloads under the shared
+`homeboy/refactor-analysis-input/v1` and `homeboy/refactor-analysis-output/v1`
+schema references. Component-linked providers take precedence when they offer
+the requested capability, with installed providers as the deterministic
 fallback.
 
 This synchronous operation is intentionally limited to analysis. It does not

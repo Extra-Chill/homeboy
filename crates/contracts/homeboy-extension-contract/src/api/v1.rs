@@ -286,6 +286,7 @@ mod tests {
             api_version: EXTENSION_API_V1,
             output: Some(serde_json::json!({ "warnings": [] })),
             failure: None,
+            process: None,
         };
 
         assert_eq!(
