@@ -2062,7 +2062,7 @@ fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_polic
 #[test]
 fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id, options) = run_intentional_no_change_cook(false, "no_change", false);
+        let (result, run_id, options) = run_intentional_no_change_cook(false, "no_change", true);
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.status, "no_candidate");
         assert_eq!(
@@ -2130,7 +2130,7 @@ fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy(
 fn finalizing_patch_cook_accepts_verified_already_satisfied_verdict() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let (result, run_id, options) =
-            run_intentional_no_change_cook(false, "already_satisfied", false);
+            run_intentional_no_change_cook(false, "already_satisfied", true);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.status, "intentional_no_change");
         let persisted = agent_task_lifecycle::exact_record(&run_id).expect("persisted terminal");
