@@ -1854,7 +1854,6 @@
         "structural::tests/core/rig/pipeline_test.rs::GodFile",
         "structural::tests/core/rig/runner_test.rs::HighItemCount",
         "structural::tests/fixtures/audit_runtime/src/god_file.rs::HighItemCount",
-        "structural::tests/release_workflow_test.rs::HighItemCount",
         "test_quality::crates/homeboy-cli/src/commands/runner/tests/redaction.rs::VacuousTest",
         "test_quality::crates/homeboy-core/src/server/client/tests.rs::VacuousTest",
         "test_quality::tests/core/daemon/control_test.rs::VacuousTest",
