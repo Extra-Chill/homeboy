@@ -1819,10 +1819,7 @@ fn run_gate_argv_with_supervision(
         reveal_policy,
         GateExecution {
             runtime_tmpdir,
-            timeout: declared_plan
-                .is_none()
-                .then(|| supervision.map(|supervision| supervision.timeout))
-                .flatten(),
+            timeout: supervision.map(|supervision| supervision.timeout),
             supervision,
             baseline_timeout_diagnostic: false,
         },
@@ -4741,6 +4738,164 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn declared_adapter_fixture(
+        exit_code: i32,
+    ) -> (
+        tempfile::TempDir,
+        homeboy_engine_primitives::test_execution::TestExecutionPlan,
+        AgentTaskGateEnvironmentPolicy,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = workspace.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let homeboy = bin.join("homeboy");
+        std::fs::write(
+            &homeboy,
+            format!(
+                "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test && test \"$3\" = '$HOME' || exit 97\n[ -z \"$HOMEBOY_FAKE_GATE_SLEEP\" ] || sleep \"$HOMEBOY_FAKE_GATE_SLEEP\"\nprintf '%s|%s|%s|%s' \"$1\" \"$2\" \"$3\" \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\nexit {exit_code}\n"
+            ),
+        )
+        .expect("adapter");
+        let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&homeboy, permissions).unwrap();
+        let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "$HOME".to_string(),
+            ],
+            42,
+        )
+        .expect("declared plan");
+        let mut environment = AgentTaskGateEnvironmentPolicy::default();
+        environment
+            .variables
+            .insert("PATH".to_string(), format!("{}:/bin", bin.display()));
+        (workspace, plan, environment)
+    }
+
+    #[cfg(unix)]
+    fn declared_supervision(cancelled: bool, no_progress_timeout: Duration) -> GateSupervision {
+        GateSupervision {
+            timeout: Duration::from_millis(10),
+            no_progress_timeout,
+            heartbeat_interval: Duration::from_millis(5),
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new(|_| Ok(())),
+            is_cancelled: Arc::new(move || cancelled),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_candidate_and_baseline_replay_identical_argv_deadline_and_outcomes() {
+        for (exit_code, outcome) in [
+            (
+                0,
+                homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed,
+            ),
+            (
+                7,
+                homeboy_engine_primitives::test_execution::TestExecutionOutcome::Failed,
+            ),
+        ] {
+            let (workspace, plan, environment) = declared_adapter_fixture(exit_code);
+            let runtime = tempfile::tempdir().expect("runtime");
+            let supervision = declared_supervision(false, Duration::from_secs(1));
+            let candidate = run_declared_test_with_supervision(
+                workspace.path(),
+                1,
+                &plan,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                Some(runtime.path()),
+                Some(&supervision),
+                &environment,
+                &[],
+            )
+            .expect("candidate execution");
+            let baseline = run_declared_test_with_timeout(
+                workspace.path(),
+                1,
+                &plan,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                runtime.path(),
+                &environment,
+                &[],
+            )
+            .expect("baseline execution");
+
+            assert_eq!(candidate.command, plan.declared_command().unwrap());
+            assert_eq!(candidate.command, baseline.command);
+            assert_eq!(candidate.stdout, "review|test|$HOME|42");
+            assert_eq!(candidate.stdout, baseline.stdout);
+            assert_eq!(candidate.test_execution_outcome, Some(outcome));
+            assert_eq!(
+                candidate.test_execution_outcome,
+                baseline.test_execution_outcome
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_supervised_cancellation_retains_its_typed_outcome() {
+        let (workspace, plan, environment) = declared_adapter_fixture(0);
+        let supervision = declared_supervision(true, Duration::from_secs(1));
+        let report = run_declared_test_with_supervision(
+            workspace.path(),
+            1,
+            &plan,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &environment,
+            &[],
+        )
+        .expect("cancelled declared execution");
+
+        assert_eq!(report.termination, AgentTaskGateTermination::Cancelled);
+        assert_eq!(
+            report.test_execution_outcome,
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Cancelled)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_supervised_no_progress_retains_timeout_outcome() {
+        let (workspace, plan, mut environment) = declared_adapter_fixture(0);
+        environment
+            .variables
+            .insert("HOMEBOY_FAKE_GATE_SLEEP".to_string(), "2".to_string());
+        let supervision = declared_supervision(false, Duration::from_millis(20));
+        let report = run_declared_test_with_supervision(
+            workspace.path(),
+            1,
+            &plan,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &environment,
+            &[],
+        )
+        .expect("stalled declared execution");
+
+        assert_eq!(report.termination, AgentTaskGateTermination::NoProgress);
+        assert_eq!(
+            report.test_execution_outcome,
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::TimedOut)
+        );
     }
 
     #[test]
