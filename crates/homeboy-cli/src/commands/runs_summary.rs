@@ -11,13 +11,18 @@
 //! it. The full JSON remains available via `runs show <id> --json` and is
 //! always written to `--output <file>` unchanged.
 
+use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::observation::nested_failure_causes_from_run_detail;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::summary_json::{string_value, value_at};
 
 const PRIMARY_ARTIFACT_LIMIT: usize = 8;
 const RECOVERY_COMMAND_LIMIT: usize = 4;
+const RUN_SHOW_OUTPUT_BYTES: usize = 16 * 1024;
+const COMMAND_ID_BYTES: usize = 512;
+const SUMMARY_LINE_LIMIT: usize = 40;
+const SUMMARY_LINE_BYTES: usize = 256;
 
 /// Render a compact summary for a serialized `RunsOutput` value. Returns
 /// `None` for any variant other than `show`, leaving other `runs`
@@ -28,6 +33,354 @@ pub(crate) fn render_runs_show_summary(payload: &Value) -> Option<String> {
     }
     let run = value_at(payload, &["payload", "run"])?;
     Some(render_run_detail(run))
+}
+
+/// Keep the default command-result data aligned with the compact human view.
+/// Explicit JSON and `--output` continue to use the untouched handler result.
+pub(crate) fn project_runs_show_output(payload: &Value) -> Value {
+    if payload.get("variant").and_then(Value::as_str) != Some("show") {
+        return payload.clone();
+    }
+    let Some(show) = value_at(payload, &["payload"]) else {
+        return payload.clone();
+    };
+    let Some(run) = show.get("run") else {
+        return payload.clone();
+    };
+    let run_id = string_value(run, &["id"]).unwrap_or("<run-id>");
+    let command_run_id = if serde_json::to_vec(&quote_arg(run_id))
+        .is_ok_and(|encoded| encoded.len() <= COMMAND_ID_BYTES)
+    {
+        run_id
+    } else {
+        "<oversized-run-id>"
+    };
+    let quoted_run_id = quote_arg(command_run_id);
+    let artifacts = run
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let artifact_refs = artifacts
+        .iter()
+        .take(super::operator_projection::ITEM_LIMIT)
+        .map(|artifact| {
+            let id = string_value(artifact, &["id"]).unwrap_or("artifact");
+            let command_id = if serde_json::to_vec(&quote_arg(id))
+                .is_ok_and(|encoded| encoded.len() <= COMMAND_ID_BYTES)
+            {
+                id
+            } else {
+                "<oversized-artifact-id>"
+            };
+            let artifact_type = artifact
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            let command = match artifact_type {
+                "file" => Some(format!(
+                    "homeboy runs artifact get {quoted_run_id} {} -o <path>",
+                    quote_arg(command_id)
+                )),
+                "directory" => Some(format!(
+                    "homeboy runs artifact preview {quoted_run_id} {}",
+                    quote_arg(command_id)
+                )),
+                _ => None,
+            };
+            json!({
+                "id": super::operator_projection::text(id),
+                "kind": artifact.get("kind").and_then(Value::as_str).map(super::operator_projection::text),
+                "type": super::operator_projection::text(artifact_type),
+                "size_bytes": artifact.get("size_bytes"),
+                "command": command,
+            })
+        })
+        .collect::<Vec<_>>();
+    let metadata = run.get("metadata").unwrap_or(&Value::Null);
+    let root_cause = nested_failure_causes_from_run_detail(run)
+        .into_iter()
+        .next()
+        .and_then(|cause| serde_json::to_value(cause).ok())
+        .map(|cause| super::operator_projection::value(&cause));
+    let runner_terminal = runner_terminal_projection(metadata);
+    let phase = first_value(
+        metadata,
+        &[
+            "/phase",
+            "/cook_progress/phase",
+            "/runner_execution_record/phase",
+            "/runner_terminal_projection/state",
+        ],
+    )
+    .map(super::operator_projection::value);
+    let mut recovery = Vec::new();
+    collect_recovery_commands(metadata, &mut recovery);
+    recovery.sort();
+    recovery.dedup();
+    let recovery_total = recovery.len();
+    recovery.truncate(RECOVERY_COMMAND_LIMIT);
+    let recovery = recovery
+        .into_iter()
+        .map(|command| super::operator_projection::text(&command))
+        .collect::<Vec<_>>();
+
+    let mut compact_run = json!({
+        "id": run.get("id").map(super::operator_projection::value),
+        "kind": run.get("kind").map(super::operator_projection::value),
+        "status": run.get("status").map(super::operator_projection::value),
+        "started_at": run.get("started_at").map(super::operator_projection::value),
+        "finished_at": run.get("finished_at").map(super::operator_projection::value),
+        "component_id": run.get("component_id").map(super::operator_projection::value),
+        "rig_id": run.get("rig_id").map(super::operator_projection::value),
+        "git_sha": run.get("git_sha").map(super::operator_projection::value),
+        "command": run.get("command").map(super::operator_projection::value),
+        "cwd": run.get("cwd").map(super::operator_projection::value),
+        "status_note": run.get("status_note").map(super::operator_projection::value),
+        "artifact_index": null,
+        "homeboy_version": run.get("homeboy_version").map(super::operator_projection::value),
+        "metadata": {
+            "operator_projection": {
+                "phase": phase,
+                "root_cause": root_cause,
+                "authoritative_runner_terminal_state": runner_terminal,
+                "legal_recovery": recovery,
+                "legal_recovery_total": recovery_total,
+                "artifact_refs": artifact_refs,
+                "artifact_total": artifacts.len(),
+                "detail_refs": {
+                    "full_run": format!("homeboy runs show {quoted_run_id} --format json"),
+                    "evidence": format!("homeboy runs evidence {quoted_run_id}"),
+                    "artifacts": format!("homeboy runs artifacts {quoted_run_id}"),
+                    "export": format!("homeboy runs show {quoted_run_id} --output <path>"),
+                },
+                "omitted": ["handoff", "events", "source_snapshot", "transcript", "runtime_payload"],
+            }
+        },
+        "artifacts": [],
+    });
+    let mut projected = json!({
+        "variant": "show",
+        "payload": {
+            "command": show.get("command"),
+            "run": compact_run,
+            "_homeboy_actionable": {
+                "next_actions": [
+                    { "label": "show full run", "command": format!("homeboy runs show {quoted_run_id} --format json"), "kind": "show" },
+                    { "label": "inspect evidence", "command": format!("homeboy runs evidence {quoted_run_id}"), "kind": "show" },
+                    { "label": "list artifacts", "command": format!("homeboy runs artifacts {quoted_run_id}"), "kind": "artifacts" },
+                ]
+            }
+        }
+    });
+    if super::operator_projection::serialized_len(&projected) > RUN_SHOW_OUTPUT_BYTES {
+        compact_run["metadata"]["operator_projection"]["artifact_refs"] = json!([]);
+        compact_run["metadata"]["operator_projection"]["artifact_refs_omitted"] =
+            json!(artifacts.len());
+        projected["payload"]["run"] = compact_run;
+    }
+    if super::operator_projection::serialized_len(&projected) > RUN_SHOW_OUTPUT_BYTES {
+        let operator = projected["payload"]["run"]["metadata"]["operator_projection"].clone();
+        let runner_terminal = compact_operator_fields(
+            &operator["authoritative_runner_terminal_state"],
+            &["state", "status", "job_id", "classification", "event_count"],
+        );
+        let runner_error = compact_operator_fields(
+            &operator["authoritative_runner_terminal_state"]["error"],
+            &["code", "message"],
+        );
+        let mut runner_terminal = runner_terminal;
+        if !runner_error.is_null() {
+            runner_terminal["error"] = runner_error;
+        }
+        let operator = json!({
+            "phase": compact_operator_scalar(&operator["phase"]),
+            "root_cause": compact_operator_fields(
+                &operator["root_cause"],
+                &["task_id", "class", "code", "status", "message", "source", "owner"],
+            ),
+            "authoritative_runner_terminal_state": runner_terminal,
+            "legal_recovery": operator["legal_recovery"],
+            "legal_recovery_total": operator["legal_recovery_total"],
+            "artifact_refs": [],
+            "artifact_refs_omitted": artifacts.len(),
+            "artifact_total": artifacts.len(),
+            "detail_refs": {
+                "full_run": format!("homeboy runs show {quoted_run_id} --format json"),
+                "evidence": format!("homeboy runs evidence {quoted_run_id}"),
+                "artifacts": format!("homeboy runs artifacts {quoted_run_id}"),
+                "export": format!("homeboy runs show {quoted_run_id} --output <path>"),
+            },
+            "omitted": ["handoff", "events", "source_snapshot", "transcript", "runtime_payload"],
+        });
+        projected = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": super::operator_projection::text(command_run_id),
+                    "kind": compact_required_string(&projected["payload"]["run"]["kind"], "unknown"),
+                    "status": compact_required_string(&projected["payload"]["run"]["status"], "unknown"),
+                    "started_at": compact_required_string(&projected["payload"]["run"]["started_at"], ""),
+                    "finished_at": projected["payload"]["run"]["finished_at"],
+                    "component_id": null,
+                    "rig_id": null,
+                    "git_sha": null,
+                    "command": null,
+                    "cwd": null,
+                    "status_note": null,
+                    "artifact_index": null,
+                    "homeboy_version": null,
+                    "metadata": { "operator_projection": operator },
+                    "artifacts": [],
+                },
+                "_homeboy_actionable": {
+                    "next_actions": [
+                        { "label": "show full run", "command": format!("homeboy runs show {quoted_run_id} --format json"), "kind": "show" },
+                        { "label": "inspect evidence", "command": format!("homeboy runs evidence {quoted_run_id}"), "kind": "show" },
+                    ]
+                }
+            }
+        });
+    }
+    if super::operator_projection::serialized_len(&projected) > RUN_SHOW_OUTPUT_BYTES {
+        let run = &projected["payload"]["run"];
+        let operator = &run["metadata"]["operator_projection"];
+        let mut runner_terminal = compact_operator_fields(
+            &operator["authoritative_runner_terminal_state"],
+            &["state", "status"],
+        );
+        let runner_error = compact_operator_fields(
+            &operator["authoritative_runner_terminal_state"]["error"],
+            &["code", "message"],
+        );
+        if !runner_error.is_null() {
+            runner_terminal["error"] = runner_error;
+        }
+        let legal_recovery = operator["legal_recovery"]
+            .as_array()
+            .and_then(|commands| commands.first())
+            .cloned()
+            .into_iter()
+            .collect::<Vec<_>>();
+        projected = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": compact_required_string(&run["id"], command_run_id),
+                    "kind": compact_required_string(&run["kind"], "unknown"),
+                    "status": compact_required_string(&run["status"], "unknown"),
+                    "started_at": compact_required_string(&run["started_at"], ""),
+                    "finished_at": run["finished_at"],
+                    "component_id": null,
+                    "rig_id": null,
+                    "git_sha": null,
+                    "command": null,
+                    "cwd": null,
+                    "status_note": null,
+                    "artifact_index": null,
+                    "homeboy_version": null,
+                    "metadata": {
+                        "operator_projection": {
+                            "phase": compact_operator_scalar(&operator["phase"]),
+                            "root_cause": compact_operator_fields(
+                                &operator["root_cause"],
+                                &["class", "code", "message"],
+                            ),
+                            "authoritative_runner_terminal_state": runner_terminal,
+                            "legal_recovery": legal_recovery,
+                            "artifact_refs": [],
+                            "artifact_refs_omitted": artifacts.len(),
+                            "artifact_total": artifacts.len(),
+                            "detail_refs": {
+                                "full_run": format!("homeboy runs show {quoted_run_id} --format json"),
+                                "evidence": format!("homeboy runs evidence {quoted_run_id}"),
+                                "export": format!("homeboy runs show {quoted_run_id} --output <path>"),
+                            },
+                        }
+                    },
+                    "artifacts": [],
+                },
+                "_homeboy_actionable": {
+                    "next_actions": [
+                        { "label": "show full run", "command": format!("homeboy runs show {quoted_run_id} --format json"), "kind": "show" },
+                        { "label": "inspect evidence", "command": format!("homeboy runs evidence {quoted_run_id}"), "kind": "show" },
+                    ]
+                }
+            }
+        });
+    }
+    debug_assert!(
+        super::operator_projection::serialized_len(&projected) <= RUN_SHOW_OUTPUT_BYTES,
+        "the minimal runs show operator projection must fit its byte budget"
+    );
+    projected
+}
+
+fn compact_operator_scalar(value: &Value) -> Value {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+        Value::String(value) => Value::String(super::operator_projection::text(value)),
+        _ => Value::Null,
+    }
+}
+
+fn compact_required_string(value: &Value, fallback: &str) -> String {
+    value
+        .as_str()
+        .map(super::operator_projection::text)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn compact_operator_fields(value: &Value, fields: &[&str]) -> Value {
+    let Some(source) = value.as_object() else {
+        return Value::Null;
+    };
+    let fields = fields
+        .iter()
+        .filter_map(|field| {
+            let value = compact_operator_scalar(source.get(*field)?);
+            (!value.is_null()).then(|| ((*field).to_string(), value))
+        })
+        .collect();
+    Value::Object(fields)
+}
+
+fn first_value<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a Value> {
+    pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer))
+        .filter(|value| !value.is_null())
+}
+
+fn runner_terminal_projection(metadata: &Value) -> Option<Value> {
+    if let Some(terminal) = metadata
+        .pointer("/runner_terminal_projection")
+        .and_then(Value::as_object)
+    {
+        return Some(json!({
+            "state": terminal.get("state").map(super::operator_projection::value),
+            "status": terminal.get("status").map(super::operator_projection::value),
+            "job_id": terminal.get("job_id").map(super::operator_projection::value),
+            "classification": terminal.get("classification").map(super::operator_projection::value),
+            "artifact_promotion": terminal.get("artifact_promotion").map(super::operator_projection::value),
+            "event_count": terminal.get("event_count"),
+            "error": terminal.get("error").map(|error| json!({
+                "code": error.get("code").map(super::operator_projection::value),
+                "message": error.get("message").map(super::operator_projection::value),
+            })),
+        }));
+    }
+    first_value(
+        metadata,
+        &[
+            "/runner_execution_record/status",
+            "/runner_job_status",
+            "/lab/remote_job_status",
+        ],
+    )
+    .map(super::operator_projection::value)
 }
 
 /// Render a `runs show -q` / `runs artifact get -q` field projection as plain
@@ -336,7 +689,31 @@ fn detail_reference_lines(run_id: &str) -> Vec<String> {
 }
 
 fn finish(lines: Vec<String>) -> String {
-    let mut output = lines.join("\n");
+    let total = lines.len();
+    let bounded = if total > SUMMARY_LINE_LIMIT {
+        let tail = lines.len().saturating_sub(3);
+        let mut bounded = lines
+            .iter()
+            .take(SUMMARY_LINE_LIMIT - 4)
+            .map(|line| super::operator_projection::text_with_limit(line, SUMMARY_LINE_BYTES))
+            .collect::<Vec<_>>();
+        bounded.push(format!(
+            "[omitted {} summary line(s); use `runs show <run-id> --format json` for full detail]",
+            total - (SUMMARY_LINE_LIMIT - 1)
+        ));
+        bounded.extend(
+            lines[tail..]
+                .iter()
+                .map(|line| super::operator_projection::text_with_limit(line, SUMMARY_LINE_BYTES)),
+        );
+        bounded
+    } else {
+        lines
+            .iter()
+            .map(|line| super::operator_projection::text_with_limit(line, SUMMARY_LINE_BYTES))
+            .collect()
+    };
+    let mut output = bounded.join("\n");
     output.push('\n');
     output
 }
@@ -350,6 +727,180 @@ mod tests {
     fn non_show_variant_returns_none() {
         let payload = json!({ "variant": "list", "payload": { "runs": [] } });
         assert!(render_runs_show_summary(&payload).is_none());
+    }
+
+    #[test]
+    fn default_show_projection_bounds_expanding_runner_payloads_and_keeps_drilldowns() {
+        let event = json!({ "kind": "runner_event", "body": "event".repeat(1024) });
+        let artifact = |index| {
+            json!({
+                "id": format!("artifact-{index}"),
+                "run_id": "runner-run-1",
+                "kind": "runtime_log",
+                "type": "file",
+                "path": format!("/tmp/runner-run-1/artifact-{index}.log"),
+                "metadata": { "transcript": "transcript".repeat(4096) },
+                "created_at": "2026-08-31T00:00:00Z",
+            })
+        };
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "runner-run-1",
+                    "kind": "runner-exec",
+                    "status": "failed",
+                    "started_at": "2026-08-31T00:00:00Z",
+                    "finished_at": "2026-08-31T00:01:00Z",
+                    "metadata": {
+                        "runner_handoff": { "remote_argv": vec!["x".repeat(4096); 100] },
+                        "source_snapshot": { "files": vec!["source".repeat(1024); 100] },
+                        "events": vec![event; 100],
+                        "path_materialization_plan": { "entries": vec!["path".repeat(1024); 100] },
+                        "runner_terminal_projection": {
+                            "state": "terminal_checkpointed",
+                            "status": "failed",
+                            "job_id": "job-1",
+                            "event_count": 100,
+                        },
+                        "failure": {
+                            "status": "failed",
+                            "message": "task worktree has no .git",
+                        },
+                        "retry_command": "homeboy runner retry job-1",
+                    },
+                    "artifacts": (0..100).map(artifact).collect::<Vec<_>>(),
+                },
+                "_homeboy_actionable": { "artifacts": vec!["expanded"; 100] },
+            }
+        });
+
+        let projected = project_runs_show_output(&payload);
+        let operator = &projected["payload"]["run"]["metadata"]["operator_projection"];
+
+        assert!(
+            super::super::operator_projection::serialized_len(&projected) <= RUN_SHOW_OUTPUT_BYTES
+        );
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(projected.clone()),
+            1,
+            "runs",
+            None,
+        );
+        assert!(serde_json::to_vec_pretty(&envelope).unwrap().len() <= 24 * 1024);
+        assert_eq!(operator["phase"], "terminal_checkpointed");
+        assert_eq!(
+            operator["authoritative_runner_terminal_state"]["status"],
+            "failed"
+        );
+        assert_eq!(
+            operator["root_cause"]["message"],
+            "task worktree has no .git"
+        );
+        assert_eq!(operator["legal_recovery"][0], "homeboy runner retry job-1");
+        assert_eq!(operator["artifact_total"], 100);
+        assert_eq!(operator["artifact_refs"].as_array().unwrap().len(), 12);
+        assert_eq!(
+            operator["detail_refs"]["full_run"],
+            "homeboy runs show runner-run-1 --format json"
+        );
+        assert!(projected["payload"]["run"]["artifacts"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        serde_json::from_value::<crate::commands::utils::response::CommandActionableMetadata>(
+            projected["payload"]["_homeboy_actionable"].clone(),
+        )
+        .expect("compact actionable metadata retains its typed contract");
+        assert!(projected.to_string().len() < payload.to_string().len() / 100);
+
+        assert_eq!(
+            payload["payload"]["run"]["artifacts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            100
+        );
+        assert!(payload["payload"]["run"]["metadata"]["source_snapshot"].is_object());
+    }
+
+    #[test]
+    fn show_projection_keeps_required_types_and_valid_directory_commands_at_the_byte_limit() {
+        let scalar = "'\u{0}".repeat(250);
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": scalar,
+                    "kind": "runner-exec",
+                    "status": "failed",
+                    "started_at": "2026-08-31T00:00:00Z",
+                    "finished_at": "2026-08-31T00:01:00Z",
+                    "component_id": "c".repeat(500),
+                    "rig_id": "r".repeat(500),
+                    "git_sha": "g".repeat(500),
+                    "command": "x".repeat(500),
+                    "cwd": "w".repeat(500),
+                    "metadata": {
+                        "phase": "p".repeat(500),
+                        "runner_terminal_projection": {
+                            "state": "s".repeat(500),
+                            "status": "f".repeat(500),
+                            "job_id": "j".repeat(500),
+                            "classification": "c".repeat(500),
+                            "error": { "code": "e".repeat(500), "message": "m".repeat(500) },
+                            "artifact_promotion": (0..12)
+                                .map(|index| (format!("field-{index}"), json!("a".repeat(500))))
+                                .collect::<serde_json::Map<_, _>>(),
+                        },
+                        "failure": { "status": "failed", "message": "root".repeat(125) },
+                        "retry_commands": vec!["retry".repeat(100); 4],
+                    },
+                    "artifacts": [],
+                },
+            },
+        });
+
+        let projected = project_runs_show_output(&payload);
+        let run = &projected["payload"]["run"];
+
+        assert!(
+            super::super::operator_projection::serialized_len(&projected) <= RUN_SHOW_OUTPUT_BYTES
+        );
+        for field in ["id", "kind", "status", "started_at"] {
+            assert!(run[field].is_string(), "{field} remains a required string");
+        }
+        assert_eq!(
+            run["metadata"]["operator_projection"]["detail_refs"]["full_run"],
+            "homeboy runs show '<oversized-run-id>' --format json"
+        );
+
+        let directory = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "run directory",
+                    "kind": "runner-exec",
+                    "status": "succeeded",
+                    "started_at": "2026-08-31T00:00:00Z",
+                    "metadata": {},
+                    "artifacts": [{
+                        "id": "directory's artifact",
+                        "kind": "report",
+                        "type": "directory",
+                    }],
+                },
+            },
+        });
+        let directory = project_runs_show_output(&directory);
+        assert_eq!(
+            directory["payload"]["run"]["metadata"]["operator_projection"]["artifact_refs"][0]
+                ["command"],
+            r#"homeboy runs artifact preview 'run directory' 'directory'\''s artifact'"#
+        );
     }
 
     #[test]
