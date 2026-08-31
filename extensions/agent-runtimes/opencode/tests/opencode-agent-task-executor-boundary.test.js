@@ -851,6 +851,7 @@ process.exit(${attempt.status});
 	assert.equal(missingArtifactResult.failure_code, 'agent_task.opencode_missing_declared_artifacts');
 	assert.match(missingArtifactResult.summary, /opencode-report/);
 	assert.equal(missingArtifactResult.metadata.missing_declared_artifacts[0].name, 'opencode-report');
+	assert.equal(missingArtifactResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
 
 	const workspace = path.join(root, 'workspace');
 	const artifactDir = path.join(root, 'artifacts');
@@ -996,6 +997,9 @@ process.exit(0);
 	assert.equal(missingPathOpenCodeResult.status, 'succeeded');
 	assert.equal(missingPathOpenCodeResult.diagnostics.some((diagnostic) => diagnostic.class === 'agent_task.declared_artifact_invalid_path'), false);
 	assert.equal(missingPathOpenCodeResult.artifacts.some((artifact) => artifact.name === 'missing-path'), false);
+	assert.equal(missingPathOpenCodeResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
+	const missingPathAgentResult = JSON.parse(fs.readFileSync(missingPathOpenCodeResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
+	assert.equal(missingPathAgentResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
 
 	const largePatchCliPath = path.join(root, 'mock-opencode-large-patch.cjs');
 	fs.writeFileSync(largePatchCliPath, `#!/usr/bin/env node
@@ -1106,6 +1110,27 @@ process.exit(0);
 	const quietAgentResult = JSON.parse(fs.readFileSync(quietResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
 	assert.deepEqual(quietAgentResult.artifacts, { patch: false, transcript: false });
 	assert.equal(quietAgentResult.status, 'succeeded');
+	// #2757: output-free Cook plans still need a revision-bound no-change result.
+	const quietNoChange = quietResult.outputs.opencode_run_result.intentional_no_change;
+	assert.equal(quietNoChange.schema, 'homeboy/intentional-no-change/v1');
+	assert.equal(quietNoChange.verdict, 'no_change');
+	assert.match(quietNoChange.inspected_revision, /^[0-9a-f]{40}$/);
+	assert.deepEqual(quietAgentResult.outputs.opencode_run_result.intentional_no_change, quietNoChange);
+	const failedNoChangeCliPath = path.join(root, 'mock-opencode-failed-no-change.cjs');
+	fs.writeFileSync(failedNoChangeCliPath, '#!/usr/bin/env node\nprocess.exit(1);\n');
+	const failedNoChangeResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-failed-no-change',
+		workspace_path: quietWorkspace,
+		artifacts_path: path.join(root, 'failed-no-change-artifacts'),
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [failedNoChangeCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(failedNoChangeResult.status, 'failed');
+	const failedNoChangeAgentResult = JSON.parse(fs.readFileSync(failedNoChangeResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
+	assert.equal(failedNoChangeAgentResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
 
 	const blockedArtifactPath = path.join(root, 'artifact-root-is-a-file');
 	fs.mkdirSync(blockedArtifactPath);
@@ -1134,6 +1159,41 @@ process.exit(0);
 	assert.equal(captureFailureResult.failure_code, 'agent_task.opencode_artifact_capture_failed');
 	assert.equal(captureFailureResult.metadata.artifact_capture_errors.length, 3);
 	assert.equal(captureFailureResult.diagnostics.some((diagnostic) => diagnostic.class === 'opencode.artifact_capture_failed'), true);
+	assert.equal(captureFailureResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
+	const patchFailureWorkspace = path.join(root, 'patch-failure-workspace');
+	fs.mkdirSync(patchFailureWorkspace);
+	spawnSync('git', ['init'], { cwd: patchFailureWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '--allow-empty', '-m', 'initial'], {
+		cwd: patchFailureWorkspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
+	const patchFailureCliPath = path.join(root, 'mock-opencode-break-git.cjs');
+	fs.writeFileSync(patchFailureCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.renameSync('.git', '.git-hidden');
+process.exit(0);
+`);
+	const patchFailureResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-patch-capture-failure',
+		workspace_path: patchFailureWorkspace,
+		artifacts_path: path.join(root, 'patch-failure-artifacts'),
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [patchFailureCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(patchFailureResult.status, 'provider_error');
+	assert.equal(patchFailureResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
+	const patchFailureAgentResult = JSON.parse(fs.readFileSync(patchFailureResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
+	assert.equal(patchFailureAgentResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
 
 	const deniedWorkspace = path.join(root, 'denied-workspace');
 	const deniedArtifactDir = path.join(root, 'denied-artifacts');
@@ -1197,6 +1257,8 @@ process.exit(0);
 	const recoveredAgentResult = JSON.parse(fs.readFileSync(recoveredResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
 	assert.equal(recoveredAgentResult.status, 'succeeded');
 	assert.equal(recoveredAgentResult.failure_classification, undefined);
+	assert.equal(recoveredResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
+	assert.equal(recoveredAgentResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
 
 	const deniedCliPath = path.join(root, 'mock-opencode-policy-denied.cjs');
 	fs.writeFileSync(deniedCliPath, `#!/usr/bin/env node
@@ -1265,6 +1327,9 @@ process.exit(1);
 	assert.equal(deniedZeroResult.status, 'failed');
 	assert.equal(deniedZeroResult.failure_classification, 'policy_denied');
 	assert.equal(deniedZeroResult.retryable, false);
+	assert.equal(deniedZeroResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
+	const deniedZeroAgentResult = JSON.parse(fs.readFileSync(deniedZeroResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
+	assert.equal(deniedZeroAgentResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
 
 	const inheritedPipeCliPath = path.join(root, 'mock-opencode-inherited-pipe.cjs');
 	fs.writeFileSync(inheritedPipeCliPath, `#!/usr/bin/env node

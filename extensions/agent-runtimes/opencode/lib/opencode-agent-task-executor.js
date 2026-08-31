@@ -542,19 +542,44 @@ function findArtifact(artifacts, declaration) {
 	});
 }
 
+function intentionalNoChangeDeclaration(context, structured, emptyPatch, captureErrors = []) {
+	const generatedArtifacts = new Set(['patch', 'transcript', 'agent_result']);
+	const malformedRequiredArtifact = arrayValue(
+		context.request.artifact_declarations || context.request.executor?.artifact_declarations
+	).some((artifact) => artifact?.required === true && (typeof artifact.path !== 'string' || artifact.path === ''));
+	const artifactContractSupported = declaredArtifactRequirements(context.request)
+		.every((artifact) => generatedArtifacts.has(artifact.name));
+	if (
+		!emptyPatch
+		|| context.spawnResult?.status !== 0
+		|| captureErrors.length > 0
+		|| (structured.missingRequiredOutputs || []).length > 0
+		|| !context.initialRevision?.revision
+		|| observedOpenCodePolicyDenial(context)
+		|| malformedRequiredArtifact
+		|| !artifactContractSupported
+	) {
+		return null;
+	}
+	return {
+		schema: 'homeboy/intentional-no-change/v1',
+		verdict: 'no_change',
+		inspected_revision: context.initialRevision.revision,
+	};
+}
+
 function opencodeSuccessOutcome(context) {
 	const structured = structuredOpenCodeOutputs(context);
 	const evidence = collectOpenCodeArtifacts(context, structured);
 	const session = sessionMetadata(context);
 	const emptyPatch = evidence.artifacts?.some((artifact) => artifact.name === 'patch' && artifact.bytes === 0);
 	const missingRequiredOutputs = structured.missingRequiredOutputs || [];
-	const intentionalNoChange = structured.outputs && missingRequiredOutputs.length === 0 && emptyPatch && context.initialRevision?.revision
-		? {
-			schema: 'homeboy/intentional-no-change/v1',
-			verdict: 'no_change',
-			inspected_revision: context.initialRevision.revision,
-		}
-		: null;
+	const intentionalNoChange = intentionalNoChangeDeclaration(
+		context,
+		structured,
+		emptyPatch,
+		evidence.artifact_capture_errors
+	);
 	return withPolicyDeniedOutcome(context, {
 		status: missingRequiredOutputs.length > 0 ? 'failed' : 'succeeded',
 		...(missingRequiredOutputs.length > 0 ? {
@@ -780,15 +805,28 @@ function deniedToolCallSummary(denial = {}) {
 }
 
 function detectOpenCodePolicyDenial(context = {}) {
+	const denial = observedOpenCodePolicyDenial(context);
+	if (!denial) {
+		return null;
+	}
+	const spawnResult = context.spawnResult || {};
+	const text = redactKnownSecrets([
+		spawnResult.stdout,
+		spawnResult.stderr,
+	].filter(Boolean).join('\n'), context.spawnExtra?.env);
+	if (spawnResult.status === 0 && openCodeCompletedAfterPolicyDenial(text)) {
+		return null;
+	}
+	return denial;
+}
+
+function observedOpenCodePolicyDenial(context = {}) {
 	const spawnResult = context.spawnResult || {};
 	const text = redactKnownSecrets([
 		spawnResult.stdout,
 		spawnResult.stderr,
 	].filter(Boolean).join('\n'), context.spawnExtra?.env);
 	if (!OPENCODE_PERMISSION_DENIED_PATTERN.test(text)) {
-		return null;
-	}
-	if (spawnResult.status === 0 && openCodeCompletedAfterPolicyDenial(text)) {
 		return null;
 	}
 	return sanitizeDeniedToolCall(extractDeniedToolCall(text));
@@ -945,51 +983,9 @@ function collectOpenCodeArtifacts(context = {}, structured = {}) {
 	const patch = patchCapture.content;
 	const policyDenial = detectOpenCodePolicyDenial(context);
 	const missingRequiredOutputs = structured.missingRequiredOutputs || [];
-	const intentionalNoChange = structured.outputs && missingRequiredOutputs.length === 0 && patch === '' && context.initialRevision?.revision
-		? {
-			schema: 'homeboy/intentional-no-change/v1',
-			verdict: 'no_change',
-			inspected_revision: context.initialRevision.revision,
-		}
-		: null;
 	const resultStatus = policyDenial
 		? 'failed'
 		: (spawnResult.status === 0 && missingRequiredOutputs.length === 0 ? 'succeeded' : 'failed');
-	const resultEnvelope = JSON.stringify({
-		schema: 'homeboy/opencode-agent-result/v1',
-		task_id: request.task_id,
-		status: resultStatus,
-		...(policyDenial ? {
-			failure_classification: 'policy_denied',
-			failure_code: 'agent_task.opencode_policy_denied',
-			denied_tool_call: policyDenial,
-		} : {}),
-		...(!policyDenial && missingRequiredOutputs.length > 0 ? {
-			failure_classification: 'provider',
-			failure_code: 'agent_task.opencode_required_outputs_missing',
-		} : {}),
-		...(intentionalNoChange ? { intentional_no_change: intentionalNoChange } : {}),
-		exit_code: spawnResult.status,
-		command: context.commandSpec?.command,
-		args: Array.isArray(context.commandSpec?.args) ? context.commandSpec.args : [],
-		artifacts: {
-			patch: patch !== '',
-			transcript: transcript !== '',
-		},
-		...(structured.outputs || intentionalNoChange ? {
-			outputs: {
-				...(structured.outputs || {}),
-				...(intentionalNoChange ? {
-					opencode_run_result: {
-						status: 'succeeded',
-						intentional_no_change: intentionalNoChange,
-					},
-				} : {}),
-			},
-		} : {}),
-		opencode_session: sessionMetadata(context),
-		opencode_progress: progressMetadata(context),
-	}, null, 2);
 
 	for (const requirement of requirements) {
 		if (requirement.name === 'patch') {
@@ -997,6 +993,39 @@ function collectOpenCodeArtifacts(context = {}, structured = {}) {
 		} else if (requirement.name === 'transcript') {
 			addArtifact(requirement, `${safeFileSegment(request.task_id)}-opencode-transcript.txt`, transcript, 'agent-runtime-transcript');
 		} else if (requirement.name === 'agent_result') {
+			const intentionalNoChange = intentionalNoChangeDeclaration(context, structured, patch === '', captureErrors);
+			const resultEnvelope = JSON.stringify({
+				schema: 'homeboy/opencode-agent-result/v1',
+				task_id: request.task_id,
+				status: resultStatus,
+				...(policyDenial ? {
+					failure_classification: 'policy_denied',
+					failure_code: 'agent_task.opencode_policy_denied',
+					denied_tool_call: policyDenial,
+				} : {}),
+				...(!policyDenial && missingRequiredOutputs.length > 0 ? {
+					failure_classification: 'provider',
+					failure_code: 'agent_task.opencode_required_outputs_missing',
+				} : {}),
+				...(intentionalNoChange ? { intentional_no_change: intentionalNoChange } : {}),
+				exit_code: spawnResult.status,
+				command: context.commandSpec?.command,
+				args: Array.isArray(context.commandSpec?.args) ? context.commandSpec.args : [],
+				artifacts: { patch: patch !== '', transcript: transcript !== '' },
+				...(structured.outputs || intentionalNoChange ? {
+					outputs: {
+						...(structured.outputs || {}),
+						...(intentionalNoChange ? {
+							opencode_run_result: {
+								status: 'succeeded',
+								intentional_no_change: intentionalNoChange,
+							},
+						} : {}),
+					},
+				} : {}),
+				opencode_session: sessionMetadata(context),
+				opencode_progress: progressMetadata(context),
+			}, null, 2);
 			addArtifact(requirement, `${safeFileSegment(request.task_id)}-opencode-result.json`, `${resultEnvelope}\n`, 'json');
 		} else if (requirement.name === 'progress_events') {
 			const progressPath = context.progressEventPath;
