@@ -13,7 +13,7 @@ mod signatures;
 
 use crate::auto::{DecomposeFixPlan, Fix, FixPolicy, FixResult, SkippedFile};
 use crate::decompose;
-use crate::plan::file_intent::{FileIntent, FileIntentMap};
+use crate::plan::file_intent::DecomposeConflictMap;
 use homeboy_code_audit::{fingerprint::FileFingerprint, AuditFinding, CodeAuditResult};
 use std::path::Path;
 
@@ -99,13 +99,8 @@ pub(crate) fn generate_fixes_impl(
             && !policy.exclude.contains(finding)
     };
 
-    // ── Phase 0: Build file intent map ─────────────────────────────────
-    // Identify structural operations (decompose, move, delete) planned for
-    // each file BEFORE generating content fixes. After all fixes are
-    // generated, resolve_conflicts() drops content fixes that would
-    // conflict with structural intents — replacing ad-hoc skip sets with
-    // declarative conflict rules.
-    let mut intent_map = FileIntentMap::new();
+    // Identify files that will be decomposed before generating content fixes.
+    let mut conflict_map = DecomposeConflictMap::new();
     for finding in &result.findings {
         if !finding_enabled(&finding.kind) {
             continue;
@@ -115,7 +110,7 @@ pub(crate) fn generate_fixes_impl(
             AuditFinding::GodFile | AuditFinding::HighItemCount
         ) && !homeboy_code_audit::walker::is_test_path(&finding.file)
         {
-            intent_map.set(finding.file.clone(), FileIntent::Decompose);
+            conflict_map.mark_decompose(finding.file.clone());
         }
     }
 
@@ -235,13 +230,11 @@ pub(crate) fn generate_fixes_impl(
     let mut fixes = merge_fixes_per_file(fixes);
 
     // ── Phase 4: Resolve cross-fixer conflicts ─────────────────────────
-    // Drop content fixes that conflict with structural intents. This is
-    // the central conflict resolution — no individual fixer needs to know
-    // about other fixers' existence.
-    let dropped = intent_map.resolve_conflicts(&mut fixes);
+    // Drop content fixes that conflict with planned decompositions.
+    let dropped = conflict_map.resolve_conflicts(&mut fixes);
     if dropped > 0 {
         eprintln!(
-            "FileIntent conflict resolution: dropped {} dominated insertions",
+            "Decompose conflict resolution: dropped {} dominated insertions",
             dropped
         );
     }
