@@ -862,7 +862,7 @@ Submit a batch of independent cooks and print the exact per-cook commands for ru
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`); `submit-batch` and `run-plan` expect an `AgentTaskPlan` JSON spec |
+| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan`, `submit`, and `run-plan` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-fanout-plan/v1`); `run-plan` may carry independent repository cells. `submit-batch` expects an `AgentTaskPlan` JSON spec |
 | `--fanout-id` | `<ID>` | Stable identity recorded for the submitted batch. Omit to keep the identity already carried by the plan |
 | `--backend` | `<BACKEND>` | Executor backend override applied to the loaded plan's cooks |
 | `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
@@ -881,7 +881,7 @@ Provider-neutral by design: drive execution with `agent-task run-next` or an exi
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`); `submit-batch` and `run-plan` expect an `AgentTaskPlan` JSON spec |
+| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan`, `submit`, and `run-plan` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-fanout-plan/v1`); `run-plan` may carry independent repository cells. `submit-batch` expects an `AgentTaskPlan` JSON spec |
 | `--fanout-id` | `<ID>` | Stable identity recorded for the submitted batch. Omit to keep the identity already carried by the plan |
 | `--backend` | `<BACKEND>` | Executor backend override applied to the loaded plan's cooks |
 | `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
@@ -936,7 +936,7 @@ Successful child cooks open or update their own pull requests.
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`); `submit-batch` and `run-plan` expect an `AgentTaskPlan` JSON spec |
+| `--input` | `<SPEC>` | Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan`, `submit`, and `run-plan` expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-fanout-plan/v1`); `run-plan` may carry independent repository cells. `submit-batch` expects an `AgentTaskPlan` JSON spec |
 | `--fanout-id` | `<ID>` | Stable identity recorded for the submitted batch. Omit to keep the identity already carried by the plan |
 | `--backend` | `<BACKEND>` | Executor backend override applied to the loaded plan's cooks |
 | `--selector` | `<PROVIDER_ID>` | Executor provider ID selecting which installed provider serves the backend. Only needed when one backend is served by multiple providers |
