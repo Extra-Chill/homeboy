@@ -895,20 +895,38 @@ fn create_evidence(
 
 pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
     let mut worktrees = Vec::new();
+    let mut diagnostics = Vec::new();
     if !store_dir.exists() {
-        return Ok(WorktreeListOutput { worktrees });
+        return Ok(WorktreeListOutput {
+            worktrees,
+            diagnostics,
+        });
     }
-    for entry in fs::read_dir(store_dir)
+    let mut entries: Vec<_> = fs::read_dir(store_dir)
         .map_err(|err| Error::internal_io(err.to_string(), Some(store_dir.display().to_string())))?
-    {
-        let entry = entry.map_err(|err| Error::internal_io(err.to_string(), None))?;
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        worktrees.push(read_record_path(&entry.path())?);
+        match read_record_path(&entry.path()) {
+            Ok(record) => worktrees.push(record),
+            Err(error) => diagnostics.push(WorktreeListDiagnostic::from_error(
+                error,
+                None,
+                Some(entry.path().display().to_string()),
+            )),
+        }
     }
     worktrees.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(WorktreeListOutput { worktrees })
+    Ok(WorktreeListOutput {
+        worktrees,
+        diagnostics,
+    })
 }
 
 pub(super) fn inventory_with_store_and_authority(

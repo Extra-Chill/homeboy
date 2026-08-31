@@ -1,5 +1,5 @@
 use crate::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
-use crate::Result;
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -404,6 +404,37 @@ pub struct WorktreeAdoptOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeListOutput {
     pub worktrees: Vec<TaskWorktreeRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<WorktreeListDiagnostic>,
+}
+
+/// A record-scoped failure retained by `worktree list` while unaffected records
+/// remain available to operators.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeListDiagnostic {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_path: Option<String>,
+    pub details: serde_json::Value,
+}
+
+impl WorktreeListDiagnostic {
+    pub(crate) fn from_error(
+        error: Error,
+        record_id: Option<String>,
+        record_path: Option<String>,
+    ) -> Self {
+        Self {
+            code: error.code.as_str().to_string(),
+            message: error.message,
+            record_id,
+            record_path,
+            details: error.details,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

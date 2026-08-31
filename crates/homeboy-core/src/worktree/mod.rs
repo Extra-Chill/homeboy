@@ -31,13 +31,13 @@ pub use types::{
     WorktreeImportOptions, WorktreeImportOutput, WorktreeInventoryApplyRefusal,
     WorktreeInventoryAuthorization, WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence,
     WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeInventoryRecord,
-    WorktreeLeaseActivity, WorktreeListOutput, WorktreeLivenessAuthority, WorktreeOwnershipProbe,
-    WorktreeQueueCreateFailure, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
-    WorktreeQueueCreateRequest, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
-    WorktreeQueueLockHolder, WorktreeReconciliationAction, WorktreeReconciliationAuthority,
-    WorktreeReconciliationResult, WorktreeRemoveOptions, WorktreeRemoveOutput,
-    WorktreeSafetyReport, WorktreeStatusOutput, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
-    TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+    WorktreeLeaseActivity, WorktreeListDiagnostic, WorktreeListOutput, WorktreeLivenessAuthority,
+    WorktreeOwnershipProbe, WorktreeQueueCreateFailure, WorktreeQueueCreateOptions,
+    WorktreeQueueCreateOutput, WorktreeQueueCreateRequest, WorktreeQueueCreateRow,
+    WorktreeQueueCreateStatus, WorktreeQueueLockHolder, WorktreeReconciliationAction,
+    WorktreeReconciliationAuthority, WorktreeReconciliationResult, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
+    TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
 /// The managed handle a repo and branch pair resolves to. Creation slugifies the

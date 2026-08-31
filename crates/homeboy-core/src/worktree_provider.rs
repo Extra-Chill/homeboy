@@ -562,69 +562,92 @@ impl WorktreeInventoryProvider for NativeWorktreeProvider {
         worktree::list_workspace_refs()?
             .into_iter()
             .filter(|record| record.state() == &worktree::TaskWorktreeState::Active)
-            .map(|record| {
-                let (
-                    kind,
-                    branch,
-                    task_url,
-                    repository,
-                    owner_run_ref,
-                    terminal_disposition,
-                    safety,
-                ) = match &record {
-                    worktree::WorkspaceRefRecord::Task(record) => {
-                        let safety = worktree::safety_report_for_provider(record)?;
-                        (
-                            WorktreeWorkspaceKind::TaskWorktree,
-                            Some(record.branch.clone()),
-                            record.task_url.clone(),
-                            Some(record.component_id.clone()),
-                            record.run_id.clone(),
-                            record.terminal_disposition.clone(),
-                            WorktreeProviderSafety {
-                                dirty: safety.dirty,
-                                unpushed: safety.unpushed_commits > 0,
-                                primary: safety.primary_checkout,
-                                missing: safety.worktree_missing,
-                            },
-                        )
-                    }
-                    worktree::WorkspaceRefRecord::Adopted(record) => (
-                        WorktreeWorkspaceKind::AdoptedWorkspace,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        WorktreeProviderSafety {
-                            dirty: false,
-                            unpushed: false,
-                            primary: false,
-                            missing: !Path::new(&record.path).is_dir(),
-                        },
-                    ),
-                };
-                Ok(WorktreeProviderWorkspace {
-                    ownership: WorktreeOwnership {
-                        provider: WorktreeProviderIdentity::Native,
-                        handle: record.handle().to_string(),
-                        path: record.path().to_string(),
-                        kind,
-                        branch,
-                        task_url,
-                        provenance: record.provenance().cloned(),
-                    },
-                    repository,
-                    owner_run_ref,
-                    created_at: Some(match record {
-                        worktree::WorkspaceRefRecord::Task(record) => record.created_at,
-                        worktree::WorkspaceRefRecord::Adopted(record) => record.created_at,
-                    }),
-                    terminal_disposition,
-                    safety,
-                })
-            })
+            .map(|record| Self::workspace_from_record(&record))
             .collect()
+    }
+}
+
+impl NativeWorktreeProvider {
+    fn workspaces_from_records(
+        records: impl IntoIterator<Item = worktree::WorkspaceRefRecord>,
+    ) -> (
+        Vec<WorktreeProviderWorkspace>,
+        Vec<worktree::WorktreeListDiagnostic>,
+    ) {
+        let mut workspaces = Vec::new();
+        let mut diagnostics = Vec::new();
+        for record in records {
+            if record.state() != &worktree::TaskWorktreeState::Active {
+                continue;
+            }
+            match Self::workspace_from_record(&record) {
+                Ok(workspace) => workspaces.push(workspace),
+                Err(error) => diagnostics.push(worktree::WorktreeListDiagnostic::from_error(
+                    error,
+                    Some(record.handle().to_string()),
+                    Some(record.path().to_string()),
+                )),
+            }
+        }
+        (workspaces, diagnostics)
+    }
+
+    fn workspace_from_record(
+        record: &worktree::WorkspaceRefRecord,
+    ) -> Result<WorktreeProviderWorkspace> {
+        let (kind, branch, task_url, repository, owner_run_ref, terminal_disposition, safety) =
+            match record {
+                worktree::WorkspaceRefRecord::Task(record) => {
+                    let safety = worktree::safety_report_for_provider(record)?;
+                    (
+                        WorktreeWorkspaceKind::TaskWorktree,
+                        Some(record.branch.clone()),
+                        record.task_url.clone(),
+                        Some(record.component_id.clone()),
+                        record.run_id.clone(),
+                        record.terminal_disposition.clone(),
+                        WorktreeProviderSafety {
+                            dirty: safety.dirty,
+                            unpushed: safety.unpushed_commits > 0,
+                            primary: safety.primary_checkout,
+                            missing: safety.worktree_missing,
+                        },
+                    )
+                }
+                worktree::WorkspaceRefRecord::Adopted(record) => (
+                    WorktreeWorkspaceKind::AdoptedWorkspace,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    WorktreeProviderSafety {
+                        dirty: false,
+                        unpushed: false,
+                        primary: false,
+                        missing: !Path::new(&record.path).is_dir(),
+                    },
+                ),
+            };
+        Ok(WorktreeProviderWorkspace {
+            ownership: WorktreeOwnership {
+                provider: WorktreeProviderIdentity::Native,
+                handle: record.handle().to_string(),
+                path: record.path().to_string(),
+                kind,
+                branch,
+                task_url,
+                provenance: record.provenance().cloned(),
+            },
+            repository,
+            owner_run_ref,
+            created_at: Some(match record {
+                worktree::WorkspaceRefRecord::Task(record) => record.created_at.clone(),
+                worktree::WorkspaceRefRecord::Adopted(record) => record.created_at.clone(),
+            }),
+            terminal_disposition,
+            safety,
+        })
     }
 }
 
@@ -1318,10 +1341,13 @@ impl<'a> WorktreeProviderRegistry<'a> {
     }
 
     pub fn list_report(&self) -> Result<WorktreeListReport> {
-        let native = worktree::list()?;
-        let provider_worktrees = self
-            .list()?
+        let mut native = worktree::list()?;
+        let (native_worktrees, mut diagnostics) =
+            NativeWorktreeProvider::workspaces_from_records(worktree::list_workspace_refs()?);
+        native.diagnostics.append(&mut diagnostics);
+        let provider_worktrees = native_worktrees
             .into_iter()
+            .chain(CommandWorktreeProvider::new(self.config).list()?)
             .filter(|workspace| {
                 matches!(
                     workspace.ownership.provider,
@@ -2230,6 +2256,64 @@ mod tests {
                 .expect_err("terminal disposition cannot change");
             std::fs::write(path.join("dirty"), "dirty\n").expect("dirty native worktree");
             assert_unsafe_lookup(&NativeWorktreeProvider, "fixture@native");
+        });
+    }
+
+    #[test]
+    fn list_report_keeps_valid_inventory_when_a_record_source_is_unrecoverable() {
+        crate::test_support::with_isolated_home(|home| {
+            let (source, path) = initialize_native_worktree(home.path());
+            worktree::record_active_with_source_for_test("fixture@native", source.path(), &path);
+
+            let missing_source = home.path().join("missing-source");
+            let missing_worktree = home.path().join("missing-worktree");
+            worktree::record_active_with_source_for_test(
+                "missing@source",
+                &missing_source,
+                &missing_worktree,
+            );
+            let record_path = crate::paths::observation_db()
+                .expect("observation database")
+                .parent()
+                .expect("observation database parent")
+                .join("task-worktrees")
+                .join(format!(
+                    "{}.json",
+                    crate::paths::sanitize_path_segment("missing@source")
+                ));
+            let mut record: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&record_path).expect("missing-source record"),
+            )
+            .expect("parse missing-source record");
+            record["component_id"] = serde_json::json!("unrecoverable-component");
+            std::fs::write(
+                &record_path,
+                serde_json::to_vec_pretty(&record).expect("serialize missing-source record"),
+            )
+            .expect("write missing-source record");
+
+            let report = WorktreeProviderRegistry::new(&defaults::load_config())
+                .list_report()
+                .expect("list report");
+
+            assert!(report
+                .native
+                .worktrees
+                .iter()
+                .any(|record| record.id == "missing@source"));
+            assert!(report
+                .native
+                .worktrees
+                .iter()
+                .any(|record| record.id == "fixture@native"));
+            assert_eq!(report.native.diagnostics.len(), 1);
+            let diagnostic = &report.native.diagnostics[0];
+            assert_eq!(diagnostic.code, "validation.invalid_argument");
+            assert_eq!(diagnostic.record_id.as_deref(), Some("missing@source"));
+            assert_eq!(
+                diagnostic.details["field"].as_str(),
+                Some("source_checkout")
+            );
         });
     }
 
