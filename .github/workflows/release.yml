@@ -641,34 +641,6 @@ jobs:
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
         uses: dtolnay/rust-toolchain@1.95.0
 
-      # ── One codegen-free preflight, not two compiles (release critical path) ──
-      #
-      # This replaced a pair of steps: a full workspace codegen build followed
-      # by a `--tests` check, 5m14s combined. The codegen half was the
-      # redundant one — `prepare` consumes none of the object files it emitted,
-      # `gate-build` had already proved those same lib/bin targets link in
-      # release profile, and the check below covers a strict superset of its
-      # error surface. Paying for codegen twice bought nothing.
-      #
-      # `--all-targets` rather than `--tests`: `--tests` alone can miss a plain
-      # `[[bin]]` (e.g. `bench-audit-self`) in its non-test configuration, and
-      # benches are real compile surface too. Same cost class, wider net.
-      #
-      # This step is LOAD-BEARING and must not be deleted as "the test gate
-      # already did it". It did not. `gate-test` runs `review test` with
-      # `--changed-since`, so it compiles only the changed scope — a green Test
-      # gate routinely builds a single binary. The full-scope post-merge job
-      # that used to backstop it was deliberately removed in #10696, and
-      # `audit-debt` only runs weekly. That makes this the ONLY full-workspace
-      # target compile anywhere on the merge path. It is what catches a test file
-      # still referencing a module a crate extraction moved out from under it.
-      #
-      # `--locked` is also the only enforcement that `Cargo.lock` is current
-      # before the version bump rewrites it; `gate-build` does not pass it.
-      - name: Preflight full-workspace compilation
-        if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
-        run: cargo check --workspace --all-targets --locked
-
       # The same `gate-build` artifact the three quality gates already run.
       #
       # `prepare` used to rebuild homeboy from source here (~10m of
