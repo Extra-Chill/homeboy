@@ -87,7 +87,7 @@ pub use dispatchability::{
     preflight_plan_provider_dispatchability_with_providers, preflight_provider_dispatchability,
     preflight_provider_dispatchability_with_config,
     preflight_provider_dispatchability_without_runtime_with_config,
-    AgentTaskProviderDispatchability,
+    AgentTaskProviderCredentialStatus, AgentTaskProviderDispatchability,
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;

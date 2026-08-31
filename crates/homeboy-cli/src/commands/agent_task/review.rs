@@ -2067,17 +2067,14 @@ fn providers_with_catalog(
                     .as_deref()
                     .is_none_or(|runtime| provider.runtime_id.as_deref() == Some(runtime))
                 && args.status.as_deref().is_none_or(|status| {
-                    provider_status(
-                        provider,
-                        &evaluate_provider_dispatchability(
-                            &catalog,
-                            &provider.backend,
-                            Some(&provider.id),
-                            None,
-                            false,
-                        ),
-                    )
-                    .eq_ignore_ascii_case(status)
+                    let dispatchability = evaluate_provider_dispatchability(
+                        &catalog,
+                        &provider.backend,
+                        Some(&provider.id),
+                        None,
+                        args.validate_readiness,
+                    );
+                    provider_matches_status(provider, &dispatchability, status)
                 })
         })
         .cloned()
@@ -2166,7 +2163,7 @@ fn providers_with_catalog(
             // catalog look empty even while it listed selectable executors.
             "provider_identity_catalog": provider_identity_catalog(&shown_providers),
             "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
-            "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(|provider| compact_provider(provider, &evaluate_provider_dispatchability(&catalog, &provider.backend, Some(&provider.id), None, false))).collect()) },
+            "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(|provider| compact_provider(provider, &evaluate_provider_dispatchability(&catalog, &provider.backend, Some(&provider.id), None, args.validate_readiness))).collect()) },
             // Availability means dispatchable. Anything that is declared but
             // not dispatchable reports the credential it is missing here so the
             // remediation survives the `--full` serde presentation too (#11479).
@@ -2204,13 +2201,29 @@ fn provider_status(
     dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
 ) -> &'static str {
     if !dispatchability.ready {
-        return "unavailable";
+        return match dispatchability.state {
+            "credentials_present" => "present",
+            "credentials_unverified" => "unverified",
+            "credentials_unusable" => "unusable",
+            _ => "unavailable",
+        };
     }
     if provider.default_backend {
         "default"
     } else {
         "available"
     }
+}
+
+fn provider_matches_status(
+    provider: &AgentTaskExecutorProvider,
+    dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    status: &str,
+) -> bool {
+    if status.eq_ignore_ascii_case("unavailable") {
+        return !dispatchability.ready;
+    }
+    provider_status(provider, dispatchability).eq_ignore_ascii_case(status)
 }
 
 /// Per-provider credential readiness for every provider that is not
@@ -2257,7 +2270,9 @@ fn compact_provider(
         "runtime_id": provider.runtime_id.as_deref().map(|value| bounded_text(value, 160)),
         "extension_id": provider.extension_id.as_deref().map(|value| bounded_text(value, 160)),
         "status": provider_status(provider, dispatchability),
-        "reason": readiness.reason().map(|value| bounded_text(&value, 128)).or_else(|| (!dispatchability.ready).then(|| bounded_text(&dispatchability.reason, 128))),
+        "reason": readiness.reason().map(|value| bounded_text(&value, 128))
+            .or_else(|| dispatchability.checks.credentials.reason.as_deref().map(|value| bounded_text(value, 128)))
+            .or_else(|| (!dispatchability.ready).then(|| bounded_text(&dispatchability.reason, 128))),
         "dispatchability": {
             "state": dispatchability.state,
             "ready": dispatchability.ready,
@@ -2266,9 +2281,12 @@ fn compact_provider(
                 "route": compact_check(dispatchability.checks.route.ready, dispatchability.checks.route.reason.as_deref()),
                 "model": compact_check(dispatchability.checks.model.ready, dispatchability.checks.model.reason.as_deref()),
                 "credentials": {
+                    "status": dispatchability.checks.credentials.status,
                     "ready": dispatchability.checks.credentials.ready,
                     "missing": dispatchability.checks.credentials.missing.iter().take(8).map(|value| bounded_text(value, 96)).collect::<Vec<_>>(),
                     "verified": dispatchability.checks.credentials.verified,
+                    "reason": dispatchability.checks.credentials.reason.as_deref().map(|value| bounded_text(value, 128)),
+                    "remediation": dispatchability.checks.credentials.remediation.iter().take(4).map(|value| bounded_text(value, 256)).collect::<Vec<_>>(),
                 },
                 "configuration": compact_check(dispatchability.checks.configuration.ready, dispatchability.checks.configuration.reason.as_deref()),
                 "runtime": compact_check(dispatchability.checks.runtime.ready, dispatchability.checks.runtime.reason.as_deref()),
@@ -4250,6 +4268,57 @@ mod tests {
             assert_eq!(provider_status(&provider, &dispatchability), "available");
             assert!(compact_provider(&provider, &dispatchability)["reason"].is_null());
         });
+    }
+
+    #[test]
+    fn provider_status_distinguishes_present_and_unverified_provider_owned_auth() {
+        let auth = tempfile::NamedTempFile::new().expect("auth file");
+        std::fs::write(auth.path(), r#"{"token":"present-token"}"#).expect("write auth");
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "owned-auth.provider",
+            "backend": "owned-auth",
+            "capabilities": ["cli_runtime", "provider_owned_auth"],
+            "provider_defaults": {
+                "owned-auth": {
+                    "required_secret_env": ["HOMEBOY_TEST_OWNED_AUTH_TOKEN"],
+                    "secret_env_sources": {
+                        "HOMEBOY_TEST_OWNED_AUTH_TOKEN": {
+                            "source": "json-file",
+                            "path": auth.path(),
+                            "field": "token"
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("provider fixture");
+        let catalog = provider_catalog(vec![provider.clone()]);
+
+        let present = evaluate_provider_dispatchability(
+            &catalog,
+            &provider.backend,
+            Some(&provider.id),
+            None,
+            false,
+        );
+        assert_eq!(provider_status(&provider, &present), "present");
+        assert!(provider_matches_status(&provider, &present, "unavailable"));
+        assert_eq!(compact_provider(&provider, &present)["status"], "present");
+        assert_eq!(
+            compact_provider(&provider, &present)["dispatchability"]["checks"]["credentials"]
+                ["status"],
+            "present"
+        );
+
+        let unverified = evaluate_provider_dispatchability(
+            &catalog,
+            &provider.backend,
+            Some(&provider.id),
+            None,
+            true,
+        );
+        assert_eq!(provider_status(&provider, &unverified), "unverified");
+        assert_eq!(unverified.state, "credentials_unverified");
     }
 
     #[test]

@@ -455,8 +455,8 @@ pub mod provider {
         preflight_provider_dispatchability_with_config,
         preflight_provider_dispatchability_without_runtime_with_config,
         provider_credential_readiness, AgentTaskProviderCredentialReadiness,
-        AgentTaskProviderCredentialRequirement, AgentTaskProviderDispatchability,
-        AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
+        AgentTaskProviderCredentialRequirement, AgentTaskProviderCredentialStatus,
+        AgentTaskProviderDispatchability, AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
     };
     pub use crate::agent_task_provider::{
         probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,
