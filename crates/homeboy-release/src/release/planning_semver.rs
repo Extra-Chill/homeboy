@@ -816,7 +816,6 @@ mod tests {
         run_git(&owner, &["config", "user.name", "Homeboy Test"]);
         commit_file(&owner, "VERSION", "0.1.1", "release: v0.1.1");
         run_git(&owner, &["tag", "v0.1.1"]);
-        run_git(&owner, &["push", "--tags", "origin", "main"]);
 
         let component = Component {
             local_path: stale.to_string_lossy().to_string(),
@@ -824,10 +823,48 @@ mod tests {
         };
         let scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
 
+        // A pushed tag alone cannot supersede the stale workflow: the release
+        // commit must also be authoritative on the configured release branch.
+        run_git(&owner, &["push", "--tags", "origin"]);
+        assert_eq!(
+            authoritative_descendant_release_tag(&scope, "0.1.0")
+                .expect("inspect tag-only release"),
+            None
+        );
+
+        run_git(&owner, &["push", "origin", "main"]);
         assert_eq!(
             authoritative_descendant_release_tag(&scope, "0.1.0").expect("inspect remote release"),
             Some("v0.1.1".to_string())
         );
+
+        // A later descendant tag must still identify an actual release commit.
+        commit_file(
+            &owner,
+            "VERSION",
+            "0.1.2",
+            "chore: invalid release identity",
+        );
+        run_git(&owner, &["tag", "v0.1.2"]);
+        run_git(&owner, &["push", "--tags", "origin", "main"]);
+        assert_eq!(
+            authoritative_descendant_release_tag(&scope, "0.1.0")
+                .expect("inspect malformed release"),
+            None
+        );
+
+        // A higher tag on unrelated history must remain fail-closed too.
+        run_git(&owner, &["checkout", "--orphan", "unrelated-release"]);
+        run_git(&owner, &["rm", "-qrf", "."]);
+        commit_file(&owner, "VERSION", "0.1.3", "release: v0.1.3");
+        run_git(&owner, &["tag", "v0.1.3"]);
+        run_git(&owner, &["push", "--tags", "origin"]);
+        assert_eq!(
+            authoritative_descendant_release_tag(&scope, "0.1.0")
+                .expect("inspect unrelated release"),
+            None
+        );
+
         assert_eq!(
             git::get_head_commit(&scope.git_root).expect("stale HEAD"),
             git::get_tag_commit(&seed.to_string_lossy(), "v0.1.0").expect("source release")
