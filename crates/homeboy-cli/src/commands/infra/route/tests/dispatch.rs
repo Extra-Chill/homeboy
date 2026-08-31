@@ -3173,10 +3173,9 @@ fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
 }
 
 #[test]
-fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admission() {
+fn nonlocal_cook_is_eligible_for_durable_admission() {
     let queued = Cli::parse_from([
         "homeboy",
-        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--to-worktree",
@@ -3186,7 +3185,7 @@ fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admissio
         "--prompt",
         "queue this on Lab",
     ]);
-    assert!(detached_cook_can_queue(&queued));
+    assert!(cook_can_enter_durable_admission(&queued));
 
     let local = Cli::parse_from([
         "homeboy",
@@ -3202,7 +3201,7 @@ fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admissio
         "--prompt",
         "remain local",
     ]);
-    assert!(!detached_cook_can_queue(&local));
+    assert!(!cook_can_enter_durable_admission(&local));
 }
 
 #[test]
