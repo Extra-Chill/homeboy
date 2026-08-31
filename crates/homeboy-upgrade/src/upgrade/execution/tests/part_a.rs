@@ -159,8 +159,18 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
             .expect("executable fixture");
     }
 
-    verify_source_candidate_target_admission(workspace.path(), &candidate, None, Some(&installed))
-        .expect("new candidate, not the old controller, admits replacement");
+    let candidate_identity = verify_source_candidate_target_admission(
+        workspace.path(),
+        &candidate,
+        None,
+        Some(&installed),
+    )
+    .expect("new candidate, not the old controller, admits replacement");
+    assert_eq!(candidate_identity.version.as_deref(), Some("0.352.0"));
+    assert_eq!(
+        candidate_identity.build_identity.as_deref(),
+        Some("homeboy 0.352.0+new")
+    );
     assert_eq!(
         std::fs::read_to_string(&evidence).expect("admission evidence"),
         format!(
@@ -208,11 +218,10 @@ fn older_source_completion_is_superseded_unless_forced() {
 
     // This models the old build completing after the newer build has already
     // promoted: re-reading active identity under the lease makes it a no-op.
-    assert!(source_promotion_is_superseded(
-        false,
-        Some(&newer_active),
-        workspace.path()
-    ));
+    assert!(
+        source_promotion_is_superseded(false, Some(&newer_active), workspace.path())
+            .expect("readable identity decides admission")
+    );
     let older_active = homeboy_core::build_identity::BuildIdentity {
         display: "homeboy 1.2.2+old".to_string(),
         version: "1.2.2".to_string(),
@@ -220,16 +229,34 @@ fn older_source_completion_is_superseded_unless_forced() {
         git_dirty: Some(false),
     };
     // In the reverse completion order, the newer candidate remains eligible.
-    assert!(!source_promotion_is_superseded(
-        false,
-        Some(&older_active),
-        workspace.path()
-    ));
-    assert!(!source_promotion_is_superseded(
-        true,
-        Some(&newer_active),
-        workspace.path()
-    ));
+    assert!(
+        !source_promotion_is_superseded(false, Some(&older_active), workspace.path())
+            .expect("readable identity decides admission")
+    );
+    assert!(
+        !source_promotion_is_superseded(true, Some(&newer_active), workspace.path())
+            .expect("force bypasses supersession")
+    );
+}
+
+#[test]
+fn source_completion_fails_closed_when_installed_identity_disappears() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"homeboy\"\nversion = \"1.2.3\"\n",
+    )
+    .expect("candidate manifest");
+
+    let error = source_promotion_is_superseded(false, None, workspace.path())
+        .expect_err("missing final identity blocks source replacement");
+    assert!(error
+        .message
+        .contains("cannot revalidate the installed controller"));
+    assert!(
+        !source_promotion_is_superseded(true, None, workspace.path())
+            .expect("force explicitly permits missing identity")
+    );
 }
 
 #[test]

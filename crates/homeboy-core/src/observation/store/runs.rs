@@ -767,6 +767,50 @@ impl ObservationStore {
         self.get_run(run_id)
     }
 
+    /// Finish an active run only if its metadata still matches the caller's
+    /// snapshot. This closes the read/merge/write window for lifecycle owners
+    /// that must preserve concurrent progress updates before terminalization.
+    pub fn finish_running_run_if_metadata(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        mut metadata_json: serde_json::Value,
+        expected_metadata_json: &serde_json::Value,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("run_id", run_id)?;
+        if crate::notification_route::NotificationRoute::from_metadata(&metadata_json).is_none() {
+            if let Some(route) =
+                crate::notification_route::NotificationRoute::from_metadata(expected_metadata_json)
+            {
+                route.insert_into_metadata(&mut metadata_json);
+            }
+        }
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let serialized = serialize_metadata(&metadata_json)?;
+        let expected = serialize_metadata(expected_metadata_json)?;
+        let rows = execute_with_retry("finish running run record with metadata CAS", || {
+            self.connection.execute(
+                r#"
+                UPDATE runs
+                SET finished_at = ?1, status = ?2, metadata_json = ?3
+                WHERE id = ?4 AND status = ?5 AND metadata_json = ?6
+                "#,
+                params![
+                    finished_at,
+                    status.as_str(),
+                    serialized,
+                    run_id,
+                    RunStatus::Running.as_str(),
+                    expected,
+                ],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
+    }
+
     pub fn update_run_metadata(
         &self,
         run_id: &str,
@@ -799,6 +843,31 @@ impl ObservationStore {
                 "Updated run record {run_id} but could not read it back"
             ))
         })
+    }
+
+    /// Replace metadata only while the run remains active. A terminal winner
+    /// must never be overwritten by a late heartbeat or progress writer.
+    pub fn update_running_run_metadata(
+        &self,
+        run_id: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("run_id", run_id)?;
+        let serialized = serialize_metadata(&metadata_json)?;
+        let rows = execute_with_retry("update running run metadata", || {
+            self.connection.execute(
+                r#"
+                UPDATE runs
+                SET metadata_json = ?1
+                WHERE id = ?2 AND status = ?3
+                "#,
+                params![serialized, run_id, RunStatus::Running.as_str()],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
     }
 
     pub fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>> {

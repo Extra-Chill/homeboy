@@ -19,6 +19,7 @@ use crate::paths;
 const LEASE_DIR: &str = "promotion.lock";
 const LEASE_FILE: &str = "lease.json";
 const ADMISSION_LOCK_FILE: &str = "admission.lock";
+const ADMISSION_OWNER_DIR: &str = "admission-owners";
 const PIN_DIR: &str = "pins";
 const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 const PIN_DRAIN_POLL: Duration = Duration::from_millis(100);
@@ -45,8 +46,13 @@ pub struct RuntimePromotionWaitEvent {
     pub resource_class: &'static str,
     pub wait_timeout_ms: u128,
     pub waited_ms: u128,
+    pub wait_stage: &'static str,
     pub owner_pid: u32,
     pub owner_operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_status_command: Option<String>,
     pub target: String,
     pub owner_generation: String,
 }
@@ -56,6 +62,11 @@ pub struct RuntimePromotionLeaseRecord {
     pub schema: String,
     pub pid: u32,
     pub operation: String,
+    /// Optional owning-layer operation identity and read-only inspection command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_command: Option<String>,
     pub target: String,
     pub generation: String,
     /// Non-secret result fingerprint used for exact compatible-owner waits.
@@ -82,6 +93,12 @@ pub struct RuntimePromotionLeaseRecord {
     /// boundary. The promotion directory is already local-user state.
     #[serde(default)]
     pub capability: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimePromotionOwnerStatus {
+    pub operation_id: String,
+    pub status_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +128,14 @@ struct LocalLeaseDelegation {
     target: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimePromotionBlockerIdentity {
+    pid: u32,
+    operation: String,
+    operation_id: Option<String>,
+    target: String,
+}
+
 struct LocalLeaseDelegationGuard(Vec<LocalLeaseDelegation>);
 
 impl Drop for LocalLeaseDelegationGuard {
@@ -136,6 +161,12 @@ struct RuntimeGenerationPin {
     cook_id: String,
     generation: String,
     started_at: String,
+    #[serde(default)]
+    linux_starttime_ticks: Option<u64>,
+    #[serde(default)]
+    process_start_identity: Option<crate::process::ProcessStartIdentity>,
+    #[serde(default)]
+    transaction: Option<SubprocessLeaseCapability>,
 }
 
 /// Held while a controller/runner runtime transaction is in progress.
@@ -158,6 +189,14 @@ pub struct RuntimePromotionLease {
 #[derive(Debug)]
 pub struct RuntimeGenerationPinGuard {
     path: PathBuf,
+}
+
+/// Protects a selected controller identity from replacement without claiming
+/// mutation ownership.
+#[derive(Debug)]
+pub struct RuntimeSelectionGuard {
+    admission_lock: fs::File,
+    owner_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,6 +240,174 @@ impl Drop for RuntimeGenerationPinGuard {
     }
 }
 
+impl Drop for RuntimeSelectionGuard {
+    fn drop(&mut self) {
+        let _ = self.admission_lock.unlock();
+        // Keep diagnostics published until the lock is actually available.
+        // A contender that acquires the lock never consults this stale record.
+        let _ = fs::remove_file(&self.owner_path);
+    }
+}
+
+/// Hold shared controller-selection admission for a read/refresh transaction.
+/// Controller mutation waits on the exclusive side of the same OS lock.
+pub fn protect_runtime_selection_with_status(
+    operation: &str,
+    target: impl Into<String>,
+    owner_status: RuntimePromotionOwnerStatus,
+) -> Result<RuntimeSelectionGuard> {
+    let root = paths::runtime_promotion_dir()?;
+    fs::create_dir_all(&root).map_err(io("create runtime promotion directory"))?;
+    let admission_lock = open_admission_lock(&root)?;
+    admission_lock
+        .lock_shared()
+        .map_err(io("protect runtime selection"))?;
+    publish_selection_guard(
+        operation,
+        target.into(),
+        owner_status,
+        admission_lock,
+        &root,
+    )
+}
+
+fn publish_selection_guard(
+    operation: &str,
+    target: String,
+    owner_status: RuntimePromotionOwnerStatus,
+    admission_lock: fs::File,
+    root: &Path,
+) -> Result<RuntimeSelectionGuard> {
+    let owner_dir = root.join(ADMISSION_OWNER_DIR);
+    fs::create_dir_all(&owner_dir).map_err(io("create runtime admission owner directory"))?;
+    let owner_path = owner_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+    let temporary_path = owner_path.with_extension("json.tmp");
+    let pid = std::process::id();
+    let record = RuntimePromotionLeaseRecord {
+        schema: "homeboy/runtime-promotion-admission-owner/v1".to_string(),
+        pid,
+        operation: operation.to_string(),
+        operation_id: Some(owner_status.operation_id),
+        status_command: Some(owner_status.status_command),
+        target,
+        generation: current_generation(),
+        compatibility_key: String::new(),
+        started_at: now(),
+        linux_starttime_ticks: crate::process::linux_process_starttime_ticks(pid)
+            .ok()
+            .flatten(),
+        process_start_identity: crate::process::process_start_identity(pid).ok().flatten(),
+        heartbeat_at: now(),
+        expires_at: expiry(),
+        capability: String::new(),
+    };
+    if let Err(error) = fs::write(
+        &temporary_path,
+        serde_json::to_vec_pretty(&record)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )
+    .map_err(io("write runtime admission owner"))
+    .and_then(|_| {
+        fs::rename(&temporary_path, &owner_path).map_err(io("publish runtime admission owner"))
+    }) {
+        let _ = fs::remove_file(&temporary_path);
+        let _ = admission_lock.unlock();
+        return Err(error);
+    }
+    Ok(RuntimeSelectionGuard {
+        admission_lock,
+        owner_path,
+    })
+}
+
+/// Wait boundedly for shared controller-selection admission while reporting the
+/// exclusive mutation owner that currently blocks it.
+pub fn protect_runtime_selection_waiting_with_status(
+    operation: &str,
+    target: impl Into<String>,
+    owner_status: RuntimePromotionOwnerStatus,
+    timeout: Duration,
+    mut progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimeSelectionGuard> {
+    let root = paths::runtime_promotion_dir()?;
+    fs::create_dir_all(&root).map_err(io("create runtime promotion directory"))?;
+    let admission_lock = open_admission_lock(&root)?;
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut last_progress = None;
+    loop {
+        match FileExt::try_lock_shared(&admission_lock) {
+            Ok(true) => break,
+            Ok(false) => {
+                let owner = match selection_blocker_after_busy(|| {
+                    read_record_for_acquisition(&root.join(LEASE_DIR))
+                })? {
+                    Some(owner) => owner,
+                    None => {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            match FileExt::try_lock_shared(&admission_lock) {
+                                Ok(true) => break,
+                                Ok(false) => {
+                                    return Err(selection_wait_timeout_without_owner(timeout));
+                                }
+                                Err(error) => {
+                                    return Err(io("protect runtime selection")(error));
+                                }
+                            }
+                        }
+                        std::thread::sleep(remaining.min(COMPATIBLE_WAIT_POLL));
+                        continue;
+                    }
+                };
+                if last_progress
+                    .is_none_or(|last: Instant| last.elapsed() >= COMPATIBLE_WAIT_HEARTBEAT)
+                {
+                    progress(RuntimePromotionWaitEvent {
+                        schema: "homeboy/runtime-promotion-admission/v1",
+                        state: "queued",
+                        resource_class: "runtime_promotion",
+                        wait_timeout_ms: timeout.as_millis(),
+                        waited_ms: started.elapsed().min(timeout).as_millis(),
+                        wait_stage: "os_lock",
+                        owner_pid: owner.pid,
+                        owner_operation: owner.operation.clone(),
+                        owner_operation_id: owner.operation_id.clone(),
+                        owner_status_command: owner.status_command.clone(),
+                        target: owner.target.clone(),
+                        owner_generation: owner.generation.clone(),
+                    });
+                    last_progress = Some(Instant::now());
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(wait_timeout_error(&owner, timeout, "os_lock"));
+                }
+                std::thread::sleep(remaining.min(COMPATIBLE_WAIT_POLL));
+            }
+            Err(error) => return Err(io("protect runtime selection")(error)),
+        }
+    }
+
+    publish_selection_guard(
+        operation,
+        target.into(),
+        owner_status,
+        admission_lock,
+        &root,
+    )
+}
+
+fn selection_blocker_after_busy(
+    read: impl FnOnce() -> std::result::Result<RuntimePromotionLeaseRecord, LeaseRecordReadError>,
+) -> Result<Option<RuntimePromotionLeaseRecord>> {
+    match read() {
+        Ok(owner) => Ok(Some(owner)),
+        Err(LeaseRecordReadError::Disappeared(_)) => Ok(None),
+        Err(LeaseRecordReadError::Failure(error)) => Err(error),
+    }
+}
+
 /// Acquire the global writer lease. A nested call must retain the same target
 /// and generation. A child process must present the capability explicitly
 /// attached by [`RuntimePromotionLease::authorize_subprocess`].
@@ -209,7 +416,9 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
         operation,
         target.into(),
         String::new(),
+        None,
         ForeignPinPolicy::Block,
+        None,
     )
 }
 
@@ -228,58 +437,124 @@ pub fn acquire_waiting_for_compatible(
     acquire_waiting_for_compatible_key(operation, target, "", timeout, progress)
 }
 
+/// Wait for a compatible owner while publishing this owner's durable status
+/// identity if the caller acquires the lease.
+pub fn acquire_waiting_for_compatible_with_status(
+    operation: &str,
+    target: impl Into<String>,
+    owner_status: RuntimePromotionOwnerStatus,
+    timeout: Duration,
+    progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimePromotionLease> {
+    acquire_waiting_for_compatible_key_and_status(
+        operation,
+        target,
+        "",
+        Some(owner_status),
+        CompatibleOwnerPolicy::SameGeneration,
+        timeout,
+        progress,
+    )
+}
+
+/// Wait for an owner mutating the same target, even when independently built
+/// controller candidates report different runtime generations.
+pub fn acquire_waiting_for_target_with_status(
+    operation: &str,
+    target: impl Into<String>,
+    owner_status: RuntimePromotionOwnerStatus,
+    timeout: Duration,
+    progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimePromotionLease> {
+    acquire_waiting_for_compatible_key_and_status(
+        operation,
+        target,
+        "",
+        Some(owner_status),
+        CompatibleOwnerPolicy::SameTarget,
+        timeout,
+        progress,
+    )
+}
+
 /// Wait only for an owner with an exactly matching opaque result key.
 pub fn acquire_waiting_for_compatible_key(
     operation: &str,
     target: impl Into<String>,
     compatibility_key: impl Into<String>,
     timeout: Duration,
+    progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimePromotionLease> {
+    acquire_waiting_for_compatible_key_and_status(
+        operation,
+        target,
+        compatibility_key,
+        None,
+        CompatibleOwnerPolicy::SameGeneration,
+        timeout,
+        progress,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CompatibleOwnerPolicy {
+    SameGeneration,
+    SameTarget,
+}
+
+fn acquire_waiting_for_compatible_key_and_status(
+    operation: &str,
+    target: impl Into<String>,
+    compatibility_key: impl Into<String>,
+    owner_status: Option<RuntimePromotionOwnerStatus>,
+    owner_policy: CompatibleOwnerPolicy,
+    timeout: Duration,
     mut progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimePromotionLease> {
     let target = target.into();
     let compatibility_key = compatibility_key.into();
     let generation = current_generation();
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = started + timeout;
     let mut last_owner = None;
     let mut last_progress = None;
 
     loop {
+        let mut admission = BoundedAdmission {
+            timeout,
+            started,
+            deadline,
+            progress: &mut progress,
+            last_progress: &mut last_progress,
+        };
         match acquire_with_pin_policy(
             operation,
             target.clone(),
             compatibility_key.clone(),
+            owner_status.clone(),
             ForeignPinPolicy::Block,
+            Some(&mut admission),
         ) {
             Ok(lease) => return Ok(lease),
             Err(error) if is_contention_error(&error) => {
                 let owner = contention_owner(&error)?;
-                if !is_compatible_owner(&owner, &target, &generation, &compatibility_key) {
+                if !is_compatible_owner(
+                    &owner,
+                    &target,
+                    &generation,
+                    &compatibility_key,
+                    owner_policy,
+                ) {
                     return Err(error);
                 }
-                let owner_identity = format!("{}:{}:{}", owner.pid, owner.operation, owner.target);
-                if last_owner.as_ref() != Some(&owner_identity)
-                    || last_progress
-                        .is_none_or(|last: Instant| last.elapsed() >= COMPATIBLE_WAIT_HEARTBEAT)
-                {
-                    progress(RuntimePromotionWaitEvent {
-                        schema: "homeboy/runtime-promotion-admission/v1",
-                        state: "queued",
-                        resource_class: "runtime_promotion",
-                        wait_timeout_ms: timeout.as_millis(),
-                        waited_ms: timeout
-                            .saturating_sub(deadline.saturating_duration_since(Instant::now()))
-                            .as_millis(),
-                        owner_pid: owner.pid,
-                        owner_operation: owner.operation.clone(),
-                        target: owner.target.clone(),
-                        owner_generation: owner.generation.clone(),
-                    });
+                let owner_identity = blocker_identity(&owner);
+                if last_owner.as_ref() != Some(&owner_identity) || admission.should_publish() {
+                    admission.publish(&owner, "lease_record");
                     last_owner = Some(owner_identity);
-                    last_progress = Some(Instant::now());
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(wait_timeout_error(&owner, timeout));
+                    return Err(wait_timeout_error(&owner, timeout, "lease_record"));
                 }
                 std::thread::sleep(remaining.min(COMPATIBLE_WAIT_POLL));
             }
@@ -302,7 +577,9 @@ pub fn acquire_for_generation_rotation(
         operation,
         target.into(),
         String::new(),
+        None,
         ForeignPinPolicy::Allow,
+        None,
     )
 }
 
@@ -312,11 +589,50 @@ enum ForeignPinPolicy {
     Allow,
 }
 
+struct BoundedAdmission<'a> {
+    timeout: Duration,
+    started: Instant,
+    deadline: Instant,
+    progress: &'a mut dyn FnMut(RuntimePromotionWaitEvent),
+    last_progress: &'a mut Option<Instant>,
+}
+
+impl BoundedAdmission<'_> {
+    fn should_publish(&self) -> bool {
+        self.last_progress
+            .is_none_or(|last| last.elapsed() >= COMPATIBLE_WAIT_HEARTBEAT)
+    }
+
+    fn publish(&mut self, owner: &RuntimePromotionLeaseRecord, wait_stage: &'static str) {
+        (self.progress)(RuntimePromotionWaitEvent {
+            schema: "homeboy/runtime-promotion-admission/v1",
+            state: "queued",
+            resource_class: "runtime_promotion",
+            wait_timeout_ms: self.timeout.as_millis(),
+            waited_ms: self.started.elapsed().min(self.timeout).as_millis(),
+            wait_stage,
+            owner_pid: owner.pid,
+            owner_operation: owner.operation.clone(),
+            owner_operation_id: owner.operation_id.clone(),
+            owner_status_command: owner.status_command.clone(),
+            target: owner.target.clone(),
+            owner_generation: owner.generation.clone(),
+        });
+        *self.last_progress = Some(Instant::now());
+    }
+
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
 fn acquire_with_pin_policy(
     operation: &str,
     target: String,
     compatibility_key: String,
+    owner_status: Option<RuntimePromotionOwnerStatus>,
     foreign_pin_policy: ForeignPinPolicy,
+    mut admission: Option<&mut BoundedAdmission<'_>>,
 ) -> Result<RuntimePromotionLease> {
     let root = paths::runtime_promotion_dir()?;
     fs::create_dir_all(&root).map_err(io("create runtime promotion directory"))?;
@@ -334,6 +650,12 @@ fn acquire_with_pin_policy(
                 schema: "homeboy/runtime-promotion-lease/v2".to_string(),
                 pid,
                 operation: operation.to_string(),
+                operation_id: owner_status
+                    .as_ref()
+                    .map(|status| status.operation_id.clone()),
+                status_command: owner_status
+                    .as_ref()
+                    .map(|status| status.status_command.clone()),
                 target: target.clone(),
                 generation: generation.clone(),
                 compatibility_key: compatibility_key.clone(),
@@ -355,7 +677,9 @@ fn acquire_with_pin_policy(
                         operation,
                         target,
                         compatibility_key,
+                        owner_status,
                         foreign_pin_policy,
+                        admission.as_deref_mut(),
                     );
                 }
                 return Err(error);
@@ -408,7 +732,9 @@ fn acquire_with_pin_policy(
                             operation,
                             target,
                             compatibility_key,
+                            owner_status,
                             foreign_pin_policy,
+                            admission.as_deref_mut(),
                         )
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -416,7 +742,9 @@ fn acquire_with_pin_policy(
                             operation,
                             target,
                             compatibility_key,
+                            owner_status,
                             foreign_pin_policy,
+                            admission.as_deref_mut(),
                         )
                     }
                     Err(error) => return Err(io("archive stale runtime promotion lease")(error)),
@@ -428,10 +756,15 @@ fn acquire_with_pin_policy(
 
     if foreign_pin_policy == ForeignPinPolicy::Block && lease.primary {
         let admission_lock = open_admission_lock(&root)?;
-        admission_lock
-            .lock_exclusive()
-            .map_err(io("reserve runtime promotion admission"))?;
-        wait_for_foreign_generation_pins(&root, pid, subprocess_capability.as_ref())?;
+        if let Some(admission) = admission.as_deref_mut() {
+            wait_for_admission_lock(&lease, &admission_lock, admission)?;
+            wait_for_foreign_generation_pins(&root, &lease, Some((&lease, admission)))?;
+        } else {
+            admission_lock
+                .lock_exclusive()
+                .map_err(io("reserve runtime promotion admission"))?;
+            wait_for_foreign_generation_pins(&root, &lease, None)?;
+        }
         lease.admission_lock = Some(admission_lock);
     }
     Ok(lease)
@@ -597,10 +930,19 @@ impl RuntimePromotionLease {
 pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
     let promotion_root = paths::runtime_promotion_dir()?;
     fs::create_dir_all(&promotion_root).map_err(io("create runtime promotion directory"))?;
-    let admission_lock = open_admission_lock(&promotion_root)?;
-    admission_lock
-        .lock_shared()
-        .map_err(io("join runtime promotion admission"))?;
+    let transaction = validated_pin_transaction(&promotion_root);
+    // The exact transaction capability already owns exclusive admission. Trying
+    // to reacquire the shared side here would deadlock before the pin exemption
+    // below could be observed by the owner.
+    let _admission_lock = if transaction.is_none() {
+        let admission_lock = open_admission_lock(&promotion_root)?;
+        admission_lock
+            .lock_shared()
+            .map_err(io("join runtime promotion admission"))?;
+        Some(admission_lock)
+    } else {
+        None
+    };
     let root = promotion_root.join(PIN_DIR);
     fs::create_dir_all(&root).map_err(io("create runtime generation pin directory"))?;
     prune_pins(&root)?;
@@ -616,6 +958,11 @@ pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
         cook_id: cook_id.to_string(),
         generation: current_generation(),
         started_at: now(),
+        linux_starttime_ticks: crate::process::linux_process_starttime_ticks(pid)
+            .ok()
+            .flatten(),
+        process_start_identity: crate::process::process_start_identity(pid).ok().flatten(),
+        transaction,
     };
     fs::write(
         &path,
@@ -855,6 +1202,8 @@ fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error
             "target": held.target,
             "holder_pid": held.pid,
             "holder_operation": held.operation,
+            "holder_operation_id": held.operation_id,
+            "holder_status_command": held.status_command,
             "holder_generation": held.generation,
             "holder_compatibility_key": held.compatibility_key,
             "reclaimable": reclaimable,
@@ -877,6 +1226,10 @@ fn contention_owner(error: &Error) -> Result<RuntimePromotionLeaseRecord> {
         schema: "homeboy/runtime-promotion-lease/v2".to_string(),
         pid,
         operation: string("holder_operation")?,
+        operation_id: details["holder_operation_id"].as_str().map(str::to_string),
+        status_command: details["holder_status_command"]
+            .as_str()
+            .map(str::to_string),
         target: string("target")?,
         generation: string("holder_generation")?,
         compatibility_key: details["holder_compatibility_key"]
@@ -897,15 +1250,52 @@ fn is_compatible_owner(
     target: &str,
     generation: &str,
     compatibility_key: &str,
+    policy: CompatibleOwnerPolicy,
 ) -> bool {
     owner.target == target
-        && owner.generation == generation
+        && (matches!(policy, CompatibleOwnerPolicy::SameTarget) || owner.generation == generation)
         && (compatibility_key.is_empty()
             || (!owner.compatibility_key.is_empty()
                 && owner.compatibility_key == compatibility_key))
 }
 
-fn wait_timeout_error(owner: &RuntimePromotionLeaseRecord, timeout: Duration) -> Error {
+fn blocker_identity(owner: &RuntimePromotionLeaseRecord) -> RuntimePromotionBlockerIdentity {
+    RuntimePromotionBlockerIdentity {
+        pid: owner.pid,
+        operation: owner.operation.clone(),
+        operation_id: owner.operation_id.clone(),
+        target: owner.target.clone(),
+    }
+}
+
+fn wait_timeout_error(
+    owner: &RuntimePromotionLeaseRecord,
+    timeout: Duration,
+    wait_stage: &'static str,
+) -> Error {
+    let (queue_state, tried) = match wait_stage {
+        "os_lock" => (
+            "timed_out_waiting_for_admission_lock",
+            vec![
+                "The runtime admission lock owner did not finish before the deadline.",
+                "Retry after the reported owner completes or inspect its status command.",
+            ],
+        ),
+        "foreign_generation_pins" => (
+            "timed_out_waiting_for_generation_pin",
+            vec![
+                "The pinned runtime operation did not finish before the deadline.",
+                "Retry after the reported pin owner completes.",
+            ],
+        ),
+        _ => (
+            "timed_out_waiting_for_compatible_owner",
+            vec![
+                "The compatible promotion owner did not finish before the admission deadline.",
+                "Retry the same command after the owner completes or inspect its runtime-promotion lease.",
+            ],
+        ),
+    };
     Error::new(
         ErrorCode::RuntimePromotionWaitTimeout,
         format!(
@@ -917,16 +1307,41 @@ fn wait_timeout_error(owner: &RuntimePromotionLeaseRecord, timeout: Duration) ->
         ),
         serde_json::json!({
             "schema": "homeboy/runtime-promotion-admission/v1",
-            "queue_state": "timed_out_waiting_for_compatible_owner",
+            "queue_state": queue_state,
+            "wait_stage": wait_stage,
             "resource_class": "runtime_promotion",
             "state": "busy",
             "wait_timeout_seconds": timeout.as_secs(),
             "target": owner.target,
             "holder_pid": owner.pid,
             "holder_operation": owner.operation,
+            "holder_operation_id": owner.operation_id,
+            "holder_status_command": owner.status_command,
             "holder_generation": owner.generation,
             "holder_compatibility_key": owner.compatibility_key,
-            "tried": ["The compatible promotion owner did not finish before the admission deadline.", "Retry the same command after the owner completes or inspect its runtime-promotion lease."],
+            "tried": tried,
+        }),
+    )
+}
+
+fn selection_wait_timeout_without_owner(timeout: Duration) -> Error {
+    Error::new(
+        ErrorCode::RuntimePromotionWaitTimeout,
+        format!(
+            "runtime promotion wait timed out after {}s while the admission owner was completing teardown",
+            timeout.as_secs()
+        ),
+        serde_json::json!({
+            "schema": "homeboy/runtime-promotion-admission/v1",
+            "queue_state": "timed_out_waiting_for_admission_lock",
+            "wait_stage": "os_lock",
+            "resource_class": "runtime_promotion",
+            "state": "busy",
+            "wait_timeout_seconds": timeout.as_secs(),
+            "tried": [
+                "The durable owner record disappeared while the admission lock remained busy.",
+                "Retry after the previous owner finishes releasing the admission lock."
+            ]
         }),
     )
 }
@@ -974,13 +1389,77 @@ fn prune_pins(root: &Path) -> Result<()> {
         let Ok(pin) = serde_json::from_str::<RuntimeGenerationPin>(&content) else {
             continue;
         };
-        if !crate::process::pid_is_running(pin.pid)
-            || age_seconds(&pin.started_at).is_some_and(|age| age >= DEFAULT_TTL.as_secs() as i64)
-        {
+        if pin_reclaimable(&pin) {
             let _ = fs::remove_file(path);
         }
     }
     Ok(())
+}
+
+fn pin_reclaimable(pin: &RuntimeGenerationPin) -> bool {
+    pin_reclaimable_with(pin, |pid, linux_starttime_ticks, start_identity| {
+        crate::process::process_identity_state_with_start_identity(
+            pid,
+            linux_starttime_ticks,
+            start_identity,
+        )
+    })
+}
+
+fn pin_reclaimable_with(
+    pin: &RuntimeGenerationPin,
+    inspect: impl FnOnce(
+        u32,
+        Option<u64>,
+        Option<&crate::process::ProcessStartIdentity>,
+    ) -> crate::process::ProcessIdentityState,
+) -> bool {
+    matches!(
+        inspect(
+            pin.pid,
+            pin.linux_starttime_ticks,
+            pin.process_start_identity.as_ref(),
+        ),
+        crate::process::ProcessIdentityState::Dead
+            | crate::process::ProcessIdentityState::IdentityMismatch
+    )
+}
+
+fn pin_blocks_lease(pin: &RuntimeGenerationPin, lease: &RuntimePromotionLease) -> bool {
+    pin.transaction.as_ref().is_none_or(|transaction| {
+        transaction.owner_pid != lease.owner_pid
+            || transaction.target != lease.target
+            || transaction.generation != lease.generation
+            || transaction.capability != lease.capability
+    })
+}
+
+fn validated_pin_transaction(root: &Path) -> Option<SubprocessLeaseCapability> {
+    let lease = read_record(&root.join(LEASE_DIR)).ok()?;
+    let local = LOCAL_LEASE_CAPABILITIES.with(|capabilities| {
+        capabilities
+            .borrow()
+            .iter()
+            .rev()
+            .find(|capability| capability_matches_record(capability, &lease))
+            .cloned()
+    });
+    local.or_else(|| {
+        subprocess_capability_from_env()
+            .filter(|capability| capability_matches_record(capability, &lease))
+    })
+}
+
+fn capability_matches_record(
+    capability: &SubprocessLeaseCapability,
+    lease: &RuntimePromotionLeaseRecord,
+) -> bool {
+    capability.owner_pid == lease.pid
+        && capability.target == lease.target
+        && capability.generation == lease.generation
+        && capability.capability == lease.capability
+        && capability.owner_linux_starttime_ticks == lease.linux_starttime_ticks
+        && capability.owner_process_start_identity == lease.process_start_identity
 }
 
 /// A pending promotion holds exclusive admission while existing pins drain.
@@ -988,8 +1467,8 @@ fn prune_pins(root: &Path) -> Result<()> {
 /// no foreign pin the promotion is ahead of all later cook admission.
 fn wait_for_foreign_generation_pins(
     root: &Path,
-    pid: u32,
-    subprocess_capability: Option<&SubprocessLeaseCapability>,
+    waiting_lease: &RuntimePromotionLease,
+    mut bounded: Option<(&RuntimePromotionLease, &mut BoundedAdmission<'_>)>,
 ) -> Result<()> {
     let pins = root.join(PIN_DIR);
     if !pins.exists() {
@@ -997,22 +1476,145 @@ fn wait_for_foreign_generation_pins(
     }
     loop {
         prune_pins(&pins)?;
-        let foreign_pin = fs::read_dir(&pins)
+        let mut foreign_pins = fs::read_dir(&pins)
             .map_err(io("read runtime generation pins"))?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .filter_map(|path| fs::read_to_string(path).ok())
             .filter_map(|content| serde_json::from_str::<RuntimeGenerationPin>(&content).ok())
-            .any(|pin| {
-                pin.pid != pid
-                    && subprocess_capability
-                        .is_none_or(|capability| capability.owner_pid != pin.pid)
-            });
-        if !foreign_pin {
+            .filter(|pin| pin_blocks_lease(pin, waiting_lease))
+            .collect::<Vec<_>>();
+        foreign_pins.sort_by(|left, right| {
+            (&left.started_at, left.pid, &left.cook_id).cmp(&(
+                &right.started_at,
+                right.pid,
+                &right.cook_id,
+            ))
+        });
+        let Some(foreign_pin) = foreign_pins.first() else {
             return Ok(());
+        };
+        let owner = pin_owner_record(foreign_pin);
+        if let Some((lease, admission)) = bounded.as_mut() {
+            heartbeat_wait(lease, admission, &owner, "foreign_generation_pins")?;
+            let remaining = admission.remaining();
+            if remaining.is_zero() {
+                return Err(wait_timeout_error(
+                    &owner,
+                    admission.timeout,
+                    "foreign_generation_pins",
+                ));
+            }
+            std::thread::sleep(remaining.min(PIN_DRAIN_POLL));
+        } else {
+            std::thread::sleep(PIN_DRAIN_POLL);
         }
-        std::thread::sleep(PIN_DRAIN_POLL);
     }
+}
+
+fn wait_for_admission_lock(
+    lease: &RuntimePromotionLease,
+    admission_lock: &fs::File,
+    admission: &mut BoundedAdmission<'_>,
+) -> Result<()> {
+    loop {
+        match admission_lock.try_lock_exclusive() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                let owner = admission_lock_owner(&lease.path)?;
+                heartbeat_wait(lease, admission, &owner, "os_lock")?;
+                let remaining = admission.remaining();
+                if remaining.is_zero() {
+                    return Err(wait_timeout_error(&owner, admission.timeout, "os_lock"));
+                }
+                std::thread::sleep(remaining.min(COMPATIBLE_WAIT_POLL));
+            }
+            Err(error) => return Err(io("reserve runtime promotion admission")(error)),
+        }
+    }
+}
+
+fn heartbeat_wait(
+    lease: &RuntimePromotionLease,
+    admission: &mut BoundedAdmission<'_>,
+    owner: &RuntimePromotionLeaseRecord,
+    wait_stage: &'static str,
+) -> Result<()> {
+    if admission.should_publish() {
+        lease.heartbeat()?;
+        admission.publish(owner, wait_stage);
+    }
+    Ok(())
+}
+
+fn pin_owner_record(pin: &RuntimeGenerationPin) -> RuntimePromotionLeaseRecord {
+    RuntimePromotionLeaseRecord {
+        schema: "homeboy/runtime-generation-pin/v1".to_string(),
+        pid: pin.pid,
+        operation: "runtime generation pin".to_string(),
+        operation_id: None,
+        status_command: None,
+        target: pin.cook_id.clone(),
+        generation: pin.generation.clone(),
+        compatibility_key: String::new(),
+        started_at: pin.started_at.clone(),
+        linux_starttime_ticks: pin.linux_starttime_ticks,
+        process_start_identity: pin.process_start_identity.clone(),
+        heartbeat_at: String::new(),
+        expires_at: String::new(),
+        capability: String::new(),
+    }
+}
+
+fn admission_lock_owner(lease_path: &Path) -> Result<RuntimePromotionLeaseRecord> {
+    let owner_dir = lease_path
+        .parent()
+        .expect("runtime promotion lease has a parent")
+        .join(ADMISSION_OWNER_DIR);
+    if owner_dir.exists() {
+        let mut owners = Vec::new();
+        for entry in fs::read_dir(&owner_dir).map_err(io("read runtime admission owners"))? {
+            let path = entry.map_err(io("read runtime admission owner"))?.path();
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(owner) = serde_json::from_str::<RuntimePromotionLeaseRecord>(&content) else {
+                continue;
+            };
+            if reclaimable(&owner) {
+                let _ = fs::remove_file(path);
+            } else {
+                owners.push(owner);
+            }
+        }
+        owners.sort_by(|left, right| {
+            (&left.started_at, left.pid, &left.operation).cmp(&(
+                &right.started_at,
+                right.pid,
+                &right.operation,
+            ))
+        });
+        if let Some(owner) = owners.into_iter().next() {
+            return Ok(owner);
+        }
+    }
+
+    Ok(RuntimePromotionLeaseRecord {
+        schema: "homeboy/runtime-promotion-admission-owner/v1".to_string(),
+        pid: 0,
+        operation: "unknown admission lock owner".to_string(),
+        operation_id: None,
+        status_command: None,
+        target: "runtime promotion admission".to_string(),
+        generation: String::new(),
+        compatibility_key: String::new(),
+        started_at: String::new(),
+        linux_starttime_ticks: None,
+        process_start_identity: None,
+        heartbeat_at: String::new(),
+        expires_at: String::new(),
+        capability: String::new(),
+    })
 }
 
 fn current_generation() -> String {
@@ -1044,6 +1646,8 @@ mod tests {
             schema: "v1".to_string(),
             pid: u32::MAX,
             operation: "upgrade".to_string(),
+            operation_id: None,
+            status_command: None,
             target: "main".to_string(),
             generation: "old".to_string(),
             compatibility_key: String::new(),
@@ -1099,6 +1703,8 @@ mod tests {
             schema: "v1".to_string(),
             pid: 42,
             operation: "runner refresh".to_string(),
+            operation_id: None,
+            status_command: None,
             target: "lab".to_string(),
             generation: "old".to_string(),
             compatibility_key: String::new(),
@@ -1170,6 +1776,49 @@ mod tests {
     }
 
     #[test]
+    fn compatible_wait_exposes_the_owner_operation_status_contract() {
+        crate::test_support::with_isolated_home(|_| {
+            let owner = acquire_waiting_for_compatible_with_status(
+                "controller upgrade",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "upgrade-123".to_string(),
+                    status_command: "homeboy upgrade status upgrade-123".to_string(),
+                },
+                Duration::from_secs(1),
+                |_| unreachable!("uncontended owner does not queue"),
+            )
+            .expect("owner acquires lease");
+            let contender = std::thread::spawn(|| {
+                let events = std::sync::Mutex::new(Vec::new());
+                let error = acquire_waiting_for_compatible(
+                    "controller upgrade",
+                    "active controller",
+                    Duration::ZERO,
+                    |event| events.lock().expect("collect event").push(event),
+                )
+                .expect_err("live compatible owner remains bounded");
+                (error, events.into_inner().expect("events are not poisoned"))
+            });
+
+            let (error, events) = contender.join().expect("contender exits");
+            drop(owner);
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(error.details["holder_operation_id"], "upgrade-123");
+            assert_eq!(
+                error.details["holder_status_command"],
+                "homeboy upgrade status upgrade-123"
+            );
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].owner_operation_id.as_deref(), Some("upgrade-123"));
+            assert_eq!(
+                events[0].owner_status_command.as_deref(),
+                Some("homeboy upgrade status upgrade-123")
+            );
+        });
+    }
+
+    #[test]
     fn compatible_wait_timeout_leaves_no_queue_state() {
         crate::test_support::with_isolated_home(|_| {
             let mut owner = compatible_wait_owner();
@@ -1214,6 +1863,211 @@ mod tests {
     }
 
     #[test]
+    fn bounded_admission_deadline_covers_the_os_lock() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = paths::runtime_promotion_dir().expect("runtime promotion directory");
+            let blocker = protect_runtime_selection_with_status(
+                "controller extension refresh",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "upgrade-blocker".to_string(),
+                    status_command: "homeboy upgrade status upgrade-blocker".to_string(),
+                },
+            )
+            .expect("hold shared controller selection");
+            let events = std::sync::Mutex::new(Vec::new());
+
+            let error = acquire_waiting_for_target_with_status(
+                "controller upgrade",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "upgrade-contender".to_string(),
+                    status_command: "homeboy upgrade status upgrade-contender".to_string(),
+                },
+                Duration::from_millis(25),
+                |event| events.lock().expect("collect admission events").push(event),
+            )
+            .expect_err("the shared OS lock consumes the same bounded deadline");
+
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(error.details["wait_stage"], "os_lock");
+            assert_eq!(error.details["holder_pid"], std::process::id());
+            assert_eq!(error.details["holder_operation_id"], "upgrade-blocker");
+            assert_eq!(
+                error.details["holder_operation"],
+                "controller extension refresh"
+            );
+            let events = events.into_inner().expect("events are not poisoned");
+            assert!(
+                events.len() >= 2,
+                "OS-lock waiting emits progress heartbeats"
+            );
+            assert!(events.iter().all(|event| event.wait_stage == "os_lock"));
+            assert!(events.iter().all(|event| {
+                event.owner_operation_id.as_deref() == Some("upgrade-blocker")
+                    && event.owner_operation == "controller extension refresh"
+            }));
+            assert!(
+                !root.join(LEASE_DIR).exists(),
+                "timed-out owner lease is removed"
+            );
+            drop(blocker);
+        });
+    }
+
+    #[test]
+    fn shared_selection_blocks_replacement_for_its_full_lifetime() {
+        crate::test_support::with_isolated_home(|_| {
+            let guard = protect_runtime_selection_with_status(
+                "controller extension refresh",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "refresh-owner".to_string(),
+                    status_command: "homeboy upgrade status refresh-owner".to_string(),
+                },
+            )
+            .expect("protect extension refresh");
+            let (queued_tx, queued_rx) = std::sync::mpsc::channel();
+            let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+            let contender = std::thread::spawn(move || {
+                let lease = acquire_waiting_for_target_with_status(
+                    "controller replacement",
+                    "active controller",
+                    RuntimePromotionOwnerStatus {
+                        operation_id: "replacement".to_string(),
+                        status_command: "homeboy upgrade status replacement".to_string(),
+                    },
+                    Duration::from_secs(1),
+                    |_| {
+                        let _ = queued_tx.send(());
+                    },
+                )
+                .expect("replacement acquires after refresh");
+                acquired_tx.send(()).expect("report replacement admission");
+                lease
+            });
+
+            queued_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("replacement waits on the shared selection");
+            assert!(acquired_rx.try_recv().is_err());
+            drop(guard);
+            acquired_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("replacement proceeds after refresh guard drops");
+            drop(contender.join().expect("replacement exits"));
+        });
+    }
+
+    #[test]
+    fn shared_selection_wait_is_bounded_and_names_the_mutation_owner() {
+        crate::test_support::with_isolated_home(|_| {
+            let owner = acquire_waiting_for_target_with_status(
+                "controller replacement",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "replacement-owner".to_string(),
+                    status_command: "homeboy upgrade status replacement-owner".to_string(),
+                },
+                Duration::from_secs(1),
+                |_| unreachable!("uncontended replacement does not wait"),
+            )
+            .expect("hold exclusive controller mutation");
+            let events = std::sync::Mutex::new(Vec::new());
+
+            let error = protect_runtime_selection_waiting_with_status(
+                "controller extension refresh",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "refresh-contender".to_string(),
+                    status_command: "homeboy upgrade status refresh-contender".to_string(),
+                },
+                Duration::from_millis(25),
+                |event| events.lock().expect("collect wait event").push(event),
+            )
+            .expect_err("shared selection wait remains bounded");
+
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(error.details["wait_stage"], "os_lock");
+            assert_eq!(error.details["holder_operation_id"], "replacement-owner");
+            assert_eq!(
+                error.details["queue_state"],
+                "timed_out_waiting_for_admission_lock"
+            );
+            let events = events.into_inner().expect("events are not poisoned");
+            assert!(events.iter().all(|event| {
+                event.owner_operation_id.as_deref() == Some("replacement-owner")
+                    && event.owner_operation == "controller replacement"
+            }));
+            drop(owner);
+        });
+    }
+
+    #[test]
+    fn bounded_admission_deadline_covers_foreign_generation_pins() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut foreign_owner = Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("start foreign generation owner");
+            let root = paths::runtime_promotion_dir().expect("runtime promotion directory");
+            let pins = root.join(PIN_DIR);
+            fs::create_dir_all(&pins).expect("create pin directory");
+            fs::write(
+                pins.join("foreign.json"),
+                serde_json::to_vec_pretty(&RuntimeGenerationPin {
+                    pid: foreign_owner.id(),
+                    cook_id: "foreign-cook".to_string(),
+                    generation: "previous-generation".to_string(),
+                    started_at: now(),
+                    linux_starttime_ticks: None,
+                    process_start_identity: None,
+                    transaction: None,
+                })
+                .expect("serialize foreign pin"),
+            )
+            .expect("write foreign pin");
+            let events = std::sync::Mutex::new(Vec::new());
+
+            let error = acquire_waiting_for_target_with_status(
+                "controller upgrade",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "upgrade-contender".to_string(),
+                    status_command: "homeboy upgrade status upgrade-contender".to_string(),
+                },
+                Duration::from_millis(25),
+                |event| events.lock().expect("collect admission events").push(event),
+            )
+            .expect_err("foreign pins consume the same bounded deadline");
+
+            foreign_owner.kill().expect("stop foreign owner");
+            foreign_owner.wait().expect("reap foreign owner");
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(error.details["wait_stage"], "foreign_generation_pins");
+            assert_eq!(error.details["holder_pid"], foreign_owner.id());
+            assert_eq!(error.details["holder_operation"], "runtime generation pin");
+            assert_eq!(error.details["target"], "foreign-cook");
+            assert_eq!(error.details["holder_generation"], "previous-generation");
+            let events = events.into_inner().expect("events are not poisoned");
+            assert!(events.len() >= 2, "pin draining emits progress heartbeats");
+            assert!(events
+                .iter()
+                .all(|event| event.wait_stage == "foreign_generation_pins"));
+            assert!(events.iter().all(|event| {
+                event.owner_pid == foreign_owner.id()
+                    && event.owner_operation == "runtime generation pin"
+                    && event.target == "foreign-cook"
+                    && event.owner_generation == "previous-generation"
+            }));
+            assert!(
+                !root.join(LEASE_DIR).exists(),
+                "timed-out owner lease is removed"
+            );
+        });
+    }
+
+    #[test]
     fn incompatible_contender_remains_fail_closed() {
         crate::test_support::with_isolated_home(|_| {
             let _owner = acquire("owner operation", "lab").expect("owner acquires lease");
@@ -1239,34 +2093,52 @@ mod tests {
             &owner,
             "lab",
             "generation-a",
-            "candidate-a"
+            "candidate-a",
+            CompatibleOwnerPolicy::SameGeneration,
         ));
         assert!(!is_compatible_owner(
             &owner,
             "other-lab",
             "generation-a",
-            "candidate-a"
+            "candidate-a",
+            CompatibleOwnerPolicy::SameGeneration,
         ));
         assert!(!is_compatible_owner(
             &owner,
             "lab",
             "generation-b",
-            "candidate-a"
+            "candidate-a",
+            CompatibleOwnerPolicy::SameGeneration,
         ));
         assert!(!is_compatible_owner(
             &owner,
             "lab",
             "generation-a",
-            "candidate-b"
+            "candidate-b",
+            CompatibleOwnerPolicy::SameGeneration,
         ));
         let mut legacy_owner = owner.clone();
         legacy_owner.compatibility_key.clear();
-        assert!(is_compatible_owner(&owner, "lab", "generation-a", ""));
+        assert!(is_compatible_owner(
+            &owner,
+            "lab",
+            "generation-a",
+            "",
+            CompatibleOwnerPolicy::SameGeneration,
+        ));
+        assert!(is_compatible_owner(
+            &owner,
+            "lab",
+            "generation-b",
+            "",
+            CompatibleOwnerPolicy::SameTarget,
+        ));
         assert!(!is_compatible_owner(
             &legacy_owner,
             "lab",
             "generation-a",
-            "candidate-a"
+            "candidate-a",
+            CompatibleOwnerPolicy::SameGeneration,
         ));
     }
 
@@ -1304,6 +2176,8 @@ mod tests {
             schema: "homeboy/runtime-promotion-lease/v2".to_string(),
             pid: 42,
             operation: "runner refresh".to_string(),
+            operation_id: None,
+            status_command: None,
             target: "lab".to_string(),
             generation: "generation-a".to_string(),
             compatibility_key: "candidate-a".to_string(),
@@ -1327,6 +2201,128 @@ mod tests {
             generation: record.generation.clone(),
             capability: record.capability.clone(),
         }
+    }
+
+    fn generation_pin(pid: u32) -> RuntimeGenerationPin {
+        RuntimeGenerationPin {
+            pid,
+            cook_id: "cook".to_string(),
+            generation: "generation-a".to_string(),
+            started_at: "2000-01-01T00:00:00Z".to_string(),
+            linux_starttime_ticks: None,
+            process_start_identity: None,
+            transaction: None,
+        }
+    }
+
+    #[test]
+    fn old_live_pin_is_not_reclaimed_by_age() {
+        crate::test_support::with_isolated_home(|_| {
+            let pins = paths::runtime_promotion_dir()
+                .expect("promotion root")
+                .join(PIN_DIR);
+            fs::create_dir_all(&pins).expect("create pins");
+            let path = pins.join("old-live.json");
+            fs::write(
+                &path,
+                serde_json::to_vec(&generation_pin(std::process::id())).expect("serialize pin"),
+            )
+            .expect("write pin");
+
+            prune_pins(&pins).expect("prune pins");
+            assert!(path.exists(), "age alone cannot expire a live pin");
+        });
+    }
+
+    #[test]
+    fn pin_reclamation_requires_dead_or_invalid_owner_evidence() {
+        let pin = generation_pin(42);
+        assert!(pin_reclaimable_with(&pin, |_, _, _| {
+            crate::process::ProcessIdentityState::Dead
+        }));
+        assert!(pin_reclaimable_with(&pin, |_, _, _| {
+            crate::process::ProcessIdentityState::IdentityMismatch
+        }));
+        assert!(!pin_reclaimable_with(&pin, |_, _, _| {
+            crate::process::ProcessIdentityState::Live
+        }));
+        assert!(!pin_reclaimable_with(&pin, |_, _, _| {
+            crate::process::ProcessIdentityState::Unverifiable
+        }));
+    }
+
+    #[test]
+    fn pin_exemption_requires_the_exact_transaction_capability() {
+        let record = lease_record();
+        let lease = RuntimePromotionLease {
+            path: PathBuf::new(),
+            primary: false,
+            generation: record.generation.clone(),
+            target: record.target.clone(),
+            compatibility_key: record.compatibility_key.clone(),
+            owner_pid: record.pid,
+            capability: record.capability.clone(),
+            admission_lock: None,
+        };
+        let mut pin = generation_pin(record.pid);
+        assert!(pin_blocks_lease(&pin, &lease));
+        pin.transaction = Some(capability(&record));
+        assert!(!pin_blocks_lease(&pin, &lease));
+        pin.transaction.as_mut().expect("transaction").capability = "other".to_string();
+        assert!(pin_blocks_lease(&pin, &lease));
+    }
+
+    #[test]
+    fn transaction_owner_can_publish_a_pin_without_relocking_admission() {
+        crate::test_support::with_isolated_home(|_| {
+            let lease = acquire("controller upgrade", "active controller")
+                .expect("acquire exclusive admission");
+
+            let pin = pin_cook_generation("same-transaction-cook")
+                .expect("transaction pin does not self-deadlock");
+            let pins = paths::runtime_promotion_dir()
+                .expect("promotion root")
+                .join(PIN_DIR);
+            let record = fs::read_dir(pins)
+                .expect("read pins")
+                .next()
+                .expect("published pin")
+                .expect("pin entry");
+            let pin_record: RuntimeGenerationPin =
+                serde_json::from_slice(&fs::read(record.path()).expect("read pin record"))
+                    .expect("parse pin record");
+            assert!(pin_record.transaction.is_some());
+            assert!(!pin_blocks_lease(&pin_record, &lease));
+            drop(pin);
+        });
+    }
+
+    #[test]
+    fn selection_wait_retries_only_a_disappearing_owner_record() {
+        let disappeared = selection_blocker_after_busy(|| {
+            Err(LeaseRecordReadError::Disappeared(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            )))
+        })
+        .expect("teardown disappearance is retryable");
+        assert!(disappeared.is_none());
+
+        let error = selection_blocker_after_busy(|| {
+            Err(LeaseRecordReadError::Failure(Error::internal_unexpected(
+                "malformed owner",
+            )))
+        })
+        .expect_err("malformed owners remain fail closed");
+        assert!(error.message.contains("malformed owner"));
+    }
+
+    #[test]
+    fn blocker_identity_includes_the_durable_operation_id() {
+        let mut first = lease_record();
+        first.operation_id = Some("upgrade-1".to_string());
+        let mut second = first.clone();
+        second.operation_id = Some("upgrade-2".to_string());
+        assert_ne!(blocker_identity(&first), blocker_identity(&second));
     }
 
     #[test]
@@ -1407,6 +2403,27 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_same_process_pin_blocks_promotion() {
+        crate::test_support::with_isolated_home(|_| {
+            let pin = pin_cook_generation("same-process-cook").expect("pin cook generation");
+            let error = acquire_waiting_for_target_with_status(
+                "controller upgrade",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "upgrade".to_string(),
+                    status_command: "homeboy upgrade status upgrade".to_string(),
+                },
+                Duration::ZERO,
+                |_| {},
+            )
+            .expect_err("same-process pin is unrelated without an exact capability");
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(error.details["wait_stage"], "foreign_generation_pins");
+            drop(pin);
+        });
+    }
+
+    #[test]
     fn generation_rotation_retains_writer_serialization_without_waiting_for_foreign_cooks() {
         crate::test_support::with_isolated_home(|_| {
             let mut foreign_owner = Command::new("sleep")
@@ -1424,6 +2441,9 @@ mod tests {
                     cook_id: "foreign-cook".to_string(),
                     generation: "existing-generation".to_string(),
                     started_at: now(),
+                    linux_starttime_ticks: None,
+                    process_start_identity: None,
+                    transaction: None,
                 })
                 .expect("serialize foreign pin"),
             )
@@ -1458,6 +2478,9 @@ mod tests {
                     cook_id: "existing-attempt".to_string(),
                     generation: "existing-generation".to_string(),
                     started_at: now(),
+                    linux_starttime_ticks: None,
+                    process_start_identity: None,
+                    transaction: None,
                 })
                 .expect("serialize existing pin"),
             )

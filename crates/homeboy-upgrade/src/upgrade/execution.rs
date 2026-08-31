@@ -136,10 +136,12 @@ pub(crate) fn execute_upgrade(
     source_path: Option<&Path>,
     explicit_source_path: bool,
     force: bool,
+    deliberate_replacement: bool,
     previous_build_identity: Option<&str>,
     selected_release: Option<&SelectedRelease>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
-    mut progress: impl FnMut(&str),
+    phase: &mut dyn FnMut(&str) -> Result<()>,
+    replacement_checkpoint: &mut dyn FnMut(&str, &Path, Option<&str>, Option<&str>) -> Result<()>,
 ) -> UpgradeExecutionResult {
     let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
@@ -149,16 +151,46 @@ pub(crate) fn execute_upgrade(
     let binary_destination = (method == InstallMethod::Binary)
         .then(active_binary_path)
         .transpose()?;
+    if method == InstallMethod::Binary {
+        promotion_lease
+            .ok_or_else(|| {
+                Error::internal_unexpected(
+                    "binary replacement eligibility must be revalidated under promotion ownership",
+                )
+            })?
+            .assert_generation()?;
+        validate_binary_replacement_eligibility(
+            deliberate_replacement,
+            selected_binary_version.expect("binary upgrades select a release"),
+            installed_target_build_identity_from_disk(
+                binary_destination
+                    .as_deref()
+                    .expect("binary upgrades capture a destination"),
+            )?,
+        )?;
+    }
+    if method != InstallMethod::Source {
+        phase("running_candidate_admission")?;
+        phase("installing_controller")?;
+    }
+    if method == InstallMethod::Binary {
+        replacement_checkpoint(
+            "pending",
+            binary_destination
+                .as_deref()
+                .expect("binary upgrades capture a destination"),
+            selected_binary_version,
+            None,
+        )?;
+    }
     let output = match method {
         InstallMethod::Homebrew => {
-            progress("installing controller release");
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
             Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
                 Error::internal_io(e.to_string(), Some("run homebrew upgrade".to_string()))
             })?
         }
         InstallMethod::Secondary => {
-            progress("installing controller release");
             // Legacy cargo-installed binaries are replaced with the release
             // asset now that Homeboy's private workspace is not on crates.io.
             let cmd = &defaults.install_methods.binary.upgrade_command;
@@ -198,7 +230,7 @@ pub(crate) fn execute_upgrade(
                 &workspace_root,
                 explicit_source_path,
             )?;
-            progress("building controller candidate");
+            phase("building_candidate")?;
             run_source_upgrade_command(
                 &cmd,
                 &workspace_root,
@@ -209,7 +241,6 @@ pub(crate) fn execute_upgrade(
             // Source command output is streamed to the invoking process so
             // controller timeouts can distinguish a build from a stalled run.
             // It has already returned a precise error for non-zero exits.
-            progress("running controller candidate admission");
             return complete_source_upgrade(
                 workspace_root,
                 built_binary,
@@ -219,11 +250,11 @@ pub(crate) fn execute_upgrade(
                 previous_build_identity,
                 source_revision,
                 promotion_lease,
-                &mut progress,
+                phase,
+                replacement_checkpoint,
             );
         }
         InstallMethod::Binary => {
-            progress("installing controller release");
             let cmd = &defaults.install_methods.binary.upgrade_command;
             // Pin the installer to the release this upgrade selected. Without
             // the pin the installer always resolves `latest/download`, so a
@@ -260,6 +291,19 @@ pub(crate) fn execute_upgrade(
             selected_release,
         ));
     }
+
+    if method == InstallMethod::Binary {
+        replacement_checkpoint(
+            "applied",
+            binary_destination
+                .as_deref()
+                .expect("binary upgrades capture a destination"),
+            selected_binary_version,
+            None,
+        )?;
+    }
+
+    phase("verifying_install")?;
 
     // The upgrade command above succeeded, so the new binary is already on
     // disk. Reading the version back can race the just-replaced binary (atomic
@@ -316,6 +360,39 @@ pub(crate) fn execute_upgrade(
     Ok((success, new_version, new_build_identity, None, false))
 }
 
+fn validate_binary_replacement_eligibility(
+    deliberate_replacement: bool,
+    selected_version: &str,
+    installed: Option<homeboy_core::build_identity::BuildIdentity>,
+) -> Result<()> {
+    if deliberate_replacement {
+        return Ok(());
+    }
+    let installed = installed.ok_or_else(|| {
+        Error::internal_unexpected(
+            "cannot revalidate the installed controller before binary replacement",
+        )
+        .with_hint("Retry after the PATH-active controller reports a readable build identity.")
+    })?;
+    if installed.version == selected_version
+        || version_is_newer(&installed.version, selected_version)
+    {
+        return Err(Error::validation_invalid_argument(
+            "selected_release",
+            format!(
+                "Selected controller {selected_version} is no longer newer than installed controller {}",
+                installed.version
+            ),
+            Some(selected_version.to_string()),
+            Some(vec![
+                "A queued upgrade must not reinstall or downgrade a controller promoted by an earlier owner. Re-run update discovery against the active controller."
+                    .to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
 /// Verify a source-built candidate while it is still staged, then let that
 /// candidate decide whether durable ownership permits replacement. This is the
 /// source equivalent of the release installer's verified-target admission.
@@ -324,7 +401,7 @@ fn verify_source_candidate_target_admission(
     built_binary: &Path,
     source_revision: Option<&str>,
     installed_binary: Option<&Path>,
-) -> Result<()> {
+) -> Result<ActiveBinaryInfo> {
     let expected_version = source_workspace_package_version(workspace_root)?;
     if let Some(revision) = source_revision {
         let observed = source_workspace_revision(workspace_root)?;
@@ -345,7 +422,7 @@ fn verify_source_candidate_target_admission(
             built_binary.display()
         ))
     })?;
-    let candidate_version = candidate.version.as_deref().ok_or_else(|| {
+    let candidate_version = candidate.version.clone().ok_or_else(|| {
         Error::internal_unexpected(format!(
             "source-built candidate did not report a version: {}",
             built_binary.display()
@@ -382,10 +459,11 @@ fn verify_source_candidate_target_admission(
         .unwrap_or_else(|| "unavailable".to_string());
     run_verified_target_admission(
         built_binary,
-        candidate_version,
+        &candidate_version,
         &legacy_identity,
         &format!("source candidate {}", built_binary.display()),
-    )
+    )?;
+    Ok(candidate)
 }
 
 fn source_workspace_package_version(workspace_root: &Path) -> Result<String> {
@@ -505,7 +583,8 @@ fn complete_source_upgrade(
     previous_build_identity: Option<&str>,
     source_revision: Option<String>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
-    progress: &mut impl FnMut(&str),
+    phase: &mut dyn FnMut(&str) -> Result<()>,
+    replacement_checkpoint: &mut dyn FnMut(&str, &Path, Option<&str>, Option<&str>) -> Result<()>,
 ) -> UpgradeExecutionResult {
     let replacement_target = replacement_target.ok_or_else(|| {
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
@@ -524,7 +603,7 @@ fn complete_source_upgrade(
         }
     };
     let active_identity = installed_target_build_identity()?;
-    if source_promotion_is_superseded(force, active_identity.as_ref(), &workspace_root) {
+    if source_promotion_is_superseded(force, active_identity.as_ref(), &workspace_root)? {
         let active = active_identity.expect("identity checked above");
         return Ok((
             false,
@@ -537,17 +616,30 @@ fn complete_source_upgrade(
     // The promotion decision above verifies source ancestry against the final
     // installed target. The staged binary owns recovery and admission before
     // this lease permits a byte change.
-    verify_source_candidate_target_admission(
+    phase("running_candidate_admission")?;
+    let candidate_identity = verify_source_candidate_target_admission(
         &workspace_root,
         &built_binary,
         source_revision.as_deref(),
         Some(replacement_target),
     )?;
     promotion_lease.assert_generation()?;
-    progress("installing source-built controller candidate");
+    phase("installing_controller")?;
+    replacement_checkpoint(
+        "pending",
+        replacement_target,
+        candidate_identity.version.as_deref(),
+        candidate_identity.build_identity.as_deref(),
+    )?;
     upgrade_phase("installing source-built binary");
     install_source_built_binary(&built_binary, replacement_target)?;
-    progress("verifying installed controller candidate");
+    replacement_checkpoint(
+        "applied",
+        replacement_target,
+        candidate_identity.version.as_deref(),
+        candidate_identity.build_identity.as_deref(),
+    )?;
+    phase("verifying_install")?;
     upgrade_phase("verifying installed source binary");
 
     let (_verified_version, active_binary) = verify_upgrade_with_retry(
@@ -577,7 +669,7 @@ fn complete_source_upgrade(
         source_workspace: Some(&workspace_root),
         built_binary: Some(&built_binary),
         replacement_target: Some(replacement_target),
-        built_binary_identity: previous_build_identity,
+        built_binary_identity: candidate_identity.build_identity.as_deref(),
     }) {
         return Err(error);
     }
@@ -596,10 +688,17 @@ fn source_promotion_is_superseded(
     force: bool,
     active: Option<&homeboy_core::build_identity::BuildIdentity>,
     workspace_root: &Path,
-) -> bool {
-    !force
-        && active
-            .is_some_and(|active| !source_promotion_decision(active, workspace_root).upgrades())
+) -> Result<bool> {
+    if force {
+        return Ok(false);
+    }
+    let active = active.ok_or_else(|| {
+        Error::internal_unexpected(
+            "cannot revalidate the installed controller before source replacement",
+        )
+        .with_hint("Retry after the PATH-active controller reports a readable build identity.")
+    })?;
+    Ok(!source_promotion_decision(active, workspace_root).upgrades())
 }
 
 fn upgrade_phase(phase: &str) {
@@ -948,6 +1047,15 @@ fn install_source_built_binary(built_binary: &Path, replacement_target: &Path) -
 
     make_source_install_executable(&temp_target)?;
 
+    std::fs::File::open(&temp_target)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| {
+            Error::internal_io(
+                format!("sync {} failed: {}", temp_target.display(), e),
+                Some("install source-built binary".to_string()),
+            )
+        })?;
+
     std::fs::rename(&temp_target, replacement_target).map_err(|err| {
         Error::internal_io(
             format!(
@@ -960,9 +1068,28 @@ fn install_source_built_binary(built_binary: &Path, replacement_target: &Path) -
         )
     })?;
 
+    sync_source_install_parent(parent)?;
+
     // Rename succeeded; the file is at its final path. Prevent the guard from
     // deleting it on drop.
     guard.into_owned();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_source_install_parent(parent: &Path) -> Result<()> {
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| {
+            Error::internal_io(
+                format!("sync directory {} failed: {}", parent.display(), e),
+                Some("install source-built binary".to_string()),
+            )
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_source_install_parent(_parent: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -1514,7 +1641,15 @@ pub(crate) fn installed_target_build_identity(
         }
     }
 
-    let Some(info) = active_binary_info_at(&target_path)? else {
+    installed_target_build_identity_from_disk(&target_path)
+}
+
+/// Execute the selected on-disk target so replacement at the current process's
+/// pathname cannot be mistaken for the still-running process identity.
+pub(crate) fn installed_target_build_identity_from_disk(
+    target_path: &Path,
+) -> Result<Option<homeboy_core::build_identity::BuildIdentity>> {
+    let Some(info) = active_binary_info_at(target_path)? else {
         return Ok(None);
     };
     Ok(info
