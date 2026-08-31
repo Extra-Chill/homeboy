@@ -52,11 +52,8 @@ enum ExtensionCommand {
         #[arg(short, long)]
         project: Option<String>,
         /// Run live readiness probes concurrently and refresh cached readiness
-        #[arg(long, conflicts_with = "skip_ready_check")]
+        #[arg(long)]
         live_readiness: bool,
-        /// Deprecated compatibility flag; inventory is metadata-only by default
-        #[arg(long, hide = true)]
-        skip_ready_check: bool,
     },
     /// Compare installed extension revisions with their current checkout HEADs
     DiffInstalled {
@@ -71,11 +68,8 @@ enum ExtensionCommand {
         /// Extension ID
         extension_id: String,
         /// Run the live readiness probe and refresh cached readiness
-        #[arg(long, conflicts_with = "skip_ready_check")]
+        #[arg(long)]
         live_readiness: bool,
-        /// Deprecated compatibility flag; inspection is metadata-only by default
-        #[arg(long, hide = true)]
-        skip_ready_check: bool,
     },
     /// Execute a extension
     Run {
@@ -229,8 +223,7 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
         ExtensionCommand::List {
             project,
             live_readiness,
-            skip_ready_check,
-        } => list(project, readiness_mode(live_readiness, skip_ready_check)),
+        } => list(project, readiness_mode(live_readiness)),
         ExtensionCommand::DiffInstalled {
             extension_id,
             runner,
@@ -238,11 +231,7 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
         ExtensionCommand::Show {
             extension_id,
             live_readiness,
-            skip_ready_check,
-        } => show_extension(
-            &extension_id,
-            readiness_mode(live_readiness, skip_ready_check),
-        ),
+        } => show_extension(&extension_id, readiness_mode(live_readiness)),
         ExtensionCommand::Run {
             extension_id,
             project,
@@ -751,7 +740,7 @@ pub struct InstalledExtensionDiff {
 }
 
 /// Inventory is static by default; callers must explicitly request live probes.
-fn readiness_mode(live_readiness: bool, _skip_ready_check: bool) -> ExtensionReadinessMode {
+fn readiness_mode(live_readiness: bool) -> ExtensionReadinessMode {
     if live_readiness {
         ExtensionReadinessMode::Probe
     } else {
@@ -2273,9 +2262,8 @@ mod tests {
 
     #[test]
     fn extension_inventory_defaults_to_cached_readiness() {
-        assert_eq!(readiness_mode(false, false), ExtensionReadinessMode::Cached);
-        assert_eq!(readiness_mode(false, true), ExtensionReadinessMode::Cached);
-        assert_eq!(readiness_mode(true, false), ExtensionReadinessMode::Probe);
+        assert_eq!(readiness_mode(false), ExtensionReadinessMode::Cached);
+        assert_eq!(readiness_mode(true), ExtensionReadinessMode::Probe);
     }
 
     #[test]
