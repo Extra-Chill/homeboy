@@ -481,13 +481,21 @@ fn run_command_with_workspace_inner(
     let (plan, run_result, workspace) =
         super::pipeline::run_with_plan(roots, &input.component_id, &options)?;
     display_release_summary(&run_result);
+    let skipped_reason = skipped_reason_from_plan(&plan);
 
     let new_version = if input.pipeline.head {
+        current_component_version(&component)?
+    } else if skipped_reason.as_deref() == Some("release-already-at-head") {
+        // The planner only emits this skip after proving the current-version
+        // tag is at HEAD and the checkout is not stale. Preserve that verified
+        // identity so a concurrent workflow can publish the prepared tag.
         current_component_version(&component)?
     } else {
         extract_new_version_from_run(&run_result)
     };
-    let tag = new_version.as_ref().map(|v| release_scope.tag_name(v));
+    let tag = new_version
+        .as_ref()
+        .map(|version| release_scope.tag_name(version));
     let release_step_exit = release_run_failure_exit(&run_result);
     let post_release_exit = if has_post_release_warnings(&run_result)
         || workspace_finalization_pending(workspace.as_ref())
@@ -497,7 +505,6 @@ fn run_command_with_workspace_inner(
         0
     };
     let deployment = super::deployment::extract_deployment_from_run(&run_result);
-    let skipped_reason = skipped_reason_from_plan(&plan);
     let release_summary = release_summary_from_run(&run_result);
     display_release_outcome_summary(&release_summary);
     let deploy_exit_code = deployment
@@ -2258,6 +2265,8 @@ mod tests {
 
         assert_eq!(exit_code, SKIPPED_RELEASE_EXIT_CODE);
         assert_eq!(result.status, "skipped");
+        assert_eq!(result.new_version.as_deref(), Some("1.2.3"));
+        assert_eq!(result.tag.as_deref(), Some("v1.2.3"));
         let run = result.run.expect("strict preflight run");
         assert!(run.result.steps.iter().any(|step| {
             step.id == "preflight.default_branch" && step.status == ReleaseStepStatus::Success
