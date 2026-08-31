@@ -61,6 +61,11 @@ pub fn apply(
         return;
     };
 
+    if let Err(error) = target.ensure_current() {
+        report.repairs.push(identity_repair(error.message));
+        return;
+    }
+
     repair_managed_sources(client, report);
 
     if let Some(repair) = terminal_daemon_recovery_repair(report) {
@@ -72,7 +77,7 @@ pub fn apply(
     // Executing it is the whole point of `--repair`; the fixed
     // disconnect/connect pair below is the fallback for a connected daemon whose
     // exec probe failed without any typed plan behind it (#11103).
-    if apply_daemon_repair_plan(id, report) {
+    if apply_daemon_repair_plan(target, report) {
         return;
     }
 
@@ -97,11 +102,15 @@ pub fn apply(
         format!("homeboy runner disconnect {id}"),
         format!("homeboy runner connect {id}"),
     ];
-    let disconnect_error = runner::disconnect(id).err();
+    let disconnect_error = target
+        .ensure_current()
+        .and_then(|_| runner::disconnect(id))
+        .err();
     // Connect owns lease-safe dead-daemon adoption. A failed disconnect must not
     // force operators through repeated stop/adopt cycles when its authoritative
     // probe has already established that the recorded owner is gone.
-    match retry_runtime_promotion_wait(|| runner::connect(id)) {
+    match retry_runtime_promotion_wait(|| target.ensure_current().and_then(|_| runner::connect(id)))
+    {
         Ok((_, 0)) => {
             report.checks.retain(|check| check.id != "daemon.exec");
             let workspace_root = runner_config.workspace_root.as_deref().unwrap_or(".");
@@ -198,6 +207,15 @@ fn terminal_daemon_recovery_repair(report: &RunnerDoctorOutput) -> Option<Runner
     })
 }
 
+fn identity_repair(message: String) -> RunnerRepair {
+    RunnerRepair {
+        id: "repair.target_identity".to_string(),
+        status: RunnerDoctorStatus::Error,
+        message,
+        commands: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,7 +271,13 @@ mod tests {
             };
 
             assert!(
-                !apply_daemon_repair_plan("lab", &mut report),
+                !apply_daemon_repair_plan(
+                    &target::RunnerTarget::Local {
+                        id: "lab".to_string(),
+                        runner: None,
+                    },
+                    &mut report,
+                ),
                 "unavailable ownership must reject a non-empty reconciliation plan"
             );
             let repair = terminal_daemon_recovery_repair(&report).expect("terminal repair result");
@@ -330,6 +354,69 @@ mod tests {
 
         assert_eq!(result.expect("second bounded wait succeeds"), "connected");
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn promotion_contention_retries_once_and_converges() {
+        let mut calls = 0;
+        let result = retry_runtime_promotion_wait(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(homeboy::core::Error::new(
+                    ErrorCode::RuntimePromotionContended,
+                    "another promotion owns the lease",
+                    serde_json::Value::Null,
+                ))
+            } else {
+                Ok("connected")
+            }
+        });
+
+        assert_eq!(result.expect("second bounded wait succeeds"), "connected");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn contended_repair_never_retries_against_a_changed_registry_target() {
+        crate::test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{"id":"promotion-identity","host":"first.test","user":"runner"}"#,
+                false,
+            )
+            .expect("create server");
+            runner::create(
+                r#"{"id":"promotion-identity","kind":"ssh","server_id":"promotion-identity","workspace_root":"/tmp"}"#,
+                false,
+            )
+            .expect("create runner");
+            let target = target::resolve("promotion-identity").expect("resolve target");
+            let lease = homeboy::core::runtime_promotion::acquire(
+                "doctor repair integration test",
+                "promotion-identity",
+            )
+            .expect("hold promotion lease");
+            let mut calls = 0;
+
+            let error = retry_runtime_promotion_wait(|| {
+                calls += 1;
+                if calls == 1 {
+                    let mut changed = server::load("promotion-identity").expect("load server");
+                    changed.host = "second.test".to_string();
+                    server::save(&changed).expect("change registry target");
+                    return Err(homeboy::core::Error::new(
+                        ErrorCode::RuntimePromotionContended,
+                        "held promotion lease contended direct connect",
+                        serde_json::Value::Null,
+                    ));
+                }
+                target.ensure_current()
+            })
+            .expect_err("retry must reject the changed target");
+
+            drop(lease);
+            assert_eq!(calls, 2);
+            assert!(error.message.contains("target changed"), "{error:?}");
+        });
     }
 
     #[test]
@@ -449,7 +536,14 @@ pub(super) fn dispatch_for(
 ///
 /// Returns `false` when there is no plan to act on, so the caller falls through
 /// to its own probe-driven recovery.
-fn apply_daemon_repair_plan(runner_id: &str, report: &mut RunnerDoctorOutput) -> bool {
+fn apply_daemon_repair_plan(
+    target: &target::RunnerTarget,
+    report: &mut RunnerDoctorOutput,
+) -> bool {
+    let runner_id = match target {
+        target::RunnerTarget::Ssh { id, .. } => id,
+        target::RunnerTarget::Local { .. } => return false,
+    };
     let Some(recovery) = report.daemon_recovery.as_ref() else {
         return false;
     };
@@ -464,35 +558,60 @@ fn apply_daemon_repair_plan(runner_id: &str, report: &mut RunnerDoctorOutput) ->
     let mut applied = 0usize;
     for step in &plan {
         let outcome = match dispatch_for(step, lease_id.as_deref()) {
-            DaemonRepairDispatch::Disconnect => runner::disconnect(runner_id)
+            DaemonRepairDispatch::Disconnect => target
+                .ensure_current()
+                .and_then(|_| runner::disconnect(runner_id))
                 .map(|_| ())
                 .map_err(|error| error.message),
-            DaemonRepairDispatch::Connect => {
-                connect_outcome_after_promotion_wait(|| runner::connect(runner_id))
-            }
+            DaemonRepairDispatch::Connect => connect_outcome_after_promotion_wait(|| {
+                target
+                    .ensure_current()
+                    .and_then(|_| runner::connect(runner_id))
+            }),
             DaemonRepairDispatch::AdoptOrphanLease { lease_id } => {
                 connect_outcome_after_promotion_wait(|| {
-                    runner::connect_with_orphan_adoption(
-                        runner_id,
-                        Some(&lease_id),
-                        &[],
-                        false,
-                        None,
-                        None,
-                        None,
-                    )
+                    target.ensure_current().and_then(|_| {
+                        runner::connect_with_orphan_adoption(
+                            runner_id,
+                            Some(&lease_id),
+                            &[],
+                            false,
+                            None,
+                            None,
+                            None,
+                        )
+                    })
                 })
             }
-            DaemonRepairDispatch::ReconcileLeaselessOrphans => connect_outcome(
-                runner::connect_with_orphan_adoption(runner_id, None, &[], true, None, None, None),
-            ),
-            DaemonRepairDispatch::ReconcileUnleasedCandidates => connect_outcome(
-                runner::connect_with_unleased_candidate_reconciliation(runner_id),
-            ),
+            DaemonRepairDispatch::ReconcileLeaselessOrphans => {
+                connect_outcome_after_promotion_wait(|| {
+                    target.ensure_current().and_then(|_| {
+                        runner::connect_with_orphan_adoption(
+                            runner_id,
+                            None,
+                            &[],
+                            true,
+                            None,
+                            None,
+                            None,
+                        )
+                    })
+                })
+            }
+            DaemonRepairDispatch::ReconcileUnleasedCandidates => {
+                connect_outcome_after_promotion_wait(|| {
+                    target.ensure_current().and_then(|_| {
+                        runner::connect_with_unleased_candidate_reconciliation(runner_id)
+                    })
+                })
+            }
             DaemonRepairDispatch::RefreshHomeboy {
                 git_ref,
                 allow_downgrade,
-            } => refresh_outcome(runner_id, git_ref, allow_downgrade),
+            } => target
+                .ensure_current()
+                .map_err(|error| error.message)
+                .and_then(|_| refresh_outcome(runner_id, git_ref, allow_downgrade)),
             // A read-only diagnosis, or a recovery command a runner advertised
             // as text with no argv behind it. The operator gets the plan and an
             // explicit reason instead of silence.
@@ -533,7 +652,7 @@ fn apply_daemon_repair_plan(runner_id: &str, report: &mut RunnerDoctorOutput) ->
         .map(|step| step.code.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    match daemon_admission_ready(runner_id) {
+    match target.ensure_current().and_then(|_| daemon_admission_ready(runner_id)) {
         Ok(true) => report.repairs.push(RunnerRepair {
             id: "repair.daemon".to_string(),
             status: RunnerDoctorStatus::Ok,
@@ -597,8 +716,10 @@ fn retry_runtime_promotion_wait<T>(
     for attempt in 0..PROMOTION_WAIT_CONNECT_ATTEMPTS {
         match action() {
             Err(error)
-                if error.code == ErrorCode::RuntimePromotionWaitTimeout
-                    && attempt + 1 < PROMOTION_WAIT_CONNECT_ATTEMPTS =>
+                if matches!(
+                    error.code,
+                    ErrorCode::RuntimePromotionContended | ErrorCode::RuntimePromotionWaitTimeout
+                ) && attempt + 1 < PROMOTION_WAIT_CONNECT_ATTEMPTS =>
             {
                 // `connect` emitted owner/watch events during the first wait.
                 // A second bounded admission wait converges a promotion that

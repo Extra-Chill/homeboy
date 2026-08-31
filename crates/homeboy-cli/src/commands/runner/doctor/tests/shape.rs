@@ -111,6 +111,29 @@ fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
 }
 
 #[test]
+fn compact_doctor_retains_failed_repair_cause_and_remediation() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.repairs.push(types::RunnerRepair {
+        id: "repair.daemon".to_string(),
+        status: RunnerDoctorStatus::Error,
+        message: "promotion lease remained contended after the bounded wait".to_string(),
+        commands: vec!["homeboy runner doctor local --scope lab-offload --repair".to_string()],
+    });
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(compact["repairs"][0]["id"], "repair.daemon");
+    assert_eq!(
+        compact["repairs"][0]["message"],
+        "promotion lease remained contended after the bounded wait"
+    );
+    assert_eq!(
+        compact["repairs"][0]["commands"][0],
+        "homeboy runner doctor local --scope lab-offload --repair"
+    );
+}
+
+#[test]
 fn compact_doctor_hard_bounds_oversized_identity_and_command_metadata() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.runner_id = "runner-".repeat(10_000);
@@ -179,6 +202,34 @@ fn compact_doctor_falls_back_when_escaped_untrusted_fields_exceed_the_wire_budge
         compact["truncation"]["checks"]["omitted"],
         "see_full_output"
     );
+}
+
+#[test]
+fn compact_doctor_size_fallback_retains_failed_repair() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    let escaped = "\"\\\n".repeat(10_000);
+    report.checks = (0..COMPACT_CHECK_LIMIT)
+        .map(|_| types::RunnerCheck {
+            id: escaped.clone(),
+            status: RunnerDoctorStatus::Error,
+            message: escaped.clone(),
+            remediation: Some(escaped.clone()),
+            remediation_action: None,
+            details: BTreeMap::new(),
+        })
+        .collect();
+    report.repairs.push(types::RunnerRepair {
+        id: "repair.daemon".to_string(),
+        status: RunnerDoctorStatus::Error,
+        message: "promotion wait exhausted; do not use generic reconnect".to_string(),
+        commands: vec!["homeboy runner doctor local --scope lab-offload --repair".to_string()],
+    });
+
+    let compact = output_projection(report, false);
+
+    assert_eq!(compact["checks"].as_array().unwrap().len(), 0);
+    assert_eq!(compact["repairs"][0]["id"], "repair.daemon");
+    assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
 }
 
 #[test]

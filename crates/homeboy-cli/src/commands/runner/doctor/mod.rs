@@ -72,10 +72,20 @@ pub(crate) fn run_with_options(
         // Repair is not success by itself. Re-probe the same resolved target so
         // the terminal report verifies its identity, binary, SSH, workspace,
         // daemon, and provider readiness after the mutation.
-        let repairs = std::mem::take(&mut report.repairs);
+        let mut repairs = std::mem::take(&mut report.repairs);
         report = report_for_target(&target, &options);
-        let migration = runner::secret_env_migration_plan(runner_id)?;
-        report.secret_env_migration = (!migration.is_empty()).then_some(migration);
+        match target.ensure_current() {
+            Ok(()) => {
+                let migration = runner::secret_env_migration_plan(runner_id)?;
+                report.secret_env_migration = (!migration.is_empty()).then_some(migration);
+            }
+            Err(error) => repairs.push(types::RunnerRepair {
+                id: "repair.target_identity".to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: error.message,
+                commands: Vec::new(),
+            }),
+        }
         report.repairs = repairs;
     }
 
@@ -189,6 +199,17 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         readiness.ready_for.len() + readiness.blocked_for.len()
     });
     let runner_id = bounded_text(&report.runner_id);
+    let failed_repairs = report
+        .repairs
+        .iter()
+        .filter(|repair| repair.status != RunnerDoctorStatus::Ok)
+        .map(|repair| serde_json::json!({
+            "id": bounded_text(&repair.id),
+            "status": repair.status,
+            "message": bounded_text(&repair.message),
+            "commands": repair.commands.iter().take(1).map(|command| bounded_text(command)).collect::<Vec<_>>(),
+        }))
+        .collect::<Vec<_>>();
     let projection = serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": report.command,
@@ -208,11 +229,12 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
             "cpu": { "count": report.resources.cpu.count },
         },
         "checks": checks,
+        "repairs": failed_repairs,
         "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for }) },
         "truncation": {
             "checks": { "shown": checks.len(), "omitted": report.checks.len().saturating_sub(checks.len()), "evidence_ref": "runner:doctor:checks", "full_command": format!("homeboy runner doctor {runner_id} --full") },
             "provider_readiness": { "shown": ready_for.len() + blocked_for.len(), "omitted": provider_total.saturating_sub(ready_for.len() + blocked_for.len()), "evidence_ref": "runner:doctor:provider-readiness", "full_command": format!("homeboy runner doctor {runner_id} --full") },
-            "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "repairs", "secret_env_migration", "daemon_recovery", "admission_summary"],
+            "omitted_sections": ["resource_maps", "probe_details", "diagnostics", "secret_env_migration", "daemon_recovery", "admission_summary"],
         }
     });
     projection
@@ -237,6 +259,15 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
     if projection_envelope_bytes(&projection).is_ok_and(|bytes| bytes <= COMPACT_PROJECTION_BYTES) {
         return projection;
     }
+    // Even the size-cap fallback must retain the failed repair that explains
+    // why the operator should not retry a generic connect choreography.
+    let repairs = projection
+        .get("repairs")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|repairs| repairs.first())
+        .cloned()
+        .map(|repair| vec![repair])
+        .unwrap_or_default();
     serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": "runner.doctor",
@@ -248,6 +279,7 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
             "next_action": "homeboy runner doctor <runner-id> --full",
         },
         "checks": [],
+        "repairs": repairs,
         "truncation": { "checks": { "shown": 0, "omitted": "see_full_output", "full_command": "homeboy runner doctor <runner-id> --full" } },
     })
 }
