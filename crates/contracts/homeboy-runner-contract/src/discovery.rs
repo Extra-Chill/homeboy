@@ -22,6 +22,8 @@ pub const RUNNER_API_CAPABILITIES_REQUEST_SCHEMA: &str =
     "homeboy/runner-api-capabilities-request/v1";
 pub const RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA: &str =
     "homeboy/runner-api-capabilities-response/v1";
+pub const RUNNER_API_READINESS_REQUEST_SCHEMA: &str = "homeboy/runner-api-readiness-request/v1";
+pub const RUNNER_API_READINESS_RESPONSE_SCHEMA: &str = "homeboy/runner-api-readiness-response/v1";
 pub const RUNNER_API_V1: RunnerApiVersion = RunnerApiVersion { major: 1 };
 
 /// A transport-neutral Runner API major version.
@@ -150,6 +152,26 @@ pub struct RunnerApiCapabilitiesResponse {
     pub runner_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<RunnerCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RunnerApiOperationFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiReadinessRequest {
+    pub schema: String,
+    pub api_version: RunnerApiVersion,
+    pub runner_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiReadinessResponse {
+    pub schema: String,
+    pub api_version: RunnerApiVersion,
+    pub runner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<RunnerReadiness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<RunnerApiOperationFailure>,
 }
@@ -397,6 +419,78 @@ mod tests {
             serde_json::to_value(failure).expect("capabilities failure JSON"),
             serde_json::json!({
                 "schema": RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "runner_id": "missing",
+                "failure": {
+                    "code": "runner_not_found",
+                    "message": "Runner 'missing' was not found"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn readiness_operation_wire_shapes_are_explicitly_versioned() {
+        let request = RunnerApiReadinessRequest {
+            schema: RUNNER_API_READINESS_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "local".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("readiness request JSON"),
+            serde_json::json!({
+                "schema": RUNNER_API_READINESS_REQUEST_SCHEMA,
+                "api_version": { "major": 1 },
+                "runner_id": "local"
+            })
+        );
+
+        let success = RunnerApiReadinessResponse {
+            schema: RUNNER_API_READINESS_RESPONSE_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "local".to_string(),
+            readiness: Some(RunnerReadiness {
+                schema: RUNNER_READINESS_SCHEMA.to_string(),
+                runner_id: "local".to_string(),
+                connected: true,
+                accepting_jobs: true,
+                active_job_count: 0,
+                capacity: Some(2),
+                reasons: Vec::new(),
+            }),
+            failure: None,
+        };
+        assert_eq!(
+            serde_json::to_value(success).expect("readiness success JSON"),
+            serde_json::json!({
+                "schema": RUNNER_API_READINESS_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "runner_id": "local",
+                "readiness": {
+                    "schema": RUNNER_READINESS_SCHEMA,
+                    "runner_id": "local",
+                    "connected": true,
+                    "accepting_jobs": true,
+                    "active_job_count": 0,
+                    "capacity": 2
+                }
+            })
+        );
+
+        let failure = RunnerApiReadinessResponse {
+            schema: RUNNER_API_READINESS_RESPONSE_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "missing".to_string(),
+            readiness: None,
+            failure: Some(RunnerApiOperationFailure {
+                code: RunnerApiOperationFailureCode::RunnerNotFound,
+                message: "Runner 'missing' was not found".to_string(),
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(failure).expect("readiness failure JSON"),
+            serde_json::json!({
+                "schema": RUNNER_API_READINESS_RESPONSE_SCHEMA,
                 "api_version": { "major": 1 },
                 "runner_id": "missing",
                 "failure": {

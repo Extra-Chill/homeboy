@@ -6,14 +6,15 @@ use homeboy_runner_contract::{
     RunnerApiCompatibilityFailure, RunnerApiCompatibilityFailureCode, RunnerApiCompatibilityStatus,
     RunnerApiHandshakeRequest, RunnerApiHandshakeResponse, RunnerApiInspectRequest,
     RunnerApiInspectResponse, RunnerApiListRequest, RunnerApiListResponse,
-    RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiVersion, RunnerCapabilities,
-    RunnerDescriptor, RunnerInspection, RunnerKind, RunnerReadiness,
-    RUNNER_API_CAPABILITIES_REQUEST_SCHEMA, RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA,
-    RUNNER_API_HANDSHAKE_REQUEST_SCHEMA, RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA,
-    RUNNER_API_INSPECT_REQUEST_SCHEMA, RUNNER_API_INSPECT_RESPONSE_SCHEMA,
-    RUNNER_API_LIST_REQUEST_SCHEMA, RUNNER_API_LIST_RESPONSE_SCHEMA, RUNNER_API_V1,
-    RUNNER_CAPABILITIES_SCHEMA, RUNNER_DESCRIPTOR_SCHEMA, RUNNER_INSPECTION_SCHEMA,
-    RUNNER_READINESS_SCHEMA,
+    RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiReadinessRequest,
+    RunnerApiReadinessResponse, RunnerApiVersion, RunnerCapabilities, RunnerDescriptor,
+    RunnerInspection, RunnerKind, RunnerReadiness, RUNNER_API_CAPABILITIES_REQUEST_SCHEMA,
+    RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA, RUNNER_API_HANDSHAKE_REQUEST_SCHEMA,
+    RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA, RUNNER_API_INSPECT_REQUEST_SCHEMA,
+    RUNNER_API_INSPECT_RESPONSE_SCHEMA, RUNNER_API_LIST_REQUEST_SCHEMA,
+    RUNNER_API_LIST_RESPONSE_SCHEMA, RUNNER_API_READINESS_REQUEST_SCHEMA,
+    RUNNER_API_READINESS_RESPONSE_SCHEMA, RUNNER_API_V1, RUNNER_CAPABILITIES_SCHEMA,
+    RUNNER_DESCRIPTOR_SCHEMA, RUNNER_INSPECTION_SCHEMA, RUNNER_READINESS_SCHEMA,
 };
 
 use crate::{Runner, RunnerAdmissionSnapshot};
@@ -193,6 +194,33 @@ impl RunnerDiscoveryService {
             Err(error) => Err(error),
         }
     }
+
+    pub fn readiness_api(
+        request: &RunnerApiReadinessRequest,
+    ) -> Result<RunnerApiReadinessResponse> {
+        if let Some(failure) = validate_operation_request(
+            &request.schema,
+            RUNNER_API_READINESS_REQUEST_SCHEMA,
+            request.api_version,
+        ) {
+            return Ok(readiness_failure(request, failure));
+        }
+
+        match Self::readiness(&request.runner_id) {
+            Ok(readiness) => Ok(RunnerApiReadinessResponse {
+                schema: RUNNER_API_READINESS_RESPONSE_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                runner_id: request.runner_id.clone(),
+                readiness: Some(readiness),
+                failure: None,
+            }),
+            Err(error) if error.code == ErrorCode::RunnerNotFound => Ok(readiness_failure(
+                request,
+                operation_failure(RunnerApiOperationFailureCode::RunnerNotFound, error.message),
+            )),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn validate_operation_request(
@@ -248,6 +276,19 @@ fn capabilities_failure(
         api_version: RUNNER_API_V1,
         runner_id: request.runner_id.clone(),
         capabilities: None,
+        failure: Some(failure),
+    }
+}
+
+fn readiness_failure(
+    request: &RunnerApiReadinessRequest,
+    failure: RunnerApiOperationFailure,
+) -> RunnerApiReadinessResponse {
+    RunnerApiReadinessResponse {
+        schema: RUNNER_API_READINESS_RESPONSE_SCHEMA.to_string(),
+        api_version: RUNNER_API_V1,
+        runner_id: request.runner_id.clone(),
+        readiness: None,
         failure: Some(failure),
     }
 }
@@ -514,6 +555,65 @@ mod tests {
         .expect("unknown runner response");
 
         assert_eq!(response.capabilities, None);
+        assert_eq!(
+            response.failure.expect("failure").code,
+            RunnerApiOperationFailureCode::RunnerNotFound
+        );
+    }
+
+    #[test]
+    fn readiness_api_returns_the_canonical_readiness() {
+        let response = RunnerDiscoveryService::readiness_api(&RunnerApiReadinessRequest {
+            schema: RUNNER_API_READINESS_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "local".to_string(),
+        })
+        .expect("readiness Runner API");
+
+        assert!(response.failure.is_none());
+        let readiness = response.readiness.expect("readiness");
+        assert_eq!(readiness.runner_id, "local");
+        assert!(readiness.accepting_jobs);
+    }
+
+    #[test]
+    fn readiness_api_validates_before_runner_lookup() {
+        let fixtures = [
+            (
+                "homeboy/runner-api-readiness-request/v99",
+                RUNNER_API_V1,
+                RunnerApiOperationFailureCode::InvalidRequestSchema,
+            ),
+            (
+                RUNNER_API_READINESS_REQUEST_SCHEMA,
+                RunnerApiVersion { major: 99 },
+                RunnerApiOperationFailureCode::UnsupportedApiVersion,
+            ),
+        ];
+
+        for (schema, api_version, expected_failure) in fixtures {
+            let response = RunnerDiscoveryService::readiness_api(&RunnerApiReadinessRequest {
+                schema: schema.to_string(),
+                api_version,
+                runner_id: "runner-that-does-not-exist".to_string(),
+            })
+            .expect("validation response");
+
+            assert_eq!(response.readiness, None);
+            assert_eq!(response.failure.expect("failure").code, expected_failure);
+        }
+    }
+
+    #[test]
+    fn readiness_api_types_unknown_runner_failures() {
+        let response = RunnerDiscoveryService::readiness_api(&RunnerApiReadinessRequest {
+            schema: RUNNER_API_READINESS_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "runner-that-does-not-exist".to_string(),
+        })
+        .expect("unknown runner response");
+
+        assert_eq!(response.readiness, None);
         assert_eq!(
             response.failure.expect("failure").code,
             RunnerApiOperationFailureCode::RunnerNotFound
