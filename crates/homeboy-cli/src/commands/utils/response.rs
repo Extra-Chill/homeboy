@@ -730,6 +730,10 @@ fn failure_diagnostics_for_data(
         return None;
     }
 
+    if let Some(diagnostics) = upgrade_runner_convergence_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
+
     let specialized_digest = release_failure_digest(data)
         .or_else(|| cook_batch_failure_digest(data))
         .or_else(|| formatting_failure_digest(data));
@@ -766,6 +770,101 @@ fn failure_diagnostics_for_data(
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
     failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+}
+
+fn upgrade_runner_convergence_diagnostics(
+    exit_code: i32,
+    data: &Value,
+) -> Option<CommandDiagnostics> {
+    if !is_partial_upgrade_outcome(data) {
+        return None;
+    }
+
+    let message = data
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("Controller installation succeeded, but configured runners did not converge")
+        .to_string();
+    let runners = data
+        .get("runners_updated")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            data.get("runners_skipped")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .filter(|runner| {
+            runner.get("success").and_then(Value::as_bool) == Some(false)
+                || data.get("new_version").and_then(Value::as_str).is_some_and(
+                    |controller_version| {
+                        runner.get("new_version").and_then(Value::as_str)
+                            != Some(controller_version)
+                    },
+                )
+        })
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_actions = runners
+        .iter()
+        .flat_map(|runner| {
+            let runner_id = runner
+                .get("runner_id")
+                .and_then(Value::as_str)
+                .unwrap_or("runner");
+            runner
+                .get("recovery_commands")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(move |command| {
+                    CommandNextAction::new(format!("repair {runner_id}"), command)
+                        .with_kind(CommandNextActionKind::Repair)
+                })
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    let details = serde_json::json!({
+        "exit_code": exit_code,
+        "source_pointer": "/runner_convergence",
+        "outcome": data.get("outcome"),
+        "operation_id": data.get("operation_id"),
+        "controller": data.get("controller"),
+        "runners": data.get("runners"),
+        "runner_convergence": data.get("runner_convergence"),
+        "runner_failures": runners,
+    });
+    let failure_digest = CommandFailureDigest {
+        summary: message.clone(),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions,
+        retryable: Some(true),
+    };
+    Some(CommandDiagnostics {
+        code: "upgrade.runner_convergence_partial".to_string(),
+        message,
+        details,
+        hints: None,
+        retryable: Some(true),
+        failure_digest: Some(failure_digest),
+    })
+}
+
+fn is_partial_upgrade_outcome(data: &Value) -> bool {
+    data.get("command").and_then(Value::as_str) == Some("upgrade")
+        && data.get("partial").and_then(Value::as_bool) == Some(true)
+        && data.get("runner_convergence").and_then(Value::as_str) == Some("partial")
+        && matches!(
+            data.pointer("/controller/status").and_then(Value::as_str),
+            Some("updated" | "unchanged")
+        )
 }
 
 fn command_failed_diagnostics(
@@ -1471,6 +1570,9 @@ fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
                 .expect("matched canonical status")
                 .to_string();
         }
+        if data.is_some_and(is_partial_upgrade_outcome) {
+            return "partial_failure".to_string();
+        }
         return "failed".to_string();
     }
 
@@ -1902,6 +2004,96 @@ mod tests {
 
         let succeeded = json!({ "status": "succeeded" });
         assert_eq!(status_for_result(Some(&succeeded), 0), "succeeded");
+    }
+
+    #[test]
+    fn upgrade_runner_partial_retains_typed_public_diagnostics() {
+        let payload = json!({
+            "command": "upgrade",
+            "partial": true,
+            "outcome": "controller_updated_runner_failed",
+            "operation_id": "upgrade-123",
+            "new_version": "0.304.0",
+            "runner_convergence": "partial",
+            "message": "PARTIAL: controller upgraded, but 1 selected runner did not converge",
+            "controller": {
+                "status": "updated",
+                "summary": "controller installation completed"
+            },
+            "runners": {
+                "status": "partial",
+                "summary": "0 converged, 1 require repair"
+            },
+            "runners_updated": [{
+                "runner_id": "stale-success",
+                "success": true,
+                "new_version": "0.301.2",
+                "recovery_commands": ["homeboy upgrade --upgrade-runner stale-success"]
+            }, {
+                "runner_id": "aligned-success",
+                "success": true,
+                "new_version": "0.304.0",
+                "recovery_commands": ["must-not-appear"]
+            }],
+            "runners_skipped": [{
+                "runner_id": "homeboy-lab",
+                "success": false,
+                "detail": "runner unavailable",
+                "recovery_commands": [
+                    "homeboy upgrade --force --upgrade-runner homeboy-lab"
+                ]
+            }]
+        });
+        let envelope = cli_response_for_json_result_for_command(&Ok(payload), 1, "upgrade", None);
+        let value = serde_json::to_value(envelope).expect("serialize envelope");
+
+        assert_eq!(value["status"], "partial_failure");
+        assert_eq!(
+            value["diagnostics"]["code"],
+            "upgrade.runner_convergence_partial"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["outcome"],
+            "controller_updated_runner_failed"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["operation_id"],
+            "upgrade-123"
+        );
+        let actions = value["next_actions"].as_array().expect("next actions");
+        assert!(actions.iter().any(|action| {
+            action["command"] == "homeboy upgrade --upgrade-runner stale-success"
+        }));
+        assert!(actions.iter().any(|action| {
+            action["command"] == "homeboy upgrade --force --upgrade-runner homeboy-lab"
+        }));
+        assert!(actions
+            .iter()
+            .all(|action| action["command"] != "must-not-appear"));
+        assert_eq!(value["data"]["runner_convergence"], "partial");
+        assert_eq!(
+            value["diagnostics"]["details"]["runner_failures"][0]["runner_id"],
+            "stale-success"
+        );
+        assert!(value["diagnostics"]["details"]["runner_failures"]
+            .as_array()
+            .expect("runner failures")
+            .iter()
+            .all(|runner| runner["runner_id"] != "aligned-success"));
+    }
+
+    #[test]
+    fn upgrade_preflight_failure_is_not_misclassified_as_partial_installation() {
+        let payload = json!({
+            "command": "upgrade",
+            "partial": true,
+            "outcome": "extension_preflight_failed",
+            "controller": { "status": "extension_preflight_failed" },
+            "runner_convergence": null
+        });
+
+        assert_eq!(status_for_result(Some(&payload), 1), "failed");
+        assert!(upgrade_runner_convergence_diagnostics(1, &payload).is_none());
     }
 
     #[test]
