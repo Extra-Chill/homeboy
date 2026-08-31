@@ -546,12 +546,12 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
         Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
-    finalize_resumed_provider_worktrees(&args.batch_id)?;
+    finalize_resumed_provider_worktrees(&args.batch_id, Some(&result.value))?;
     reconcile_fanout_pr_states(&args.batch_id, true)?;
     let exit_code = result.exit_code;
     let batch = batch::read_batch_record(&args.batch_id)?;
     let portfolio = run_portfolio(&batch)?;
-    finalize_resumed_provider_worktrees(&args.batch_id)?;
+    finalize_resumed_provider_worktrees(&args.batch_id, None)?;
     Ok(batch_resume_result(
         result.value,
         exit_code,
@@ -1872,28 +1872,74 @@ fn finalize_provider_worktrees(
     first_error.map_or(Ok(()), Err)
 }
 
-fn finalize_resumed_provider_worktrees(batch_id: &str) -> Result<()> {
+fn finalize_resumed_provider_worktrees(
+    batch_id: &str,
+    resumed: Option<&agent_task_service::AgentTaskCookBatchReport>,
+) -> Result<()> {
     let batch = batch::read_batch_record(batch_id)?;
     let config = homeboy::core::defaults::load_config();
     let mut first_error = None;
     for child in &batch.child_runs {
-        let disposition = match child.state {
-            agent_task_lifecycle::AgentTaskRunState::Succeeded => {
-                homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded
-            }
-            agent_task_lifecycle::AgentTaskRunState::PartialFailure
-            | agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::Cancelled => {
-                homeboy::core::worktree_provider::WorktreeTerminalDisposition::Failed
-            }
-            // Recoverable children still need Cook promotion, gates, and PR
-            // finalization before their provider workspace may be released.
-            agent_task_lifecycle::AgentTaskRunState::Queued
-            | agent_task_lifecycle::AgentTaskRunState::Running
-            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable => continue,
-        };
         let result = (|| {
+            let live_state = || -> Result<Option<agent_task_lifecycle::AgentTaskRunState>> {
+                match agent_task_lifecycle::reconcile_status(&child.run_id) {
+                    Ok(current) => Ok(Some(current.state)),
+                    Err(error) if error.message.contains("agent-task run record not found") => {
+                        Ok(None)
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+            let state = resumed
+                .and_then(|report| {
+                    report.cooks.iter().find(|cook| {
+                        cook.initial_run_id == child.run_id && cook.lifecycle().terminal
+                    })
+                })
+                .map(|cook| {
+                    if cook.exit_code == 0 {
+                        agent_task_lifecycle::AgentTaskRunState::Succeeded
+                    } else {
+                        agent_task_lifecycle::AgentTaskRunState::Failed
+                    }
+                })
+                .map_or_else(
+                    || {
+                        let live = live_state()?;
+                        let finalizable = |state| {
+                            matches!(
+                                state,
+                                agent_task_lifecycle::AgentTaskRunState::Succeeded
+                                    | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                                    | agent_task_lifecycle::AgentTaskRunState::Failed
+                                    | agent_task_lifecycle::AgentTaskRunState::Cancelled
+                            )
+                        };
+                        Ok::<_, Error>(match live {
+                            Some(state) if finalizable(state) => Some(state),
+                            _ if finalizable(child.state) => Some(child.state),
+                            state => state,
+                        })
+                    },
+                    |state| Ok(Some(state)),
+                )?;
+            let Some(state) = state else { return Ok(()) };
+            let disposition = match state {
+                agent_task_lifecycle::AgentTaskRunState::Succeeded => {
+                    homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded
+                }
+                agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                | agent_task_lifecycle::AgentTaskRunState::Failed
+                | agent_task_lifecycle::AgentTaskRunState::Cancelled => {
+                    homeboy::core::worktree_provider::WorktreeTerminalDisposition::Failed
+                }
+                // Recoverable children still need Cook promotion, gates, and PR
+                // finalization before their provider workspace may be released.
+                agent_task_lifecycle::AgentTaskRunState::Queued
+                | agent_task_lifecycle::AgentTaskRunState::Running
+                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable => return Ok(()),
+            };
             let recipe =
                 agent_task_service::load_recipe_for_attempt(&child.run_id)?.ok_or_else(|| {
                     Error::validation_invalid_argument(
@@ -6804,7 +6850,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ \"$2\" = \"${{HOMEBOY_FAKE_PROVIDER_MISSING_HANDLE:-}}\" ]; then printf '{{\"worktrees\":[]}}\\n'; exit 0; fi\n  printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"{}\",\"branch\":\"fixture\",\"safety\":{{\"dirty\":{},\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\"\nelse\n  printf '%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\n  if [ \"$1\" = finalize ] && [ \"$2\" = \"${{HOMEBOY_FAKE_PROVIDER_FINALIZE_FAIL_HANDLE:-}}\" ]; then exit 1; fi\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ \"$2\" = \"${{HOMEBOY_FAKE_PROVIDER_MISSING_HANDLE:-}}\" ]; then printf '{{\"worktrees\":[]}}\\n'; exit 0; fi\n  printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"{}\",\"branch\":\"fixture\",\"safety\":{{\"dirty\":{},\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\"\nelse\n  printf '%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\n  if [ \"$1\" = finalize ] && {{ [ \"$2\" = \"${{HOMEBOY_FAKE_PROVIDER_FINALIZE_FAIL_HANDLE:-}}\" ] || [ \"${{HOMEBOY_FAKE_PROVIDER_FINALIZE_FAIL_HANDLE:-}}\" = '*' ]; }}; then exit 1; fi\nfi\n",
                 workspace.display(),
                 dirty,
                 records.display(),
@@ -6977,11 +7023,12 @@ mod tests {
             assert!(expected
                 .iter()
                 .all(|line| initial.matches(line).count() == 1));
+            assert_eq!(initial.lines().count(), 2);
 
             let error = {
                 let _fail = homeboy::core::test_support::EnvVarGuard::set(
                     "HOMEBOY_FAKE_PROVIDER_FINALIZE_FAIL_HANDLE",
-                    format!("homeboy@{}", plan.cooks[0].cook_id),
+                    "*",
                 );
                 batch_resume(
                     AgentTaskFanoutBatchStatusArgs {
@@ -6997,11 +7044,10 @@ mod tests {
             );
             let failed_resume =
                 std::fs::read_to_string(&records).expect("failed resume finalizations");
-            assert!(
-                expected
-                    .iter()
-                    .all(|line| failed_resume.matches(line).count() == 2),
-                "a first-child failure must not strand later provider finalization"
+            assert_eq!(
+                failed_resume.lines().count(),
+                4,
+                "one provider failure must not strand later child finalization"
             );
 
             batch_resume(
@@ -7012,9 +7058,56 @@ mod tests {
             )
             .expect("idempotent command-path resume");
             let converged = std::fs::read_to_string(records).expect("converged finalizations");
-            assert!(expected
-                .iter()
-                .all(|line| converged.matches(line).count() == 4));
+            assert_eq!(converged.lines().count(), 8);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_resume_finalizes_live_terminal_children_despite_a_stale_running_roster() {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let (_fixture, records, mut plan) = provider_finalization_fixture(false);
+            plan.cooks.truncate(1);
+            let cook = &plan.cooks[0];
+            let dispatcher: &CookAttemptDispatcherFactory =
+                &|_| std::sync::Arc::new(FailingFanoutDispatcher);
+            run_batch_cook_fanout_plan_with_attempt_dispatcher(plan.clone(), dispatcher)
+                .expect("initial dispatcher fanout result");
+            let recipe = agent_task_service::load_recipe_for_attempt(&cook.run_id())
+                .expect("load durable recipe")
+                .expect("durable recipe");
+            let durable_handle = recipe.finalization["to_worktree"]
+                .as_str()
+                .expect("durable provider handle");
+            let expected = format!(
+                "{durable_handle}|agent_task_cook|{}|remove_on_success|failed|finalize:{}",
+                cook.run_id(),
+                cook.run_id(),
+            );
+            let before = std::fs::read_to_string(&records).expect("initial finalizations");
+
+            homeboy::agents::agent_task_batch::AgentTaskBatchStore::from_current_data_root()
+                .expect("batch store")
+                .mutate_batch(&plan.fanout_id, |batch| {
+                    batch.child_runs[0].state = agent_task_lifecycle::AgentTaskRunState::Running;
+                    Ok(())
+                })
+                .expect("make durable roster stale before command-path resume");
+            batch_resume(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: plan.fanout_id.clone(),
+                },
+                Placement::Auto,
+            )
+            .expect("resume reconciles live child lifecycle state");
+
+            let after = std::fs::read_to_string(records).expect("resumed finalizations");
+            assert_eq!(
+                after.matches(&expected).count(),
+                before.matches(&expected).count() + 2,
+                "both pre- and post-portfolio passes must use live terminal child state"
+            );
         });
     }
 
