@@ -541,12 +541,13 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
 /// contract, reconciling per-child state back into the durable batch record so
 /// repeated resume calls converge without duplicate PRs (#9525).
 fn batch_resume(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> CmdResult<Value> {
-    reconcile_fanout_pr_states(&args.batch_id, true)?;
     let result = agent_task_service::resume_cook_batch(
         &args.batch_id,
         Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
+    finalize_resumed_provider_worktrees(&args.batch_id)?;
+    reconcile_fanout_pr_states(&args.batch_id, true)?;
     let exit_code = result.exit_code;
     let batch = batch::read_batch_record(&args.batch_id)?;
     let portfolio = run_portfolio(&batch)?;
@@ -1843,6 +1844,7 @@ fn finalize_provider_worktrees(
     previously_terminal: Option<&BTreeMap<String, String>>,
 ) -> Result<()> {
     let config = homeboy::core::defaults::load_config();
+    let mut first_error = None;
     for cell in &report.cooks {
         if !cell.lifecycle().terminal {
             continue;
@@ -1859,34 +1861,111 @@ fn finalize_provider_worktrees(
         } else {
             homeboy::core::worktree_provider::WorktreeTerminalDisposition::Failed
         };
-        let finalization = homeboy::core::worktree_provider::finalize_worktree_from_config(
-            &cook.to_worktree,
-            &homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
-                purpose: "agent_task_cook".to_string(),
-                owner_run_ref: cook.run_id(),
-                cleanup_policy:
-                    homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
-            },
-            disposition,
-            &config,
-        )?;
-        let not_found = matches!(
-            finalization,
-            homeboy::core::worktree_provider::WorktreeFinalizationLookup::NotFound
-        );
-        if not_found
-            && configured_provider_workspace_creation()?
-            && !previously_terminal.is_some_and(|terminal| terminal.contains_key(&cook.run_id()))
-        {
-            return Err(
-                homeboy::core::worktree_provider::worktree_finalization_not_found_error(
-                    &cook.to_worktree,
-                    &config,
-                ),
+        let result = (|| {
+            let finalization = homeboy::core::worktree_provider::finalize_worktree_from_config(
+                &cook.to_worktree,
+                &homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
+                    purpose: "agent_task_cook".to_string(),
+                    owner_run_ref: cook.run_id(),
+                    cleanup_policy:
+                        homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
+                },
+                disposition,
+                &config,
+            )?;
+            let not_found = matches!(
+                finalization,
+                homeboy::core::worktree_provider::WorktreeFinalizationLookup::NotFound
             );
+            if not_found
+                && configured_provider_workspace_creation()?
+                && !previously_terminal
+                    .is_some_and(|terminal| terminal.contains_key(&cook.run_id()))
+            {
+                return Err(
+                    homeboy::core::worktree_provider::worktree_finalization_not_found_error(
+                        &cook.to_worktree,
+                        &config,
+                    ),
+                );
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
         }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
+}
+
+fn finalize_resumed_provider_worktrees(batch_id: &str) -> Result<()> {
+    let batch = batch::read_batch_record(batch_id)?;
+    let config = homeboy::core::defaults::load_config();
+    let mut first_error = None;
+    for child in &batch.child_runs {
+        let disposition = match child.state {
+            agent_task_lifecycle::AgentTaskRunState::Succeeded => {
+                homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded
+            }
+            agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            | agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::Cancelled => {
+                homeboy::core::worktree_provider::WorktreeTerminalDisposition::Failed
+            }
+            // Recoverable children still need Cook promotion, gates, and PR
+            // finalization before their provider workspace may be released.
+            agent_task_lifecycle::AgentTaskRunState::Queued
+            | agent_task_lifecycle::AgentTaskRunState::Running
+            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable => continue,
+        };
+        let result = (|| {
+            let recipe =
+                agent_task_service::load_recipe_for_attempt(&child.run_id)?.ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "run_id",
+                        "terminal fanout child is missing its durable Cook recipe",
+                        Some(child.run_id.clone()),
+                        None,
+                    )
+                })?;
+            let owner = recipe
+                .attempts
+                .first()
+                .expect("validated Cook recipe has an initial attempt")
+                .run_id
+                .clone();
+            let handle = recipe
+                .finalization
+                .get("to_worktree")
+                .and_then(Value::as_str)
+                .filter(|handle| !handle.trim().is_empty())
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "cook_recipe.finalization.to_worktree",
+                        "terminal fanout child recipe has no provider worktree handle",
+                        Some(recipe.cook_id.clone()),
+                        None,
+                    )
+                })?;
+            homeboy::core::worktree_provider::finalize_worktree_from_config(
+                handle,
+                &homeboy::core::worktree_provider::WorktreeProvisionLifecycle {
+                    purpose: "agent_task_cook".to_string(),
+                    owner_run_ref: owner,
+                    cleanup_policy:
+                        homeboy::core::worktree_provider::WorktreeCleanupPolicy::RemoveOnSuccess,
+                },
+                disposition,
+                &config,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// HOOK — wave-completion notification. Intentionally not implemented here.
@@ -6717,7 +6796,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"{}\",\"branch\":\"fixture\",\"safety\":{{\"dirty\":{},\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\"\nelse\n  printf '%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  printf '{{\"worktrees\":[{{\"handle\":\"%s\",\"path\":\"{}\",\"branch\":\"fixture\",\"safety\":{{\"dirty\":{},\"unpushed\":false,\"primary\":false}}}}]}}\\n' \"$2\"\nelse\n  printf '%s|%s|%s|%s|%s|%s\\n' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" >> '{}'\n  if [ \"$1\" = finalize ] && [ \"$2\" = \"${{HOMEBOY_FAKE_PROVIDER_FINALIZE_FAIL_HANDLE:-}}\" ]; then exit 1; fi\nfi\n",
                 workspace.display(),
                 dirty,
                 records.display(),
@@ -6828,53 +6907,72 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn dispatcher_fanout_terminalization_replays_provider_finalization_on_recovery() {
-        with_isolated_home(|_| {
-            let (_fixture, records, mut plan) = provider_finalization_fixture(false);
-            plan.cooks.truncate(1);
-            let cook = &plan.cooks[0];
-            let report = agent_task_service::AgentTaskCookBatchReport {
-                schema: "homeboy/agent-task-cook-batch/v1",
-                batch_id: plan.fanout_id.clone(),
-                status: "succeeded".to_string(),
-                total: 1,
-                queued: 0,
-                running: 0,
-                succeeded: 1,
-                failed: 0,
-                cancelled: 0,
-                timed_out: 0,
-                cooks: vec![agent_task_service::AgentTaskCookBatchCellReport {
-                    cook_id: cook.cook_id.clone(),
-                    initial_run_id: cook.run_id(),
-                    status: "succeeded".to_string(),
-                    exit_code: 0,
-                    result: None,
-                    error: None,
-                }],
+    fn batch_resume_replays_all_provider_finalizations_before_downstream_processing() {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let (_fixture, records, plan) = provider_finalization_fixture(false);
+            let dispatcher: &CookAttemptDispatcherFactory =
+                &|_| std::sync::Arc::new(FailingFanoutDispatcher);
+
+            let (_, exit_code) =
+                run_batch_cook_fanout_plan_with_attempt_dispatcher(plan.clone(), dispatcher)
+                    .expect("initial dispatcher fanout result");
+            assert_ne!(exit_code, 0);
+
+            let expected = plan
+                .cooks
+                .iter()
+                .map(|cook| {
+                    format!(
+                        "homeboy@{}|agent_task_cook|{}|remove_on_success|failed|finalize:{}",
+                        cook.cook_id,
+                        cook.run_id(),
+                        cook.run_id(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let initial = std::fs::read_to_string(&records).expect("initial finalizations");
+            assert!(expected
+                .iter()
+                .all(|line| initial.matches(line).count() == 1));
+
+            let error = {
+                let _fail = homeboy::core::test_support::EnvVarGuard::set(
+                    "HOMEBOY_FAKE_PROVIDER_FINALIZE_FAIL_HANDLE",
+                    format!("homeboy@{}", plan.cooks[0].cook_id),
+                );
+                batch_resume(
+                    AgentTaskFanoutBatchStatusArgs {
+                        batch_id: plan.fanout_id.clone(),
+                    },
+                    Placement::Auto,
+                )
+                .expect_err("provider finalization failure stops downstream resume processing")
             };
-
-            finalize_provider_worktrees(&plan, &report, None).expect("initial finalization");
-            finalize_provider_worktrees(&plan, &report, None)
-                .expect("recovered finalization replay");
-
-            let expected = format!(
-                "homeboy@{}|agent_task_cook|{}|remove_on_success|succeeded|finalize:{}",
-                cook.cook_id,
-                cook.run_id(),
-                cook.run_id(),
+            assert!(
+                error.message.contains("finalize command failed"),
+                "unexpected resume error: {error:?}"
             );
-            let records = std::fs::read_to_string(records).expect("provider finalization records");
-            assert_eq!(records.lines().filter(|line| *line == expected).count(), 2);
+            let failed_resume =
+                std::fs::read_to_string(&records).expect("failed resume finalizations");
+            assert!(
+                expected
+                    .iter()
+                    .all(|line| failed_resume.matches(line).count() == 2),
+                "a first-child failure must not strand later provider finalization"
+            );
 
-            std::fs::remove_dir_all(_fixture.path().join("workspace"))
-                .expect("provider cleanup removed workspace");
-            let previously_terminal = BTreeMap::from([(
-                cook.run_id(),
-                _fixture.path().join("workspace").display().to_string(),
-            )]);
-            finalize_provider_worktrees(&plan, &report, Some(&previously_terminal))
-                .expect("missing finalized provider workspace is converged on recovery");
+            batch_resume(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: plan.fanout_id.clone(),
+                },
+                Placement::Auto,
+            )
+            .expect("idempotent command-path resume");
+            let converged = std::fs::read_to_string(records).expect("converged finalizations");
+            assert!(expected
+                .iter()
+                .all(|line| converged.matches(line).count() == 3));
         });
     }
 
