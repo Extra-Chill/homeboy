@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.4] - 2026-08-31
+
+### Changed
+- make self-audit advisory
+- Route compiler warnings through Extension API v1
+- Define Runner API v1 discovery operations
+- Simplify Homeboy tests and CI policy
+- Define Runner API v1 handshake
+- Terminalize verified no-change before Cook-wide candidate selection
+
+### Fixed
+- keep reconciliation store-rooted
+- require live credential verification
+
 ## [0.367.3] - 2026-08-31
 
 ### Changed

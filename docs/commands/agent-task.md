@@ -1682,6 +1682,10 @@ projects that diagnosis into the shared `_homeboy_actionable` envelope (`run`,
 `refs`, `next_actions`, `artifacts`, `evidence`) instead of returning only
 prose. The existing `next_commands` field is unchanged.
 
+The default diagnosis keeps bounded causal excerpts and artifact refs. Use
+`--full`, `agent-task evidence --kind <kind> --full`, or their `--output` forms
+to hydrate the complete durable detail explicitly.
+
 `next_action_basis` reports how `next_actions` was produced: `diagnosis` when a
 classification or a concrete missing-artifact set mapped to specific commands,
 `generic_fallback` when nothing in the diagnosis was specific enough to act on.

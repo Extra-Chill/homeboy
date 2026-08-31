@@ -8,7 +8,7 @@
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
@@ -754,91 +754,6 @@ fn attach_durable_read_availability(
     }
 }
 
-fn normalized_evidence_graph(
-    run_id: &str,
-    aggregate: Option<&AgentTaskAggregate>,
-    artifact_count: usize,
-    evidence_count: usize,
-) -> Value {
-    let encoded = homeboy::core::execution_contract::encode_uri_component(run_id);
-    let mut refs = BTreeMap::new();
-    let mut insert = |kind: &str, count: usize, command: String| {
-        refs.insert(
-            kind.to_string(),
-            json!({
-                "ref": format!("homeboy://agent-task/run/{encoded}/{kind}"),
-                "count": count,
-                "command": command,
-                "export_command": format!("{command} --output <path>"),
-            }),
-        );
-    };
-    insert(
-        "status",
-        1,
-        format!("homeboy agent-task status {}", quote_arg(run_id)),
-    );
-    insert(
-        "plan",
-        1,
-        format!(
-            "homeboy agent-task evidence {} --kind plan --full",
-            quote_arg(run_id)
-        ),
-    );
-    insert(
-        "aggregate",
-        usize::from(aggregate.is_some()),
-        format!(
-            "homeboy agent-task evidence {} --kind aggregate --full",
-            quote_arg(run_id)
-        ),
-    );
-    insert(
-        "artifacts",
-        artifact_count,
-        format!("homeboy agent-task artifacts {} --full", quote_arg(run_id)),
-    );
-    insert(
-        "evidence",
-        evidence_count,
-        format!("homeboy agent-task evidence {} --full", quote_arg(run_id)),
-    );
-    let outcomes = aggregate.map_or(0, |aggregate| aggregate.outcomes.len());
-    insert(
-        "attempts",
-        outcomes,
-        format!(
-            "homeboy agent-task evidence {} --kind attempt --full",
-            quote_arg(run_id)
-        ),
-    );
-    insert(
-        "promotion",
-        usize::from(aggregate.is_some()),
-        format!(
-            "homeboy agent-task evidence {} --kind promotion --full",
-            quote_arg(run_id)
-        ),
-    );
-    let diagnostics = aggregate.map_or(0, |aggregate| {
-        aggregate
-            .outcomes
-            .iter()
-            .map(|outcome| outcome.diagnostics.len())
-            .sum()
-    });
-    insert(
-        "diagnostics",
-        diagnostics,
-        format!(
-            "homeboy agent-task evidence {} --kind diagnostic --full",
-            quote_arg(run_id)
-        ),
-    );
-    Value::Array(refs.into_values().collect())
-}
-
 const OPERATOR_HEAVY_FIELDS: &[&str] = &[
     "diff",
     "patch",
@@ -955,24 +870,33 @@ mod bounded_failure_result_tests {
 /// Known event streams retain their array/item schema. The owning evidence
 /// object receives additive metadata describing the omitted durable events.
 fn project_heavy_collection(fields: &mut serde_json::Map<String, Value>, key: &str) {
-    let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
-        return;
+    let projection = {
+        let Some(items) = fields.get_mut(key).and_then(Value::as_array_mut) else {
+            return;
+        };
+        let projection = (items.len() > COMPACT_REF_LIMIT).then(|| {
+            let total_items = items.len();
+            let digest = content_hash::sha256_hex(
+                serde_json::to_vec(items.as_slice())
+                    .as_deref()
+                    .unwrap_or_default(),
+            );
+            items.truncate(COMPACT_REF_LIMIT);
+            json!({
+                "total_items": total_items,
+                "returned_items": COMPACT_REF_LIMIT,
+                "omitted_items": total_items - COMPACT_REF_LIMIT,
+                "sha256": digest,
+            })
+        });
+        for item in items {
+            project_operator_value(item, true);
+        }
+        projection
     };
-    if items.len() <= COMPACT_REF_LIMIT {
-        return;
+    if let Some(projection) = projection {
+        fields.insert(format!("{key}_projection"), projection);
     }
-    let total_items = items.len();
-    let digest = content_hash::sha256_hex(serde_json::to_vec(items).as_deref().unwrap_or_default());
-    items.truncate(COMPACT_REF_LIMIT);
-    fields.insert(
-        format!("{key}_projection"),
-        json!({
-            "total_items": total_items,
-            "returned_items": COMPACT_REF_LIMIT,
-            "omitted_items": total_items - COMPACT_REF_LIMIT,
-            "sha256": digest,
-        }),
-    );
 }
 
 pub(super) fn list_runs(
@@ -1423,7 +1347,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         total += 1;
         // Count filtered refs without hydrating their payload once the shared
         // collection budget is full.
-        if !false && hydrated.len() >= OutputBudget::COLLECTION.max_items {
+        if !args.full && hydrated.len() >= OutputBudget::COLLECTION.max_items {
             continue;
         }
         hydrated.push(agent_task_service::hydrate_evidence_ref(
@@ -1452,7 +1376,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         value["candidate_selection"] = selection;
     }
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
-    if !false {
+    if !args.full {
         attach_collection_budget(
             &mut value,
             "evidence",
@@ -1516,7 +1440,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
                 ) {
                     diagnostic_truncations.push(truncation);
                 }
-                if false || hydrated_evidence.len() < OutputBudget::COLLECTION.max_items {
+                if args.full || hydrated_evidence.len() < OutputBudget::COLLECTION.max_items {
                     if let Some(summary) =
                         agent_task_service::hydrate_evidence_summary(&outcome.task_id, evidence)
                     {
@@ -1531,11 +1455,11 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let root_cause = ranked_reasons
         .first()
         .cloned()
-        .map(|item| collected_diagnostic_value_with_details(item, false));
+        .map(|item| collected_diagnostic_value_with_details(item, args.full));
     let diagnostic_chain = ranked_reasons
         .into_iter()
         .take(FAILURE_REASON_LIMIT)
-        .map(|item| collected_diagnostic_value_with_details(item, false))
+        .map(|item| collected_diagnostic_value_with_details(item, args.full))
         .collect::<Vec<_>>();
 
     let missing_artifacts = aggregate
@@ -1590,7 +1514,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     if let Some(selection) = target.selection {
         value["candidate_selection"] = selection;
     }
-    if !false {
+    if !args.full {
         attach_collection_budget(
             &mut value,
             "hydrated_evidence",
@@ -1618,58 +1542,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let recovery_prefix =
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
-    if false {
-        value = normalized_full_diagnosis(value, run_id, aggregate.as_ref());
-    }
     Ok((value, 0))
-}
-
-/// Keep full diagnosis causal rather than recursive: the root cause and its
-/// admission facts stay inline while durable payload families become refs.
-fn normalized_full_diagnosis(
-    value: Value,
-    run_id: &str,
-    aggregate: Option<&AgentTaskAggregate>,
-) -> Value {
-    let evidence_count = value
-        .get("hydrated_evidence_total")
-        .and_then(Value::as_u64)
-        .unwrap_or_default() as usize;
-    let artifact_count = aggregate
-        .map(|aggregate| {
-            aggregate
-                .outcomes
-                .iter()
-                .map(|outcome| outcome.artifacts.len())
-                .sum()
-        })
-        .unwrap_or_default();
-    let output = json!({
-        "schema": "homeboy/agent-task-diagnose-full/v2",
-        "presentation": "normalized_evidence_graph",
-        "run_id": value.get("run_id"),
-        "state": value.get("state"),
-        "root_cause": value.get("root_cause"),
-        "causal_phase": value.get("causal_phase"),
-        "continuation_admission": value.get("continuation_admission"),
-        "retry_replay": value.get("retry_replay"),
-        "next_action": value.pointer(&format!("/{ACTIONABLE_METADATA_KEY}/next_actions/0")),
-        "actionable": value.get(ACTIONABLE_METADATA_KEY),
-        "lab_transport_failure": value.get("lab_transport_failure"),
-        "evidence_graph": normalized_evidence_graph(run_id, aggregate, artifact_count, evidence_count),
-        "output_budget": {
-            "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT,
-            "truncated": true,
-            "lossless_command": format!("homeboy agent-task evidence {} --full --output <path>", quote_arg(run_id)),
-        },
-    });
-    if serialized_len(&output) <= BOUNDED_FULL_STATUS_BYTE_LIMIT {
-        return output;
-    }
-
-    let mut bounded = bounded_full_operation_report(value, "diagnose");
-    bounded["schema"] = json!("homeboy/agent-task-diagnose-full/v2");
-    bounded
 }
 
 /// These fields are deliberately separate from secondary compact tables. They
