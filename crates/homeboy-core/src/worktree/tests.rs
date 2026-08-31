@@ -601,6 +601,184 @@ fn finalization_is_owner_bound_idempotent_conflict_safe_and_never_cleans_up() {
 }
 
 #[test]
+fn owned_worktree_survives_push_and_pr_boundary_until_finalization_and_cwd_exit() {
+    crate::test_support::with_isolated_home(|home| {
+        let developer = home.path().join("Developer");
+        let remote = home.path().join("remote.git");
+        let source = developer.join("lifecycle-fixture");
+        fs::create_dir_all(&developer).expect("developer directory");
+        fs::create_dir_all(&remote).expect("remote directory");
+        run_git(&remote, &["init", "--bare", "-q"]);
+        run_git(
+            &developer,
+            &[
+                "clone",
+                "-q",
+                &remote.to_string_lossy(),
+                "lifecycle-fixture",
+            ],
+        );
+        run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.join("README.md"), "initial\n").expect("initial file");
+        fs::write(source.join("homeboy.json"), r#"{"id":"lifecycle-fixture"}"#)
+            .expect("component manifest");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "initial"]);
+        run_git(&source, &["branch", "-M", "main"]);
+        run_git(&source, &["push", "-q", "-u", "origin", "main"]);
+        write_component_registration(home.path(), "lifecycle-fixture", &source);
+
+        let owner = "cook-lifecycle-attempt-1";
+        let created = create(WorktreeCreateOptions {
+            component_id: "lifecycle-fixture".to_string(),
+            branch: "fix/lifecycle".to_string(),
+            from: Some("main".to_string()),
+            task_url: Some("https://github.com/Extra-Chill/homeboy/issues/13971".to_string()),
+            run_id: Some(owner.to_string()),
+            cleanup_policy: Some(CleanupPolicy::RemoveWhenSafe),
+            require_handoff_freshness: false,
+        })
+        .expect("owned worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        fs::write(path.join("fix.txt"), "fixed\n").expect("task change");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-q", "-m", "fix lifecycle"]);
+        {
+            let _cwd = CurrentDirGuard::set(&path);
+            run_git(&path, &["push", "-q", "-u", "origin", "fix/lifecycle"]);
+
+            let active_status = status(&created.record.id).expect("active owned status");
+            assert!(
+                active_status.safety.safe,
+                "lifecycle cleanup eligibility must not make an active worktree unsafe for lookup"
+            );
+            let before_pr = cleanup(WorktreeCleanupOptions {
+                force: true,
+                dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            })
+            .expect("cleanup before PR creation");
+            assert_eq!(before_pr.counts.removed, 0);
+            assert!(before_pr.skipped[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("explicit succeeded finalization")));
+            assert!(path.exists(), "a clean push is not terminal owner evidence");
+
+            let bin = home.path().join("bin");
+            fs::create_dir(&bin).expect("fake gh bin");
+            let gh_log = home.path().join("gh-cwd.log");
+            let fake_gh = bin.join("gh");
+            fs::write(
+                &fake_gh,
+                r#"#!/bin/sh
+if [ "$1 $2" = "pr create" ]; then
+  test -d "$PWD" || exit 2
+  pwd > "$HOMEBOY_FAKE_GH_CWD_LOG"
+  printf '%s\n' 'https://github.com/example/lifecycle-fixture/pull/13971'
+fi
+"#,
+            )
+            .expect("write fake gh");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755))
+                    .expect("make fake gh executable");
+            }
+            let mut command_path = std::ffi::OsString::from(bin.as_os_str());
+            command_path.push(":");
+            command_path.push(std::env::var_os("PATH").unwrap_or_default());
+            let _path_env = crate::test_support::EnvVarGuard::set("PATH", command_path);
+            let _gh_log_env =
+                crate::test_support::EnvVarGuard::set("HOMEBOY_FAKE_GH_CWD_LOG", &gh_log);
+            fs::write(
+                home.path()
+                    .join(".config/homeboy/components/lifecycle-fixture.json"),
+                serde_json::json!({
+                    "local_path": source,
+                    "remote_path": "wp-content/plugins/lifecycle-fixture",
+                    "remote_url": "https://github.com/example/lifecycle-fixture.git"
+                })
+                .to_string(),
+            )
+            .expect("GitHub component registration");
+
+            let pr = crate::git::pr_create(
+                Some("lifecycle-fixture"),
+                crate::git::PrCreateOptions {
+                    base: "main".to_string(),
+                    head: "fix/lifecycle".to_string(),
+                    title: "Fix lifecycle".to_string(),
+                    body: "Lifecycle fixture".to_string(),
+                    draft: false,
+                    path: Some(path.display().to_string()),
+                },
+            )
+            .expect("create PR through fake gh");
+            assert_eq!(pr.number, Some(13971));
+            assert_eq!(
+                PathBuf::from(fs::read_to_string(&gh_log).expect("fake gh cwd").trim()),
+                path.canonicalize().expect("canonical worktree")
+            );
+            assert!(
+                path.exists(),
+                "PR creation must retain its caller workspace"
+            );
+
+            finalize_provider_lifecycle(
+                &created.record.id,
+                owner,
+                crate::worktree_provider::WorktreeTerminalDisposition::Succeeded,
+            )
+            .expect("explicit terminal owner finalization");
+            let finalized_status = status(&created.record.id).expect("finalized status");
+            assert!(finalized_status
+                .safety
+                .terminal_owner_evidence
+                .as_deref()
+                .is_some_and(|evidence| evidence.contains(owner)));
+
+            let direct_remove = remove(WorktreeRemoveOptions {
+                id: created.record.id.clone(),
+                force: true,
+                cleanup_branch: false,
+                allow_unmerged_branch: false,
+            })
+            .expect_err("forced direct removal cannot remove the caller cwd");
+            assert!(direct_remove
+                .message
+                .contains("live current working directory"));
+            let live_cwd = cleanup(WorktreeCleanupOptions {
+                force: true,
+                dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            })
+            .expect("cleanup while caller cwd is live");
+            assert_eq!(live_cwd.counts.removed, 0);
+            assert!(live_cwd.skipped[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("live current working directory")));
+            assert!(path.exists());
+        }
+
+        let after_cwd_exit = cleanup(WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        })
+        .expect("cleanup after terminal finalization and cwd exit");
+        assert_eq!(after_cwd_exit.counts.removed, 1);
+        assert!(!path.exists());
+    });
+}
+
+#[test]
 fn create_restores_missing_active_record_from_an_unclaimed_existing_branch() {
     crate::test_support::with_isolated_home(|home| {
         let (source, options) = registered_create_fixture(home.path(), "restore-fixture");

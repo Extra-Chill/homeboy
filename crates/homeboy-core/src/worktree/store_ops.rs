@@ -215,7 +215,7 @@ pub(super) fn cleanup_with_store(
         };
         let branch_cleanup = branch_cleanup_report(&record)
             .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
-        let skip_reasons = cleanup_skip_reasons(&safety, options.force);
+        let skip_reasons = cleanup_skip_reasons(&record, &safety, options.force);
         if !skip_reasons.is_empty() {
             skipped.push(WorktreeCleanupSkipped {
                 record,
@@ -289,8 +289,19 @@ pub(super) fn cleanup_with_store(
     })
 }
 
-fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<String> {
+fn cleanup_skip_reasons(
+    record: &TaskWorktreeRecord,
+    safety: &WorktreeSafetyReport,
+    force: bool,
+) -> Vec<String> {
     let mut reasons = Vec::new();
+    if record.terminal_disposition.as_deref() != Some("succeeded") {
+        if let Some(owner) = record.run_id.as_deref() {
+            reasons.push(format!(
+                "cleanup requires explicit succeeded finalization from lifecycle owner `{owner}`"
+            ));
+        }
+    }
     if safety.primary_checkout {
         reasons.push("refuses to remove primary checkout".to_string());
     }
@@ -299,6 +310,9 @@ fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<Strin
     }
     if safety.worktree_missing {
         reasons.push("missing active worktree requires `worktree inventory --apply` reconciliation authority".to_string());
+    }
+    if safety.live_caller_cwd {
+        reasons.push("refuses to remove the caller's live current working directory".to_string());
     }
     if !force {
         if safety.dirty {
@@ -1377,6 +1391,14 @@ pub(super) fn remove_with_store(
             Some(safety.reasons.clone()),
         ));
     }
+    if safety.live_caller_cwd {
+        return Err(Error::validation_invalid_argument(
+            "worktree",
+            "Task worktree contains the caller's live current working directory",
+            Some(record.id.clone()),
+            Some(safety.reasons.clone()),
+        ));
+    }
 
     if !safety.worktree_missing {
         let mut args = vec!["worktree", "remove"];
@@ -1572,6 +1594,11 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     let worktree_missing = !raw_worktree.exists();
     let primary_checkout = source == worktree;
     let path_contained = worktree.starts_with(parent) && worktree != source;
+    let live_caller_cwd = !worktree_missing
+        && std::env::current_dir()
+            .ok()
+            .map(|cwd| normalize_missing_path(&cwd))
+            .is_some_and(|cwd| cwd == worktree || cwd.starts_with(&worktree));
     let dirty = !worktree_missing && is_dirty(&worktree)?;
     let unpushed_commits = if worktree_missing {
         0
@@ -1591,6 +1618,14 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     if !path_contained {
         reasons.push("worktree path is outside the component checkout parent".to_string());
     }
+    let terminal_owner_evidence = record.run_id.as_deref().and_then(|owner| {
+        (record.terminal_disposition.as_deref() == Some("succeeded")).then(|| {
+            format!(
+                "lifecycle owner `{owner}` explicitly finalized succeeded at revision {}",
+                record.lifecycle_revision
+            )
+        })
+    });
     let safe = reasons.is_empty();
     Ok(WorktreeSafetyReport {
         dirty,
@@ -1598,6 +1633,8 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
         primary_checkout,
         path_contained,
         worktree_missing,
+        live_caller_cwd,
+        terminal_owner_evidence,
         safe,
         reasons,
     })

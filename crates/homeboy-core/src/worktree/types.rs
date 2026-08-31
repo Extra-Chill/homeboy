@@ -318,6 +318,9 @@ pub struct WorktreeSafetyReport {
     pub primary_checkout: bool,
     pub path_contained: bool,
     pub worktree_missing: bool,
+    pub live_caller_cwd: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_owner_evidence: Option<String>,
     pub safe: bool,
     pub reasons: Vec<String>,
 }

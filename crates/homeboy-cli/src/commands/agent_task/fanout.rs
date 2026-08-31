@@ -1854,9 +1854,6 @@ fn finalize_provider_worktrees(
         else {
             continue;
         };
-        if previously_terminal.is_some_and(|terminal| terminal.contains_key(&cook.run_id())) {
-            continue;
-        }
         let disposition = if cell.exit_code == 0 {
             homeboy::core::worktree_provider::WorktreeTerminalDisposition::Succeeded
         } else {
@@ -1873,10 +1870,13 @@ fn finalize_provider_worktrees(
             disposition,
             &config,
         )?;
-        if matches!(
+        let not_found = matches!(
             finalization,
             homeboy::core::worktree_provider::WorktreeFinalizationLookup::NotFound
-        ) && configured_provider_workspace_creation()?
+        );
+        if not_found
+            && configured_provider_workspace_creation()?
+            && !previously_terminal.is_some_and(|terminal| terminal.contains_key(&cook.run_id()))
         {
             return Err(
                 homeboy::core::worktree_provider::worktree_finalization_not_found_error(
@@ -6823,6 +6823,58 @@ mod tests {
                 plan.cooks[1].run_id(),
                 plan.cooks[1].run_id(),
             )));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatcher_fanout_terminalization_replays_provider_finalization_on_recovery() {
+        with_isolated_home(|_| {
+            let (_fixture, records, mut plan) = provider_finalization_fixture(false);
+            plan.cooks.truncate(1);
+            let cook = &plan.cooks[0];
+            let report = agent_task_service::AgentTaskCookBatchReport {
+                schema: "homeboy/agent-task-cook-batch/v1",
+                batch_id: plan.fanout_id.clone(),
+                status: "succeeded".to_string(),
+                total: 1,
+                queued: 0,
+                running: 0,
+                succeeded: 1,
+                failed: 0,
+                cancelled: 0,
+                timed_out: 0,
+                cooks: vec![agent_task_service::AgentTaskCookBatchCellReport {
+                    cook_id: cook.cook_id.clone(),
+                    initial_run_id: cook.run_id(),
+                    status: "succeeded".to_string(),
+                    exit_code: 0,
+                    result: None,
+                    error: None,
+                }],
+            };
+
+            finalize_provider_worktrees(&plan, &report, None).expect("initial finalization");
+            finalize_provider_worktrees(&plan, &report, None)
+                .expect("recovered finalization replay");
+
+            let expected = format!(
+                "homeboy@{}|agent_task_cook|{}|remove_on_success|succeeded|finalize:{}",
+                cook.cook_id,
+                cook.run_id(),
+                cook.run_id(),
+            );
+            let records = std::fs::read_to_string(records).expect("provider finalization records");
+            assert_eq!(records.lines().filter(|line| *line == expected).count(), 2);
+
+            std::fs::remove_dir_all(_fixture.path().join("workspace"))
+                .expect("provider cleanup removed workspace");
+            let previously_terminal = BTreeMap::from([(
+                cook.run_id(),
+                _fixture.path().join("workspace").display().to_string(),
+            )]);
+            finalize_provider_worktrees(&plan, &report, Some(&previously_terminal))
+                .expect("missing finalized provider workspace is converged on recovery");
         });
     }
 
