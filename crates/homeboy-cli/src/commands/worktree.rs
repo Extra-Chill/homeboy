@@ -861,6 +861,7 @@ mod tests {
                 terminal_workspace_authority: None,
             },
             reconciliation,
+            handoff_freshness: None,
         }
     }
 
