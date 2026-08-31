@@ -1,6 +1,32 @@
 use super::*;
 use crate::conventions::Language;
 
+fn detect_duplicates(
+    fingerprints: &[&FileFingerprint],
+    convention_methods: &HashSet<String>,
+) -> Vec<Finding> {
+    detect_exact_duplicates_scoped(fingerprints, fingerprints, convention_methods).findings
+}
+
+fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<DuplicateGroup> {
+    detect_exact_duplicates_scoped(fingerprints, fingerprints, &HashSet::new()).groups
+}
+
+fn detect_duplicates_scoped(
+    scoped: &[&FileFingerprint],
+    all: &[&FileFingerprint],
+    convention_methods: &HashSet<String>,
+) -> Vec<Finding> {
+    detect_exact_duplicates_scoped(scoped, all, convention_methods).findings
+}
+
+fn detect_duplicate_groups_scoped(
+    scoped: &[&FileFingerprint],
+    all: &[&FileFingerprint],
+) -> Vec<DuplicateGroup> {
+    detect_exact_duplicates_scoped(scoped, all, &HashSet::new()).groups
+}
+
 fn make_fingerprint(path: &str, methods: &[&str], hashes: &[(&str, &str)]) -> FileFingerprint {
     make_fingerprint_with_structural(path, methods, hashes, &[])
 }
