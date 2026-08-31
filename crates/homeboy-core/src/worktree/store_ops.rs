@@ -311,8 +311,12 @@ fn cleanup_skip_reasons(
     if safety.worktree_missing {
         reasons.push("missing active worktree requires `worktree inventory --apply` reconciliation authority".to_string());
     }
-    if safety.live_caller_cwd {
-        reasons.push("refuses to remove the caller's live current working directory".to_string());
+    if safety
+        .reasons
+        .iter()
+        .any(|reason| reason == LIVE_CWD_REASON)
+    {
+        reasons.push(LIVE_CWD_REASON.to_string());
     }
     if !force {
         if safety.dirty {
@@ -1391,7 +1395,11 @@ pub(super) fn remove_with_store(
             Some(safety.reasons.clone()),
         ));
     }
-    if safety.live_caller_cwd {
+    if safety
+        .reasons
+        .iter()
+        .any(|reason| reason == LIVE_CWD_REASON)
+    {
         return Err(Error::validation_invalid_argument(
             "worktree",
             "Task worktree contains the caller's live current working directory",
@@ -1594,11 +1602,11 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     let worktree_missing = !raw_worktree.exists();
     let primary_checkout = source == worktree;
     let path_contained = worktree.starts_with(parent) && worktree != source;
-    let live_caller_cwd = !worktree_missing
-        && std::env::current_dir()
-            .ok()
-            .map(|cwd| normalize_missing_path(&cwd))
-            .is_some_and(|cwd| cwd == worktree || cwd.starts_with(&worktree));
+    let caller_cwd =
+        std::env::current_dir().map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let caller_cwd = normalize_missing_path(&caller_cwd);
+    let live_caller_cwd =
+        !worktree_missing && (caller_cwd == worktree || caller_cwd.starts_with(&worktree));
     let dirty = !worktree_missing && is_dirty(&worktree)?;
     let unpushed_commits = if worktree_missing {
         0
@@ -1618,14 +1626,9 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
     if !path_contained {
         reasons.push("worktree path is outside the component checkout parent".to_string());
     }
-    let terminal_owner_evidence = record.run_id.as_deref().and_then(|owner| {
-        (record.terminal_disposition.as_deref() == Some("succeeded")).then(|| {
-            format!(
-                "lifecycle owner `{owner}` explicitly finalized succeeded at revision {}",
-                record.lifecycle_revision
-            )
-        })
-    });
+    if live_caller_cwd {
+        reasons.push(LIVE_CWD_REASON.to_string());
+    }
     let safe = reasons.is_empty();
     Ok(WorktreeSafetyReport {
         dirty,
@@ -1633,12 +1636,12 @@ pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafet
         primary_checkout,
         path_contained,
         worktree_missing,
-        live_caller_cwd,
-        terminal_owner_evidence,
         safe,
         reasons,
     })
 }
+
+const LIVE_CWD_REASON: &str = "refuses to remove the caller's live current working directory";
 
 pub(super) fn is_dirty(path: &Path) -> Result<bool> {
     Ok(

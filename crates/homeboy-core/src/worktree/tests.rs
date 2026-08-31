@@ -650,8 +650,12 @@ fn owned_worktree_survives_push_and_pr_boundary_until_finalization_and_cwd_exit(
 
             let active_status = status(&created.record.id).expect("active owned status");
             assert!(
-                active_status.safety.safe,
-                "lifecycle cleanup eligibility must not make an active worktree unsafe for lookup"
+                active_status
+                    .safety
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.contains("live current working directory")),
+                "active lookup must report why the caller workspace cannot be removed"
             );
             let before_pr = cleanup(WorktreeCleanupOptions {
                 force: true,
@@ -735,11 +739,12 @@ fi
             )
             .expect("explicit terminal owner finalization");
             let finalized_status = status(&created.record.id).expect("finalized status");
-            assert!(finalized_status
-                .safety
-                .terminal_owner_evidence
-                .as_deref()
-                .is_some_and(|evidence| evidence.contains(owner)));
+            assert_eq!(finalized_status.record.run_id.as_deref(), Some(owner));
+            assert_eq!(
+                finalized_status.record.terminal_disposition.as_deref(),
+                Some("succeeded")
+            );
+            assert_eq!(finalized_status.record.lifecycle_revision, 1);
 
             let direct_remove = remove(WorktreeRemoveOptions {
                 id: created.record.id.clone(),

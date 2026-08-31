@@ -2266,6 +2266,7 @@ pub fn finalize_apply_enabled_worktree_provider_from_config(
             None,
         ));
     }
+    ensure_provider_finalization_cwd_safe(&resolution.worktree.path)?;
     let command =
         worktree_provider_lifecycle_finalizer_argv_from_config(&resolution.provider_id, config)?
             .ok_or_else(|| {
@@ -2300,6 +2301,30 @@ pub fn finalize_apply_enabled_worktree_provider_from_config(
         lifecycle_state: disposition.lifecycle_state().to_string(),
         inspection_path: resolution.worktree.path.clone(),
     })
+}
+
+fn ensure_provider_finalization_cwd_safe(workspace: &str) -> Result<()> {
+    let cwd =
+        std::env::current_dir().map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let workspace = match std::fs::canonicalize(workspace) {
+        Ok(workspace) => workspace,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(workspace.to_string()),
+            ))
+        }
+    };
+    if cwd == workspace || cwd.starts_with(&workspace) {
+        return Err(Error::validation_invalid_argument(
+            "worktree",
+            "Provider worktree contains the caller's live current working directory",
+            Some(workspace.display().to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub fn worktree_provider_idempotency_key(intent: &WorktreeProviderCreateIntent) -> String {

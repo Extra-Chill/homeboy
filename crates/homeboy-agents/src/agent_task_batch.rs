@@ -1747,6 +1747,43 @@ pub fn read_batch_record_in_store(
     store.read_batch(batch_id)
 }
 
+pub fn provider_worktree_finalization_receipt(
+    batch_id: &str,
+    child_run_id: &str,
+) -> Result<Option<Value>> {
+    let batch = read_batch_record(batch_id)?;
+    Ok(batch.metadata["provider_worktree_finalizations"]
+        .get(child_run_id)
+        .filter(|receipt| receipt.is_object())
+        .cloned())
+}
+
+pub fn record_provider_worktree_finalization_receipt(
+    batch_id: &str,
+    child_run_id: &str,
+    receipt: Value,
+) -> Result<()> {
+    AgentTaskBatchStore::from_current_data_root()?.mutate_batch(batch_id, |batch| {
+        if !batch.metadata.is_object() {
+            batch.metadata = json!({});
+        }
+        let receipts = batch
+            .metadata
+            .as_object_mut()
+            .expect("metadata object")
+            .entry("provider_worktree_finalizations")
+            .or_insert_with(|| json!({}));
+        if !receipts.is_object() {
+            *receipts = json!({});
+        }
+        receipts
+            .as_object_mut()
+            .expect("provider worktree finalization receipts object")
+            .insert(child_run_id.to_string(), receipt);
+        Ok(())
+    })
+}
+
 /// Persist a child's resume-time finalization outcome into the durable batch
 /// record's metadata, keyed by the child run id. Repeated resume calls overwrite
 /// the same key so the batch record stays a single, convergent view of what has
