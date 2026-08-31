@@ -1797,7 +1797,7 @@ fn diagnose_next_actions(
             CommandNextAction::new(
                 "inspect the queued runner-owned execution",
                 format!(
-                    "homeboy --runner {} agent-task status {}",
+                    "homeboy --runner {} agent-task diagnose {} --full",
                     quote_arg(runner_id.unwrap_or("<runner>")),
                     quote_arg(run_id)
                 ),
@@ -5656,7 +5656,9 @@ fn diagnose_next_commands(
             .collect();
     }
     if queued_runner_ownership {
-        return vec![format!("homeboy {owner} agent-task status {run_id}")];
+        return vec![format!(
+            "homeboy {owner} agent-task diagnose {run_id} --full"
+        )];
     }
     let mut commands = vec![
         format!("homeboy {owner} agent-task diagnose {run_id} --full"),

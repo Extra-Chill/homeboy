@@ -2320,12 +2320,12 @@ fn diagnose_surfaces_queued_runner_ownership_before_a_job_id_is_recorded() {
         );
         assert_eq!(
             diagnosis["next_commands"][0],
-            format!("homeboy --runner homeboy-lab agent-task status {run_id}")
+            format!("homeboy --runner homeboy-lab agent-task diagnose {run_id} --full")
         );
         assert_eq!(diagnosis["next_action_basis"], "diagnosis");
         assert_eq!(
             diagnosis["_homeboy_actionable"]["next_actions"][0]["command"],
-            format!("homeboy --runner homeboy-lab agent-task status {run_id}")
+            format!("homeboy --runner homeboy-lab agent-task diagnose {run_id} --full")
         );
     });
 }
