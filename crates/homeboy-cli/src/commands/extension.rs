@@ -310,12 +310,23 @@ impl ExtensionArgs {
     }
 
     pub(crate) fn is_runner_resident_read_command(&self) -> bool {
-        matches!(self.command, ExtensionCommand::Show { .. })
+        // The default show path only loads the controller-local manifest and
+        // cached readiness. The live probe may execute an extension command.
+        matches!(
+            self.command,
+            ExtensionCommand::Show {
+                live_readiness: true,
+                ..
+            }
+        )
     }
 
     pub(crate) fn runner_resident_read_command_label(&self) -> &'static str {
         match self.command {
-            ExtensionCommand::Show { .. } => "extension show",
+            ExtensionCommand::Show {
+                live_readiness: true,
+                ..
+            } => "extension show --live-readiness",
             _ => "extension",
         }
     }
