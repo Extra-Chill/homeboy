@@ -367,6 +367,239 @@ fn source_upgrade_timeout_terminates_the_entire_child_process_group() {
     panic!("source-upgrade child must not be orphaned");
 }
 
+#[cfg(unix)]
+#[test]
+fn installer_completion_reaps_background_process_group() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let pid_file = workspace.path().join("child.pid");
+    let shell = format!(
+        "sleep 30 & echo $! > {}; printf installed",
+        quote_path(&pid_file.display().to_string())
+    );
+    let output = supervise_installer_shell_command(
+        &shell,
+        Duration::from_secs(1),
+        "test installer",
+        |_| {},
+        |_| {},
+    )
+    .expect("installer command completes");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"installed");
+
+    let child_pid = std::fs::read_to_string(&pid_file)
+        .expect("background child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric pid");
+    assert!(
+        !homeboy_core::process::pid_is_running(child_pid),
+        "successful installer left a runnable descendant"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_timeout_terminates_and_reaps_the_process_tree() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let pid_file = workspace.path().join("child.pid");
+    let shell = format!(
+        "sleep 30 & echo $! > {}; wait",
+        quote_path(&pid_file.display().to_string())
+    );
+    let error = supervise_installer_shell_command(
+        &shell,
+        Duration::from_millis(50),
+        "test installer",
+        |_| {},
+        |_| {},
+    )
+    .expect_err("installer command times out");
+    assert!(error
+        .details
+        .to_string()
+        .to_lowercase()
+        .contains("timed out"));
+    let child_pid = std::fs::read_to_string(&pid_file)
+        .expect("background child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric pid");
+    assert!(
+        !homeboy_core::process::pid_is_running(child_pid),
+        "timed-out installer left a runnable descendant"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_timeout_classifies_bytes_mutated_before_the_hang() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let target = workspace.path().join("homeboy");
+    std::fs::write(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n")
+        .expect("write installed fixture");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+        .expect("make fixture executable");
+    let checkpoint = ReplacementCheckpoint::pending(&target, Some("0.2.0"), None, None)
+        .expect("capture immutable pre-install evidence");
+    let shell = format!(
+        "printf changed > {}; sleep 30",
+        quote_path(&target.display().to_string())
+    );
+
+    supervise_installer_shell_command(
+        &shell,
+        Duration::from_millis(50),
+        "test binary installer",
+        |_| {},
+        |_| {},
+    )
+    .expect_err("installer mutates and then times out");
+
+    assert_eq!(
+        replacement_observed_state(&checkpoint).expect("classify post-timeout bytes"),
+        "changed_unverified"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess fixture for controller-death supervision"]
+fn installer_controller_death_fixture() {
+    let pid_file = std::env::var("HOMEBOY_INSTALLER_PID_FILE").expect("pid file");
+    let release_file = std::env::var("HOMEBOY_INSTALLER_RELEASE_FILE").expect("release file");
+    let target = std::env::var("HOMEBOY_INSTALLER_TARGET").expect("target");
+    let shell = format!(
+        "echo $$ > {}; while [ ! -e {} ]; do sleep 0.02; done; printf stale > {}",
+        quote_path(&pid_file),
+        quote_path(&release_file),
+        quote_path(&target),
+    );
+    supervise_installer_shell_command(
+        &shell,
+        Duration::from_secs(30),
+        "controller-death fixture",
+        |_| {},
+        |_| {},
+    )
+    .expect("fixture installer completes only when not killed");
+}
+
+#[cfg(unix)]
+#[test]
+fn controller_death_cannot_leave_an_installer_to_mutate_after_successor_handoff() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let pid_file = workspace.path().join("installer.pid");
+    let release_file = workspace.path().join("release");
+    let target = workspace.path().join("homeboy");
+    let mut controller = Command::new(std::env::current_exe().expect("test executable"));
+    controller
+        .args([
+            "--ignored",
+            "--exact",
+            "upgrade::execution::tests::part_a::installer_controller_death_fixture",
+            "--nocapture",
+        ])
+        .env("HOMEBOY_INSTALLER_PID_FILE", &pid_file)
+        .env("HOMEBOY_INSTALLER_RELEASE_FILE", &release_file)
+        .env("HOMEBOY_INSTALLER_TARGET", &target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut controller = controller.spawn().expect("spawn controller fixture");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_file.exists() {
+        assert!(Instant::now() < deadline, "installer fixture did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let installer_pid = std::fs::read_to_string(&pid_file)
+        .expect("installer pid")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric installer pid");
+    controller.kill().expect("kill old controller");
+    controller.wait().expect("reap old controller");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while homeboy_core::process::pid_is_running(installer_pid) {
+        assert!(
+            Instant::now() < deadline,
+            "old controller's installer remained runnable"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(&target, b"successor").expect("successor mutates after lease handoff");
+    std::fs::write(&release_file, b"release stale installer").expect("release barrier");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        std::fs::read(&target).expect("read installed bytes"),
+        b"successor",
+        "orphaned installer mutated after successor handoff"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn controller_death_before_guard_attachment_cannot_start_installer_mutation() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let pid_file = workspace.path().join("installer.pid");
+    let ready_file = workspace.path().join("spawned-before-attach");
+    let release_file = workspace.path().join("release");
+    let target = workspace.path().join("homeboy");
+    let mut controller = Command::new(std::env::current_exe().expect("test executable"));
+    controller
+        .args([
+            "--ignored",
+            "--exact",
+            "upgrade::execution::tests::part_a::installer_controller_death_fixture",
+            "--nocapture",
+        ])
+        .env("HOMEBOY_INSTALLER_PID_FILE", &pid_file)
+        .env("HOMEBOY_INSTALLER_GATE_PID_FILE", &pid_file)
+        .env("HOMEBOY_INSTALLER_BEFORE_ATTACH_READY", &ready_file)
+        .env("HOMEBOY_INSTALLER_RELEASE_FILE", &release_file)
+        .env("HOMEBOY_INSTALLER_TARGET", &target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut controller = controller.spawn().expect("spawn controller fixture");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready_file.exists() || !pid_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "pre-attach fixture did not start"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let installer_pid = std::fs::read_to_string(&pid_file)
+        .expect("installer pid")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric installer pid");
+    controller
+        .kill()
+        .expect("kill controller before guard attachment");
+    controller.wait().expect("reap controller fixture");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while homeboy_core::process::pid_is_running(installer_pid) {
+        assert!(
+            Instant::now() < deadline,
+            "start-gated installer survived its controller"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(&target, b"successor").expect("successor mutation");
+    std::fs::write(&release_file, b"release").expect("release stale mutation barrier");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        std::fs::read(&target).expect("read successor bytes"),
+        b"successor"
+    );
+}
+
 #[test]
 fn test_execute_upgrade() {
     assert_eq!(

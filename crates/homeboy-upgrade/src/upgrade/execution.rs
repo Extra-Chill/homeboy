@@ -4,7 +4,8 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_engine_primitives::command::{
-    terminate_process_tree_and_reap, terminate_remaining_process_group, ControllerChildGuard,
+    terminate_process_tree_and_reap, terminate_remaining_process_group,
+    wait_with_bounded_output_supervised, ControllerChildGuard, SupervisedCommandTermination,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,6 +15,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{io, os::fd::RawFd};
 
 use super::constants::{
     RELEASE_TAG_ENV, RELEASE_VERSION_ENV, VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY,
@@ -30,6 +33,8 @@ use super::types::InstallMethod;
 /// `agent_task_promotion` / runner exec captures (#5297).
 const UPGRADE_CAPTURE_LIMIT_BYTES: usize = 65_536;
 const SOURCE_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const INSTALLER_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const INSTALLER_SUPERVISION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CLEANUP_ERROR_CONTEXT_LIMIT_CHARS: usize = 1_024;
 
 /// Environment variable set in the shell child's environment and checked at the
@@ -231,20 +236,25 @@ pub(crate) fn execute_upgrade(
     let output = match method {
         InstallMethod::Homebrew => {
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
-            Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run homebrew upgrade".to_string()))
-            })?
+            run_installer_shell_command(
+                cmd,
+                promotion_lease,
+                INSTALLER_UPGRADE_TIMEOUT,
+                "run homebrew upgrade",
+                |_| {},
+            )?
         }
         InstallMethod::Secondary => {
             // Legacy cargo-installed binaries are replaced with the release
             // asset now that Homeboy's private workspace is not on crates.io.
             let cmd = &defaults.install_methods.binary.upgrade_command;
-            Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
-                Error::internal_io(
-                    e.to_string(),
-                    Some("run release binary upgrade".to_string()),
-                )
-            })?
+            run_installer_shell_command(
+                cmd,
+                promotion_lease,
+                INSTALLER_UPGRADE_TIMEOUT,
+                "run release binary upgrade",
+                |_| {},
+            )?
         }
         InstallMethod::Source => {
             if env::var_os(REENTRANCY_GUARD_ENV).is_some() {
@@ -305,17 +315,24 @@ pub(crate) fn execute_upgrade(
             // the pin the installer always resolves `latest/download`, so a
             // newest release missing this target's asset is unreachable past —
             // there is no older release the operator can be moved to (#11750).
-            let mut command = Command::new("sh");
-            command.args(["-c", cmd]);
-            if let Some(release) = selected_release {
-                command.env(RELEASE_TAG_ENV, &release.tag);
-                command.env(RELEASE_VERSION_ENV, &release.version);
-            }
-            match command.output() {
+            match run_installer_shell_command(
+                cmd,
+                promotion_lease,
+                INSTALLER_UPGRADE_TIMEOUT,
+                "run binary upgrade",
+                |command| {
+                    if let Some(release) = selected_release {
+                        command.env(RELEASE_TAG_ENV, &release.tag);
+                        command.env(RELEASE_VERSION_ENV, &release.version);
+                    }
+                },
+            ) {
                 Ok(output) => output,
                 Err(error) => {
                     if let Some(checkpoint) = binary_checkpoint.as_ref() {
-                        replacement_checkpoint(&checkpoint.with_state("not_applied"))?;
+                        replacement_checkpoint(
+                            &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+                        )?;
                     }
                     return Err(Error::internal_io(
                         error.to_string(),
@@ -422,6 +439,221 @@ pub(crate) fn execute_upgrade(
     // believe the roll-forward succeeded. Fail loudly with an actionable reason
     // so urgent source fixes are not silently dropped (#5772).
     Ok((success, new_version, new_build_identity, None, false))
+}
+
+fn run_installer_shell_command(
+    script: &str,
+    promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
+    timeout: Duration,
+    context: &str,
+    configure: impl FnOnce(&mut Command),
+) -> Result<std::process::Output> {
+    let promotion_lease = promotion_lease.ok_or_else(|| {
+        Error::internal_unexpected("installer mutation requires controller promotion ownership")
+    })?;
+    promotion_lease.assert_generation()?;
+    supervise_installer_shell_command(
+        script,
+        timeout,
+        context,
+        |command| promotion_lease.authorize_subprocess(command),
+        configure,
+    )
+}
+
+fn supervise_installer_shell_command(
+    script: &str,
+    timeout: Duration,
+    context: &str,
+    authorize_before_spawn: impl FnOnce(&mut Command),
+    configure: impl FnOnce(&mut Command),
+) -> Result<std::process::Output> {
+    let mut start_gate = InstallerStartGate::new()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+    let mut command = start_gate.command(script);
+    configure(&mut command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let guard = ControllerChildGuard::prepare(&mut command)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+    // The capability is intentionally scoped to this exact supervised spawn.
+    authorize_before_spawn(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+    #[cfg(test)]
+    if let Some(ready) = std::env::var_os("HOMEBOY_INSTALLER_BEFORE_ATTACH_READY") {
+        if let Some(pid_file) = std::env::var_os("HOMEBOY_INSTALLER_GATE_PID_FILE") {
+            std::fs::write(pid_file, child.id().to_string()).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(context.to_string()))
+            })?;
+        }
+        std::fs::write(ready, b"spawned before guard attachment")
+            .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
+        loop {
+            std::thread::park_timeout(Duration::from_secs(30));
+        }
+    }
+    if let Err(error) = guard.attach(&child) {
+        let primary = Error::internal_io(
+            format!("failed to attach installer process guard: {error}"),
+            Some(context.to_string()),
+        );
+        return Err(append_cleanup_failure_context(
+            primary,
+            terminate_process_tree_and_reap(&mut child).err(),
+        ));
+    }
+    start_gate.release().map_err(|error| {
+        append_cleanup_failure_context(
+            Error::internal_io(error.to_string(), Some(context.to_string())),
+            terminate_process_tree_and_reap(&mut child).err(),
+        )
+    })?;
+    let supervised = wait_with_bounded_output_supervised(
+        &mut child,
+        UPGRADE_CAPTURE_LIMIT_BYTES,
+        timeout,
+        INSTALLER_SUPERVISION_POLL_INTERVAL,
+        || false,
+        |_, _| Ok(()),
+    );
+    let supervised = match supervised {
+        Ok(supervised) => supervised,
+        Err(error) => {
+            return Err(append_cleanup_failure_context(
+                Error::internal_io(error.to_string(), Some(context.to_string())),
+                terminate_process_tree_and_reap(&mut child).err(),
+            ));
+        }
+    };
+    match supervised.termination {
+        SupervisedCommandTermination::Completed => Ok(supervised.output.into_output()),
+        SupervisedCommandTermination::TimedOut => Err(Error::internal_io(
+            format!("installer timed out after {}s", timeout.as_secs()),
+            Some(context.to_string()),
+        )),
+        termination => Err(Error::internal_io(
+            format!("installer terminated before completion: {termination:?}"),
+            Some(context.to_string()),
+        )),
+    }
+}
+
+#[cfg(unix)]
+struct InstallerStartGate {
+    read_fd: RawFd,
+    write_fd: RawFd,
+}
+
+#[cfg(unix)]
+impl InstallerStartGate {
+    fn new() -> io::Result<Self> {
+        let mut fds = [-1; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            read_fd: fds[0],
+            write_fd: fds[1],
+        })
+    }
+
+    fn command(&self, script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                &format!(
+                    "IFS= read -r _ <&{} || exit 125; exec sh -c \"$HOMEBOY_INSTALLER_SCRIPT\"",
+                    self.read_fd
+                ),
+            ])
+            .env("HOMEBOY_INSTALLER_SCRIPT", script);
+        command
+    }
+
+    fn release(&mut self) -> io::Result<()> {
+        let bytes = b"1\n";
+        let written = unsafe { libc::write(self.write_fd, bytes.as_ptr().cast(), bytes.len()) };
+        if written != bytes.len() as isize {
+            return Err(io::Error::last_os_error());
+        }
+        unsafe {
+            libc::close(self.read_fd);
+            libc::close(self.write_fd);
+        }
+        self.read_fd = -1;
+        self.write_fd = -1;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InstallerStartGate {
+    fn drop(&mut self) {
+        unsafe {
+            if self.read_fd >= 0 {
+                libc::close(self.read_fd);
+            }
+            if self.write_fd >= 0 {
+                libc::close(self.write_fd);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct InstallerStartGate {
+    path: PathBuf,
+}
+
+#[cfg(not(unix))]
+impl InstallerStartGate {
+    fn new() -> std::io::Result<Self> {
+        let gate = tempfile::Builder::new()
+            .prefix("homeboy-installer-start-")
+            .tempfile()?;
+        let path = gate.path().to_path_buf();
+        gate.close()?;
+        Ok(Self { path })
+    }
+
+    fn command(&self, script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "attempt=0; while [ ! -f \"$HOMEBOY_INSTALLER_START_GATE\" ]; do attempt=$((attempt + 1)); [ \"$attempt\" -ge 500 ] && exit 125; sleep 0.01; done; exec sh -c \"$HOMEBOY_INSTALLER_SCRIPT\"",
+            ])
+            .env("HOMEBOY_INSTALLER_START_GATE", &self.path)
+            .env("HOMEBOY_INSTALLER_SCRIPT", script);
+        command
+    }
+
+    fn release(&mut self) -> std::io::Result<()> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .map(|_| ())
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for InstallerStartGate {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn validate_binary_replacement_eligibility(

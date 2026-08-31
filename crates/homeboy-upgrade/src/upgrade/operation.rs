@@ -4,6 +4,8 @@
 //! Persisting them before mutation lets a timed-out client inspect whether the
 //! controller actually promoted, instead of guessing from a silent hang.
 
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -76,7 +78,7 @@ pub struct UpgradeOperation {
     #[cfg(test)]
     fail_next_progress_write: bool,
     #[cfg(test)]
-    before_terminal_write: Option<Box<dyn FnOnce() + Send>>,
+    before_terminal_writes: VecDeque<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
     after_promotion_wait: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -110,7 +112,7 @@ impl UpgradeOperation {
             persistence_error: None,
             fail_terminal_writes_remaining: 0,
             fail_next_progress_write: false,
-            before_terminal_write: None,
+            before_terminal_writes: VecDeque::new(),
             after_promotion_wait: None,
         };
         if let Some(id) = operation.id() {
@@ -142,7 +144,7 @@ impl UpgradeOperation {
             #[cfg(test)]
             fail_next_progress_write: false,
             #[cfg(test)]
-            before_terminal_write: None,
+            before_terminal_writes: VecDeque::new(),
             #[cfg(test)]
             after_promotion_wait: None,
         };
@@ -331,7 +333,10 @@ impl UpgradeOperation {
                 "upgrade operation has no durable observation",
             ));
         };
-        self.metadata["elapsed_seconds"] = json!(self.started.elapsed().as_secs());
+        merge_elapsed_seconds(&mut self.metadata, self.started.elapsed().as_secs());
+        if let Some(run) = observation.store().get_run(observation.run_id())? {
+            merge_elapsed_from_metadata(&mut self.metadata, &run.metadata_json);
+        }
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_progress_write) {
             return Err(Error::internal_unexpected(
@@ -371,11 +376,8 @@ impl UpgradeOperation {
                     observation.run_id()
                 ))
             })?;
-        merge_component_fields(&mut self.metadata, &run.metadata_json);
-        if let Some(elapsed) = run.metadata_json.get("elapsed_seconds") {
-            self.metadata["elapsed_seconds"] = elapsed.clone();
-        }
-        self.metadata["elapsed_seconds"] = json!(self.started.elapsed().as_secs());
+        merge_latest_monotonic_progress(&mut self.metadata, &run.metadata_json);
+        merge_elapsed_seconds(&mut self.metadata, self.started.elapsed().as_secs());
         if self.pending_terminal.is_none() {
             let intent_id = format!("upgrade-terminal:{}", observation.run_id());
             self.metadata["terminal_intent_id"] = json!(intent_id);
@@ -385,14 +387,17 @@ impl UpgradeOperation {
                 intent_id,
             });
         } else if let Some(intent) = self.pending_terminal.as_mut() {
-            merge_component_fields(&mut intent.metadata, &run.metadata_json);
+            merge_latest_monotonic_progress(&mut intent.metadata, &run.metadata_json);
         }
         let mut expected_metadata = run.metadata_json;
         let mut last_error = None;
-        for _ in 0..3 {
+        for attempt in 1..=3 {
             #[cfg(test)]
-            if let Some(before_write) = self.before_terminal_write.take() {
+            if let Some(before_write) = self.before_terminal_writes.pop_front() {
                 before_write();
+            }
+            if let Some(intent) = self.pending_terminal.as_mut() {
+                merge_latest_monotonic_progress(&mut intent.metadata, &expected_metadata);
             }
             let intent = self
                 .pending_terminal
@@ -428,11 +433,16 @@ impl UpgradeOperation {
                     }
                     Ok(Some(run)) if run.status == RunStatus::Running.as_str() => {
                         if let Some(intent) = self.pending_terminal.as_mut() {
-                            merge_component_fields(&mut intent.metadata, &run.metadata_json);
+                            merge_latest_monotonic_progress(
+                                &mut intent.metadata,
+                                &run.metadata_json,
+                            );
                         }
                         expected_metadata = run.metadata_json;
                         last_error = Some(Error::internal_unexpected(
-                            "upgrade terminal write raced with running progress",
+                            format!(
+                                "upgrade terminal write raced with running progress on attempt {attempt}"
+                            ),
                         ));
                     }
                     Ok(Some(_)) => {
@@ -448,9 +458,27 @@ impl UpgradeOperation {
                 },
             }
         }
-        Err(last_error.unwrap_or_else(|| {
-            Error::internal_unexpected("upgrade terminalization retries were exhausted")
-        }))
+        let phase = expected_metadata["phase"].as_str().unwrap_or("unknown");
+        let elapsed = expected_metadata["elapsed_seconds"].as_u64().unwrap_or(0);
+        let components = ["controller", "extensions", "runners"]
+            .into_iter()
+            .map(|key| {
+                format!(
+                    "{key}={}",
+                    expected_metadata[key]["status"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cause = last_error
+            .map(|error| error.message)
+            .unwrap_or_else(|| "unknown terminal write failure".to_string());
+        Err(Error::internal_unexpected(format!(
+            "upgrade terminalization retries exhausted for {} after 3 attempts; final observed phase={phase}, elapsed_seconds={elapsed}, {components}; last error: {cause}",
+            observation.run_id()
+        )))
     }
 
     #[cfg(test)]
@@ -470,7 +498,7 @@ impl UpgradeOperation {
 
     #[cfg(test)]
     pub(crate) fn before_terminal_write(&mut self, callback: impl FnOnce() + Send + 'static) {
-        self.before_terminal_write = Some(Box::new(callback));
+        self.before_terminal_writes.push_back(Box::new(callback));
     }
 
     #[cfg(test)]
@@ -583,7 +611,7 @@ pub fn persist_extension_progress(
     ));
     patch_metadata(run_id, |metadata| {
         metadata["phase"] = json!("refreshing_installed_extensions");
-        metadata["elapsed_seconds"] = json!(elapsed.as_secs());
+        merge_elapsed_seconds(metadata, elapsed.as_secs());
         metadata["extensions"] = component(
             "running",
             format!("refreshing {extension_id} ({current}/{total})"),
@@ -629,7 +657,7 @@ pub fn persist_upgrade_heartbeat(run_id: &str, elapsed: Duration) -> Result<()> 
         )));
     };
     let mut metadata = run.metadata_json;
-    metadata["elapsed_seconds"] = json!(elapsed.as_secs());
+    merge_elapsed_seconds(&mut metadata, elapsed.as_secs());
     store
         .update_running_run_metadata(run_id, metadata)?
         .map(|_| ())
@@ -674,7 +702,9 @@ fn patch_metadata(run_id: &str, patch: impl FnOnce(&mut Value)) -> Result<()> {
         )));
     }
     let mut metadata = run.metadata_json;
+    let previous_elapsed = metadata["elapsed_seconds"].as_u64().unwrap_or(0);
     patch(&mut metadata);
+    merge_elapsed_seconds(&mut metadata, previous_elapsed);
     store
         .update_running_run_metadata(run_id, metadata)?
         .map(|_| ())
@@ -686,16 +716,58 @@ fn patch_metadata(run_id: &str, patch: impl FnOnce(&mut Value)) -> Result<()> {
 fn merge_component_fields(target: &mut Value, source: &Value) {
     for key in ["controller", "extensions", "runners"] {
         if let Some(value) = source.get(key) {
-            let target_is_pending = target
+            let target_status = target
                 .get(key)
                 .and_then(|component| component.get("status"))
-                .and_then(Value::as_str)
-                == Some("pending");
-            let source_is_pending = value.get("status").and_then(Value::as_str) == Some("pending");
-            if target.get(key).is_none() || (target_is_pending && !source_is_pending) {
+                .and_then(Value::as_str);
+            let source_status = value.get("status").and_then(Value::as_str);
+            let target_rank = component_progress_rank(target_status);
+            let source_rank = component_progress_rank(source_status);
+            if target.get(key).is_none()
+                || source_rank > target_rank
+                || (source_rank == target_rank && source_rank <= 1)
+            {
                 target[key] = value.clone();
             }
         }
+    }
+}
+
+fn component_progress_rank(status: Option<&str>) -> u8 {
+    match status {
+        None | Some("pending") => 0,
+        Some("running") => 1,
+        Some(_) => 2,
+    }
+}
+
+fn merge_elapsed_seconds(metadata: &mut Value, proposed: u64) {
+    let elapsed = metadata["elapsed_seconds"]
+        .as_u64()
+        .unwrap_or(0)
+        .max(proposed);
+    metadata["elapsed_seconds"] = json!(elapsed);
+}
+
+fn merge_elapsed_from_metadata(target: &mut Value, source: &Value) {
+    merge_elapsed_seconds(
+        target,
+        source["elapsed_seconds"].as_u64().unwrap_or_default(),
+    );
+}
+
+fn merge_latest_monotonic_progress(target: &mut Value, source: &Value) {
+    merge_component_fields(target, source);
+    merge_elapsed_from_metadata(target, source);
+    let Some(source_replacement) = source.get("replacement") else {
+        return;
+    };
+    let target_state = target["replacement"]["state"].as_str();
+    let source_state = source_replacement["state"].as_str();
+    if target.get("replacement").is_none()
+        || (target_state == Some("pending") && source_state.is_some_and(|state| state != "pending"))
+    {
+        target["replacement"] = source_replacement.clone();
     }
 }
 
@@ -816,7 +888,8 @@ pub(crate) fn freeze_prior_pending_replacements(current_operation_id: &str) -> R
         {
             continue;
         }
-        let mut metadata = run.metadata_json;
+        let expected_metadata = run.metadata_json;
+        let mut metadata = expected_metadata.clone();
         let checkpoint = serde_json::from_value::<super::execution::ReplacementCheckpoint>(
             metadata["replacement"].clone(),
         )
@@ -858,8 +931,17 @@ pub(crate) fn freeze_prior_pending_replacements(current_operation_id: &str) -> R
                 metadata["phase"] = json!("controller_replacement_evidence_unavailable");
             }
         }
+        metadata["phase"] = json!("controller_replacement_superseded");
+        metadata["outcome"] = json!("controller_replacement_interrupted");
+        metadata["superseded_by_operation_id"] = json!(current_operation_id);
+        metadata["terminal_intent_id"] = json!(format!("upgrade-superseded:{}", run.id));
         store
-            .update_running_run_metadata(&run.id, metadata)?
+            .finish_running_run_if_metadata(
+                &run.id,
+                RunStatus::Error,
+                metadata,
+                &expected_metadata,
+            )?
             .ok_or_else(|| {
                 Error::internal_unexpected(format!(
                     "prior upgrade operation changed while freezing replacement evidence: {}",
@@ -1328,6 +1410,14 @@ mod tests {
                 )
                 .expect("persist progress in terminal CAS window");
             });
+            let progress_id = id.clone();
+            operation.before_terminal_write(move || {
+                patch_metadata(&progress_id, |metadata| {
+                    metadata["elapsed_seconds"] = json!(27);
+                    metadata["runners"] = component("running", "refreshing runner docker (2/3)");
+                })
+                .expect("persist second progress advance in terminal CAS window");
+            });
 
             operation
                 .finish_failed_durable(&Error::internal_unexpected("injected failure"))
@@ -1340,6 +1430,61 @@ mod tests {
                 .extensions
                 .as_ref()
                 .is_some_and(|value| value.summary.contains("woocommerce")));
+            assert!(status
+                .runners
+                .as_ref()
+                .is_some_and(|value| value.summary.contains("docker")));
+            assert_eq!(status.elapsed_seconds, 27);
+        });
+    }
+
+    #[test]
+    fn terminal_retry_exhaustion_reports_final_observed_progress() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            persist_upgrade_heartbeat(&id, Duration::from_secs(41))
+                .expect("persist durable elapsed progress");
+            operation.fail_next_terminal_writes(3);
+
+            let error = operation
+                .finish_failed_durable(&Error::internal_unexpected("injected failure"))
+                .expect_err("terminal writes are exhausted");
+            assert!(error.message.contains(&id));
+            assert!(error.message.contains("after 3 attempts"));
+            assert!(error.message.contains("elapsed_seconds=41"));
+            assert!(error.message.contains("extensions=pending"));
+        });
+    }
+
+    #[test]
+    fn elapsed_seconds_never_regresses_across_progress_clock_origins() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+
+            persist_upgrade_heartbeat(&id, Duration::from_secs(30))
+                .expect("persist queued ownership elapsed time");
+            persist_upgrade_heartbeat(&id, Duration::from_secs(1))
+                .expect("mutation heartbeat uses a newer clock origin");
+            assert_eq!(
+                load_upgrade_operation_status(Some(&id))
+                    .expect("load heartbeat status")
+                    .elapsed_seconds,
+                30
+            );
+
+            persist_extension_progress(&id, "wordpress", 1, 2, Duration::from_secs(45))
+                .expect("first extension progress");
+            persist_extension_progress(&id, "woocommerce", 1, 2, Duration::from_secs(2))
+                .expect("second extension clock restarts");
+            operation
+                .set_phase_durable("refreshing configured runners")
+                .expect("stale operation clock persists a later phase");
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("load final status");
+            assert_eq!(status.elapsed_seconds, 45);
+            assert_eq!(status.phase, "refreshing configured runners");
         });
     }
 
@@ -1396,6 +1541,8 @@ mod tests {
                 .expect("freeze crash evidence before admitting the next mutation");
             write_executable(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# later retry\n");
             let frozen = load_upgrade_operation_status(Some(&id)).expect("reload frozen status");
+            assert_eq!(frozen.status, RunStatus::Error.as_str());
+            assert_eq!(frozen.phase, "controller_replacement_superseded");
             assert_eq!(
                 frozen
                     .controller
@@ -1473,6 +1620,8 @@ mod tests {
                 .expect("next owner freezes panic evidence");
             let frozen =
                 load_upgrade_operation_status(Some(&operation_id)).expect("load frozen operation");
+            assert_eq!(frozen.status, RunStatus::Error.as_str());
+            assert_eq!(frozen.phase, "controller_replacement_superseded");
             assert_eq!(
                 frozen
                     .controller
@@ -1512,6 +1661,7 @@ mod tests {
                 .expect("next owner freezes changed evidence");
             let frozen =
                 load_upgrade_operation_status(Some(&operation_id)).expect("load frozen operation");
+            assert_eq!(frozen.status, RunStatus::Error.as_str());
             assert_eq!(
                 frozen
                     .controller
@@ -1519,7 +1669,24 @@ mod tests {
                     .map(|component| component.status.as_str()),
                 Some("replacement_changed_unverified")
             );
-            assert_eq!(frozen.phase, "controller_replacement_changed_unverified");
+            assert_eq!(frozen.phase, "controller_replacement_superseded");
+            let run = ObservationStore::open_initialized()
+                .expect("open store")
+                .get_run(&operation_id)
+                .expect("read run")
+                .expect("run exists");
+            assert_eq!(
+                run.metadata_json["outcome"],
+                "controller_replacement_interrupted"
+            );
+            assert_eq!(
+                run.metadata_json["superseded_by_operation_id"],
+                "next-controller-operation"
+            );
+            assert_eq!(
+                run.metadata_json["replacement"],
+                json!(checkpoint.with_state("changed_unverified"))
+            );
         });
     }
 
