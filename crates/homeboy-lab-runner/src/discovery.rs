@@ -2,11 +2,13 @@
 
 use homeboy_core::{error::ErrorCode, Result};
 use homeboy_runner_contract::{
-    RunnerApiCompatibility, RunnerApiCompatibilityFailure, RunnerApiCompatibilityFailureCode,
-    RunnerApiCompatibilityStatus, RunnerApiHandshakeRequest, RunnerApiHandshakeResponse,
-    RunnerApiInspectRequest, RunnerApiInspectResponse, RunnerApiListRequest, RunnerApiListResponse,
+    RunnerApiCapabilitiesRequest, RunnerApiCapabilitiesResponse, RunnerApiCompatibility,
+    RunnerApiCompatibilityFailure, RunnerApiCompatibilityFailureCode, RunnerApiCompatibilityStatus,
+    RunnerApiHandshakeRequest, RunnerApiHandshakeResponse, RunnerApiInspectRequest,
+    RunnerApiInspectResponse, RunnerApiListRequest, RunnerApiListResponse,
     RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiVersion, RunnerCapabilities,
     RunnerDescriptor, RunnerInspection, RunnerKind, RunnerReadiness,
+    RUNNER_API_CAPABILITIES_REQUEST_SCHEMA, RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA,
     RUNNER_API_HANDSHAKE_REQUEST_SCHEMA, RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA,
     RUNNER_API_INSPECT_REQUEST_SCHEMA, RUNNER_API_INSPECT_RESPONSE_SCHEMA,
     RUNNER_API_LIST_REQUEST_SCHEMA, RUNNER_API_LIST_RESPONSE_SCHEMA, RUNNER_API_V1,
@@ -164,6 +166,33 @@ impl RunnerDiscoveryService {
             Err(error) => Err(error),
         }
     }
+
+    pub fn capabilities_api(
+        request: &RunnerApiCapabilitiesRequest,
+    ) -> Result<RunnerApiCapabilitiesResponse> {
+        if let Some(failure) = validate_operation_request(
+            &request.schema,
+            RUNNER_API_CAPABILITIES_REQUEST_SCHEMA,
+            request.api_version,
+        ) {
+            return Ok(capabilities_failure(request, failure));
+        }
+
+        match Self::capabilities(&request.runner_id) {
+            Ok(capabilities) => Ok(RunnerApiCapabilitiesResponse {
+                schema: RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                runner_id: request.runner_id.clone(),
+                capabilities: Some(capabilities),
+                failure: None,
+            }),
+            Err(error) if error.code == ErrorCode::RunnerNotFound => Ok(capabilities_failure(
+                request,
+                operation_failure(RunnerApiOperationFailureCode::RunnerNotFound, error.message),
+            )),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn validate_operation_request(
@@ -206,6 +235,19 @@ fn inspect_failure(
         api_version: RUNNER_API_V1,
         runner_id: request.runner_id.clone(),
         inspection: None,
+        failure: Some(failure),
+    }
+}
+
+fn capabilities_failure(
+    request: &RunnerApiCapabilitiesRequest,
+    failure: RunnerApiOperationFailure,
+) -> RunnerApiCapabilitiesResponse {
+    RunnerApiCapabilitiesResponse {
+        schema: RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA.to_string(),
+        api_version: RUNNER_API_V1,
+        runner_id: request.runner_id.clone(),
+        capabilities: None,
         failure: Some(failure),
     }
 }
@@ -411,6 +453,67 @@ mod tests {
         .expect("unknown runner response");
 
         assert_eq!(response.inspection, None);
+        assert_eq!(
+            response.failure.expect("failure").code,
+            RunnerApiOperationFailureCode::RunnerNotFound
+        );
+    }
+
+    #[test]
+    fn capabilities_api_returns_the_canonical_inventory() {
+        let response = RunnerDiscoveryService::capabilities_api(&RunnerApiCapabilitiesRequest {
+            schema: RUNNER_API_CAPABILITIES_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "local".to_string(),
+        })
+        .expect("capabilities Runner API");
+
+        assert!(response.failure.is_none());
+        assert_eq!(
+            response.capabilities.expect("capabilities").runner_id,
+            "local"
+        );
+    }
+
+    #[test]
+    fn capabilities_api_validates_before_runner_lookup() {
+        let fixtures = [
+            (
+                "homeboy/runner-api-capabilities-request/v99",
+                RUNNER_API_V1,
+                RunnerApiOperationFailureCode::InvalidRequestSchema,
+            ),
+            (
+                RUNNER_API_CAPABILITIES_REQUEST_SCHEMA,
+                RunnerApiVersion { major: 99 },
+                RunnerApiOperationFailureCode::UnsupportedApiVersion,
+            ),
+        ];
+
+        for (schema, api_version, expected_failure) in fixtures {
+            let response =
+                RunnerDiscoveryService::capabilities_api(&RunnerApiCapabilitiesRequest {
+                    schema: schema.to_string(),
+                    api_version,
+                    runner_id: "runner-that-does-not-exist".to_string(),
+                })
+                .expect("validation response");
+
+            assert_eq!(response.capabilities, None);
+            assert_eq!(response.failure.expect("failure").code, expected_failure);
+        }
+    }
+
+    #[test]
+    fn capabilities_api_types_unknown_runner_failures() {
+        let response = RunnerDiscoveryService::capabilities_api(&RunnerApiCapabilitiesRequest {
+            schema: RUNNER_API_CAPABILITIES_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "runner-that-does-not-exist".to_string(),
+        })
+        .expect("unknown runner response");
+
+        assert_eq!(response.capabilities, None);
         assert_eq!(
             response.failure.expect("failure").code,
             RunnerApiOperationFailureCode::RunnerNotFound

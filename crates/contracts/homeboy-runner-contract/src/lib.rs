@@ -19,11 +19,13 @@ pub use capability::{
     RunnerToolchainReadinessProbe,
 };
 pub use discovery::{
-    RunnerApiCompatibility, RunnerApiCompatibilityFailure, RunnerApiCompatibilityFailureCode,
-    RunnerApiCompatibilityStatus, RunnerApiHandshakeRequest, RunnerApiHandshakeResponse,
-    RunnerApiInspectRequest, RunnerApiInspectResponse, RunnerApiListRequest, RunnerApiListResponse,
+    RunnerApiCapabilitiesRequest, RunnerApiCapabilitiesResponse, RunnerApiCompatibility,
+    RunnerApiCompatibilityFailure, RunnerApiCompatibilityFailureCode, RunnerApiCompatibilityStatus,
+    RunnerApiHandshakeRequest, RunnerApiHandshakeResponse, RunnerApiInspectRequest,
+    RunnerApiInspectResponse, RunnerApiListRequest, RunnerApiListResponse,
     RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiVersion, RunnerCapabilities,
     RunnerDescriptor, RunnerInspection, RunnerKind, RunnerReadiness,
+    RUNNER_API_CAPABILITIES_REQUEST_SCHEMA, RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA,
     RUNNER_API_HANDSHAKE_REQUEST_SCHEMA, RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA,
     RUNNER_API_INSPECT_REQUEST_SCHEMA, RUNNER_API_INSPECT_RESPONSE_SCHEMA,
     RUNNER_API_LIST_REQUEST_SCHEMA, RUNNER_API_LIST_RESPONSE_SCHEMA, RUNNER_API_V1,
