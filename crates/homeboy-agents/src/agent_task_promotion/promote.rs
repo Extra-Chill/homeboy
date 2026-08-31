@@ -377,6 +377,52 @@ struct ResumePromotedPatchAdmission {
     command_evidence: Vec<AgentTaskPromotionCommandReport>,
 }
 
+struct PatchArtifactAdmission {
+    path: PathBuf,
+    patch: String,
+    normalized_patch: Option<super::patch::NormalizedPromotionPatch>,
+}
+
+fn patch_artifact_admission(
+    artifact: &AgentTaskArtifact,
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<PatchArtifactAdmission> {
+    let path = resolve_artifact_path(
+        artifact,
+        &outcome.task_id,
+        options.source_run_id.as_deref(),
+        options.source_path.as_deref(),
+        observation_store,
+    )?;
+    let patch = std::fs::read_to_string(&path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read patch artifact {}", path.display())),
+        )
+    })?;
+    validate_artifact_content(artifact, &patch)?;
+    let normalized_patch = (!patch.trim().is_empty())
+        .then(|| normalize_promotion_patch(&patch, &options.to_worktree))
+        .transpose()?;
+    Ok(PatchArtifactAdmission {
+        path,
+        patch,
+        normalized_patch,
+    })
+}
+
+pub(crate) fn preflight_patch_artifact_admission_in_observation_store(
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskArtifact> {
+    let artifact = select_patch_artifact(outcome, options.artifact_id.as_deref())?;
+    patch_artifact_admission(&artifact, outcome, options, observation_store)?;
+    Ok(artifact)
+}
+
 fn resume_promoted_patch_admission(
     options: &AgentTaskPromotionOptions,
     target_path: &Path,
@@ -394,20 +440,11 @@ fn resume_promoted_patch_admission(
     })?;
     let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
     let artifact = select_patch_artifact(&outcome, options.artifact_id.as_deref())?;
-    let patch_path = resolve_artifact_path(
-        &artifact,
-        &outcome.task_id,
-        options.source_run_id.as_deref(),
-        options.source_path.as_deref(),
-        observation_store,
-    )?;
-    let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("read patch artifact {}", patch_path.display())),
-        )
-    })?;
-    validate_artifact_content(&artifact, &patch)?;
+    let PatchArtifactAdmission {
+        path: patch_path,
+        patch: _,
+        normalized_patch,
+    } = patch_artifact_admission(&artifact, &outcome, &options, observation_store)?;
     validate_resume_candidate(
         options,
         target_path,
@@ -416,7 +453,7 @@ fn resume_promoted_patch_admission(
         &artifact,
         replacement_gates,
     )?;
-    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let normalized_patch = normalized_patch.expect("non-empty admitted patches are normalized");
     let command_evidence = vec![verify_patch_is_present(
         target_path,
         &normalized_patch.content,
@@ -864,20 +901,11 @@ fn promote_with_provider_and_checkpoint_internal(
         .as_ref()
         .or(gate_feedback_baseline.as_ref())
         .cloned();
-    let patch_path = resolve_artifact_path(
-        &artifact,
-        &outcome.task_id,
-        options.source_run_id.as_deref(),
-        options.source_path.as_deref(),
-        observation_store,
-    )?;
-    let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("read patch artifact {}", patch_path.display())),
-        )
-    })?;
-    validate_artifact_content(&artifact, &patch)?;
+    let PatchArtifactAdmission {
+        path: patch_path,
+        patch,
+        normalized_patch,
+    } = patch_artifact_admission(&artifact, &outcome, &options, observation_store)?;
     if patch.trim().is_empty() {
         if let Some(committed_patch) = committed_changes_patch(&options)? {
             return promote_committed_changes(
@@ -977,7 +1005,7 @@ fn promote_with_provider_and_checkpoint_internal(
             operator_notification,
         });
     }
-    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let normalized_patch = normalized_patch.expect("non-empty admitted patches are normalized");
     let changed_files = normalized_patch.changed_files.clone();
     // Resolving the destination is a worktree-safety question: is the dirt in
     // that checkout this promotion's own candidate, or someone else's work?

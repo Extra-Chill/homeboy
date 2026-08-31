@@ -3482,13 +3482,14 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             "checks": execution_only_checks,
         }));
     }
-    let admitted = execution_only_checks.is_empty();
+    let execution_required = !execution_only_checks.is_empty();
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-continue-preflight/v1",
-            "admitted": admitted,
+            "admitted": true,
             "pre_dispatch_admitted": true,
-            "status": if admitted { "admitted" } else { "execution_required" },
+            "status": "admitted",
+            "execution_required": execution_required,
             "run_id": selected_run_id,
             "selected_attempt": { "run_id": run_id },
             "selected_artifact": { "artifact_id": promotion_preflight.get("artifact_id").cloned().unwrap_or_else(|| serde_json::json!(args.artifact_id)) },

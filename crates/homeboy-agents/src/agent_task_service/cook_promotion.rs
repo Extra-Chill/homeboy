@@ -31,9 +31,8 @@ use crate::agent_task_promotion::{
     canonical_recoverable_patch_artifacts_in_observation_store,
     preflight_recoverable_candidate_promotion_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
-    resume_promoted_patch_replacement_gates_in_observation_store, select_patch_artifact,
-    AgentTaskPromotionCandidate, AgentTaskPromotionOptions, AgentTaskPromotionReport,
-    AgentTaskPromotionStatus,
+    resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -448,20 +447,10 @@ pub fn preflight_cook_promotion_in_store(
             "status": promotion.status,
             "artifact_id": promotion.patch_artifact.id,
             "candidate_fingerprint": promotion.provenance.get("candidate").cloned().unwrap_or(Value::Null),
-            "execution_only_checks": if promotion.status == AgentTaskPromotionStatus::VerificationPending {
-                json!(["promotion_target_resolution", "patch_presence", "verification_gates"])
-            } else {
-                json!([])
-            },
-        }));
-    }
-    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
-        let artifact = select_patch_artifact(outcome, artifact_id)?;
-        return Ok(json!({
-            "behavior": "promote_new",
-            "artifact_id": artifact.id,
-            "candidate_fingerprint": Value::Null,
-            "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
+            "execution_only_checks": persisted_promotion_execution_only_checks(
+                promotion.status,
+                options.finalization.no_finalize,
+            ),
         }));
     }
     let source = serde_json::to_string_pretty(&aggregate).map_err(|error| {
@@ -488,6 +477,20 @@ pub fn preflight_cook_promotion_in_store(
         provider_invocation: options.provider_transport.provider_invocation.clone(),
     };
     let observation_store = lifecycle_store.open_observation_readonly()?;
+    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
+        let artifact =
+            crate::agent_task_promotion::preflight_patch_artifact_admission_in_observation_store(
+                outcome,
+                &promotion_options,
+                &observation_store,
+            )?;
+        return Ok(json!({
+            "behavior": "promote_new",
+            "artifact_id": artifact.id,
+            "candidate_fingerprint": Value::Null,
+            "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
+        }));
+    }
     let artifact = preflight_recoverable_candidate_promotion_in_observation_store(
         &promotion_options,
         &observation_store,
@@ -511,6 +514,61 @@ pub fn preflight_cook_promotion_in_store(
             "workspace_identity": artifact.metadata.get("workspace_identity"),
         }
     }))
+}
+
+fn persisted_promotion_execution_only_checks(
+    status: AgentTaskPromotionStatus,
+    no_finalize: bool,
+) -> Vec<&'static str> {
+    let mut checks = Vec::new();
+    if status == AgentTaskPromotionStatus::VerificationPending {
+        checks.extend([
+            "promotion_target_resolution",
+            "patch_presence",
+            "verification_gates",
+        ]);
+    }
+    if status == AgentTaskPromotionStatus::GateFailed {
+        checks.push("gate_failure_differential");
+    }
+    checks.push("cook_loop_evaluation");
+    if !no_finalize && status.patch_promoted() {
+        checks.push("finalization");
+    }
+    checks
+}
+
+#[cfg(test)]
+mod preflight_report_tests {
+    use super::*;
+
+    #[test]
+    fn every_persisted_promotion_status_reports_remaining_execution() {
+        for status in [
+            AgentTaskPromotionStatus::DryRun,
+            AgentTaskPromotionStatus::VerificationPending,
+            AgentTaskPromotionStatus::Applied,
+            AgentTaskPromotionStatus::GateFailed,
+            AgentTaskPromotionStatus::VerifiedNoChanges,
+            AgentTaskPromotionStatus::NoChangesGateFailed,
+            AgentTaskPromotionStatus::NoChanges,
+        ] {
+            let checks = persisted_promotion_execution_only_checks(status, false);
+            assert!(checks.contains(&"cook_loop_evaluation"), "{status:?}");
+            if status.patch_promoted() {
+                assert!(checks.contains(&"finalization"), "{status:?}");
+            }
+        }
+
+        let verification = persisted_promotion_execution_only_checks(
+            AgentTaskPromotionStatus::VerificationPending,
+            true,
+        );
+        assert!(verification.contains(&"promotion_target_resolution"));
+        assert!(verification.contains(&"patch_presence"));
+        assert!(verification.contains(&"verification_gates"));
+        assert!(!verification.contains(&"finalization"));
+    }
 }
 
 pub(crate) fn canonical_cook_patch_artifact_id_in_store(

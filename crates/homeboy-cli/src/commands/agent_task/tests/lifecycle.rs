@@ -1466,9 +1466,10 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
         .expect("preflight evaluates pre-execution retry");
 
         assert_eq!(exit_code, 0, "{report:#}");
-        assert_eq!(report["admitted"], false);
+        assert_eq!(report["admitted"], true);
         assert_eq!(report["pre_dispatch_admitted"], true);
-        assert_eq!(report["status"], "execution_required");
+        assert_eq!(report["status"], "admitted");
+        assert_eq!(report["execution_required"], true);
         assert_eq!(report["selected_attempt"]["run_id"], run_id);
         let phases = report["phases"].as_array().expect("phases");
         assert!(phases
@@ -2131,9 +2132,10 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
             })
             .expect("preflight admits deterministic checks for the retained candidate");
         assert_eq!(preflight_exit, 0, "{preflight:#}");
-        assert_eq!(preflight["admitted"], false);
+        assert_eq!(preflight["admitted"], true);
         assert_eq!(preflight["pre_dispatch_admitted"], true);
-        assert_eq!(preflight["status"], "execution_required");
+        assert_eq!(preflight["status"], "admitted");
+        assert_eq!(preflight["execution_required"], true);
         assert!(!provider_invocations.exists());
         assert!(!promotion_provider_invocations.exists());
         assert_eq!(
@@ -2183,7 +2185,9 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
             json!([
                 "promotion_target_resolution",
                 "patch_presence",
-                "verification_gates"
+                "verification_gates",
+                "cook_loop_evaluation",
+                "finalization"
             ])
         );
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
