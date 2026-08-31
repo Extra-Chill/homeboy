@@ -2490,6 +2490,72 @@ fn durable_finalization_uses_promoted_files_for_clean_committed_candidate() {
 }
 
 #[test]
+fn production_validator_accepts_patch_tree_on_two_parent_baseline() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = real_git_repo();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git runs")
+                .success());
+        };
+        let base_branch = String::from_utf8(
+            Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(repo.path())
+                .output()
+                .expect("read base branch")
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        git(&["checkout", "-b", "side"]);
+        std::fs::write(repo.path().join("side"), "side").unwrap();
+        git(&["add", "side"]);
+        git(&["commit", "-m", "side"]);
+        git(&["checkout", &base_branch]);
+        std::fs::write(repo.path().join("main-only"), "main").unwrap();
+        git(&["add", "main-only"]);
+        git(&["commit", "-m", "base"]);
+        git(&["merge", "--no-ff", "side", "-m", "merge side"]);
+
+        std::fs::write(repo.path().join("candidate"), "promoted bytes").unwrap();
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap())
+                .unwrap();
+        let run_id = "patch-on-two-parent-baseline";
+        crate::agent_task_lifecycle::submit_plan(
+            &crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new()),
+            Some(run_id),
+        )
+        .unwrap();
+        let mut promotion = successful_gate_proof().promotion;
+        promotion.source.run_id = Some(run_id.to_string());
+        promotion.target.path = Some(repo.path().display().to_string());
+        promotion.changed_files = vec!["candidate".to_string()];
+        promotion.provenance = json!({ "candidate": candidate });
+        crate::agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion).unwrap(),
+        )
+        .unwrap();
+
+        let mut options = real_git_finalization_options(repo.path(), vec!["candidate".to_string()]);
+        options.run_id = run_id.to_string();
+        validate_real_candidate_fingerprint(&options)
+            .expect("patch tree on merge baseline accepted");
+
+        git(&["add", "candidate"]);
+        git(&["commit", "-m", "recover promoted patch"]);
+        validate_real_candidate_fingerprint(&options)
+            .expect("exact recovery commit on merge baseline accepted");
+    });
+}
+
+#[test]
 fn production_validator_accepts_only_the_exact_promoted_recovery_commit() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let repo = real_git_repo();
