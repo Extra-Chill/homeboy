@@ -7,7 +7,7 @@
 //! [`register_orchestration_driver`].
 
 use crate::agent_task_lifecycle;
-use homeboy_core::Result;
+use homeboy_core::{Error, Result};
 use std::collections::HashMap;
 
 use super::discovery::{
@@ -89,6 +89,49 @@ fn rooted_exact_status(
         true,
     )?
     .record)
+}
+
+/// Read back the durable record and its active discovery projection after an
+/// apply. A successful reconcile must mean the selected record is no longer a
+/// blocking projection, not merely that its cancellation write returned.
+fn verified_reconciled_status(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let record = rooted_exact_status(lifecycle_store, run_id)?;
+    let remains_active = discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
+        .runs
+        .into_iter()
+        .any(|run| run.run_id == run_id);
+    let runner_projection_resolved = record.runner_id().is_none_or(|runner_id| {
+        agent_task_lifecycle::runner_live_job_authority(runner_id)
+            == agent_task_lifecycle::RunnerLiveJobAuthority::Idle
+    });
+    verify_reconciled_postcondition(&record, remains_active, runner_projection_resolved)?;
+    Ok(record)
+}
+
+pub(super) fn verify_reconciled_postcondition(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    remains_active: bool,
+    runner_projection_resolved: bool,
+) -> Result<()> {
+    if record.state.is_terminal() && !remains_active && runner_projection_resolved {
+        return Ok(());
+    }
+
+    Err(Error::internal_unexpected(format!(
+        "agent-task reconciliation did not satisfy its postcondition for `{}`: durable state is {}, unresolved projection remains {}",
+        record.run_id,
+        run_state_label(record.state),
+        if remains_active {
+            "in active discovery"
+        } else if !runner_projection_resolved {
+            "on the runner"
+        } else {
+            "non-terminal"
+        },
+    )))
 }
 
 fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
@@ -418,16 +461,30 @@ pub(crate) fn reconcile_run_in_store(
                             resolved_run_id,
                         ) {
                             Ok(true) => {
+                                let verified =
+                                    verified_reconciled_status(&lifecycle_store, resolved_run_id);
+                                let verified = match verified {
+                                    Ok(record) => record,
+                                    Err(error) => {
+                                        failed += 1;
+                                        runs.push(AgentTaskReconcileRun {
+                                            run_id: resolved_run_id.clone(),
+                                            liveness,
+                                            source: run.source,
+                                            authoritative_state: refreshed.state,
+                                            stale_reason: run.stale_reason,
+                                            action: "failed",
+                                            error: Some(error.message),
+                                        });
+                                        continue;
+                                    }
+                                };
                                 reconciled += 1;
                                 runs.push(AgentTaskReconcileRun {
                                     run_id: resolved_run_id.clone(),
                                     liveness,
                                     source: run.source,
-                                    authoritative_state: rooted_status(
-                                        &lifecycle_store,
-                                        resolved_run_id,
-                                    )?
-                                    .state,
+                                    authoritative_state: verified.state,
                                     stale_reason: run.stale_reason,
                                     action: "reconciled",
                                     error: None,
@@ -471,12 +528,30 @@ pub(crate) fn reconcile_run_in_store(
                         Some(&reason),
                     ) {
                         Ok(record) => {
+                            let verified =
+                                match verified_reconciled_status(&lifecycle_store, resolved_run_id)
+                                {
+                                    Ok(record) => record,
+                                    Err(error) => {
+                                        failed += 1;
+                                        runs.push(AgentTaskReconcileRun {
+                                            run_id: resolved_run_id.clone(),
+                                            liveness,
+                                            source: run.source,
+                                            authoritative_state: record.state,
+                                            stale_reason: run.stale_reason,
+                                            action: "failed",
+                                            error: Some(error.message),
+                                        });
+                                        continue;
+                                    }
+                                };
                             reconciled += 1;
                             runs.push(AgentTaskReconcileRun {
                                 run_id: resolved_run_id.clone(),
                                 liveness,
                                 source: run.source,
-                                authoritative_state: record.state,
+                                authoritative_state: verified.state,
                                 stale_reason: run.stale_reason,
                                 action: "reconciled",
                                 error: None,

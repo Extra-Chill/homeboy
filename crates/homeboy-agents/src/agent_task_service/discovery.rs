@@ -249,6 +249,21 @@ pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscov
     discover_runs_with_options(filter, AgentTaskDiscoveryOptions::default())
 }
 
+/// Discovery with operator options (currently `--limit`). The `latest` filter
+/// is inherently a single run, so a limit is a no-op there; `all`/`active`
+/// truncate to the requested cap after filtering and sorting, and report the
+/// pre-cap `total` so consumers know more runs exist (#5681).
+pub fn discover_runs_with_options(
+    filter: AgentTaskDiscoveryFilter,
+    options: AgentTaskDiscoveryOptions,
+) -> Result<AgentTaskDiscoveryReport> {
+    let (records, record_health) = agent_task_lifecycle::read_records_with_health()?;
+    discovery_report(filter, options, records, record_health)
+}
+
+/// [`discover_runs_with_options`] against an explicitly injected lifecycle
+/// store. Reconciliation uses this to verify the same durable projection it
+/// just changed rather than consulting ambient storage.
 pub(crate) fn discover_runs_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     filter: AgentTaskDiscoveryFilter,
@@ -261,18 +276,6 @@ pub(crate) fn discover_runs_in_store(
         records,
         record_health,
     )
-}
-
-/// Discovery with operator options (currently `--limit`). The `latest` filter
-/// is inherently a single run, so a limit is a no-op there; `all`/`active`
-/// truncate to the requested cap after filtering and sorting, and report the
-/// pre-cap `total` so consumers know more runs exist (#5681).
-pub fn discover_runs_with_options(
-    filter: AgentTaskDiscoveryFilter,
-    options: AgentTaskDiscoveryOptions,
-) -> Result<AgentTaskDiscoveryReport> {
-    let (records, record_health) = agent_task_lifecycle::read_records_with_health()?;
-    discovery_report(filter, options, records, record_health)
 }
 
 /// Find the newest run matching list filters without treating a bounded display

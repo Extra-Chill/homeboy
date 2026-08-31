@@ -1990,6 +1990,14 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
                 .state,
             AgentTaskRunState::Cancelled
         );
+        assert!(
+            !discover_runs(AgentTaskDiscoveryFilter::Active)
+                .expect("fresh active discovery")
+                .runs
+                .iter()
+                .any(|run| run.run_id == run_id),
+            "a successful runner-owned reconciliation must not survive rediscovery"
+        );
 
         let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
         let admitted =
@@ -2032,6 +2040,26 @@ fn record_scoped_reconciliation_stays_with_its_explicit_lifecycle_store() {
             AgentTaskRunState::Cancelled
         );
         assert!(agent_task_lifecycle::exact_record(run_id).is_err());
+    });
+}
+
+#[test]
+fn reconciliation_postcondition_names_an_unresolved_runner_projection() {
+    with_isolated_home(|_| {
+        let run_id = "queued-runner-projection-postcondition";
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Cancelled);
+            record.tasks[0].state = AgentTaskState::Cancelled;
+        })
+        .expect("terminal controller projection");
+        let record = agent_task_lifecycle::exact_record(run_id).expect("queued record");
+
+        let error = super::reconcile::verify_reconciled_postcondition(&record, false, false)
+            .expect_err("an unresolved runner projection cannot report reconciliation success");
+        assert!(error.message.contains(run_id));
+        assert!(error.message.contains("durable state is cancelled"));
+        assert!(error.message.contains("on the runner"));
     });
 }
 
