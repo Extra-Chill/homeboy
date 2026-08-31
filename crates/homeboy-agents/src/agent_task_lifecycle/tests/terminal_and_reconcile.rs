@@ -3283,6 +3283,18 @@ fn cancel_run_reclaims_stale_running_record() {
     );
     assert!(cancelled.metadata["provider_executions"][0]["finished_at"].is_string());
     assert!(cancelled.metadata.get("stale_running").is_none());
+    let recovery = &cancelled.metadata["live_cancellation_unsupported"];
+    assert_eq!(
+        recovery["reason"],
+        json!("recorded owner pid is not running on this host")
+    );
+    assert!(
+        recovery["recovery_commands"]
+            .as_array()
+            .expect("recovery commands")
+            .is_empty(),
+        "a PID already proved absent must not receive signal advice"
+    );
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -3818,6 +3830,61 @@ fn terminal_provider_failure_without_owner_persists_interrupted_owner_aggregate(
             aggregate.outcomes[0].diagnostics[0].class,
             "interrupted_owner"
         );
+    });
+}
+
+/// A provider-side cancellation is terminal authority just like a provider
+/// failure. An interrupted foreground Cook must not leave its lifecycle running
+/// after its provider has already recorded cancellation.
+#[test]
+fn terminal_provider_cancellation_without_owner_converges_and_is_idempotent() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("provider-cancelled-no-owner")).expect("submitted");
+        mark_running("provider-cancelled-no-owner").expect("running");
+        reserve_provider_execution_in_store(
+            &test_lifecycle_store(),
+            "provider-cancelled-no-owner",
+            &plan.tasks[0],
+            1,
+        )
+        .expect("reserved");
+        record_provider_execution_terminal_in_store(
+            &test_lifecycle_store(),
+            "provider-cancelled-no-owner",
+            "task-a",
+            1,
+            "cancelled",
+        )
+        .expect("provider cancellation recorded");
+        rewrite_record_for_test("provider-cancelled-no-owner", |record| {
+            let execution = record.metadata["provider_executions"][0]
+                .as_object_mut()
+                .expect("provider execution object");
+            execution.remove("owner_pid");
+            execution.remove("owner_linux_starttime_ticks");
+            execution.remove("owner_identity");
+        })
+        .expect("interrupted foreground owner fixture");
+
+        let terminal = reconcile_status("provider-cancelled-no-owner").expect("reconciled status");
+        let replay = reconcile_status("provider-cancelled-no-owner").expect("idempotent status");
+
+        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(replay.state, AgentTaskRunState::Cancelled);
+        assert_eq!(replay.tasks[0].state, AgentTaskState::Cancelled);
+        assert_eq!(
+            replay.metadata["provider_executions"][0]["state"],
+            json!("cancelled")
+        );
+        assert_eq!(
+            replay.metadata["local_provider_ownership"]["state"],
+            json!("provider_cancelled")
+        );
+        let aggregate = test_lifecycle_store()
+            .read_aggregate("provider-cancelled-no-owner")
+            .expect("interrupted-owner aggregate");
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Cancelled);
     });
 }
 

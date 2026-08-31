@@ -967,8 +967,8 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
     }
 
     // No reachable live process (stale running record, or no recorded pid): the
-    // record is being reclaimed. If a pid was recorded, still hand back recovery
-    // commands so a now-orphaned tree can be cleaned up by hand.
+    // record is being reclaimed. A dead PID is authoritative absence, so do not
+    // recommend signals that cannot execute against it.
     if let Some(pid) = owner_pid {
         return Ok(LiveCancellationOutcome::Unsupported(
             UnsupportedLiveCancellation {
@@ -976,7 +976,7 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
                 owner_pid: Some(pid),
                 runner_id: None,
                 runner_job_id: None,
-                recovery_commands: homeboy_core::process::process_tree_recovery_commands(pid),
+                recovery_commands: Vec::new(),
             },
         ));
     }

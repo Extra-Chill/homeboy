@@ -93,12 +93,13 @@ fn record_interrupted_local_owner_locked(
 ) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
     let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
     let now = now_timestamp();
-    let (has_succeeded, has_failed, recovery_identity) = match decision {
+    let (has_succeeded, has_failed, has_cancelled, recovery_identity) = match decision {
         LocalProviderOwnerDecision::Interrupted {
             has_succeeded,
             has_failed,
+            has_cancelled,
             recovery_identity,
-        } => (has_succeeded, has_failed, recovery_identity),
+        } => (has_succeeded, has_failed, has_cancelled, recovery_identity),
         LocalProviderOwnerDecision::StayRunning | LocalProviderOwnerDecision::NotApplicable => {
             let identity = record
                 .metadata
@@ -111,7 +112,7 @@ fn record_interrupted_local_owner_locked(
                         .collect()
                 })
                 .unwrap_or_default();
-            (false, false, identity)
+            (false, false, false, identity)
         }
     };
     let consumed = record
@@ -177,6 +178,12 @@ fn record_interrupted_local_owner_locked(
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
             "provider_failed",
             false,
+        )
+    } else if has_cancelled {
+        (
+            crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled,
+            "provider_cancelled",
+            true,
         )
     } else {
         (

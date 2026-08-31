@@ -4170,6 +4170,7 @@ pub(crate) enum LocalProviderOwnerDecision {
     Interrupted {
         has_succeeded: bool,
         has_failed: bool,
+        has_cancelled: bool,
         recovery_identity: Vec<Value>,
     },
 }
@@ -4195,13 +4196,17 @@ pub(crate) fn annotate_local_provider_ownership(
     let mut has_unverifiable_owner = false;
     let mut has_succeeded = false;
     let mut has_failed = false;
+    let mut has_cancelled = false;
     let mut recovery_identity = Vec::new();
     for execution in executions.iter_mut() {
         match execution["state"].as_str() {
-            Some("running") | Some("succeeded") | Some("failed") => {
+            // A cancelled provider is terminal authority too. Excluding it left
+            // an interrupted foreground Cook projected as running forever.
+            Some("running") | Some("succeeded") | Some("failed") | Some("cancelled") => {
                 has_reconcilable_execution = true;
                 has_succeeded |= execution["state"] == json!("succeeded");
                 has_failed |= execution["state"] == json!("failed");
+                has_cancelled |= execution["state"] == json!("cancelled");
                 recovery_identity.push(execution["owner_identity"].clone());
                 let identity_state = execution
                     .get("owner_pid")
@@ -4239,7 +4244,7 @@ pub(crate) fn annotate_local_provider_ownership(
             _ => {}
         }
     }
-    if has_live_owner || (has_unverifiable_owner && !has_failed) {
+    if has_live_owner || (has_unverifiable_owner && !has_failed && !has_cancelled) {
         return LocalProviderOwnerDecision::StayRunning;
     }
     if !has_reconcilable_execution {
@@ -4248,6 +4253,7 @@ pub(crate) fn annotate_local_provider_ownership(
     LocalProviderOwnerDecision::Interrupted {
         has_succeeded,
         has_failed,
+        has_cancelled,
         recovery_identity,
     }
 }
