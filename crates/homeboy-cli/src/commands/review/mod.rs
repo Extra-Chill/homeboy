@@ -395,13 +395,11 @@ fn to_value_with_readiness_provenance<T: Serialize>(
     if let Some(requested_source) = requested_source {
         let provenance = homeboy_release::release::readiness_provenance(component)?;
         let source_commit = homeboy::core::git::get_head_commit(&component.local_path)?;
-        let runner_id =
-            crate::commands::utils::execution_provenance::captured().and_then(|value| {
-                value
-                    .pointer("/resolved_execution/runner_id")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-            });
+        let execution_provenance = crate::commands::utils::execution_provenance::captured();
+        let runner_id = release_readiness_runner_id(
+            execution_provenance.as_ref(),
+            homeboy::core::resource_policy_context::lab_execution_runner_id(),
+        );
         object.insert(
             "release_readiness".to_string(),
             serde_json::to_value(ReviewChildReadinessEvidence {
@@ -418,6 +416,20 @@ fn to_value_with_readiness_provenance<T: Serialize>(
         );
     }
     Ok((value, exit_code))
+}
+
+fn release_readiness_runner_id(
+    execution_provenance: Option<&Value>,
+    lab_execution_runner_id: Option<String>,
+) -> Option<String> {
+    execution_provenance
+        .and_then(|value| {
+            value
+                .pointer("/resolved_execution/runner_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or(lab_execution_runner_id)
 }
 
 fn to_value<T: Serialize>(result: CmdResult<T>) -> CmdResult<Value> {
@@ -1220,6 +1232,35 @@ mod tests {
         assert_eq!(cli.review.changed.changed_since(), Some("trunk"));
         assert!(!cli.review.changed.changed_only);
         assert_eq!(cli.review.comp.component.as_deref(), Some("my-comp"));
+    }
+
+    #[test]
+    fn release_readiness_runner_prefers_routed_provenance() {
+        let provenance = serde_json::json!({
+            "resolved_execution": { "runner_id": "routed-runner" }
+        });
+
+        assert_eq!(
+            release_readiness_runner_id(Some(&provenance), Some("durable-runner".to_string()))
+                .as_deref(),
+            Some("routed-runner")
+        );
+    }
+
+    #[test]
+    fn release_readiness_runner_uses_durable_lab_execution_provenance() {
+        let local_child_provenance = serde_json::json!({
+            "resolved_execution": { "location": "controller", "runner_id": null }
+        });
+
+        assert_eq!(
+            release_readiness_runner_id(
+                Some(&local_child_provenance),
+                Some("homeboy-lab".to_string()),
+            )
+            .as_deref(),
+            Some("homeboy-lab")
+        );
     }
 
     #[test]
