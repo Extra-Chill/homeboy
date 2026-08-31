@@ -153,3 +153,14 @@ pub struct BenchListWorkflowResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rig_package: Option<RigPackageEvidence>,
 }
+
+pub(crate) fn rig_package_root_env(
+    rig_package: Option<&RigPackageEvidence>,
+) -> Option<(String, String)> {
+    rig_package.map(|evidence| {
+        (
+            "HOMEBOY_BENCH_RIG_PACKAGE_ROOT".to_string(),
+            evidence.package_root.clone(),
+        )
+    })
+}

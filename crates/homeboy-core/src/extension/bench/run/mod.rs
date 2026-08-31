@@ -42,6 +42,7 @@ mod tests {
     };
     use homeboy_core::engine::run_dir::{self, RunDir};
     use homeboy_engine_primitives::baseline::BaselineFlags;
+    use homeboy_extension_contract::{RigPackageEvidence, RigPackageFreshness};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -203,6 +204,23 @@ mod tests {
     }
 
     #[test]
+    fn component_script_bench_env_forwards_rig_package_root() {
+        let run_dir = RunDir::create().expect("run dir");
+        let mut args = bench_run_workflow_args_fixture();
+        args.rig_package = Some(rig_package_evidence("/tmp/rig-package"));
+
+        let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
+
+        assert_eq!(
+            env.iter().find_map(|(key, value)|
+                (key == "HOMEBOY_BENCH_RIG_PACKAGE_ROOT").then_some(value)
+            ),
+            Some(&"/tmp/rig-package".to_string())
+        );
+        run_dir.cleanup();
+    }
+
+    #[test]
     fn component_script_bench_env_serializes_passthrough_args() {
         let run_dir = RunDir::create().expect("run dir");
         let mut args = bench_run_workflow_args_fixture();
@@ -291,6 +309,28 @@ mod tests {
         }
     }
 
+    fn rig_package_evidence(package_root: &str) -> RigPackageEvidence {
+        RigPackageEvidence {
+            rig_id: "fixture".to_string(),
+            package_root: package_root.to_string(),
+            source: "fixture".to_string(),
+            source_root: None,
+            rig_path: None,
+            discovery_path: None,
+            installed_source_revision: None,
+            current_source_revision: None,
+            source_content_hash: None,
+            source_ref: None,
+            source_dirty: false,
+            linked: false,
+            materialized: true,
+            freshness: RigPackageFreshness::Verified,
+            freshness_verified: true,
+            freshness_message: None,
+            refresh_command: None,
+        }
+    }
+
     #[test]
     fn component_script_bench_list_env_includes_typed_settings_json() {
         let env = bench_component_script_list_env(&BenchListWorkflowArgs {
@@ -323,6 +363,29 @@ mod tests {
             parsed["workflow_bench_env"]["WORKFLOW_BENCH_SCENARIO"],
             "plain-site-sample-plugin"
         );
+    }
+
+    #[test]
+    fn component_script_bench_list_env_omits_rig_package_root_without_rig() {
+        let args = BenchListWorkflowArgs {
+            component_label: "studio-web".to_string(),
+            component_id: "studio-web".to_string(),
+            path_override: None,
+            settings: Vec::new(),
+            settings_json: Vec::new(),
+            passthrough_args: Vec::new(),
+            scenario_ids: Vec::new(),
+            extra_workloads: Vec::new(),
+            env_provider_extensions: Vec::new(),
+            rig_package: None,
+            profiles: Vec::new(),
+        };
+
+        let env = bench_component_script_list_env(&args).expect("component-script list env");
+
+        assert!(!env
+            .iter()
+            .any(|(key, _)| key == "HOMEBOY_BENCH_RIG_PACKAGE_ROOT"));
     }
 
     #[test]

@@ -185,5 +185,8 @@ pub(crate) fn bench_component_script_list_env(
         "HOMEBOY_SETTINGS_JSON".to_string(),
         crate::extension::build_settings_json(&[], &[], &args.settings, &args.settings_json)?,
     ));
+    env.extend(super::types::rig_package_root_env(
+        args.rig_package.as_ref(),
+    ));
     Ok(env)
 }

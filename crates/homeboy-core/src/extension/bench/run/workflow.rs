@@ -523,6 +523,9 @@ pub(crate) fn bench_component_script_env(
     {
         env.push(("HOMEBOY_BENCH_RUN_ID".to_string(), run_id.to_string()));
     }
+    env.extend(super::types::rig_package_root_env(
+        args.rig_package.as_ref(),
+    ));
     env.extend(args.ci_env.iter().cloned());
     Ok(env)
 }
