@@ -85,7 +85,7 @@ use daemon::*;
 use daemon_api::*;
 pub(crate) use daemon_api::{
     daemon_api_get_for_session, daemon_api_get_for_session_with_timeout,
-    daemon_api_post_json_for_session,
+    daemon_api_post_json_for_session_with_broker_token,
 };
 use failure::*;
 use handoff::*;
