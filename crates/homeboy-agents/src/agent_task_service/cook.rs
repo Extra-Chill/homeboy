@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, request_is_review_form_only, AgentTaskCookLoopOptions,
     AgentTaskCookLoopReport, AgentTaskCookLoopStatus, AgentTaskIntentionalNoChange,
+    AgentTaskIntentionalNoChangeVerdict,
 };
 
 pub use crate::agent_task_cook_loop::{
@@ -292,14 +293,57 @@ fn pre_artifact_interruption_phase(
 pub(crate) fn intentional_no_change_from_aggregate(
     aggregate: &crate::agent_task_scheduler::AgentTaskAggregate,
 ) -> Option<AgentTaskIntentionalNoChange> {
-    aggregate.outcomes.iter().find_map(|outcome| {
-        let declaration = outcome
-            .outputs
-            .get("provider_run_result")?
-            .get("intentional_no_change")?
-            .clone();
-        serde_json::from_value::<AgentTaskIntentionalNoChange>(declaration).ok()
-    })
+    let outcome = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    })?;
+    (outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Succeeded).then_some(())?;
+    (outcome.metadata["intentional_no_change_verified"] == Value::Bool(true)).then_some(())?;
+    let declaration = outcome
+        .outputs
+        .get("provider_run_result")?
+        .get("intentional_no_change")?
+        .clone();
+    serde_json::from_value::<AgentTaskIntentionalNoChange>(declaration)
+        .ok()
+        .filter(|declaration| declaration.schema == "homeboy/intentional-no-change/v1")
+}
+
+fn request_requires_substantive_candidate(request: &crate::agent_task::AgentTaskRequest) -> bool {
+    fn is_change_artifact(value: &str) -> bool {
+        matches!(
+            value,
+            "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
+        )
+    }
+
+    request.policy.write == "patch"
+        || request
+            .expected_artifacts
+            .iter()
+            .any(|artifact| is_change_artifact(artifact))
+        || request.artifact_declarations.iter().any(|artifact| {
+            artifact.required
+                && (is_change_artifact(&artifact.name)
+                    || artifact
+                        .artifact_type
+                        .as_deref()
+                        .is_some_and(is_change_artifact))
+        })
+}
+
+fn no_change_requires_substantive_candidate(
+    declaration: &AgentTaskIntentionalNoChange,
+    request: &crate::agent_task::AgentTaskRequest,
+) -> bool {
+    match declaration.verdict {
+        AgentTaskIntentionalNoChangeVerdict::AlreadySatisfied => false,
+        AgentTaskIntentionalNoChangeVerdict::Blocked => true,
+        AgentTaskIntentionalNoChangeVerdict::InvestigationOnly => {
+            request_requires_substantive_candidate(request)
+        }
+    }
 }
 
 fn pre_artifact_execution_count(record: &agent_task_lifecycle::AgentTaskRunRecord) -> u32 {
@@ -2914,9 +2958,9 @@ fn claim_disposition(
     control: AgentTaskCookBatchControl,
 ) -> ClaimDisposition {
     if control.skip_durably_terminal_children {
-        if let Some(state) = durably_terminal_child_state(&cook.identity.cook_id) {
+        if let Some(record) = durably_terminal_child_record(&cook.identity.cook_id) {
             if matches!(
-                state,
+                record.state,
                 agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
                     | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
             ) {
@@ -2925,7 +2969,7 @@ fn claim_disposition(
                 // and finalization without redispatching the provider.
                 return ClaimDisposition::Run;
             }
-            return ClaimDisposition::AlreadyTerminal(observed_child_cell(cook, state));
+            return ClaimDisposition::AlreadyTerminal(observed_child_cell(cook, &record));
         }
     }
     if control.honour_durable_cancellation
@@ -2956,9 +3000,19 @@ fn claim_disposition(
 /// lifecycle record, so a fresh batch reads `None` here for every child. An
 /// unreadable record is also `None` — the coordinator's job is to run work, and
 /// a transient read failure must not be turned into a silent skip.
-fn durably_terminal_child_state(cook_id: &str) -> Option<agent_task_lifecycle::AgentTaskRunState> {
+fn durably_terminal_child_record(
+    cook_id: &str,
+) -> Option<agent_task_lifecycle::AgentTaskRunRecord> {
     let record = agent_task_lifecycle::reconcile_status(cook_id).ok()?;
-    record.state.is_terminal().then_some(record.state)
+    record.state.is_terminal().then_some(record)
+}
+
+fn persisted_terminal_cook_status(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<CookStatus> {
+    record.metadata["cook_progress"]["terminal_status"]
+        .as_str()
+        .map(CookStatus::from_status)
 }
 
 /// Report a child from the durable state a previous coordinator left, without
@@ -2966,22 +3020,25 @@ fn durably_terminal_child_state(cook_id: &str) -> Option<agent_task_lifecycle::A
 /// successful run is a zero exit.
 fn observed_child_cell(
     cook: &CookRequest,
-    state: agent_task_lifecycle::AgentTaskRunState,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> AgentTaskCookBatchCellReport {
-    let status = match state {
-        // A terminal, successful durable run is a completed Cook. `Completed`
-        // rather than a synthesized string so `cook_batch_result`'s
-        // `CookStatus::from_status` classification is the same one the live
-        // path produces.
-        agent_task_lifecycle::AgentTaskRunState::Succeeded => CookStatus::Completed,
-        agent_task_lifecycle::AgentTaskRunState::Cancelled => CookStatus::Cancelled,
-        _ => CookStatus::Failed,
-    };
+    let status = persisted_terminal_cook_status(record).unwrap_or_else(|| {
+        match record.state {
+            // A terminal, successful durable run is a completed Cook. `Completed`
+            // rather than a synthesized string so `cook_batch_result`'s
+            // `CookStatus::from_status` classification is the same one the live
+            // path produces.
+            agent_task_lifecycle::AgentTaskRunState::Succeeded => CookStatus::Completed,
+            agent_task_lifecycle::AgentTaskRunState::Cancelled => CookStatus::Cancelled,
+            _ => CookStatus::Failed,
+        }
+    });
+    let exit_code = i32::from(!status.is_success_exit());
     AgentTaskCookBatchCellReport {
         cook_id: cook.identity.cook_id.clone(),
         initial_run_id: cook.identity.initial_run_id.clone(),
         status: status.as_str().to_string(),
-        exit_code: i32::from(state != agent_task_lifecycle::AgentTaskRunState::Succeeded),
+        exit_code,
         result: None,
         error: None,
     }
@@ -4757,6 +4814,7 @@ fn run_cook_reported(
             if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
                 lifecycle_store,
                 run_id,
+                &result.value.status,
                 result.exit_code == 0,
                 result.exit_code,
             ) {
@@ -6296,6 +6354,51 @@ fn run_cook_spine(
         let review_form_continuation = mode.allows_historical_terminal()
             && review_form_attempt_is_ready_for_cook_continuation(&plan, &record)?
             && retryable_review_form_terminal_failure(&record, &aggregate);
+        let persisted_terminal_status = record.metadata["cook_progress"]["terminal_status"]
+            .as_str()
+            .map(str::to_string);
+        if let Some(status @ ("intentional_no_change" | "no_candidate")) =
+            persisted_terminal_status.as_deref()
+        {
+            let declaration =
+                intentional_no_change_from_aggregate(&aggregate).ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                    "intentional_no_change",
+                    "persisted no-change terminal status requires its durable provider declaration",
+                    Some(run_id.clone()),
+                    None,
+                )
+                })?;
+            let review_form = review_form_from_aggregate(&aggregate)?;
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            let is_refusal = status == "no_candidate";
+            let mut report = cook_report(CookReportInput {
+                cook_id,
+                status,
+                disposition: CookDisposition::Terminal,
+                attempts,
+                finalization: None,
+                stop_reason: Some("Cook restored its exact verified intentional no-change terminal result from durable state".to_string()),
+                exit_code: i32::from(is_refusal),
+                invocation_latest_run_id: Some(&run_id),
+            });
+            report.value.intentional_no_change = Some(AgentTaskCookIntentionalNoChangeReport {
+                declaration,
+                review_form,
+            });
+            if is_refusal {
+                report.value.terminal_phase = Some("candidate_selection".to_string());
+                report.value.terminal_failure_classification = Some("no_candidate".to_string());
+            }
+            return Ok(report);
+        }
         if !matches!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -6393,6 +6496,75 @@ fn run_cook_spine(
                 exit_code,
                 invocation_latest_run_id: Some(&run_id),
             }));
+        }
+
+        let intentional_no_change = intentional_no_change_from_aggregate(&aggregate);
+        let has_substantive_candidate =
+            agent_task_lifecycle::select_cook_candidate_in_store(lifecycle_store, &cook_id)
+                .is_ok_and(|selection| {
+                    !selection.incomplete
+                        && selection.selected_task_id.is_some()
+                        && selection.selected_artifact_id.is_some()
+                });
+        if let Some(declaration) = intentional_no_change.filter(|declaration| {
+            !has_substantive_candidate
+                || declaration.verdict == AgentTaskIntentionalNoChangeVerdict::Blocked
+        }) {
+            let review_form = review_form_from_aggregate(&aggregate)?;
+            let requires_candidate =
+                no_change_requires_substantive_candidate(&declaration, &source_request);
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            let mut report = cook_report(CookReportInput {
+                cook_id,
+                status: if requires_candidate {
+                    "no_candidate"
+                } else {
+                    "intentional_no_change"
+                },
+                disposition: CookDisposition::Terminal,
+                attempts,
+                finalization: None,
+                stop_reason: Some(
+                    if declaration.verdict == AgentTaskIntentionalNoChangeVerdict::Blocked {
+                        format!(
+                        "provider returned a verified blocked verdict; promotion and publication were skipped{}",
+                        declaration
+                            .next_action
+                            .is_empty()
+                            .then(String::new)
+                            .unwrap_or_else(|| format!("; next action: {}", declaration.next_action))
+                    )
+                    } else if requires_candidate {
+                        format!(
+                        "provider completed a verified {} review, but task policy requires a substantive candidate patch",
+                        declaration.verdict
+                    )
+                    } else {
+                        format!(
+                        "provider completed a verified {} evidence-only review without a candidate patch; promotion and publication were skipped",
+                        declaration.verdict
+                    )
+                    },
+                ),
+                exit_code: i32::from(requires_candidate),
+                invocation_latest_run_id: Some(&run_id),
+            });
+            report.value.intentional_no_change = Some(AgentTaskCookIntentionalNoChangeReport {
+                declaration,
+                review_form,
+            });
+            if requires_candidate {
+                report.value.terminal_phase = Some("candidate_selection".to_string());
+                report.value.terminal_failure_classification = Some("no_candidate".to_string());
+            }
+            return Ok(report);
         }
 
         // Gate dispatch boundary. Promotion is where the deterministic gates

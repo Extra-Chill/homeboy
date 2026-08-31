@@ -5470,7 +5470,16 @@ pub fn cook_failure_context(
                     .flat_map(|outcome| &outcome.diagnostics),
             )
         });
-    let (phase, reason_code, diagnostic) = if blocking_claim.is_some() {
+    let (phase, reason_code, diagnostic) = if status == "no_candidate" {
+        (
+            "candidate_selection".to_string(),
+            "no_candidate".to_string(),
+            Some(serde_json::json!({
+                "class": "agent_task.no_candidate",
+                "message": "verified intentional no-change evidence exists, but task policy requires a substantive candidate patch",
+            })),
+        )
+    } else if blocking_claim.is_some() {
         (
             "promotion".to_string(),
             "operation_in_progress".to_string(),
@@ -5782,6 +5791,7 @@ fn cook_recovery_actions(
         | "review_ready"
         | "green_no_finalize"
         | "intentional_no_change"
+        | "no_candidate"
         | "execution_budget_exhausted"
         | "retries_exhausted"
         | "pre_execution_failure" => false,

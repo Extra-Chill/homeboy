@@ -159,7 +159,7 @@ impl From<&CookStatus> for RunLifecycleStatus {
             // --- terminal, unsuccessful, not an invitation to retry ---
             // Finalization ran and produced nothing. Nothing failed, but the
             // Cook did not succeed either, and re-running it changes nothing.
-            CookStatus::NoChanges => Self::PartialFailure,
+            CookStatus::NoChanges | CookStatus::NoCandidate => Self::PartialFailure,
             // A candidate exists and can still be recovered. This matches the
             // `AgentTaskRunState::CandidateRecoverable ->
             // RunExecutionState::CandidateRecoverable` projection rather than
@@ -287,6 +287,7 @@ mod tests {
             CookStatus::DraftPublished,
             CookStatus::GreenNoFinalize,
             CookStatus::IntentionalNoChange,
+            CookStatus::NoCandidate,
             CookStatus::NoChanges,
             CookStatus::NoOpGateFailed,
             CookStatus::GateFailed,
@@ -320,6 +321,7 @@ mod tests {
                 CookStatus::DraftPublished => RunLifecycleStatus::Succeeded,
                 CookStatus::GreenNoFinalize => RunLifecycleStatus::Succeeded,
                 CookStatus::IntentionalNoChange => RunLifecycleStatus::Succeeded,
+                CookStatus::NoCandidate => RunLifecycleStatus::PartialFailure,
                 CookStatus::NoChanges => RunLifecycleStatus::PartialFailure,
                 CookStatus::NoOpGateFailed => RunLifecycleStatus::Failed,
                 CookStatus::GateFailed => RunLifecycleStatus::Failed,
@@ -406,6 +408,7 @@ mod tests {
             CookStatus::Blocked,
             CookStatus::Cancelled,
             CookStatus::NoChanges,
+            CookStatus::NoCandidate,
         ] {
             let projected = RunLifecycleStatus::from(&status);
             assert!(projected.is_terminal(), "{status} must be terminal");

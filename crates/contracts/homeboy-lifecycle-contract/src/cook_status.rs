@@ -89,6 +89,8 @@ pub enum CookStatus {
     GreenNoFinalize,
     /// A verified provider review intentionally produced no candidate patch.
     IntentionalNoChange,
+    /// Verified no-change evidence cannot satisfy a task that requires a patch.
+    NoCandidate,
     /// Finalization ran and found no changed files.
     NoChanges,
     /// A no-op candidate failed its gates.
@@ -148,6 +150,7 @@ impl CookStatus {
             "draft_published" => Self::DraftPublished,
             "green_no_finalize" => Self::GreenNoFinalize,
             "intentional_no_change" => Self::IntentionalNoChange,
+            "no_candidate" => Self::NoCandidate,
             "no_changes" => Self::NoChanges,
             "no_op_gate_failed" => Self::NoOpGateFailed,
             "gate_failed" => Self::GateFailed,
@@ -182,6 +185,7 @@ impl CookStatus {
             Self::DraftPublished => "draft_published",
             Self::GreenNoFinalize => "green_no_finalize",
             Self::IntentionalNoChange => "intentional_no_change",
+            Self::NoCandidate => "no_candidate",
             Self::NoChanges => "no_changes",
             Self::NoOpGateFailed => "no_op_gate_failed",
             Self::GateFailed => "gate_failed",
@@ -317,6 +321,7 @@ mod tests {
             "draft_published",
             "green_no_finalize",
             "intentional_no_change",
+            "no_candidate",
             "no_changes",
             "gate_failed",
             "awaiting_acceptance",
@@ -386,6 +391,7 @@ mod tests {
             CookStatus::DraftPublished,
             CookStatus::GreenNoFinalize,
             CookStatus::IntentionalNoChange,
+            CookStatus::NoCandidate,
             CookStatus::NoChanges,
             CookStatus::NoOpGateFailed,
             CookStatus::GateFailed,

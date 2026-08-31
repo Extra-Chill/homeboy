@@ -3717,6 +3717,14 @@ pub fn record_cook_progress_with_activity_in_store(
         {
             let metadata = record.ensure_metadata_object();
             let previous = metadata.get("cook_progress").cloned();
+            if previous
+                .as_ref()
+                .and_then(|progress| progress.get("terminal_status"))
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                return true;
+            }
             let mut progress = json!({
                 "phase": phase,
                 "attempt": attempt,
@@ -3886,6 +3894,7 @@ pub fn record_cook_supervision_stop_in_store(
 pub fn record_cook_terminal_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
+    terminal_status: &str,
     terminal_success: bool,
     exit_code: i32,
 ) -> Result<AgentTaskRunRecord> {
@@ -3901,8 +3910,12 @@ pub fn record_cook_terminal_result_in_store(
         if progress.get("phase").and_then(Value::as_str) != Some("terminal") {
             return false;
         }
+        progress.insert("terminal_status".to_string(), json!(terminal_status));
         progress.insert("terminal_success".to_string(), json!(terminal_success));
         progress.insert("exit_code".to_string(), json!(exit_code));
+        if terminal_status == "no_candidate" {
+            set_run_state(record, AgentTaskRunState::PartialFailure);
+        }
         true
     })?;
     record.ok_or_else(|| Error::internal_unexpected("Cook terminal result was unchanged"))

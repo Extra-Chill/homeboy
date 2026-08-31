@@ -91,6 +91,19 @@ fn successful_cook_carries_the_pull_request_link() {
 }
 
 #[test]
+fn intentional_no_change_terminal_notifications_match_policy_outcome() {
+    let accepted = terminal_payload(&report("intentional_no_change", None), None, 0);
+    assert_eq!(accepted.kind, NotifyEventKind::Completed);
+    assert!(accepted
+        .render_body()
+        .contains("Status: intentional_no_change"));
+
+    let refused = terminal_payload(&report("no_candidate", None), None, 1);
+    assert_eq!(refused.kind, NotifyEventKind::NeedsAttention);
+    assert!(refused.render_body().contains("Status: no_candidate"));
+}
+
+#[test]
 fn failed_cook_forwards_its_own_legal_recovery_commands() {
     let mut failed = report("durable_failure", None);
     failed.failure_context = Some(failure_context());
