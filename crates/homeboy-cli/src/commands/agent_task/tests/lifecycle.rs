@@ -1980,13 +1980,24 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
             run_id,
         )
         .unwrap();
+        let candidate_base_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(workspace.path())
+                .output()
+                .expect("resolve candidate base")
+                .stdout,
+        )
+        .expect("candidate base is UTF-8")
+        .trim()
+        .to_string();
         let provenance = |id: &str, path: &std::path::Path, patch: &str| AgentTaskArtifact {
             id: id.to_string(),
             kind: "patch".to_string(),
             path: Some(path.display().to_string()),
             size_bytes: Some(patch.len() as u64),
             sha256: Some(format!("{:x}", Sha256::digest(patch.as_bytes()))),
-            metadata: json!({"task_id":"provider","run_id":run_id,"producer_attempt":1,"base_ref":"main","provider_backend":"fixture","provider_model":"fixture-model","repository_identity":"fixture","workspace_identity":"fixture"}),
+            metadata: json!({"task_id":"provider","run_id":run_id,"producer_attempt":1,"base_ref":candidate_base_sha,"provider_backend":"fixture","provider_model":"fixture-model","repository_identity":"fixture","workspace_identity":"fixture"}),
             ..Default::default()
         };
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &AgentTaskAggregate { schema: "homeboy/agent-task-aggregate/v1".to_string(), plan_id: plan.plan_id.clone(), status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable, totals: Default::default(), outcomes: vec![AgentTaskOutcome { schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(), task_id: "provider".to_string(), status: AgentTaskOutcomeStatus::CandidateRecoverable, summary: None, failure_classification: None, artifacts: vec![provenance("selected", &selected, selected_patch), provenance("alternate", &alternate, &std::fs::read_to_string(&alternate).unwrap()), AgentTaskArtifact { id: "mime-shaped".to_string(), kind: "log".to_string(), mime: Some("text/x-patch".to_string()), path: Some(workspace.path().join("missing.patch").display().to_string()), size_bytes: Some(1), sha256: Some("a".repeat(64)), metadata: json!({"actionable": false}), ..Default::default() }], typed_artifacts: Vec::new(), evidence_refs: Vec::new(), diagnostics: Vec::new(), outputs: Value::Null, workflow: None, follow_up: None, metadata: json!({"model": "fixture-model"}) }], events: Vec::new(), artifact_lineage: Vec::new(), child_runs: Vec::new(), artifact_bindings: Vec::new(), queue: Default::default() }).unwrap();
@@ -2186,8 +2197,7 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 "promotion_target_resolution",
                 "patch_presence",
                 "verification_gates",
-                "cook_loop_evaluation",
-                "finalization"
+                "cook_loop_evaluation"
             ])
         );
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
