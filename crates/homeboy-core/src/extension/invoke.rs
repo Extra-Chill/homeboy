@@ -85,7 +85,39 @@ pub struct ExtensionSetupResult {
     pub exit_code: i32,
 }
 
-const EXTENSION_SETUP_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_EXTENSION_SETUP_TIMEOUT_SECONDS: u64 = 300;
+const MAX_EXTENSION_SETUP_TIMEOUT_SECONDS: u64 = 3600;
+const EXTENSION_SETUP_TIMEOUT_ENV: &str = "HOMEBOY_EXTENSION_SETUP_TIMEOUT_SECONDS";
+
+fn resolve_setup_timeout(
+    runtime: &RuntimeConfig,
+    override_seconds: Option<&str>,
+) -> Result<Duration> {
+    let seconds = match override_seconds {
+        Some(value) => value.parse::<u64>().map_err(|_| {
+            Error::validation_invalid_argument(
+                EXTENSION_SETUP_TIMEOUT_ENV,
+                "Extension setup timeout override must be an integer number of seconds",
+                Some(value.to_string()),
+                None,
+            )
+        })?,
+        None => runtime
+            .setup_timeout_seconds
+            .unwrap_or(DEFAULT_EXTENSION_SETUP_TIMEOUT_SECONDS),
+    };
+    if !(1..=MAX_EXTENSION_SETUP_TIMEOUT_SECONDS).contains(&seconds) {
+        return Err(Error::validation_invalid_argument(
+            "setup_timeout_seconds",
+            format!(
+                "Extension setup timeout must be between 1 and {MAX_EXTENSION_SETUP_TIMEOUT_SECONDS} seconds"
+            ),
+            Some(seconds.to_string()),
+            None,
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
+}
 
 /// Run a extension's setup command (if defined).
 pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
@@ -118,21 +150,20 @@ pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
     ];
 
     let command = template::render(setup_command, &vars);
+    let timeout_override = std::env::var(EXTENSION_SETUP_TIMEOUT_ENV).ok();
+    let setup_timeout = resolve_setup_timeout(runtime, timeout_override.as_deref())?;
     let output = execute_local_command_passthrough_with_timeout(
         &command,
         Some(extension_path),
         None,
-        EXTENSION_SETUP_TIMEOUT,
+        setup_timeout,
     );
     let exit_code = output.exit_code;
 
     if exit_code != 0 {
         return Err(Error::internal_io(
             if output.timed_out {
-                format!(
-                    "Setup command timed out after {}s",
-                    EXTENSION_SETUP_TIMEOUT.as_secs()
-                )
+                format!("Setup command timed out after {}s", setup_timeout.as_secs())
             } else {
                 format!("Setup command failed with exit code {}", exit_code)
             },
@@ -615,6 +646,40 @@ mod tests {
     use super::*;
     use crate::extension::resolve::extract_component_extension_settings;
     use homeboy_core::component::Component;
+
+    fn runtime_with_setup_timeout(setup_timeout_seconds: Option<u64>) -> RuntimeConfig {
+        RuntimeConfig {
+            run_command: None,
+            setup_command: Some("true".to_string()),
+            setup_timeout_seconds,
+            ready_check: None,
+            env: None,
+            entrypoint: None,
+            args: None,
+        }
+    }
+
+    #[test]
+    fn extension_setup_timeout_defaults_and_accepts_bounded_declarations() {
+        let default = resolve_setup_timeout(&runtime_with_setup_timeout(None), None)
+            .expect("default setup timeout");
+        let declared = resolve_setup_timeout(&runtime_with_setup_timeout(Some(900)), None)
+            .expect("declared setup timeout");
+        let overridden =
+            resolve_setup_timeout(&runtime_with_setup_timeout(Some(900)), Some("1200"))
+                .expect("operator setup timeout override");
+
+        assert_eq!(default, Duration::from_secs(300));
+        assert_eq!(declared, Duration::from_secs(900));
+        assert_eq!(overridden, Duration::from_secs(1200));
+    }
+
+    #[test]
+    fn extension_setup_timeout_rejects_invalid_or_unbounded_values() {
+        assert!(resolve_setup_timeout(&runtime_with_setup_timeout(Some(0)), None).is_err());
+        assert!(resolve_setup_timeout(&runtime_with_setup_timeout(Some(3601)), None).is_err());
+        assert!(resolve_setup_timeout(&runtime_with_setup_timeout(None), Some("slow")).is_err());
+    }
 
     fn make_executable(path: &Path) {
         #[cfg(unix)]
