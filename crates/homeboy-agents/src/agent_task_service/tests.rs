@@ -2048,13 +2048,18 @@ fn reconciliation_postcondition_names_an_unresolved_runner_projection() {
     with_isolated_home(|_| {
         let run_id = "queued-runner-projection-postcondition";
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Cancelled);
+            record.tasks[0].state = AgentTaskState::Cancelled;
+        })
+        .expect("terminal controller projection");
         let record = agent_task_lifecycle::exact_record(run_id).expect("queued record");
 
-        let error = super::reconcile::verify_reconciled_postcondition(&record, true)
-            .expect_err("an active queued projection cannot report reconciliation success");
+        let error = super::reconcile::verify_reconciled_postcondition(&record, false, false)
+            .expect_err("an unresolved runner projection cannot report reconciliation success");
         assert!(error.message.contains(run_id));
-        assert!(error.message.contains("durable state is queued"));
-        assert!(error.message.contains("in active discovery"));
+        assert!(error.message.contains("durable state is cancelled"));
+        assert!(error.message.contains("on the runner"));
     });
 }
 

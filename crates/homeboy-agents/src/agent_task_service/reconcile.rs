@@ -103,15 +103,20 @@ fn verified_reconciled_status(
         .runs
         .into_iter()
         .any(|run| run.run_id == run_id);
-    verify_reconciled_postcondition(&record, remains_active)?;
+    let runner_projection_resolved = record.runner_id().is_none_or(|runner_id| {
+        agent_task_lifecycle::runner_live_job_authority(runner_id)
+            == agent_task_lifecycle::RunnerLiveJobAuthority::Idle
+    });
+    verify_reconciled_postcondition(&record, remains_active, runner_projection_resolved)?;
     Ok(record)
 }
 
 pub(super) fn verify_reconciled_postcondition(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     remains_active: bool,
+    runner_projection_resolved: bool,
 ) -> Result<()> {
-    if record.state.is_terminal() && !remains_active {
+    if record.state.is_terminal() && !remains_active && runner_projection_resolved {
         return Ok(());
     }
 
@@ -119,7 +124,13 @@ pub(super) fn verify_reconciled_postcondition(
         "agent-task reconciliation did not satisfy its postcondition for `{}`: durable state is {}, unresolved projection remains {}",
         record.run_id,
         run_state_label(record.state),
-        if remains_active { "in active discovery" } else { "non-terminal" },
+        if remains_active {
+            "in active discovery"
+        } else if !runner_projection_resolved {
+            "on the runner"
+        } else {
+            "non-terminal"
+        },
     )))
 }
 
