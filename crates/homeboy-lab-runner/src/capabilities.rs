@@ -599,14 +599,14 @@ fn runner_tool_probes(
     RunnerToolRegistry::required_tools(runner, preflight)
         .into_iter()
         .map(|tool| {
+            let spec = RunnerToolRegistry::spec_for_runner_required_tool(runner, &tool);
             let (command, version_args) = if tool.id() == "homeboy" {
                 (
                     effective_homeboy_command(runner, "runner capability preflight")?,
-                    vec!["--version".to_string()],
+                    spec.map(|spec| spec.version_args).unwrap_or_default(),
                 )
             } else {
-                RunnerToolRegistry::spec_for_runner_required_tool(runner, &tool)
-                    .map(|spec| (spec.command, spec.version_args))
+                spec.map(|spec| (spec.command, spec.version_args))
                     .unwrap_or_else(|| (tool.id().to_string(), Vec::new()))
             };
             Ok(RunnerToolProbe {
@@ -1579,12 +1579,16 @@ mod tests {
         };
         let preflight = RunnerCapabilityPreflight {
             command: "agent-task cook".to_string(),
-            required_tools: vec![RunnerRequiredTool::git()],
+            required_tools: vec![RunnerRequiredTool::homeboy(), RunnerRequiredTool::git()],
             ..Default::default()
         };
 
         let capabilities = runner_capability_snapshot_for_preflight(&runner, &preflight)
             .expect("capability snapshot");
+        assert!(
+            capabilities.has_tool(&RunnerRequiredTool::homeboy()),
+            "Configured Homeboy version evidence was not recorded: {capabilities:?}"
+        );
         assert!(
             capabilities.has_tool(&RunnerRequiredTool::git()),
             "Git version evidence was not recorded: {capabilities:?}"
@@ -1603,6 +1607,23 @@ mod tests {
         )
         .expect_err("an unusable Git executable blocks handoff before provider execution");
         assert!(error.message.contains("tools: git"));
+
+        fs::write(
+            &git,
+            "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nexit 1\n",
+        )
+        .expect("restore git version probe");
+        fs::write(&homeboy, "#!/bin/sh\nexit 1\n").expect("make Homeboy version probe fail");
+        let unavailable = runner_capability_snapshot_for_preflight(&runner, &preflight)
+            .expect("capability snapshot");
+        let error = validate_runner_capability_preflight(
+            "local",
+            &preflight,
+            &unavailable,
+            &HashMap::new(),
+        )
+        .expect_err("an unusable configured Homeboy blocks handoff before provider execution");
+        assert!(error.message.contains("tools: homeboy"));
     }
 
     #[test]
