@@ -52,6 +52,7 @@ impl ControllerJobHarness {
                 request,
                 public_request,
                 request_digest,
+                active_idempotency_key: None,
                 checkpoint: None,
                 cancellation_requested: false,
                 cancellation_reason: None,
