@@ -1023,6 +1023,83 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
 }
 
 #[test]
+fn cook_keeps_root_repository_for_an_explicit_subdirectory_component() {
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("repository checkout");
+        init_runtime_component_checkout(checkout.path());
+        let component_path = checkout.path().join("php-transformer");
+        std::fs::create_dir(&component_path).expect("nested component directory");
+        std::fs::write(component_path.join("plugin.php"), "<?php\n")
+            .expect("nested component marker");
+        assert!(Command::new("git")
+            .args(["add", "php-transformer/plugin.php"])
+            .current_dir(checkout.path())
+            .status()
+            .expect("stage nested component")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "add nested component"])
+            .current_dir(checkout.path())
+            .status()
+            .expect("commit nested component")
+            .success());
+        let remote = "https://github.com/example/blocks-engine.git";
+        add_remote(checkout.path(), "origin", remote);
+        register_component("blocks-engine", checkout.path(), remote);
+        register_component("php-transformer", &component_path, remote);
+        register_component(
+            "unrelated",
+            tempfile::tempdir().expect("unrelated component").path(),
+            "https://github.com/example/unrelated.git",
+        );
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "blocks-engine".to_string(),
+            "--component".to_string(),
+            "php-transformer".to_string(),
+            "--cwd".to_string(),
+            component_path.display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("resolve explicit subdirectory component");
+
+        assert_eq!(args.dispatch.repo.as_deref(), Some("blocks-engine"));
+        assert_eq!(args.component.as_deref(), Some("php-transformer"));
+        let identity = args.repository_identity.expect("repository identity");
+        assert_eq!(identity["repository_name"], "blocks-engine");
+        assert_eq!(identity["component_id"], "php-transformer");
+        assert_eq!(identity["component_cwd"], "php-transformer");
+        assert_eq!(
+            identity["remote_identity"],
+            "git://github.com/example/blocks-engine"
+        );
+
+        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "blocks-engine".to_string(),
+            "--component".to_string(),
+            "unrelated".to_string(),
+            "--cwd".to_string(),
+            component_path.display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("unrelated component must remain fail-closed");
+        assert!(error.message.contains("belongs to repository"));
+    });
+}
+
+#[test]
 fn cook_replay_preserves_exact_component_when_repository_has_multiple_components() {
     with_isolated_home(|_| {
         let root = tempfile::tempdir().expect("repository root");

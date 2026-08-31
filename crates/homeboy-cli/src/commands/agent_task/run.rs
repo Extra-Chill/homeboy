@@ -4517,6 +4517,18 @@ pub(super) struct CookRepositoryIdentity {
 }
 
 fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if let (Some(repo), Some(component)) =
+        (args.dispatch.repo.as_deref(), args.component.as_deref())
+    {
+        // Preserve the repository/component contract when the component is still
+        // registered. A removed component is instead disproven by the workspace.
+        if homeboy::core::component::inventory::registered_base()?
+            .iter()
+            .any(|registered| registered.id == component)
+        {
+            validate_cook_repository_component_selection(repo, component)?;
+        }
+    }
     if let Some(repository_name) = args.component.as_deref().or(args.dispatch.repo.as_deref()) {
         // Resolve configured aliases before any workspace or provider operation,
         // so every Cook invocation form rejects an ambiguous identity equally.
@@ -4611,7 +4623,43 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
         validate_cook_repository_component_selection(repo, component)?;
     }
     args.dispatch.repo = Some(selected.repository_name.clone());
-    let component_id = selected.component_registered.then(|| selected.slug.clone());
+    let component_id = match args.component.as_deref() {
+        Some(component_id) => {
+            let component =
+                homeboy::core::component::registered_by_id(component_id)?.ok_or_else(|| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "component",
+                        format!("--component `{component_id}` is not a registered component"),
+                        Some(component_id.to_string()),
+                        None,
+                    )
+                })?;
+            let component_remote = component
+                .remote_url
+                .as_deref()
+                .and_then(canonical_remote_identity)
+                .ok_or_else(|| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "component",
+                        format!("--component `{component_id}` has no canonical configured remote"),
+                        Some(component_id.to_string()),
+                        None,
+                    )
+                })?;
+            if component_remote != selected.remote_identity {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "component",
+                    format!(
+                        "--component `{component_id}` does not match the supplied workspace repository"
+                    ),
+                    Some(component_id.to_string()),
+                    None,
+                ));
+            }
+            Some(component.id)
+        }
+        None => selected.component_registered.then(|| selected.slug.clone()),
+    };
     args.component = component_id.clone();
     let component_cwd = match component_id.as_deref() {
         Some(component_id) => homeboy::core::component::registered_by_id(component_id)?
