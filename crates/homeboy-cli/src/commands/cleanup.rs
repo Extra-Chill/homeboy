@@ -386,7 +386,13 @@ impl CleanupJobDriver {
                 run_ref: format!("homeboy://job/{job_id}"),
                 report: Box::new(move |progress| progress_handle.progress(progress)),
             },
-            || cleanup_inventory(args),
+            || {
+                // A durable job retains partial, resumable evidence as a
+                // successful pass. Only an interactive cleanup must turn that
+                // state into a failing command envelope.
+                let deadline = SystemTime::now().checked_add(cleanup_inventory_timeout(args.apply));
+                cleanup_inventory_with_deadline(args, deadline)
+            },
         )?;
         let output = serde_json::json!({
             "phase": if result.exit_code == 0 { "completed" } else { "partial_failure" },
@@ -1922,7 +1928,19 @@ fn automatic_retention() -> CmdResult<Value> {
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventoryResult> {
     let deadline = SystemTime::now().checked_add(cleanup_inventory_timeout(args.apply));
-    cleanup_inventory_with_deadline(args, deadline)
+    let mut result = cleanup_inventory_with_deadline(args, deadline)?;
+    // An interactive aggregate has no scheduler to perform its next bounded
+    // pass. Do not acknowledge an incomplete mutation inventory as success:
+    // callers must receive the continuation action and a non-zero exit.
+    finalize_synchronous_cleanup_result(&mut result);
+    Ok(result)
+}
+
+fn finalize_synchronous_cleanup_result(result: &mut CleanupInventoryResult) {
+    if result.exit_code == 0 && result.output["continuation_required"] == true {
+        result.output["status"] = Value::String("partial_failure".to_string());
+        result.exit_code = 1;
+    }
 }
 
 /// Aggregate sweep budget, widened by whatever a category legitimately needs
@@ -2762,6 +2780,7 @@ fn isolate_cleanup_category_bounded(
             remaining,
             0,
             Some("aggregate cleanup budget was exhausted before this category started".to_string()),
+            cleanup_category_replay_command(metadata, args),
         ));
         return;
     }
@@ -2847,6 +2866,7 @@ fn run_cleanup_category_process(
                 "aggregate cleanup has too little time remaining to start and reap this category"
                     .to_string(),
             ),
+            cleanup_category_replay_command(metadata, args),
         )));
     }
     let timeout = wall_clock_budget.saturating_sub(CLEANUP_CHILD_TERMINATION_ALLOWANCE);
@@ -2951,6 +2971,7 @@ fn run_cleanup_category_process(
             timeout,
             elapsed_ms,
             last_progress,
+            cleanup_category_replay_command(metadata, args),
         )));
     }
 
@@ -3182,11 +3203,11 @@ fn cleanup_category_timeout_failure(
     timeout: Duration,
     elapsed_ms: u128,
     last_progress: Option<String>,
+    continuation_command: String,
 ) -> CleanupInventoryCategory {
-    let continuation = metadata.canonical_cleanup_command(apply);
     CleanupInventoryCategory {
         category: metadata.category.to_string(),
-        canonical_cleanup_command: continuation.clone(),
+        canonical_cleanup_command: continuation_command.clone(),
         specialist_command: metadata.specialist_command(apply).to_string(),
         included: true,
         skipped: true,
@@ -3207,7 +3228,7 @@ fn cleanup_category_timeout_failure(
         elapsed_ms,
         timeout_ms: timeout.as_millis(),
         last_progress,
-        continuation_command: continuation,
+        continuation_command: continuation_command.clone(),
         cleanup_run_ref: active_cleanup_run_ref(),
         candidate_count: 0,
         applied_count: 0,
@@ -3220,8 +3241,52 @@ fn cleanup_category_timeout_failure(
             "outcome": "timed_out",
             "elapsed_ms": elapsed_ms,
             "timeout_ms": timeout.as_millis(),
+            "continuation_command": continuation_command,
         }),
     }
+}
+
+/// Replay one incomplete aggregate category with the exact policy supplied to
+/// the owning command. A specialist command cannot carry aggregate-only policy
+/// such as `--include-untagged`, retention overrides, or pagination state.
+fn cleanup_category_replay_command(
+    metadata: CleanupInventoryCategoryMetadata,
+    args: &CleanupArgs,
+) -> String {
+    let mut command = "homeboy cleanup".to_string();
+    command.push_str(&format!(" --include {}", metadata.include_arg));
+    if !args.exclude.is_empty() {
+        command.push_str(&format!(
+            " --exclude {}",
+            args.exclude
+                .iter()
+                .map(cleanup_category_arg_name)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if args.include_untagged {
+        command.push_str(" --include-untagged");
+    }
+    if args.apply {
+        command.push_str(" --apply");
+    }
+    if let Some(days) = args.older_than_days {
+        command.push_str(&format!(" --older-than-days {days}"));
+    }
+    if let Some(days) = args.runtime_tmp_managed_older_than_days {
+        command.push_str(&format!(" --runtime-tmp-managed-older-than-days {days}"));
+    }
+    if let Some(limit) = args.limit {
+        command.push_str(&format!(" --limit {limit}"));
+    }
+    if let Some(cursor) = &args.cursor {
+        command.push_str(&format!(" --cursor {}", quote_arg(cursor)));
+    }
+    if args.full {
+        command.push_str(" --full");
+    }
+    command
 }
 
 fn cleanup_category_process_failure(
@@ -3987,6 +4052,16 @@ fn cleanup_actionable(
 ) -> CommandActionableMetadata {
     let mut actionable = CommandActionableMetadata::default();
     for category in categories {
+        if is_bounded_continuation(category) {
+            actionable.next_actions.push(
+                CommandNextAction::new(
+                    format!("resume {} cleanup", category.category.replace('_', " ")),
+                    category.continuation_command.clone(),
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+            continue;
+        }
         if category.failure.is_some() {
             actionable.next_actions.push(
                 CommandNextAction::new(
@@ -5455,6 +5530,56 @@ mod tests {
                     "a starved category must publish how to resume it"
                 );
             }
+        });
+    }
+
+    /// Interactive cleanup has no scheduler to consume a bounded continuation.
+    /// Its envelope must therefore fail consistently while exposing one replay
+    /// action owned by the aggregate, rather than a stripped specialist hint.
+    #[test]
+    fn timed_out_scoped_cleanup_is_non_successful_and_replays_the_aggregate_policy() {
+        homeboy::test_support::with_isolated_home(|_root| {
+            let expired = SystemTime::now()
+                .checked_sub(Duration::from_secs(60))
+                .expect("expired deadline");
+            let result = cleanup_inventory_with_deadline(
+                CleanupArgs {
+                    apply: true,
+                    include: vec![CleanupCategoryArg::RepoArtifacts],
+                    exclude: vec![CleanupCategoryArg::ControllerRuntimes],
+                    include_untagged: true,
+                    older_than_days: Some(7),
+                    runtime_tmp_managed_older_than_days: None,
+                    limit: Some(3),
+                    full: true,
+                    cursor: Some("next page".to_string()),
+                    command: None,
+                },
+                Some(expired),
+            )
+            .expect("aggregate result");
+            let mut result = result;
+            finalize_synchronous_cleanup_result(&mut result);
+            let envelope =
+                crate::commands::utils::response::cli_response_for_json_result_for_command(
+                    &Ok(result.output),
+                    result.exit_code,
+                    "cleanup",
+                    None,
+                );
+
+            assert_eq!(envelope.exit_code, 1);
+            assert!(!envelope.success);
+            assert_eq!(envelope.status, "partial_failure");
+            assert_eq!(
+                envelope.data.as_ref().expect("data")["status"],
+                "partial_failure"
+            );
+            assert_eq!(envelope.next_actions.len(), 1);
+            assert_eq!(
+                envelope.next_actions[0].command,
+                "homeboy cleanup --include repo-artifacts --exclude controller-runtimes --include-untagged --apply --older-than-days 7 --limit 3 --cursor 'next page' --full"
+            );
         });
     }
 
