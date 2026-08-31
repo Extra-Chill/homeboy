@@ -1039,10 +1039,16 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut operation = UpgradeOperation::start("homeboy upgrade");
             let id = operation.id().expect("persisted operation").to_string();
-            operation.mark_controller_promoted("controller installation completed");
-            operation.set_phase("refreshing installed extensions");
+            operation
+                .mark_controller_promoted_durable("controller installation completed")
+                .expect("persist controller promotion");
+            operation
+                .set_phase_durable("refreshing installed extensions")
+                .expect("persist extension refresh phase");
             operation.mark_extensions("completed", "7 updated, 0 skipped");
-            operation.set_phase("refreshing configured runners");
+            operation
+                .set_phase_durable("refreshing configured runners")
+                .expect("persist runner refresh phase");
 
             let status = load_upgrade_operation_status(Some(&id)).expect("load status");
             assert_eq!(status.phase, "refreshing configured runners");
