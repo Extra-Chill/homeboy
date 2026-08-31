@@ -2,6 +2,11 @@ use std::path::{Component, Path};
 
 use homeboy::core::Error;
 use homeboy::runner::runners::RunnerExecOutput;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiRecipeRunPlanRequest, ExtensionApiRecipeRunProviderInventoryEntry,
+    ExtensionApiRecipeRunProviderInventoryRequest, EXTENSION_API_RECIPE_RUN_PLAN_REQUEST_SCHEMA,
+    EXTENSION_API_RECIPE_RUN_PROVIDER_INVENTORY_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
 
 use super::super::CmdResult;
 use super::exec::exec_with_hydration;
@@ -24,14 +29,31 @@ pub(super) fn recipe_run(
             None,
         ));
     }
-    let descriptor = homeboy_core::extension::recipe_run::resolve_recipe_run_provider(provider_id)?;
-    let command = homeboy_core::extension::recipe_run::render_recipe_run_command(
-        &descriptor,
-        &homeboy_core::extension::recipe_run::RecipeRunRequest {
+    let response = homeboy_core::extension::recipe_run_api::recipe_run_plan_api(
+        &ExtensionApiRecipeRunPlanRequest {
+            schema: EXTENSION_API_RECIPE_RUN_PLAN_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            provider_id: provider_id.to_string(),
             recipe_path: recipe,
             artifact_path: artifacts.clone(),
         },
-    )?;
+    );
+    let plan = match response.plan {
+        Some(plan) => plan,
+        None => {
+            let message = response
+                .selection_failure
+                .map(|failure| failure.message)
+                .or_else(|| response.failure.map(|failure| failure.message))
+                .unwrap_or_else(|| "Recipe-run planning returned no plan".to_string());
+            return Err(recipe_run_operation_error(
+                provider_id,
+                message,
+                &response.available_provider_ids,
+            ));
+        }
+    };
+    let command = plan.command;
     let (output, exit_code) = exec_with_hydration(
         runner_id,
         None,
@@ -64,13 +86,52 @@ pub(super) fn recipe_run(
         serde_json::to_value(&output.source_snapshot).expect("runner source snapshot serializes");
     homeboy_agents::agent_task_lifecycle::record_runner_exec_provider_result(
         &run_id,
-        &descriptor.id,
-        &descriptor.version,
+        &plan.provider_id,
+        &plan.provider_version,
         &command,
         &source_snapshot,
         &terminal_json,
     )?;
     Ok((output, exit_code))
+}
+
+pub(super) fn recipe_run_provider_inventory(
+) -> homeboy::core::Result<Vec<ExtensionApiRecipeRunProviderInventoryEntry>> {
+    let response = homeboy_core::extension::recipe_run_api::recipe_run_provider_inventory_api(
+        &ExtensionApiRecipeRunProviderInventoryRequest {
+            schema: EXTENSION_API_RECIPE_RUN_PROVIDER_INVENTORY_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+        },
+    );
+    match response.failure {
+        Some(failure) => Err(recipe_run_operation_error(
+            "inventory",
+            failure.message,
+            &[],
+        )),
+        None => Ok(response.providers),
+    }
+}
+
+fn recipe_run_operation_error(
+    provider_id: &str,
+    message: String,
+    available_provider_ids: &[String],
+) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "provider",
+        message,
+        Some(provider_id.to_string()),
+        None,
+    )
+    .with_hint("Run 'homeboy runner recipe-providers' to inspect installed providers.");
+    if !available_provider_ids.is_empty() {
+        error = error.with_hint(format!(
+            "Available provider IDs: {}",
+            available_provider_ids.join(", ")
+        ));
+    }
+    error
 }
 
 fn validate_workspace_relative_path(argument: &str, value: &str) -> homeboy::core::Result<()> {
@@ -136,7 +197,11 @@ mod tests {
         )
         .expect_err("provider must resolve before dispatch");
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.message.contains("No installed extension declares"));
+        assert!(
+            error.message.contains("No installed extension declares"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

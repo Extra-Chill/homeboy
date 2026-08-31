@@ -9,8 +9,10 @@ use super::{
 
 mod environment;
 mod invocation;
+mod recipe_run;
 pub use environment::*;
 pub use invocation::*;
+pub use recipe_run::*;
 
 pub const EXTENSION_API_CATALOG_REQUEST_SCHEMA: &str = "homeboy/extension-api-catalog-request/v1";
 pub const EXTENSION_API_CATALOG_RESPONSE_SCHEMA: &str = "homeboy/extension-api-catalog-response/v1";
