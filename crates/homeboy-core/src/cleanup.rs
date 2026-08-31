@@ -3964,41 +3964,47 @@ mod tests {
         write_file(&repo.path().join("target/debug/app"), "primary artifact");
         write_file(
             &sibling.join("node_modules/pkg/index.js"),
-            "dependency artifact",
+            &"dependency artifact".repeat(1024),
         );
 
-        let output = cleanup_artifacts(ArtifactCleanupOptions {
+        let options = ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
             scope: ArtifactCleanupScope::ExactCheckout,
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
-            sort: ArtifactCleanupSort::Discovery,
-            limit: None,
+            sort: ArtifactCleanupSort::Size,
+            limit: Some(1),
             merged_only: false,
             min_age_days: None,
-            include_active_worktrees: false,
+            include_active_worktrees: true,
             max_scan_duration: None,
-        })
-        .expect("dry-run cleanup");
+        };
+        let output = cleanup_artifacts(options.clone()).expect("dry-run cleanup");
 
         assert_eq!(output.mode, "dry_run");
         assert_eq!(output.scope, ArtifactCleanupScope::ExactCheckout);
+        assert_eq!(output.worktree_count, 1);
         assert_eq!(output.applied_count, 0);
-        assert!(output.candidates.iter().any(|row| row
+        assert_eq!(output.candidate_count, 1);
+        assert_eq!(output.candidates[0].relative_path, "target");
+        assert!(output.candidates[0]
             .worktree
-            .ends_with(repo.path().file_name().unwrap().to_str().unwrap())
-            && row.relative_path == "target"));
+            .ends_with(repo.path().file_name().unwrap().to_str().unwrap()));
         assert!(!output
             .candidates
             .iter()
             .any(|row| row.worktree.ends_with("artifact-worktree")));
+        assert_eq!(
+            serde_json::to_value(&output).expect("serialize output")["scope"],
+            "exact_checkout"
+        );
         assert!(repo.path().join("target/debug/app").exists());
         assert!(sibling.join("node_modules/pkg/index.js").exists());
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             apply: true,
-            ..dry_run_options(repo.path())
+            ..options
         })
         .expect("apply cleanup");
         assert_eq!(output.scope, ArtifactCleanupScope::ExactCheckout);
