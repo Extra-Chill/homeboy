@@ -208,7 +208,7 @@ pub(crate) fn route_after_parse_with_provenance(
                 .map(|runner| runner.runner_id.clone())
         })
         .flatten();
-    if detached_cook_can_queue(cli) && !is_unmaterialized_replay_worker() {
+    if detached_cook_requires_deferred_admission(cli) && !is_unmaterialized_replay_worker() {
         // Persist before any bounded refresh. The scoped replay selector owns
         // ready and reverse-capacity admission after this durable boundary.
         return admit_unmaterialized_cook(
@@ -957,8 +957,12 @@ fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str>
     }
 }
 
-fn detached_cook_can_queue(cli: &Cli) -> bool {
+/// Deferred replay is only needed after an explicitly detached Cook loses its
+/// Lab route. Attached Cooks continue to observe their terminal execution, and
+/// `lab-or-local` continues through its authorized controller fallback.
+fn detached_cook_requires_deferred_admission(cli: &Cli) -> bool {
     cli.detach_after_handoff
+        && !cli.placement.allows_local_fallback()
         && !matches!(cli.placement, homeboy::cli_surface::Placement::Local)
         && matches!(
             cli.command,
@@ -1133,7 +1137,8 @@ fn admit_unmaterialized_cook(
     let admission = record.metadata["unmaterialized_cook_admission"].clone();
     let output = serde_json::json!({
         "schema": "homeboy/unmaterialized-cook-admission-result/v1",
-        "status": admission["state"],
+        "status": "pending_resource_admission",
+        "admission_state": admission["state"],
         "cook_id": cook_id,
         "run_id": cook_id,
         "materialized": false,
