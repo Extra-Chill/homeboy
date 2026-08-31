@@ -684,7 +684,7 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
     assert!(candidate_adoption_recovery_outcome(&record, &plan.tasks[0]).is_some());
 
     let mut wrong_phase = record.clone();
-    wrong_phase.metadata["phase"] = json!("provider_dispatch");
+    wrong_phase.metadata["pre_execution_failure"]["phase"] = json!("provider_dispatch");
     assert!(candidate_adoption_recovery_outcome(&wrong_phase, &plan.tasks[0]).is_none());
 
     let mut consumed_execution = record.clone();

@@ -707,7 +707,7 @@ fn promote_with_provider_and_checkpoint_internal(
 
     let failed_candidate_adoption = options.candidate_ref.is_some()
         && outcome.status == AgentTaskOutcomeStatus::Failed
-        && has_pre_provider_transport_recovery_eligibility(&outcome);
+        && has_candidate_adoption_recovery_eligibility(&outcome);
     if !matches!(
         outcome.status,
         AgentTaskOutcomeStatus::Succeeded
@@ -718,7 +718,7 @@ fn promote_with_provider_and_checkpoint_internal(
         let problem = if options.candidate_ref.is_some()
             && outcome.status == AgentTaskOutcomeStatus::Failed
         {
-            "immutable candidate adoption requires explicit durable pre-provider transport recovery eligibility; legacy or provider/test failures remain ineligible. Retry the cook or record a new transport failure through Homeboy."
+            "immutable candidate adoption requires explicit durable pre-provider recovery eligibility; legacy or provider/test failures remain ineligible. Retry the cook or record a new eligible pre-provider failure through Homeboy."
                 .to_string()
         } else {
             format!(
@@ -1184,13 +1184,15 @@ fn valid_git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn has_pre_provider_transport_recovery_eligibility(outcome: &AgentTaskOutcome) -> bool {
+fn has_candidate_adoption_recovery_eligibility(outcome: &AgentTaskOutcome) -> bool {
     let eligibility = outcome
         .metadata
         .get("candidate_adoption_recovery")
         .or_else(|| outcome.outputs.get("candidate_adoption_recovery"));
     eligibility
-        .filter(|value| crate::agent_task_lifecycle::is_pre_provider_transport_recovery(value))
+        .filter(|value| {
+            crate::agent_task_lifecycle::candidate_adoption_recovery_eligibility(value).is_some()
+        })
         .is_some()
 }
 

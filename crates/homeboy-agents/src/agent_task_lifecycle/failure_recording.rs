@@ -498,7 +498,7 @@ fn record_pre_execution_failure_locked(
     let failed = task_count;
     let retryable = error.retryable == Some(true);
     let failure_classification = pre_execution_failure_classification(error);
-    let candidate_adoption_recovery = candidate_adoption_recovery(phase);
+    let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
     let error_code = reported_error_code(error);
     let outcomes = plan
         .tasks
@@ -771,7 +771,7 @@ pub(crate) fn build_pre_execution_failure_outcome(
 ) -> AgentTaskOutcome {
     let retryable = error.retryable == Some(true);
     let failure_classification = pre_execution_failure_classification(error);
-    let candidate_adoption_recovery = candidate_adoption_recovery(phase);
+    let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
     let error_code = reported_error_code(error);
     let diagnostic = AgentTaskDiagnostic {
         class: "pre_execution_failure".to_string(),
@@ -844,18 +844,22 @@ fn reported_error_code(error: &Error) -> &str {
         .unwrap_or_else(|| error.code.as_str())
 }
 
-fn candidate_adoption_recovery(phase: &str) -> Option<serde_json::Value> {
-    matches!(
+fn candidate_adoption_recovery(phase: &str, error: &Error) -> Option<serde_json::Value> {
+    let reason = if matches!(
         phase,
         "lab_handoff_preacceptance" | "transport_dispatcher_prepare"
-    )
-    .then(|| {
-        json!({
-            "schema": super::CANDIDATE_ADOPTION_RECOVERY_SCHEMA,
-            "reason": "pre_provider_transport_failure",
-            "provider_executions_consumed": 0,
-        })
-    })
+    ) {
+        "pre_provider_transport_failure"
+    } else if error.details["dirty_candidate_adoption"]["reason"] == "first_provider_admission" {
+        "dirty_destination_first_provider_admission"
+    } else {
+        return None;
+    };
+    Some(json!({
+        "schema": super::CANDIDATE_ADOPTION_RECOVERY_SCHEMA,
+        "reason": reason,
+        "provider_executions_consumed": 0,
+    }))
 }
 
 fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassification {
