@@ -249,6 +249,20 @@ pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscov
     discover_runs_with_options(filter, AgentTaskDiscoveryOptions::default())
 }
 
+pub(crate) fn discover_runs_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    filter: AgentTaskDiscoveryFilter,
+) -> Result<AgentTaskDiscoveryReport> {
+    let (records, record_health) =
+        agent_task_lifecycle::read_records_with_health_in_store(lifecycle_store)?;
+    discovery_report(
+        filter,
+        AgentTaskDiscoveryOptions::default(),
+        records,
+        record_health,
+    )
+}
+
 /// Discovery with operator options (currently `--limit`). The `latest` filter
 /// is inherently a single run, so a limit is a no-op there; `all`/`active`
 /// truncate to the requested cap after filtering and sorting, and report the

@@ -282,7 +282,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             }
                         }
                         ControlPlaneAction::Reconcile => {
-                            match crate::agent_task_service::reconcile_run(
+                            match crate::agent_task_service::reconcile_run_in_store(
+                                &self.lookup.store,
                                 requested_id.as_str(),
                                 false,
                             ) {
@@ -1566,6 +1567,59 @@ mod tests {
             assert_eq!(first.result.schema, "homeboy/agent-task-reconcile/v1");
             assert_eq!(
                 service.execute_action(&run, &reconcile).expect("replay"),
+                first
+            );
+        });
+    }
+
+    #[test]
+    fn reconcile_action_mutates_and_completes_in_its_explicit_store() {
+        with_isolated_home(|home| {
+            let store =
+                AgentTaskLifecycleStore::from_data_root(home.path().join("explicit-control-plane"));
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("explicit-reconcile", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("explicit queued record");
+            store
+                .mutate_record(AGENT_TASK_RUN, |record| {
+                    record.submitted_at = "2000-01-01T00:00:00Z".to_string();
+                    record.updated_at = None;
+                    true
+                })
+                .expect("stale explicit record");
+
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                action: ControlPlaneAction::Reconcile,
+                idempotency_key: "explicit-reconcile-1".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+
+            let first = service
+                .execute_action(&run, &request)
+                .expect("reconcile action");
+            assert_eq!(
+                first.outcome,
+                ControlPlaneActionOutcome::Succeeded,
+                "{first:?}"
+            );
+            assert_eq!(
+                store
+                    .read_record(AGENT_TASK_RUN)
+                    .expect("reconciled record")
+                    .state,
+                AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
                 first
             );
         });

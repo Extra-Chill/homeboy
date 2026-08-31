@@ -10,7 +10,9 @@ use crate::agent_task_lifecycle;
 use homeboy_core::Result;
 use std::collections::HashMap;
 
-use super::discovery::{discover_runs, AgentTaskDiscoveryFilter, AgentTaskLiveness};
+use super::discovery::{
+    discover_runs, discover_runs_in_store, AgentTaskDiscoveryFilter, AgentTaskLiveness,
+};
 
 /// Report returned by [`reconcile_stale_active_runs`]. Lists every active run
 /// that was classified non-active, and for the reconcilable ones records the
@@ -301,11 +303,19 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
 /// reconciliation: a state or ownership change becomes a no-op rather than a
 /// reason to inspect or mutate any other record (#10001).
 pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileReport> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    reconcile_run_in_store(&lifecycle_store, run_id, dry_run)
+}
+
+pub(crate) fn reconcile_run_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    dry_run: bool,
+) -> Result<AgentTaskReconcileReport> {
     // One store for the whole reconciliation: the scope resolution, every
     // authoritative read, and the expiry or cancellation that follows are one
     // answer about one run.
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let requested_run_id = run_id.to_string();
     let resolved_run_ids =
         agent_task_lifecycle::reconcile_scope_run_ids_in_store(&lifecycle_store, run_id)?;
@@ -318,7 +328,7 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
             .runner_id()
             .map(|runner_id| format!("runner:{runner_id}"))
             .unwrap_or_else(|| "local".to_string());
-        let candidate = discover_runs(AgentTaskDiscoveryFilter::Active)?
+        let candidate = discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
             .runs
             .into_iter()
             .find(|run| run.run_id == *resolved_run_id);
@@ -330,12 +340,13 @@ pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileRe
                 let refreshed = rooted_exact_status(&lifecycle_store, resolved_run_id)?;
                 let locally_reconcilable_after_runner_idle =
                     refreshed.is_locally_reconcilable_after_runner_idle();
-                let still_reconcilable = discover_runs(AgentTaskDiscoveryFilter::Active)?
-                    .runs
-                    .into_iter()
-                    .find(|run| run.run_id == *resolved_run_id)
-                    .and_then(|run| run.liveness)
-                    .is_some_and(AgentTaskLiveness::is_reconcilable);
+                let still_reconcilable =
+                    discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
+                        .runs
+                        .into_iter()
+                        .find(|run| run.run_id == *resolved_run_id)
+                        .and_then(|run| run.liveness)
+                        .is_some_and(AgentTaskLiveness::is_reconcilable);
                 if refreshed.state.is_terminal() || !still_reconcilable {
                     runs.push(AgentTaskReconcileRun {
                         run_id: resolved_run_id.clone(),
