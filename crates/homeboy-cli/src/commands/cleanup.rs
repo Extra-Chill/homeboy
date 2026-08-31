@@ -382,7 +382,13 @@ impl CleanupJobDriver {
                 run_ref: format!("homeboy://job/{job_id}"),
                 report: Box::new(move |progress| progress_handle.progress(progress)),
             },
-            || cleanup_inventory(args),
+            || {
+                // A durable job retains partial, resumable evidence as a
+                // successful pass. Only an interactive cleanup must turn that
+                // state into a failing command envelope.
+                let deadline = SystemTime::now().checked_add(cleanup_inventory_timeout(args.apply));
+                cleanup_inventory_with_deadline(args, deadline)
+            },
         )?;
         let output = serde_json::json!({
             "phase": if result.exit_code == 0 { "completed" } else { "partial_failure" },
@@ -3245,6 +3251,16 @@ fn cleanup_category_replay_command(
 ) -> String {
     let mut command = "homeboy cleanup".to_string();
     command.push_str(&format!(" --include {}", metadata.include_arg));
+    if !args.exclude.is_empty() {
+        command.push_str(&format!(
+            " --exclude {}",
+            args.exclude
+                .iter()
+                .map(cleanup_category_arg_name)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
     if args.include_untagged {
         command.push_str(" --include-untagged");
     }
@@ -5524,7 +5540,7 @@ mod tests {
                 CleanupArgs {
                     apply: true,
                     include: vec![CleanupCategoryArg::RepoArtifacts],
-                    exclude: Vec::new(),
+                    exclude: vec![CleanupCategoryArg::ControllerRuntimes],
                     include_untagged: true,
                     older_than_days: Some(7),
                     runtime_tmp_managed_older_than_days: None,
@@ -5556,7 +5572,7 @@ mod tests {
             assert_eq!(envelope.next_actions.len(), 1);
             assert_eq!(
                 envelope.next_actions[0].command,
-                "homeboy cleanup --include repo-artifacts --include-untagged --apply --older-than-days 7 --limit 3 --cursor 'next page' --full"
+                "homeboy cleanup --include repo-artifacts --exclude controller-runtimes --include-untagged --apply --older-than-days 7 --limit 3 --cursor 'next page' --full"
             );
         });
     }
