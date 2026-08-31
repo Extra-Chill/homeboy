@@ -31,26 +31,25 @@ fn availability_from_response(
     runner_id: &str,
     response: Result<RunnerApiReadinessResponse>,
 ) -> AgentTaskLoopRunnerAvailability {
-    match response
+    let readiness = response
         .map_err(|error| error.to_string())
-        .and_then(readiness_from_response)
-    {
-            Ok(readiness) if readiness.accepting_jobs => {
-                AgentTaskLoopRunnerAvailability::Available
-            }
-            Ok(readiness) => AgentTaskLoopRunnerAvailability::Unavailable {
-                reason: format!(
-                    "runner `{runner_id}` is not available for controller action execution: connected={}, reasons={}",
-                    readiness.connected,
-                    readiness.reasons.join(",")
-                ),
-            },
-            Err(error) => AgentTaskLoopRunnerAvailability::Unavailable {
-                reason: format!(
-                    "runner `{runner_id}` is not available for controller action execution: {error}"
-                ),
-            },
-        }
+        .and_then(readiness_from_response);
+
+    match readiness {
+        Ok(readiness) if readiness.accepting_jobs => AgentTaskLoopRunnerAvailability::Available,
+        Ok(readiness) => AgentTaskLoopRunnerAvailability::Unavailable {
+            reason: format!(
+                "runner `{runner_id}` is not available for controller action execution: connected={}, reasons={}",
+                readiness.connected,
+                readiness.reasons.join(",")
+            ),
+        },
+        Err(error) => AgentTaskLoopRunnerAvailability::Unavailable {
+            reason: format!(
+                "runner `{runner_id}` is not available for controller action execution: {error}"
+            ),
+        },
+    }
 }
 
 fn readiness_from_response(
