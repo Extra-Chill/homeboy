@@ -3271,7 +3271,7 @@ fn candidate_adoption_lifecycle_and_promotion_evidence_do_not_alias_across_expli
         store
             .record_candidate_adoption_result(run_id, serde_json::json!({ "root": root }))
             .unwrap();
-        store.finish_candidate_adoption(run_id, None).unwrap();
+        store.finish_candidate_adoption(run_id, None, true).unwrap();
     }
 
     for (store, candidate_sha, model, root) in [
@@ -14553,6 +14553,7 @@ fn legacy_adoption_budget_failure_reenters_once_through_review_authority() {
             &test_lifecycle_store(),
             &fixture.run_id,
             Some("candidate remediation budget exhausted".to_string()),
+            false,
         )
         .unwrap();
         agent_task_lifecycle::record_candidate_adoption_result_in_store(

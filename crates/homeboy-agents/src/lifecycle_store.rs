@@ -523,8 +523,14 @@ impl AgentTaskLifecycleStore {
         &self,
         run_id: &str,
         error: Option<String>,
+        supersede_pre_execution_failure: bool,
     ) -> Result<AgentTaskRunRecord> {
-        super::lifecycle_candidate_adoption::finish_candidate_adoption_in_store(self, run_id, error)
+        super::lifecycle_candidate_adoption::finish_candidate_adoption_in_store(
+            self,
+            run_id,
+            error,
+            supersede_pre_execution_failure,
+        )
     }
 
     pub fn record_candidate_adoption_result(&self, run_id: &str, result: Value) -> Result<()> {
