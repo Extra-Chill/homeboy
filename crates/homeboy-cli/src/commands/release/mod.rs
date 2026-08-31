@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{fs, path::Path};
 
 use homeboy::core::component;
@@ -633,6 +633,17 @@ impl PortableStageDispatcher for CliPortableStageDispatcher {
             )
         })?;
         let mut command = Command::new(executable);
+        let output_dir = tempfile::tempdir().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                format!(
+                    "create portable release {} preflight output directory: {error}",
+                    request.gate
+                ),
+                Some(request.path.to_string()),
+            )
+        })?;
+        let output_path = output_dir.path().join("command-result.json");
+        command.args(["--output", output_path.to_string_lossy().as_ref()]);
         if let Some(runner_id) = request.requested_runner_id {
             command.args(["--runner", runner_id]);
         } else if matches!(request.placement, ReleasePreflightPlacementArg::Lab) {
@@ -647,26 +658,45 @@ impl PortableStageDispatcher for CliPortableStageDispatcher {
             "--release-readiness-source",
             request.source_commit,
         ]);
+        // Review dependencies may stream ordinary progress on stdout. The
+        // global output file is the machine contract; retaining stdout here
+        // would both corrupt that contract and buffer unbounded gate logs.
+        command.stdout(Stdio::null());
         let output = command.output().map_err(|error| {
             homeboy::core::Error::internal_io(
                 format!("start portable release {} preflight: {error}", request.gate),
                 Some(request.path.to_string()),
             )
         })?;
-        let envelope: PortableReviewChildEnvelope = serde_json::from_slice(&output.stdout)
-            .map_err(|error| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "release.preflight",
-                    format!(
-                        "portable {} preflight returned no stable command-result JSON: {error}",
-                        request.gate
-                    ),
-                    Some(String::from_utf8_lossy(&output.stderr).to_string()),
-                    None,
-                )
-            })?;
+        let envelope =
+            read_portable_review_child_envelope(&output_path, request.gate, &output.stderr)?;
         envelope.project(output.status.success(), request.source_commit)
     }
+}
+
+fn read_portable_review_child_envelope(
+    path: &Path,
+    gate: &str,
+    stderr: &[u8],
+) -> homeboy::core::Result<PortableReviewChildEnvelope> {
+    let result = fs::read(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            format!("portable {gate} preflight returned no structured command-result: {error}"),
+            Some(String::from_utf8_lossy(stderr).to_string()),
+            None,
+        )
+    })?;
+    serde_json::from_slice(&result).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "release.preflight",
+            format!(
+                "portable {gate} preflight returned invalid structured command-result JSON: {error}"
+            ),
+            Some(String::from_utf8_lossy(stderr).to_string()),
+            None,
+        )
+    })
 }
 
 /// Stable subset of a child command-result envelope consumed by release.
@@ -2458,5 +2488,64 @@ jobs:
             .iter()
             .filter(|gate| ["audit", "lint", "test"].contains(&gate.gate.as_str()))
             .all(|gate| gate.provenance.as_ref() == Some(&child_provenance)));
+    }
+
+    #[test]
+    fn portable_preflight_reads_only_the_structured_output_file() {
+        let output = tempfile::NamedTempFile::new().expect("output file");
+        std::fs::write(
+            output.path(),
+            serde_json::to_vec(&serde_json::json!({
+                "success": true,
+                "evidence": [{ "uri": "run://portable-test" }],
+                "data": {
+                    "release_readiness": {
+                        "requested_source_commit": "source",
+                        "source_commit": "source",
+                        "runner_id": "homeboy-lab",
+                        "provenance": { "dependencies": { "fixture": "locked" } }
+                    }
+                }
+            }))
+            .expect("serialize envelope"),
+        )
+        .expect("write envelope");
+
+        let envelope = read_portable_review_child_envelope(
+            output.path(),
+            "test",
+            b"ordinary child progress remains outside the structured result",
+        )
+        .expect("structured output is authoritative");
+        let projected = envelope.project(true, "source").expect("valid evidence");
+
+        assert!(projected.passed);
+        assert_eq!(projected.runner_id.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn portable_preflight_fails_closed_for_missing_or_invalid_structured_output() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let missing = match read_portable_review_child_envelope(
+            &directory.path().join("missing.json"),
+            "lint",
+            b"diagnostic",
+        ) {
+            Ok(_) => panic!("missing output must fail"),
+            Err(error) => error,
+        };
+        assert!(missing.message.contains("no structured command-result"));
+
+        let invalid_path = directory.path().join("invalid.json");
+        std::fs::write(&invalid_path, "progress before JSON\n{not-json}")
+            .expect("write invalid output");
+        let invalid =
+            match read_portable_review_child_envelope(&invalid_path, "lint", b"diagnostic") {
+                Ok(_) => panic!("invalid output must fail"),
+                Err(error) => error,
+            };
+        assert!(invalid
+            .message
+            .contains("invalid structured command-result JSON"));
     }
 }
