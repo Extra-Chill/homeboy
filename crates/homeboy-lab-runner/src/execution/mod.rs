@@ -1616,7 +1616,6 @@ pub(super) fn fire_runner_direct_notification(
     let Some(route) = notification_route else {
         return;
     };
-    let status = job.status.as_str();
     let store = match homeboy_core::observation::ObservationStore::open_initialized() {
         Ok(store) => store,
         Err(_) => return,
@@ -1625,16 +1624,32 @@ pub(super) fn fire_runner_direct_notification(
     if already_delivered {
         return;
     }
-    let mut event =
-        homeboy_core::notify::NotifyEvent::run_completed_with_route(run_id, status, Some(route));
+    let run = store.get_run(run_id).ok().flatten();
+    let event = runner_direct_notification_event(run_id, job.status.as_str(), route, run.as_ref());
     // The store is already open for the delivery guard; reuse it so the
     // runner's direct delivery carries the same structured detail the
     // controller's notifier does.
-    if let Ok(Some(run)) = store.get_run(run_id) {
-        event = event.with_payload(homeboy_core::notify::run_completed_payload(&run));
-    }
     let outcome = homeboy_core::notify::dispatch(&event);
     if outcome.delivered {
         let _ = store.mark_notification_delivered(run_id, "runner-direct");
+    }
+}
+
+pub(super) fn runner_direct_notification_event(
+    run_id: &str,
+    fallback_status: &str,
+    route: &homeboy_core::notification_route::NotificationRoute,
+    run: Option<&homeboy_core::observation::RunRecord>,
+) -> homeboy_core::notify::NotifyEvent {
+    // The mirrored run is authoritative when it exists. In particular, a
+    // detached wrapper can remain `running` after its nested run has failed.
+    let status = run
+        .map(|run| run.status.as_str())
+        .unwrap_or(fallback_status);
+    let event =
+        homeboy_core::notify::NotifyEvent::run_completed_with_route(run_id, status, Some(route));
+    match run {
+        Some(run) => event.with_payload(homeboy_core::notify::run_completed_payload(run)),
+        None => event,
     }
 }

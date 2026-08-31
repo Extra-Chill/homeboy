@@ -281,8 +281,11 @@ where
         flow.run_id.as_deref(),
         mirror_run_id.as_deref(),
     )?;
+    // A detached handoff wrapper is only the transport owner. Once the
+    // runner has mirrored the terminal result, that nested run owns the
+    // operator-visible outcome and its notification.
     fire_runner_direct_notification(
-        flow.run_id.as_deref(),
+        terminal_notification_run_id(mirror_run_id.as_deref(), flow.run_id.as_deref()),
         &job,
         flow.lab_runner_workload
             .as_ref()
@@ -392,6 +395,15 @@ where
         append_runner_exec_diagnostic_hint(&mut output, Some(hint.to_string()));
     }
     Ok((output, exit_code))
+}
+
+pub(super) fn terminal_notification_run_id<'a>(
+    mirrored_run_id: Option<&'a str>,
+    wrapper_run_id: Option<&'a str>,
+) -> Option<&'a str> {
+    mirrored_run_id
+        .filter(|run_id| !run_id.trim().is_empty())
+        .or(wrapper_run_id)
 }
 
 fn observed_agent_task_terminal_job_status(
