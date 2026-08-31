@@ -738,6 +738,68 @@ mod tests {
     }
 
     #[test]
+    fn stale_descendant_release_plans_a_neutral_superseded_skip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let stale = temp.path().join("stale");
+        let owner = temp.path().join("owner");
+        let remote_path = remote.to_string_lossy().to_string();
+
+        git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_path],
+        );
+        git(temp.path(), &["clone", &remote_path, "seed"]);
+        git(&seed, &["config", "user.email", "homeboy@example.test"]);
+        git(&seed, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(
+            seed.join("homeboy.json"),
+            r#"{"id":"fixture","type":"fixture","version_targets":[{"file":"VERSION","pattern":"([0-9]+\\.[0-9]+\\.[0-9]+)"}]}"#,
+        )
+        .expect("config");
+        std::fs::write(seed.join("VERSION"), "0.1.0\n").expect("version");
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "release: v0.1.0"]);
+        git(&seed, &["tag", "v0.1.0"]);
+        git(&seed, &["push", "--tags", "origin", "main"]);
+        git(temp.path(), &["clone", &remote_path, "stale"]);
+        git(temp.path(), &["clone", &remote_path, "owner"]);
+        git(&owner, &["config", "user.email", "homeboy@example.test"]);
+        git(&owner, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(owner.join("VERSION"), "0.1.1\n").expect("release version");
+        git(&owner, &["add", "VERSION"]);
+        git(&owner, &["commit", "-qm", "release: v0.1.1"]);
+        git(&owner, &["tag", "v0.1.1"]);
+        git(&owner, &["push", "--tags", "origin", "main"]);
+
+        let plan = plan(
+            "fixture",
+            &ReleaseOptions {
+                path_override: Some(stale.to_string_lossy().to_string()),
+                bump_type: "patch".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("stale release must defer without error");
+
+        assert!(!plan.enabled());
+        assert_eq!(
+            plan.plan.steps[0]
+                .inputs
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some("release-superseded")
+        );
+        assert_eq!(
+            std::fs::read_to_string(stale.join("VERSION"))
+                .expect("unmutated stale version")
+                .trim(),
+            "0.1.0"
+        );
+    }
+
+    #[test]
     fn guard_fails_closed_when_checkout_is_behind_upstream() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let local = stale_checkout_fixture(dir.path(), 2);
