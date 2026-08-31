@@ -20684,7 +20684,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             crate::agent_task_gate::AgentTaskGateStatus::Succeeded;
         replacement.deterministic_gates[0].exit_code = 0;
         replacement.deterministic_gates[0].stderr.clear();
-        replacement.provenance["candidate_checkout"] = legacy_checkout;
+        replacement.provenance["candidate_checkout"] = legacy_checkout.clone();
         replacement.command_evidence = vec![
             crate::agent_task_promotion::AgentTaskPromotionCommandReport {
                 command: vec![
@@ -20804,6 +20804,20 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         );
         assert_eq!(error.details["gate_id"], "private-unbound");
 
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["latest_promotion"]["provenance"]["candidate_checkout"] =
+                legacy_checkout.clone();
+            record.metadata["promotions"][0]["provenance"]["candidate_checkout"] =
+                legacy_checkout.clone();
+        })
+        .expect("restore original immutable checkout evidence");
+        replacement.provenance["candidate_checkout"]["commit"] =
+            serde_json::json!("replacement-candidate-checkout");
+        replacement.deterministic_gates[0]
+            .candidate_checkout
+            .as_mut()
+            .unwrap()
+            .commit = "replacement-candidate-checkout".to_string();
         let replacement_for_finalization = replacement.clone();
         let replacement_for_replay = replacement.clone();
         record_replacement_gate_proof(
@@ -20812,7 +20826,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             Some("Chris approved external proof".to_string()),
             false,
         )
-        .expect("record bound green replacement proof");
+        .expect("a fresh immutable gate checkout does not change the candidate");
         let replay = record_replacement_gate_proof(
             run_id,
             replacement_for_replay,
