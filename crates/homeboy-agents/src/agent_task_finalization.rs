@@ -1429,11 +1429,26 @@ fn validate_durable_publication_eligibility(
     promotion: &AgentTaskPromotionReport,
 ) -> Result<DurablePublicationEligibility> {
     use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunExecutionState};
-    if !lifecycle.provider_runtime.is_empty()
+    let all_provider_runtimes_succeeded = !lifecycle.provider_runtime.is_empty()
         && lifecycle
             .provider_runtime
             .iter()
-            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded)
+            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
+    let producing_runtime = lifecycle.provider_runtime.iter().find(|runtime| {
+        runtime.task_id == promotion.source.task_id
+            && runtime.state == ProviderRuntimeState::Succeeded
+    });
+    let fingerprinted_candidate = matches!(
+        serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionCandidate>(
+            promotion.provenance["candidate"].clone(),
+        ),
+        Ok(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. })
+    );
+    let successful_fallback_produced_candidate = lifecycle.execution.state
+        == RunExecutionState::Succeeded
+        && producing_runtime.is_some()
+        && fingerprinted_candidate;
+    if (all_provider_runtimes_succeeded || successful_fallback_produced_candidate)
         && (lifecycle.execution.state == RunExecutionState::Succeeded
             // `CandidateRecoverable` and `PartialRecoverable` were folded into
             // `PartialFailure` before #6761, so they reached this check as
