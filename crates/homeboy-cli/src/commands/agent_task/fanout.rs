@@ -4380,6 +4380,10 @@ struct BatchCookSpec {
     input_sources: Vec<homeboy::agents::agent_tasks::gate::AgentTaskGateInputSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verification_profile: Option<String>,
+    /// Typed declared verification. Legacy shell gates remain separately
+    /// persisted for concrete records that predate this contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    test_execution_plan: Option<homeboy_engine_primitives::test_execution::TestExecutionPlan>,
     #[serde(default = "default_private_gate_reveal")]
     private_gate_reveal: AgentTaskGateRevealPolicy,
     #[serde(default)]
@@ -4470,7 +4474,10 @@ impl BatchCookSpec {
     }
 
     fn to_cook_invocation(&self, plan: &BatchCookFanoutPlan) -> Result<BatchCookInvocation> {
-        if self.verify.is_empty() && self.private_verify.is_empty() {
+        if self.verify.is_empty()
+            && self.private_verify.is_empty()
+            && self.test_execution_plan.is_none()
+        {
             return Err(invalid_fanout(
                 "each fanout cook requires verify or private_verify so PR finalization has deterministic gates",
             ));
@@ -4587,12 +4594,23 @@ impl BatchCookSpec {
                     attempt_dispatcher: None,
                 },
                 gates: VerifyGateOptions {
-                    verify: self.verify.clone(),
+                    verify: self
+                        .test_execution_plan
+                        .as_ref()
+                        .map(project_declared_test_command)
+                        .transpose()?
+                        .into_iter()
+                        .chain(self.verify.clone())
+                        .collect(),
                     private_verify: self.private_verify.clone(),
                     input_sources: self.input_sources.clone(),
                     private_gate_reveal: self.private_gate_reveal,
                     execution_policy: self.execution_policy,
-                    gate_timeout_seconds: self.gate_timeout_seconds,
+                    gate_timeout_seconds: self
+                        .test_execution_plan
+                        .as_ref()
+                        .map(|plan| plan.suite_timeout().as_secs())
+                        .unwrap_or(self.gate_timeout_seconds),
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
                     gate_no_progress_timeout_seconds: self.gate_no_progress_timeout_seconds,
                     rerun_completed_gates: self.rerun_completed_gates,
@@ -4783,13 +4801,14 @@ fn build_cook_batch_plan_with_profiles(
             &worktree,
         );
         let task_selector = format!("issue-{}", issue.number);
-        let (verify, private_verify, verification_profile) = profiles.resolve(
-            issue_url,
-            &issue.key,
-            &task_selector,
-            &args.gates.verify,
-            &args.gates.private_verify,
-        )?;
+        let (verify, private_verify, verification_profile, test_execution_plan) = profiles
+            .resolve(
+                issue_url,
+                &issue.key,
+                &task_selector,
+                &args.gates.verify,
+                &args.gates.private_verify,
+            )?;
         let input_sources =
             sources_for_executed_gates(&args.gates.input_sources, &verify, &private_verify);
         cooks.push(BatchCookSpec {
@@ -4829,6 +4848,7 @@ fn build_cook_batch_plan_with_profiles(
             private_verify,
             input_sources,
             verification_profile,
+            test_execution_plan,
             private_gate_reveal: args.gates.private_gate_reveal,
             execution_policy: VerifyGateOptions::from(args.gates.clone()).execution_policy,
             gate_timeout_seconds: args.gates.gate_timeout_seconds,
@@ -4937,20 +4957,7 @@ struct VerificationProfiles {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VerificationProfile {
-    #[serde(default)]
-    verify: Vec<String>,
-    #[serde(default)]
-    private_verify: Vec<String>,
-    #[serde(default)]
-    mode: VerificationProfileMode,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-enum VerificationProfileMode {
-    #[default]
-    Append,
-    Replace,
+    plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4996,7 +5003,12 @@ impl VerificationProfiles {
         task_selector: &str,
         shared_verify: &[String],
         shared_private_verify: &[String],
-    ) -> Result<(Vec<String>, Vec<String>, Option<String>)> {
+    ) -> Result<(
+        Vec<String>,
+        Vec<String>,
+        Option<String>,
+        Option<homeboy_engine_primitives::test_execution::TestExecutionPlan>,
+    )> {
         let matches = self
             .assignments
             .iter()
@@ -5020,7 +5032,12 @@ impl VerificationProfiles {
             ));
         }
         let Some(assignment) = matches.into_iter().next() else {
-            return Ok((shared_verify.to_vec(), shared_private_verify.to_vec(), None));
+            return Ok((
+                shared_verify.to_vec(),
+                shared_private_verify.to_vec(),
+                None,
+                None,
+            ));
         };
         let profile = self.profiles.get(&assignment.profile).ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -5030,16 +5047,23 @@ impl VerificationProfiles {
                 Some(self.profiles.keys().cloned().collect()),
             )
         })?;
-        let (mut verify, mut private_verify) = match profile.mode {
-            VerificationProfileMode::Append => {
-                (shared_verify.to_vec(), shared_private_verify.to_vec())
-            }
-            VerificationProfileMode::Replace => (Vec::new(), Vec::new()),
-        };
-        verify.extend(profile.verify.clone());
-        private_verify.extend(profile.private_verify.clone());
-        Ok((verify, private_verify, Some(assignment.profile.clone())))
+        profile.plan.declared_command().map_err(|message| {
+            Error::invalid_argument("verification-profiles.profiles.plan", message)
+        })?;
+        Ok((
+            shared_verify.to_vec(),
+            shared_private_verify.to_vec(),
+            Some(assignment.profile.clone()),
+            Some(profile.plan.clone()),
+        ))
     }
+}
+
+fn project_declared_test_command(
+    plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
+) -> Result<String> {
+    let command = plan.declared_command().map_err(invalid_fanout)?;
+    Ok(homeboy_engine_primitives::shell::quote_args(command))
 }
 
 fn sources_for_executed_gates(
@@ -5147,7 +5171,10 @@ fn validate_batch_cook_gates(
     workspace: Option<std::path::PathBuf>,
 ) -> Result<()> {
     for cook in &plan.cooks {
-        if cook.verify.is_empty() && cook.private_verify.is_empty() {
+        if cook.verify.is_empty()
+            && cook.private_verify.is_empty()
+            && cook.test_execution_plan.is_none()
+        {
             return Err(Error::validation_invalid_argument(
                 "verification-profiles",
                 "gate_missing: every cook-batch child requires verify or private_verify before worktree creation",
@@ -5203,6 +5230,7 @@ fn effective_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Vec<Value> {
                 "task_url": cook.task_url,
                 "selectors": verification_profile_selectors(cook),
                 "profile": cook.verification_profile,
+                "test_execution_plan": cook.test_execution_plan,
                 "verify": cook.verify,
                 "private_verify": cook.private_verify.iter().map(|_| "[private]").collect::<Vec<_>>(),
                 "input_sources": cook.input_sources,
@@ -5604,45 +5632,20 @@ fn dry_run_replay_command_with_placement(
         || args
             .verification_profiles
             .as_deref()
-            .is_some_and(profile_replay_requires_redaction)
+            .is_some_and(|spec| spec.starts_with('@') || spec.trim() == "-")
     {
         return "[redacted: re-run the original local private Cook-batch invocation]".to_string();
     }
     cook_batch_plan_command(args, placement)
 }
 
-fn profile_replay_requires_redaction(spec: &str) -> bool {
-    if spec.starts_with('@') || spec.trim() == "-" {
-        return true;
-    }
-    serde_json::from_str::<Value>(spec)
-        .ok()
-        .and_then(|value| value.get("profiles").cloned())
-        .and_then(|profiles| profiles.as_object().cloned())
-        .is_some_and(|profiles| {
-            profiles.values().any(|profile| {
-                profile
-                    .get("private_verify")
-                    .and_then(Value::as_array)
-                    .is_some_and(|commands| !commands.is_empty())
-            })
-        })
-}
-
-/// Before Cook resolves issue assignments, conservatively treat any declared
-/// private profile as private so invalid-input recovery cannot echo its JSON.
+/// Typed plans are always visible declarations. Private programs remain the
+/// explicit shell-only escape hatch handled above.
 fn has_private_gate_declaration(args: &AgentTaskFanoutCookBatchArgs) -> bool {
     if !args.gates.private_verify.is_empty() || !args.gates.private_verify_file.is_empty() {
         return true;
     }
-    load_verification_profiles(args.verification_profiles.as_deref())
-        .map(|profiles| {
-            profiles
-                .profiles
-                .values()
-                .any(|profile| !profile.private_verify.is_empty())
-        })
-        .unwrap_or(true)
+    false
 }
 
 fn secure_batch_plan_execution(fanout_id: &str, placement: Placement) -> String {
@@ -6132,11 +6135,10 @@ mod tests {
             "--verification-profiles <JSON>",
             "Complete example:",
             "https://github.com/owner/repo/issues/123",
-            "owner/repo#124",
             "issue-number",
-            "append",
-            "replace",
-            "private_verify",
+            "typed `plan`",
+            "suite_timeout_seconds",
+            "\"homeboy\",\"review\",\"test\"",
         ] {
             assert!(help.contains(expected), "missing {expected}:\n{help}");
         }
@@ -6150,11 +6152,11 @@ mod tests {
                 "$.per_issue",
             ),
             (
-                r#"{"profiles":{"rust":{"verify":["cargo test"],"command":["cargo fmt"]}},"assignments":[]}"#,
-                "$.profiles.rust.command",
+                r#"{"profiles":{"rust":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test"],"suite_timeout_seconds":30,"unexpected":true}}},"assignments":[]}"#,
+                "$.profiles.rust.plan.unexpected",
             ),
             (
-                r#"{"profiles":{"rust":{"verify":["cargo test"]}},"assignments":[{"selector":"issue-1","profile":"rust","append":true}]}"#,
+                r#"{"profiles":{"rust":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test"],"suite_timeout_seconds":30}}},"assignments":[{"selector":"issue-1","profile":"rust","append":true}]}"#,
                 "$.assignments[0].append",
             ),
         ] {
@@ -6176,6 +6178,22 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn verification_profile_rejects_noncanonical_review_test_argv() {
+        let mut args = cook_batch_args();
+        args.verification_profiles = Some(
+            r#"{"profiles":{"invalid":{"plan":{"adapter":"homeboy_review_test","command":["cargo","test"],"suite_timeout_seconds":30}}},"assignments":[{"selector":"issue-6453","profile":"invalid"}]}"#.to_string(),
+        );
+
+        let error =
+            build_cook_batch_plan(&args).expect_err("adapter argv is validated before planning");
+        assert_eq!(
+            error.details["field"],
+            "verification-profiles.profiles.plan"
+        );
+        assert!(error.message.contains("homeboy review test"), "{error}");
     }
 
     fn source(
@@ -6230,40 +6248,28 @@ mod tests {
     }
 
     #[test]
-    fn private_profile_declarations_use_redacted_public_paths_for_append_and_replace() {
+    fn raw_private_gates_still_use_redacted_public_paths() {
         let sentinel = "PRIVATE_PROFILE_SENTINEL";
-        for mode in ["append", "replace"] {
-            let mut args = cook_batch_args();
-            args.verification_profiles = Some(format!(
-                r#"{{"profiles":{{"private":{{"private_verify":["{sentinel}"],"mode":"{mode}"}}}},"assignments":[{{"selector":"issue-6453","profile":"private"}}]}}"#
-            ));
-            assert!(has_private_gate_declaration(&args));
-            let plan = build_cook_batch_plan(&args).expect("resolve profile");
-            assert!(plan
-                .cooks
-                .iter()
-                .any(|cook| cook.private_verify.iter().any(|gate| gate == sentinel)));
-            let commands = cook_batch_commands(&args, true, None);
-            assert!(!commands.to_string().contains(sentinel));
-            assert!(commands["run"].as_str().unwrap().contains("unavailable"));
-        }
+        let mut args = cook_batch_args();
+        args.gates.private_verify = vec![sentinel.to_string()];
+        assert!(has_private_gate_declaration(&args));
+        let commands = cook_batch_commands(&args, true, None);
+        assert!(!commands.to_string().contains(sentinel));
+        assert!(commands["run"].as_str().unwrap().contains("unavailable"));
     }
 
     #[test]
     fn private_profile_sentinel_is_redacted_across_repo_error_dry_run_and_bound_plan() {
         let sentinel = "PRIVATE_PROFILE_ALL_STATES_SENTINEL";
-        let profiles = format!(
-            r#"{{"profiles":{{"private":{{"private_verify":["{sentinel}"],"mode":"append"}}}},"assignments":[{{"selector":"issue-6453","profile":"private"}}]}}"#
-        );
         with_isolated_home(|home| {
             let mut invalid = cook_batch_args();
             invalid.repo = "homeboy@bad".to_string();
-            invalid.verification_profiles = Some(profiles.clone());
+            invalid.gates.private_verify = vec![sentinel.to_string()];
             let error = normalize_cook_batch_repo(&mut invalid).expect_err("invalid repo");
             assert!(!format!("{} {:?}", error.message, error.details).contains(sentinel));
 
             let mut dry = cook_batch_args();
-            dry.verification_profiles = Some(profiles.clone());
+            dry.gates.private_verify = vec![sentinel.to_string()];
             dry.preview = true;
             let plan = build_cook_batch_plan(&dry).expect("profile plan");
             let public = serde_json::to_string(&public_batch_cook_plan(&plan)).unwrap();
@@ -6279,7 +6285,7 @@ mod tests {
         });
         with_materialized_cook_batch_worktrees(|| {
             let mut executable = cook_batch_args();
-            executable.verification_profiles = Some(profiles);
+            executable.gates.private_verify = vec![sentinel.to_string()];
             executable.preview = false;
             executable.run_plan = false;
             let resolved = build_cook_batch_plan(&executable).expect("resolve executable profile");
@@ -9256,49 +9262,39 @@ fi
     }
 
     #[test]
-    fn cook_batch_resolves_mixed_verification_profiles_and_round_trips_commands() {
+    fn cook_batch_projects_a_declared_verification_plan_to_cook_and_lab() {
         with_materialized_cook_batch_worktrees(|| {
             let mut batch_args = cook_batch_args();
             batch_args
                 .issues
                 .push("https://github.com/Extra-Chill/homeboy/issues/6455".to_string());
-            batch_args.gates.verify = vec!["shared gate --strict='exact bytes'".to_string()];
+            batch_args.gates.verify.clear();
             batch_args.verification_profiles = Some(
-            serde_json::json!({
-                "profiles": {
-                    "php": { "verify": ["composer audit --format=json"], "mode": "append" },
-                    "node": { "verify": ["npm audit --omit=dev"], "mode": "replace" },
-                    "rust": { "verify": ["cargo fmt --check", "cargo test -p homeboy-cli"] }
-                },
-                "assignments": [
-                    { "selector": "Extra-Chill/homeboy#6453", "profile": "php" },
-                    { "selector": "issue-6454", "profile": "node" },
-                    { "selector": "https://github.com/Extra-Chill/homeboy/issues/6455", "profile": "rust" }
-                ]
-            })
-            .to_string(),
-        );
+                serde_json::json!({
+                    "profiles": {
+                        "review": { "plan": {
+                            "adapter": "homeboy_review_test",
+                            "command": ["homeboy", "review", "test", "homeboy"],
+                            "suite_timeout_seconds": 123,
+                        }}
+                    },
+                    "assignments": [
+                        { "selector": "issue-6454", "profile": "review" }
+                    ]
+                })
+                .to_string(),
+            );
 
             let plan = build_cook_batch_plan(&batch_args).expect("mixed verification plan");
-            assert_eq!(plan.cooks[0].verification_profile.as_deref(), Some("php"));
             assert_eq!(
-                plan.cooks[0].verify,
-                vec![
-                    "shared gate --strict='exact bytes'",
-                    "composer audit --format=json"
-                ]
+                plan.cooks[1].verification_profile.as_deref(),
+                Some("review")
             );
-            assert_eq!(plan.cooks[1].verification_profile.as_deref(), Some("node"));
-            assert_eq!(plan.cooks[1].verify, vec!["npm audit --omit=dev"]);
-            assert_eq!(plan.cooks[2].verification_profile.as_deref(), Some("rust"));
-            assert_eq!(
-                plan.cooks[2].verify,
-                vec![
-                    "shared gate --strict='exact bytes'",
-                    "cargo fmt --check",
-                    "cargo test -p homeboy-cli"
-                ]
-            );
+            let declared = plan.cooks[1]
+                .test_execution_plan
+                .as_ref()
+                .expect("declared plan");
+            assert_eq!(declared.suite_timeout().as_secs(), 123);
 
             let round_trip = BatchCookFanoutPlan::from_value(
                 serde_json::to_value(&plan).expect("serialize plan"),
@@ -9310,15 +9306,25 @@ fi
                 assert_eq!(reloaded.verification_profile, original.verification_profile);
                 assert_eq!(reloaded.verify, original.verify);
                 assert_eq!(reloaded.private_verify, original.private_verify);
+                assert_eq!(reloaded.test_execution_plan, original.test_execution_plan);
             }
             assert_eq!(
-                round_trip.cooks[2]
+                round_trip.cooks[1]
                     .to_cook_invocation(&round_trip)
                     .expect("Lab handoff invocation")
                     .options
                     .gates
                     .verify,
-                plan.cooks[2].verify
+                vec!["homeboy review test homeboy"]
+            );
+            assert_eq!(
+                round_trip.cooks[1]
+                    .to_cook_invocation(&round_trip)
+                    .expect("Cook projection")
+                    .options
+                    .gates
+                    .gate_timeout_seconds,
+                123
             );
         });
     }
@@ -9327,7 +9333,7 @@ fi
     fn cook_batch_rejects_an_unmatched_verification_profile_selector() {
         let mut args = cook_batch_args();
         args.verification_profiles = Some(
-            r#"{"profiles":{"node":{"verify":["npm audit"]}},"assignments":[{"selector":"issue-9999","profile":"node"}]}"#.to_string(),
+            r#"{"profiles":{"node":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test"],"suite_timeout_seconds":30}}},"assignments":[{"selector":"issue-9999","profile":"node"}]}"#.to_string(),
         );
 
         let error = build_cook_batch_plan(&args).expect_err("unmatched profile selector");
@@ -9346,7 +9352,7 @@ fi
         let mut args = cook_batch_args();
         args.gates.verify.clear();
         args.verification_profiles = Some(
-            r#"{"profiles":{"rust":{"verify":["cargo test"]}},"assignments":[{"selector":"issue-6453","profile":"rust"}]}"#.to_string(),
+            r#"{"profiles":{"rust":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test"],"suite_timeout_seconds":30}}},"assignments":[{"selector":"issue-6453","profile":"rust"}]}"#.to_string(),
         );
 
         let plan = build_cook_batch_plan(&args).expect("plan before worktree creation");
@@ -10297,8 +10303,8 @@ fi
             args.verification_profiles = Some(
                 serde_json::json!({
                     "profiles": {
-                        "append": { "verify": ["profile-check"], "mode": "append" },
-                        "replace": { "private_verify": ["private-check"], "mode": "replace" }
+                        "append": { "plan": { "adapter": "homeboy_review_test", "command": ["homeboy", "review", "test"], "suite_timeout_seconds": 30 } },
+                        "replace": { "plan": { "adapter": "homeboy_review_test", "command": ["homeboy", "review", "test", "fixture"], "suite_timeout_seconds": 30 } }
                     },
                     "assignments": [
                         { "selector": "Extra-Chill/homeboy#6453", "profile": "append" },
@@ -10332,7 +10338,8 @@ fi
                 .as_array()
                 .expect("resolved gate preview");
             assert_eq!(gates[0]["profile"], "append");
-            assert_eq!(gates[0]["verify"], json!(["shared-check", "profile-check"]));
+            assert_eq!(gates[0]["verify"], json!(["shared-check"]));
+            assert_eq!(gates[0]["test_execution_plan"]["suite_timeout_seconds"], 30);
             assert_eq!(
                 gates[0]["selectors"],
                 json!([
@@ -10342,9 +10349,11 @@ fi
                 ])
             );
             assert_eq!(gates[1]["profile"], "replace");
-            assert_eq!(gates[1]["verify"], json!([]));
-            assert_eq!(gates[1]["private_verify"], json!(["[private]"]));
-            assert!(!value.to_string().contains("private-check"));
+            assert_eq!(gates[1]["verify"], json!(["shared-check"]));
+            assert_eq!(
+                gates[1]["test_execution_plan"]["command"],
+                json!(["homeboy", "review", "test", "fixture"])
+            );
             assert!(!home
                 .path()
                 .join(".local/share/homeboy/agent-task-recipes")
@@ -10549,14 +10558,12 @@ fi
     fn public_inline_profile_keeps_an_executable_replay_command() {
         let mut args = cook_batch_args();
         args.verification_profiles = Some(
-            r#"{"profiles":{"public":{"verify":["cargo test"]}},"assignments":[]}"#.to_string(),
+            r#"{"profiles":{"public":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test"],"suite_timeout_seconds":30}}},"assignments":[]}"#.to_string(),
         );
         assert!(dry_run_replay_command(&args).starts_with("homeboy "));
 
         let sentinel = "PRIVATE_PROFILE_REPLAY_SENTINEL";
-        args.verification_profiles = Some(format!(
-            r#"{{"profiles":{{"private":{{"private_verify":["{sentinel}"]}}}},"assignments":[]}}"#
-        ));
+        args.gates.private_verify = vec![sentinel.to_string()];
         assert!(!dry_run_replay_command(&args).contains(sentinel));
     }
 

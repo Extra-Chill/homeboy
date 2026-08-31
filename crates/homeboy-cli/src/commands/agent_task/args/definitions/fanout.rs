@@ -5,14 +5,14 @@ use super::cook::{
     PROVIDER_EVIDENCE_DECLARATION,
 };
 
-pub const VERIFICATION_PROFILES_EXAMPLE: &str = r#"{"profiles":{"rust":{"verify":["cargo test"],"private_verify":["./private-check"],"mode":"append"},"node":{"verify":["npm test"],"mode":"replace"}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"rust"},{"selector":"owner/repo#124","profile":"node"}]}"#;
+pub const VERIFICATION_PROFILES_EXAMPLE: &str = r#"{"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
 
 const VERIFICATION_PROFILES_HELP: &str = r#"JSON verification profile declaration, inline or @file.json.
 
-Profiles contain visible `verify` and/or `private_verify` command arrays. `mode` is `append` (the default, combining profile and shared gates) or `replace` (discarding shared gates for that child). Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector.
+Profiles select one typed `plan`; shared `--verify` and `--private-verify` remain explicit shell escape hatches. Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector.
 
 Complete example:
-  {"profiles":{"rust":{"verify":["cargo test"],"private_verify":["./private-check"],"mode":"append"},"node":{"verify":["npm test"],"mode":"replace"}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"rust"},{"selector":"owner/repo#124","profile":"node"}]}"#;
+  {"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
 
 #[derive(Args, Debug)]
 pub struct AgentTaskFanoutArgs {
