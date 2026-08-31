@@ -8047,18 +8047,6 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
         .expect("moving base SHA is UTF-8")
         .trim()
         .to_string();
-        let components = home.path().join(".config/homeboy/components");
-        std::fs::create_dir_all(&components).expect("component registry");
-        std::fs::write(
-            components.join("fixture.json"),
-            serde_json::json!({
-                "local_path": source,
-                "remote_path": "wp-content/plugins/fixture"
-            })
-            .to_string(),
-        )
-        .expect("component registration");
-
         let cook_id = "native-provision";
         let run_id = "native-provision-run";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
@@ -8069,7 +8057,7 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
             "kind": "provider",
             "handle": options.workspace.to_worktree,
             "provision_intent": {
-                "repo": "fixture",
+                "repo": source,
                 "base": "main",
                 "head": "native-provision",
                 "task_url": "https://example.test/issues/8017",

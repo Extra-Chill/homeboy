@@ -857,7 +857,12 @@ impl WorktreeFinalizationProvider for NativeWorktreeProvider {
 
 fn native_provision_intent(intent: &WorktreeProvisionIntent) -> WorktreeProvisionIntent {
     let mut intent = intent.clone();
-    intent.handle = worktree::handle_for_branch(&intent.repo, &intent.head);
+    let repository = Path::new(&intent.repo)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&intent.repo);
+    intent.handle = worktree::handle_for_branch(repository, &intent.head);
     intent
 }
 
