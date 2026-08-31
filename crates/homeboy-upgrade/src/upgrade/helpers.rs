@@ -461,19 +461,19 @@ fn run_controller_upgrade_with_operation(
             )?;
             let (mut extensions_updated, mut extension_skips) =
                 if !controller_allows_extension_refresh(false, &initial_completion) {
-                    operation.mark_extensions(
+                    operation.mark_extensions_durable(
                         "not_run",
                         "controller changed before extension refresh admission",
-                    );
+                    )?;
                     (vec![], vec![])
                 } else if skip_extensions {
-                    operation.mark_extensions("skipped", "extension refresh skipped");
+                    operation.mark_extensions_durable("skipped", "extension refresh skipped")?;
                     (vec![], vec![])
                 } else {
                     operation.set_phase_durable("refreshing installed extensions")?;
                     let (updated, skipped) = update_all_extensions(operation.id())?;
                     let status = extension_component_status(true, false, &updated, &skipped);
-                    operation.mark_extensions(&status.status, &status.summary);
+                    operation.mark_extensions_durable(&status.status, &status.summary)?;
                     (updated, skipped)
                 };
             let mut completion;
@@ -675,6 +675,26 @@ fn run_controller_upgrade_with_operation(
             }
         },
         || {
+            if matches!(
+                install_method,
+                InstallMethod::Homebrew | InstallMethod::Secondary
+            ) && !deliberate
+            {
+                let completion = reconcile_controller_identity(
+                    observed_installed_controller_identity()?,
+                    previous_build_identity.as_deref(),
+                    Some(previous_version.as_str()),
+                )?;
+                if completion.superseded {
+                    return Ok((
+                        false,
+                        completion.version,
+                        completion.build_identity,
+                        None,
+                        true,
+                    ));
+                }
+            }
             let operation_id = operation
                 .id()
                 .expect("controller upgrades require a durable operation")
@@ -807,22 +827,22 @@ fn run_controller_upgrade_with_operation(
     // mismatches and inconsistent audit findings.
     let (mut extensions_updated, mut extension_skips) =
         if !controller_allows_extension_refresh(superseded, &initial_completion) {
-            operation.mark_extensions(
+            operation.mark_extensions_durable(
                 "not_run",
                 "controller changed before extension refresh admission",
-            );
+            )?;
             (vec![], vec![])
         } else if upgrade_completed && !skip_extensions {
             operation.set_phase_durable("refreshing installed extensions")?;
             let (updated, skipped) = update_all_extensions(operation.id())?;
             let status = extension_component_status(true, false, &updated, &skipped);
-            operation.mark_extensions(&status.status, &status.summary);
+            operation.mark_extensions_durable(&status.status, &status.summary)?;
             (updated, skipped)
         } else if skip_extensions {
-            operation.mark_extensions("skipped", "extension refresh skipped");
+            operation.mark_extensions_durable("skipped", "extension refresh skipped")?;
             (vec![], vec![])
         } else {
-            operation.mark_extensions("not_run", "extension refresh was not attempted");
+            operation.mark_extensions_durable("not_run", "extension refresh was not attempted")?;
             (vec![], vec![])
         };
 

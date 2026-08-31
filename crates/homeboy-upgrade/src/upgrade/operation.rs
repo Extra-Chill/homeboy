@@ -256,9 +256,9 @@ impl UpgradeOperation {
         persisted
     }
 
-    pub fn mark_extensions(&mut self, status: &str, summary: &str) {
+    pub fn mark_extensions_durable(&mut self, status: &str, summary: &str) -> Result<()> {
         self.metadata["extensions"] = component(status, summary);
-        self.persist();
+        self.persist_durable()
     }
 
     #[cfg(test)]
@@ -314,10 +314,6 @@ impl UpgradeOperation {
         self.pending_terminal = None;
         self.finished = false;
         self.finish_failed_durable(error)
-    }
-
-    fn persist(&mut self) {
-        let _ = self.persist_durable();
     }
 
     fn persist_durable(&mut self) -> Result<()> {
@@ -1045,7 +1041,9 @@ mod tests {
             operation
                 .set_phase_durable("refreshing installed extensions")
                 .expect("persist extension refresh phase");
-            operation.mark_extensions("completed", "7 updated, 0 skipped");
+            operation
+                .mark_extensions_durable("completed", "7 updated, 0 skipped")
+                .expect("persist completed extension refresh");
             operation
                 .set_phase_durable("refreshing configured runners")
                 .expect("persist runner refresh phase");
