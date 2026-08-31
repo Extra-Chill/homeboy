@@ -47,6 +47,39 @@ assert.deepEqual(componentInputs.mounts, [{
   mode: 'readonly',
 }]);
 
+const rigPackageRoot = path.join(path.sep, 'tmp', 'installed-rig-package');
+const packageInputs = rigWorkloadInputs(
+  [
+    path.join(rigPackageRoot, 'tests', 'bench', 'boot-timing.php'),
+    path.join(rigPackageRoot, 'tests', 'bench', 'read-heavy.php'),
+  ].join(path.delimiter),
+  [],
+  'markdown-database-integration',
+  componentRoot,
+  rigPackageRoot,
+);
+
+assert.deepEqual(packageInputs.workloads, [
+  {
+    id: 'boot-timing',
+    source: 'rig',
+    overridesDiscovered: true,
+    run: [{ type: 'php', file: '.homeboy/bench-rig/tests/bench/boot-timing.php' }],
+  },
+  {
+    id: 'read-heavy',
+    source: 'rig',
+    overridesDiscovered: true,
+    run: [{ type: 'php', file: '.homeboy/bench-rig/tests/bench/read-heavy.php' }],
+  },
+]);
+assert.deepEqual(packageInputs.mounts, [{
+  source: rigPackageRoot,
+  target: '/wordpress/wp-content/plugins/markdown-database-integration/.homeboy/bench-rig',
+  type: 'directory',
+  mode: 'readonly',
+}]);
+
 const materializedRoot = mkdtempSync(path.join(tmpdir(), 'homeboy-bench-selection-'));
 try {
   const actualRoot = path.join(materializedRoot, 'actual');
