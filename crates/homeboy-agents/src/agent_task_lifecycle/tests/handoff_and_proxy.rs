@@ -1434,6 +1434,19 @@ fn reserved_lab_admission_recovers_runner_job_after_client_loss() {
             u64::MAX,
         )
         .expect("persist direct daemon reservation before client loss");
+        rewrite_record_for_test(run_id, |record| {
+            // The synchronous caller has exited and its last controller
+            // heartbeat is stale. Recovery must bind the admitted daemon job
+            // before the no-PID watchdog classifies this as ownerless.
+            record.updated_at = Some(
+                (chrono::Utc::now()
+                    - chrono::Duration::minutes(
+                        homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES,
+                    ))
+                .to_rfc3339(),
+            );
+        })
+        .expect("age interrupted caller heartbeat");
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
             result: Mutex::new(Some(TestRunnerReconciliation::Unconfirmed)),
             recovered_runner_job_id: Mutex::new(Some("accepted-runner-job-1".to_string())),
@@ -1449,6 +1462,7 @@ fn reserved_lab_admission_recovers_runner_job_after_client_loss() {
             "accepted"
         );
         assert!(recovered.metadata.get("stale_running").is_none());
+        assert!(recovered.metadata.get("stale_running_reason").is_none());
     });
 }
 
