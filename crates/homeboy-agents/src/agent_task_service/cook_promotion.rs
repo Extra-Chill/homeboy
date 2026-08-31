@@ -2914,7 +2914,7 @@ pub fn persist_manual_finalization_intent(
     validate_manual_preflight_report(&report, run_id, false)?;
     agent_task_lifecycle::record_manual_finalization_intent(
         run_id,
-        serde_json::to_value(&report).expect("finalization report serializes"),
+        manual_finalization_report_value(&report, run_id, "manual_finalization_intent")?,
     )
 }
 
@@ -2927,7 +2927,7 @@ pub fn persist_manual_finalization_retry_intent(
     validate_manual_preflight_report(report, run_id, true)?;
     let record = agent_task_lifecycle::record_manual_finalization_intent(
         run_id,
-        serde_json::to_value(report).expect("finalization report serializes"),
+        manual_finalization_report_value(report, run_id, "manual_finalization_intent")?,
     )?;
     agent_task_lifecycle::record_manual_finalization_retry(run_id)?;
     let candidate = crate::agent_task_promotion::candidate_fingerprint(&report.path)?;
@@ -3139,7 +3139,7 @@ pub fn persist_manual_finalization_receipt(
     }
     agent_task_lifecycle::record_manual_finalization_receipt(
         run_id,
-        serde_json::to_value(report).expect("finalization report serializes"),
+        manual_finalization_report_value(report, run_id, "cook_finalization")?,
     )
 }
 
@@ -3766,15 +3766,8 @@ fn manual_finalization_receipt_for_run(
     {
         return Ok(None);
     }
-    let report: AgentTaskPrFinalizationReport =
-        serde_json::from_value(value.clone()).map_err(|_| {
-            Error::validation_invalid_argument(
-                "cook_finalization",
-                "persisted manual finalization receipt is invalid",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
+    let report =
+        manual_finalization_report_from_value(value, run_id, "cook_finalization", "receipt")?;
     let intent = manual_finalization_intent_for_run(record, run_id)?;
     if !valid_manual_finalization_receipt(&report, &intent, record, run_id, true) {
         return Err(Error::validation_invalid_argument(
@@ -3839,15 +3832,12 @@ fn manual_finalization_intent_for_run(
             None,
         ));
     }
-    let report: AgentTaskPrFinalizationReport =
-        serde_json::from_value(value.clone()).map_err(|_| {
-            Error::validation_invalid_argument(
-                "manual_finalization_intent",
-                "persisted manual finalization intent is invalid",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
+    let report = manual_finalization_report_from_value(
+        value,
+        run_id,
+        "manual_finalization_intent",
+        "intent",
+    )?;
     if report.run_id != run_id {
         return Err(Error::validation_invalid_argument(
             "manual_finalization_intent.run_id",
@@ -3880,6 +3870,41 @@ fn manual_finalization_intent_for_run(
         }
     }
     Ok(report)
+}
+
+fn manual_finalization_report_value(
+    report: &AgentTaskPrFinalizationReport,
+    run_id: &str,
+    field: &str,
+) -> Result<Value> {
+    let value = serde_json::to_value(report).expect("finalization report serializes");
+    manual_finalization_report_from_value(&value, run_id, field, "report")?;
+    Ok(value)
+}
+
+fn manual_finalization_report_from_value(
+    value: &Value,
+    run_id: &str,
+    field: &str,
+    kind: &str,
+) -> Result<AgentTaskPrFinalizationReport> {
+    serde_path_to_error::deserialize(value.clone()).map_err(|error| {
+        let path = error.path().to_string();
+        let field = if path.is_empty() || path == "." {
+            field.to_string()
+        } else {
+            format!("{field}.{path}")
+        };
+        Error::validation_invalid_argument(
+            field,
+            format!(
+                "persisted manual finalization {kind} is invalid: {}",
+                error.inner()
+            ),
+            Some(run_id.to_string()),
+            None,
+        )
+    })
 }
 
 fn valid_manual_finalization_receipt(
