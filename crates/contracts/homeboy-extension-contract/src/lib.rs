@@ -10,6 +10,7 @@
 //! workflow modules expose only the result types that are part of those workflows.
 
 pub use action_types::HttpMethod;
+pub mod api;
 pub use ci_config::{
     CiCachePath, CiCachePathRoot, CiCacheSpec, CiCapability, CiJobFidelity, CiJobMapping,
     CiJobSpec, CiLocalContext, CiProfileSpec,
