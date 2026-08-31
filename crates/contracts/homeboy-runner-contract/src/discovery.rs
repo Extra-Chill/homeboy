@@ -1,4 +1,8 @@
-//! Transport-neutral runner discovery and readiness resources.
+//! Transport-neutral runner discovery, readiness, and API handshake resources.
+//!
+//! Runner API negotiation covers the serialized service contract only. Homeboy
+//! binary provenance, daemon freshness, source ancestry, and Lab capability
+//! admission remain independently evaluated implementation concerns.
 
 use std::collections::BTreeSet;
 
@@ -8,6 +12,66 @@ pub const RUNNER_DESCRIPTOR_SCHEMA: &str = "homeboy/runner-descriptor/v1";
 pub const RUNNER_CAPABILITIES_SCHEMA: &str = "homeboy/runner-capabilities/v1";
 pub const RUNNER_READINESS_SCHEMA: &str = "homeboy/runner-readiness/v1";
 pub const RUNNER_INSPECTION_SCHEMA: &str = "homeboy/runner-inspection/v1";
+pub const RUNNER_API_HANDSHAKE_REQUEST_SCHEMA: &str = "homeboy/runner-api-handshake-request/v1";
+pub const RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA: &str = "homeboy/runner-api-handshake-response/v1";
+pub const RUNNER_API_V1: RunnerApiVersion = RunnerApiVersion { major: 1 };
+
+/// A transport-neutral Runner API major version.
+///
+/// The numeric shape lets an older client parse and explicitly reject a future
+/// version instead of failing to deserialize an unknown enum variant.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RunnerApiVersion {
+    pub major: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiHandshakeRequest {
+    pub schema: String,
+    pub supported_versions: Vec<RunnerApiVersion>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerApiCompatibilityStatus {
+    Compatible,
+    Incompatible,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerApiCompatibilityFailureCode {
+    InvalidHandshakeSchema,
+    NoSharedApiVersion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiCompatibilityFailure {
+    pub code: RunnerApiCompatibilityFailureCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiCompatibility {
+    pub status: RunnerApiCompatibilityStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<RunnerApiCompatibilityFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerApiHandshakeResponse {
+    pub schema: String,
+    pub supported_versions: Vec<RunnerApiVersion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_version: Option<RunnerApiVersion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection: Option<RunnerInspection>,
+    pub compatibility: RunnerApiCompatibility,
+}
 
 /// The implementation kind backing a runner definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,5 +160,45 @@ mod tests {
         assert_eq!(value["kind"], "local");
         assert!(value.get("server_id").is_none());
         assert!(value.get("concurrency_limit").is_none());
+    }
+
+    #[test]
+    fn future_api_versions_remain_parseable() {
+        let version: RunnerApiVersion =
+            serde_json::from_value(serde_json::json!({ "major": 99 })).expect("api version");
+
+        assert_eq!(version.major, 99);
+    }
+
+    #[test]
+    fn incompatible_handshake_response_has_an_explicit_wire_shape() {
+        let response = RunnerApiHandshakeResponse {
+            schema: RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA.to_string(),
+            supported_versions: vec![RUNNER_API_V1],
+            selected_version: None,
+            inspection: None,
+            compatibility: RunnerApiCompatibility {
+                status: RunnerApiCompatibilityStatus::Incompatible,
+                failures: vec![RunnerApiCompatibilityFailure {
+                    code: RunnerApiCompatibilityFailureCode::NoSharedApiVersion,
+                    message: "no shared version".to_string(),
+                }],
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("handshake response JSON"),
+            serde_json::json!({
+                "schema": RUNNER_API_HANDSHAKE_RESPONSE_SCHEMA,
+                "supported_versions": [{ "major": 1 }],
+                "compatibility": {
+                    "status": "incompatible",
+                    "failures": [{
+                        "code": "no_shared_api_version",
+                        "message": "no shared version"
+                    }]
+                }
+            })
+        );
     }
 }
