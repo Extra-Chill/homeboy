@@ -8,7 +8,7 @@
 //! declares every detector and `descriptor_runtime::run_descriptor_detectors`
 //! executes it. Only three families are still sequenced by hand below because
 //! they have a non-uniform shape — the convention pipeline, the multi-pass
-//! `duplication` family (five timing spans plus the `duplicate_groups` side
+//! `duplication` family (six timing spans plus the `duplicate_groups` side
 //! output), and `artifact_portability` (logs scan statistics even when empty).
 //!
 //! The detector phase runs CONCURRENTLY (see `parallel`). Detectors are pure
@@ -294,11 +294,11 @@ pub(super) fn audit_internal(
     // corpus below because their correctness for an in-scope file depends on
     // evidence from out-of-scope files (matching bodies, external references).
     //
-    // The two exact-duplicate passes are the exception, and the reason the
+    // The exact-duplicate pass is the exception, and the reason the
     // narrowing above could not close the timeout on its own: the duplication
     // family is this repository's largest finding population and it consumed the
-    // whole corpus. `detect_duplicates_scoped` / `detect_duplicate_groups_scoped`
-    // (#12587) split that cross-file work in two — seed the candidate
+    // whole corpus. `detect_exact_duplicates_scoped` (#12587) splits that
+    // cross-file work in two — seed the candidate
     // `(method_name, body_hash)` keys from the scoped subset, then expand each
     // surviving key against the FULL corpus for counterpart evidence. So they
     // still see every out-of-scope counterpart, and the subset is passed only as
@@ -361,7 +361,7 @@ pub(super) fn audit_internal(
     // the `scoped ⊆ all` precondition those entry points require: the changed-scope
     // arm is a `filter` over `all_fingerprints`, and the unscoped arm is
     // `all_fingerprints` itself — which is exactly the `(all, all)` delegation the
-    // unscoped `detect_duplicates` / `detect_duplicate_groups` already perform.
+    // unscoped analysis performs.
     let per_file_fingerprints: &[&fingerprint::FileFingerprint] = scoped_fingerprints
         .as_ref()
         .map(|(_, subset)| subset.as_slice())
@@ -405,7 +405,7 @@ pub(super) fn audit_internal(
         test_quality_findings: test_quality_findings.as_deref(),
     };
 
-    // The duplication family stays hand-sequenced: it runs five timing spans and
+    // The duplication family stays hand-sequenced: it runs six timing spans and
     // also produces `duplicate_groups`, a side output threaded into the report.
     //
     // "Hand-sequenced" describes the REPORTING, which is still the fixed sequence
@@ -696,8 +696,8 @@ pub(super) fn audit_internal(
 /// Naming each output rather than returning a flat `Vec<Finding>` is what lets
 /// the passes run concurrently while the reporting in `audit_internal` stays in
 /// its original fixed order — each pass has its own log line, and
-/// `detect_duplicate_groups` produces `duplicate_groups`, a side output the report
-/// carries separately from the findings.
+/// the exact pass produces `duplicate_groups`, a side output the report carries
+/// separately from the findings.
 struct DuplicationUnit {
     spans: Vec<AuditTimingSpan>,
     exact: Vec<findings::Finding>,
@@ -709,14 +709,12 @@ struct DuplicationUnit {
     parallel_implementation: Vec<findings::Finding>,
 }
 
-/// Run the duplication family's seven passes concurrently.
+/// Run the duplication family's six passes concurrently.
 ///
 /// Every pass is a pure function of the same two immutable inputs — the
-/// convention fingerprint corpus and the convention method set — and returns an
-/// owned vector. There is no data dependency between them, not even between
-/// `detect_duplicates` and `detect_duplicate_groups`, which each rebuild their own
-/// grouping. So the family's "hand-sequenced" shape was never a sequencing
-/// requirement, only a reporting one.
+/// convention fingerprint corpus and the convention method set — and returns
+/// owned output. The family's "hand-sequenced" shape is a reporting requirement,
+/// not an execution dependency.
 ///
 /// Units are started in pass order and joined in pass order, and the spans are
 /// concatenated in that same order, so the timing report is identical to the
@@ -724,13 +722,13 @@ struct DuplicationUnit {
 /// `HOMEBOY_AUDIT_DETECTOR_THREADS=1`, `spawn_or_run` runs each pass inline at its
 /// start point, which reproduces the original serial execution exactly.
 ///
-/// `scoped_fingerprints` is the changed-scope seed corpus (#12583). The two
-/// exact-duplicate passes use the scope-seeded entry points, which seed candidate
+/// `scoped_fingerprints` is the changed-scope seed corpus (#12583). The exact
+/// duplicate pass uses the scope-seeded entry point, which seeds candidate
 /// `(method_name, body_hash)` keys from it and then expand each candidate against
 /// the full `all_fingerprints` corpus, so counterpart evidence from out-of-scope
 /// files is still found. It must be a SUBSET of `all_fingerprints`; in unscoped
 /// mode the caller passes `all_fingerprints` itself, which is the same `(all, all)`
-/// delegation the unscoped `detect_duplicates` / `detect_duplicate_groups` perform.
+/// delegation an unscoped analysis performs.
 /// The other five passes have no scoped variant and take the full corpus, so this
 /// adds a third immutable input without adding a data dependency: every pass is
 /// still a pure function of borrowed, shared inputs.
@@ -749,26 +747,13 @@ fn run_duplication_family(
                 "detector.duplication.exact",
                 enabled,
                 || {
-                    duplication::detect_duplicates_scoped(
+                    duplication::detect_exact_duplicates_scoped(
                         scoped_fingerprints,
                         all_fingerprints,
                         convention_methods,
                     )
                 },
-                Vec::new,
-            )
-        });
-        let groups = spawn_or_run(scope, || {
-            time_audit_detector_isolated(
-                "detector.duplication.groups",
-                enabled,
-                || {
-                    duplication::detect_duplicate_groups_scoped(
-                        scoped_fingerprints,
-                        all_fingerprints,
-                    )
-                },
-                Vec::new,
+                duplication::ExactDuplicateAnalysis::default,
             )
         });
         let intra_method = spawn_or_run(scope, || {
@@ -819,7 +804,6 @@ fn run_duplication_family(
         });
 
         let (exact, exact_spans) = exact.join();
-        let (groups, groups_spans) = groups.join();
         let (intra_method, intra_method_spans) = intra_method.join();
         let (near_duplicate, near_duplicate_spans) = near_duplicate.join();
         let (cross_name, cross_name_spans) = cross_name.join();
@@ -829,7 +813,6 @@ fn run_duplication_family(
 
         let mut spans = Vec::new();
         spans.extend(exact_spans);
-        spans.extend(groups_spans);
         spans.extend(intra_method_spans);
         spans.extend(near_duplicate_spans);
         spans.extend(cross_name_spans);
@@ -838,8 +821,8 @@ fn run_duplication_family(
 
         DuplicationUnit {
             spans,
-            exact,
-            groups,
+            exact: exact.findings,
+            groups: exact.groups,
             intra_method,
             near_duplicate,
             cross_name,

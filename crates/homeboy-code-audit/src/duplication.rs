@@ -6,16 +6,14 @@
 //! to detect near-duplicates — functions with identical control flow that differ
 //! only in variable names, constant references, or string values.
 //!
-//! Four outputs:
-//! - `detect_duplicates()` → flat `Vec<Finding>` for exact duplicates
-//! - `detect_duplicate_groups()` → structured `Vec<DuplicateGroup>` for the fixer
+//! Primary outputs:
+//! - `detect_exact_duplicates_scoped()` → exact findings plus fixer groups
 //! - `detect_near_duplicates()` → flat `Vec<Finding>` for structural near-duplicates
 //! - `detect_intra_method_duplicates()` → duplicated blocks within a single method
 //!
-//! # Scope-seeded entry points
+//! # Scope-seeded analysis
 //!
-//! The exact-duplicate family also exposes two-phase, scope-seeded variants —
-//! [`detect_duplicates_scoped`] and [`detect_duplicate_groups_scoped`] — for
+//! The exact-duplicate family exposes a two-phase, scope-seeded analysis for
 //! changed-scope (`--changed-since`) audits. Duplication is a *cross-file*
 //! detector: a duplicate is only a duplicate because a counterpart body exists
 //! somewhere else, and that counterpart may sit outside the changed scope. So
@@ -59,7 +57,7 @@ const MIN_DUPLICATE_LOCATIONS: usize = 2;
 
 /// `(method_name, body_hash)` → the files that contain that exact body.
 ///
-/// The shared grouping behind `detect_duplicates` and `detect_duplicate_groups`.
+/// The shared grouping behind exact duplicate findings and fixer groups.
 type BodyHashGroups = HashMap<(String, String), Vec<String>>;
 
 /// Candidate seed index: `method_name` → the body hashes seen for that name in
@@ -162,35 +160,27 @@ fn pick_canonical(locations: &[String]) -> String {
     sorted[0].clone()
 }
 
-/// Detect duplicate groups with canonical file selection.
-///
-/// Returns structured data the fixer uses to remove duplicates.
-///
-/// Since #12583 the engine calls [`detect_duplicate_groups_scoped`] on both the
-/// scoped and unscoped paths (unscoped passes the full corpus as its own seed),
-/// so this wrapper's only remaining callers are the tests that use it as the
-/// unscoped oracle for the scope-seeded equivalence assertions. It stays compiled
-/// in release builds as the documented unscoped entry point; the `cfg_attr` only
-/// keeps `dead_code` quiet where nothing but tests reach it.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn detect_duplicate_groups(fingerprints: &[&FileFingerprint]) -> Vec<DuplicateGroup> {
-    detect_duplicate_groups_scoped(fingerprints, fingerprints)
+#[derive(Default)]
+pub(crate) struct ExactDuplicateAnalysis {
+    pub(crate) findings: Vec<Finding>,
+    pub(crate) groups: Vec<DuplicateGroup>,
 }
 
-/// Scope-seeded [`detect_duplicate_groups`].
+/// Detect exact duplicates and build their fixer groups from one seeded index.
 ///
-/// Seeds candidate `(method_name, body_hash)` keys from `scoped`, then expands
-/// each candidate to its full member list across `all`, so canonical selection
-/// and `remove_from` see every counterpart — including out-of-scope ones.
-///
-/// `scoped` must be a subset of `all`. Output equals `detect_duplicate_groups(all)`
-/// restricted to the groups that have at least one member in `scoped` (a group
-/// with no in-scope member is not actionable for a changed-scope run).
-pub(crate) fn detect_duplicate_groups_scoped(
+/// `scoped` must be a subset of `all`. Candidate keys come from `scoped`, then
+/// expand against `all` so findings and canonical selection retain every
+/// out-of-scope counterpart. Passing `(all, all)` performs an unscoped analysis.
+pub(crate) fn detect_exact_duplicates_scoped(
     scoped: &[&FileFingerprint],
     all: &[&FileFingerprint],
-) -> Vec<DuplicateGroup> {
-    duplicate_groups_from_body_hash_groups(&build_groups_seeded(scoped, all))
+    convention_methods: &HashSet<String>,
+) -> ExactDuplicateAnalysis {
+    let hash_groups = build_groups_seeded(scoped, all);
+    ExactDuplicateAnalysis {
+        findings: duplicate_findings_from_body_hash_groups(&hash_groups, all, convention_methods),
+        groups: duplicate_groups_from_body_hash_groups(&hash_groups),
+    }
 }
 
 /// Shared group-construction phase for both the scoped and unscoped paths.
@@ -311,54 +301,6 @@ fn is_test_location(
     is_test_path(file) || inline_test_methods.contains(&(method_name.to_string(), file.to_string()))
 }
 
-/// Detect exact function body duplicates across files.
-///
-/// Groups functions by `(method_name, body_hash)`. When two or more files
-/// contain a function with the same name and the same normalized body hash, a
-/// finding is emitted for each location.
-///
-/// `convention_methods` are excluded — identical implementations across
-/// convention-following files are expected behavior (e.g. `__construct`,
-/// `checkPermission`, interface methods with identical bodies).
-///
-/// Since #12583 the engine calls [`detect_duplicates_scoped`] on both the scoped
-/// and unscoped paths (unscoped passes the full corpus as its own seed), so this
-/// wrapper's only remaining callers are the tests that use it as the unscoped
-/// oracle for the scope-seeded equivalence assertions. It stays compiled in
-/// release builds as the documented unscoped entry point; the `cfg_attr` only
-/// keeps `dead_code` quiet where nothing but tests reach it.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn detect_duplicates(
-    fingerprints: &[&FileFingerprint],
-    convention_methods: &std::collections::HashSet<String>,
-) -> Vec<Finding> {
-    detect_duplicates_scoped(fingerprints, fingerprints, convention_methods)
-}
-
-/// Scope-seeded [`detect_duplicates`].
-///
-/// Phase 1 seeds candidate `(method_name, body_hash)` keys from `scoped`; phase 2
-/// expands each candidate to every counterpart in `all`. Group membership,
-/// severity, the `also in …` list, and the `N files` count are therefore computed
-/// from the full corpus exactly as the unscoped path does — only the *set of
-/// groups considered* is narrowed, to those with at least one in-scope member.
-///
-/// `scoped` must be a subset of `all`.
-///
-/// Findings are still emitted for every member of a surviving group, including
-/// out-of-scope files, so the output is literally a subset of
-/// `detect_duplicates(all, convention_methods)`. The engine drops the
-/// out-of-scope ones in its scope filter, which is the same thing that happens
-/// on the unscoped path; restricted to in-scope files the two agree exactly.
-pub(crate) fn detect_duplicates_scoped(
-    scoped: &[&FileFingerprint],
-    all: &[&FileFingerprint],
-    convention_methods: &std::collections::HashSet<String>,
-) -> Vec<Finding> {
-    let hash_groups = build_groups_seeded(scoped, all);
-    duplicate_findings_from_body_hash_groups(&hash_groups, all, convention_methods)
-}
-
 /// Whether a raw `(method_name, body_hash)` group is a reportable duplicate.
 ///
 /// Two filters, stated once for both passes below: a group needs at least
@@ -474,7 +416,7 @@ const CROSS_NAME_MIN_BODY_LINES: usize = 1;
 ///
 /// `already_flagged_names` are method names already reported by the same-name
 /// exact detector; a cross-name group is still reported (its value is the
-/// *cross-name* link), but same-name-only groups are left to `detect_duplicates`.
+/// *cross-name* link), but same-name-only groups are left to the exact detector.
 pub(crate) fn detect_cross_name_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let inline_test_methods = inline_test_context_methods(fingerprints);
     // hash -> list of (file, method_name)
