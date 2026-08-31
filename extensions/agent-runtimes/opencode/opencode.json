@@ -46,6 +46,27 @@
         ],
         "display": "node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs"
       },
+      "readiness_invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/homeboy-opencode-provider-readiness.cjs"
+        ],
+        "env_allowlist": [
+          "HOME",
+          "PATH",
+          "XDG_CONFIG_HOME",
+          "XDG_DATA_HOME",
+          "HOMEBOY_OPENCODE_COMMAND_ARGS",
+          "OPENCODE_CONFIG_CONTENT",
+          "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+          "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+          "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+          "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+          "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/homeboy-opencode-provider-readiness.cjs"
+      },
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [

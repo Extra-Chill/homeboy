@@ -114,6 +114,16 @@ const OPENCODE_CAPABILITIES = [
 ];
 
 const OPENCODE_COMMAND = 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs';
+const OPENCODE_READINESS_INVOCATION = {
+	schema: 'homeboy/command-invocation/v1',
+	argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-opencode-provider-readiness.cjs'],
+	env_allowlist: [
+		'HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME',
+		'HOMEBOY_OPENCODE_COMMAND_ARGS', 'OPENCODE_CONFIG_CONTENT',
+		...OPENCODE_SECRET_ENV,
+	],
+	display: 'node {{runtime_path}}/scripts/agent/homeboy-opencode-provider-readiness.cjs',
+};
 const OPENCODE_PROCESS_ENV_ALLOWLIST = [
 	'CI',
 	'HOME',
@@ -272,6 +282,7 @@ function providerContract(options = {}) {
 		backend: 'opencode',
 		runtime_id: 'opencode',
 		invocation: options.invocation || OPENCODE_INVOCATION,
+		readiness_invocation: options.readinessInvocation || OPENCODE_READINESS_INVOCATION,
 		...contractFields,
 		secret_env_requirements: [providerSecretEnvRequirement('codex', OPENCODE_SECRET_ENV)],
 		capabilities: OPENCODE_CAPABILITIES,
@@ -1902,6 +1913,7 @@ module.exports = {
 	OPENCODE_SECRET_ENV,
 	OPENCODE_COMMAND,
 	OPENCODE_INVOCATION,
+	OPENCODE_READINESS_INVOCATION,
 	OPENCODE_PROVIDER_DEFAULTS,
 	OPENCODE_PROVIDER_PREFLIGHT,
 	OPENCODE_ROLE_ALIASES,

@@ -17,6 +17,7 @@ const { agentTaskPolicyToolPermissions } = require('../../../agent-task-contract
  */
 const {
 	OPENCODE_INVOCATION,
+	OPENCODE_READINESS_INVOCATION,
 	OPENCODE_PROVIDER_DEFAULTS,
 	OPENCODE_PROVIDER_PREFLIGHT,
 	OPENCODE_ROLE_ALIASES,
@@ -114,6 +115,9 @@ assert.equal(provider.runtime_id, 'opencode');
 assert.equal(provider.status, 'active');
 assert.equal(provider.integration_contract, 'homeboy-opencode-agent-task/v1');
 assert.deepEqual(provider.invocation, OPENCODE_INVOCATION);
+assert.deepEqual(provider.readiness_invocation, OPENCODE_READINESS_INVOCATION);
+assert.equal(provider.readiness_invocation.env_allowlist.includes('HOME'), true);
+assert.equal(provider.readiness_invocation.env_allowlist.includes('AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN'), true);
 assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false);
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, OPENCODE_SECRET_ENV);
@@ -146,6 +150,7 @@ assert.deepEqual(manifest.compatibility, {
 	},
 });
 assert.equal(manifest.agent_task_executors.length, 1);
+assert.deepEqual(manifest.agent_task_executors[0].readiness_invocation, OPENCODE_READINESS_INVOCATION);
 assert.equal(manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
 assert.equal(Object.hasOwn(manifest.agent_task_executors[0].provider_defaults.codex, 'model'), false);
 const [unexpectedServerError] = manifest.agent_task_executors[0].immediate_failure_patterns;
