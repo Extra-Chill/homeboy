@@ -1906,7 +1906,9 @@ fn run_promotion_gates(
         )?;
     }
     if options.dry_run
-        || (options.gates.verify.is_empty() && options.gates.private_verify.is_empty())
+        || (options.gates.verify.is_empty()
+            && options.gates.private_verify.is_empty()
+            && options.gates.test_execution_plan.is_none())
     {
         return Ok(PromotionGateRun::without_gates(options.dry_run));
     }
@@ -1993,10 +1995,38 @@ fn run_promotion_gates(
         }));
     let mut deterministic_gates = Vec::new();
     let mut blocking_gate_id = None;
-    for (index, (command, visibility, reveal_policy)) in declared_gates.enumerate() {
+    if let Some(plan) = options.gates.test_execution_plan.as_ref() {
         let gate = if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
             crate::agent_task_gate::AgentTaskGateReport::skipped(
-                format!("gate-{}", index + 1),
+                "gate-1".to_string(),
+                plan.declared_command()
+                    .map_err(|message| Error::invalid_argument("test_execution_plan", message))?
+                    .to_vec(),
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                blocking_gate_id,
+            )
+        } else {
+            emit_promotion_progress(
+                "gate",
+                Some("gate-1".to_string()),
+                Some("starting declared test plan".to_string()),
+            );
+            run_declared_promotion_test(options, &gate_workspace, 1, plan)?
+        };
+        if gate.status == AgentTaskGateStatus::Failed
+            && options.gates.execution_policy
+                == crate::agent_task_gate::AgentTaskGateExecutionPolicy::OrderedFailFast
+        {
+            blocking_gate_id = Some(gate.id.clone());
+        }
+        deterministic_gates.push(gate);
+    }
+    for (index, (command, visibility, reveal_policy)) in declared_gates.enumerate() {
+        let index = index + deterministic_gates.len() + 1;
+        let gate = if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
+            crate::agent_task_gate::AgentTaskGateReport::skipped(
+                format!("gate-{index}"),
                 vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
                 visibility,
                 reveal_policy,
@@ -2005,14 +2035,14 @@ fn run_promotion_gates(
         } else {
             emit_promotion_progress(
                 "gate",
-                Some(format!("gate-{}", index + 1)),
+                Some(format!("gate-{index}")),
                 Some("starting deterministic gate".to_string()),
             );
             run_promotion_gate(
                 options,
                 provider,
                 &gate_workspace,
-                index + 1,
+                index,
                 command,
                 visibility,
                 reveal_policy,
@@ -2063,6 +2093,52 @@ fn run_promotion_gates(
         destination_gate_setup,
         candidate_checkout,
     })
+}
+
+fn run_declared_promotion_test(
+    options: &AgentTaskPromotionOptions,
+    worktree_path: &Path,
+    index: usize,
+    plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
+) -> Result<crate::agent_task_gate::AgentTaskGateReport> {
+    let run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
+    let runtime_tmpdir = homeboy_core::engine::invocation::InvocationGuard::acquire(
+        &run_dir,
+        &homeboy_core::engine::invocation::InvocationRequirements::default(),
+    )?;
+    let mut gate_environment = options.gates.gate_environment.clone();
+    gate_environment.hydrate_rust_cache &= options.gates.hydrate_dependencies;
+    let supervision = GATE_SUPERVISION.with(|slot| slot.borrow().clone());
+    let timeout = plan.suite_timeout();
+    let supervision = supervision.map(|supervision| crate::agent_task_gate::GateSupervision {
+        timeout,
+        no_progress_timeout: supervision.no_progress_timeout,
+        heartbeat_interval: supervision.heartbeat_interval,
+        on_spawn: supervision.on_spawn.clone(),
+        on_heartbeat: supervision.on_heartbeat.clone(),
+        is_cancelled: supervision.is_cancelled.clone(),
+    });
+    let fallback_supervision = crate::agent_task_gate::GateSupervision {
+        timeout,
+        no_progress_timeout: timeout,
+        heartbeat_interval: Duration::from_secs(5),
+        on_spawn: Arc::new(|_, _| Ok(())),
+        on_heartbeat: Arc::new(|_| Ok(())),
+        is_cancelled: Arc::new(|| false),
+    };
+    let result = crate::agent_task_gate::run_declared_test_with_supervision(
+        worktree_path,
+        index,
+        plan,
+        AgentTaskGateVisibility::Visible,
+        AgentTaskGateRevealPolicy::FullEvidence,
+        Some(&runtime_tmpdir.context().tmp_dir),
+        supervision.as_ref().or(Some(&fallback_supervision)),
+        &gate_environment,
+        &options.gates.gate_package_artifacts,
+    );
+    finish_promotion_gate_run_dir(&run_dir, result.is_ok());
+    result
 }
 
 fn gate_workspace_path(options: &AgentTaskPromotionOptions, worktree_path: &Path) -> PathBuf {

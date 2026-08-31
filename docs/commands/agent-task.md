@@ -530,9 +530,9 @@ assignment must match one child; unmatched selectors return the typed
 ```
 
 Each profile selects one `TestExecutionPlan`. The current declared contract
-enforces a canonical `homeboy review test` argv and a positive suite timeout,
-then projects that timeout once for both Cook and Lab handoff. Use `--verify`
-only for arbitrary shell programs.
+enforces a canonical `homeboy review test` argv and a positive suite timeout.
+The typed declaration is persisted unchanged through Cook and Lab handoff; use
+`--verify` only for arbitrary shell programs.
 
 Add `--dry-run` to inspect the derived branch/worktree names and batch-cook spec
 without creating worktrees. Add `--run-plan` after reviewing provider readiness

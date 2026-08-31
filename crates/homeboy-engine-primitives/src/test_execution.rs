@@ -34,6 +34,17 @@ pub enum TestExecutionAdapter {
     HomeboyReviewTest,
 }
 
+/// Terminal result emitted by the executor of a declared test plan. Consumers
+/// project this value directly rather than inferring a timeout from output.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TestExecutionOutcome {
+    Passed,
+    Failed,
+    TimedOut,
+    Cancelled,
+}
+
 impl TestExecutionPlan {
     /// A suite deadline must be positive. Zero is never an implicit request for
     /// unbounded execution.
@@ -162,5 +173,24 @@ mod tests {
         )
         .expect_err("unsupported scope is not silently ignored");
         assert!(error.to_string().contains("scope"));
+    }
+
+    #[test]
+    fn declared_plan_round_trips_as_a_concrete_durable_contract() {
+        let plan = TestExecutionPlan::declared_homeboy_review_test(
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "component".to_string(),
+            ],
+            42,
+        )
+        .unwrap();
+        let persisted = serde_json::to_string(&plan).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TestExecutionPlan>(&persisted).unwrap(),
+            plan
+        );
     }
 }
