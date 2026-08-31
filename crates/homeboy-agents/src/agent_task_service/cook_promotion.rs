@@ -348,6 +348,21 @@ fn missing_promotion_source_error(
     )
 }
 
+pub(super) fn cook_candidate_base_sha(options: &CookRequest) -> Option<String> {
+    options
+        .identity
+        .initial_plan
+        .metadata
+        .get("cook_workspace_base_snapshot")
+        .filter(|snapshot| {
+            snapshot.get("mode").and_then(Value::as_str) == Some("isolated_attempt_snapshot")
+        })
+        .and_then(|snapshot| snapshot.get("resolved_base"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| options.workspace.task_base_sha.clone())
+}
+
 pub(crate) fn promote_attempt_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
@@ -368,7 +383,7 @@ pub(crate) fn promote_attempt_in_store(
             source_worktree_path: component_workspace_path(options)?
                 .or_else(|| options.workspace.source_worktree_path.clone()),
             base_ref: Some(options.finalization.base.clone()),
-            task_base_sha: options.workspace.task_base_sha.clone(),
+            task_base_sha: cook_candidate_base_sha(options),
             candidate_ref: None,
             to_worktree: options.workspace.to_worktree.clone(),
             task_id: selected_task_id,
@@ -416,7 +431,7 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
         source_worktree_path: component_workspace_path(options)?
             .or_else(|| options.workspace.source_worktree_path.clone()),
         base_ref: Some(options.finalization.base.clone()),
-        task_base_sha: options.workspace.task_base_sha.clone(),
+        task_base_sha: cook_candidate_base_sha(options),
         candidate_ref: None,
         to_worktree: options.workspace.to_worktree.clone(),
         task_id,
@@ -842,7 +857,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     source_worktree_path: component_workspace_path(options)?
                         .or_else(|| options.workspace.source_worktree_path.clone()),
                     base_ref: Some(options.finalization.base.clone()),
-                    task_base_sha: options.workspace.task_base_sha.clone(),
+                    task_base_sha: cook_candidate_base_sha(options),
                     candidate_ref: None,
                     to_worktree: options.workspace.to_worktree.clone(),
                     // A resumed verification must retain the scheduler-selected

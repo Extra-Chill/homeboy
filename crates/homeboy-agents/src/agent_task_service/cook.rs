@@ -5100,7 +5100,7 @@ fn run_cook_spine(
         && (options.provider_transport.attempt_dispatcher.is_none()
             || options.workspace.source_worktree_path.is_some())
     {
-        validate_cook_workspace_with_adopted_candidate(
+        let workspace_base = validate_cook_workspace_with_adopted_candidate(
             &options,
             options.workspace.source_worktree_path.is_some()
                 && !cook_uses_explicit_cwd_workspace(&options),
@@ -5109,6 +5109,12 @@ fn run_cook_spine(
             error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
             error
         })?;
+        if let Some(CookWorkspaceBaseValidation::Snapshot(snapshot)) = workspace_base {
+            if let Some(resolved_base) = snapshot.get("resolved_base").and_then(Value::as_str) {
+                options.workspace.task_base_sha = Some(resolved_base.to_string());
+                options.identity.initial_plan.metadata["cook_workspace_base_snapshot"] = snapshot;
+            }
+        }
     }
     // Base resolution reaches origin. Keep its transport failure behind the
     // recipe/run saga so retry and replay have durable zero-provider evidence.

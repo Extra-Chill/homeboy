@@ -11,21 +11,22 @@ use super::super::cook_baseline::git_output;
 use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
     canonical_cook_patch_artifact_id_in_store, canonical_cook_recovery_run_id,
-    cook_finalization_options, cook_finalization_options_with_stores, cook_promotion_argv,
-    cook_report, finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
-    finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
-    mark_replacement_gate_execution_started, moving_base_recovery_for_run,
-    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
-    moving_base_recovery_report, next_moving_base_recovery, persist_manual_finalization_intent,
-    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
-    persisted_promotion_for_attempt_in_store, prepare_manual_finalization_identity,
-    record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
-    replacement_gate_execution_started, selected_candidate_task_id_in_store,
-    verify_replacement_gates, CookReportInput, MovingBaseCookRecovery,
+    cook_candidate_base_sha, cook_finalization_options, cook_finalization_options_with_stores,
+    cook_promotion_argv, cook_report, finalize_cook_pr_with_backend,
+    finalize_cook_pr_with_backend_with_stores, finalize_or_load_cook_pr_with_backend,
+    finalize_or_load_cook_pr_with_backend_with_stores, mark_replacement_gate_execution_started,
+    moving_base_recovery_for_run, moving_base_recovery_for_run_with_stores,
+    moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
+    persist_manual_finalization_intent, persist_manual_finalization_receipt,
+    persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
+    prepare_manual_finalization_identity, record_replacement_gate_proof,
+    recover_cook_pr_with_backend, recover_moving_base_cook_candidate_in_store,
+    refreshed_moving_base_recovery, replacement_gate_execution_started,
+    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
+    MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
-    persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
+    load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
 };
 use super::*;
 use crate::agent_task::{
@@ -4557,6 +4558,11 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             Some(observed_base.as_str()),
             "provider runs from the pinned base even after main advances"
         );
+        let recipe = load_recipe("cook-stale-origin-base").expect("persisted Cook recipe");
+        assert_eq!(
+            recipe.finalization["task_base_sha"], observed_base,
+            "the durable candidate base matches the isolated attempt snapshot"
+        );
 
         std::fs::write(destination.join("uncommitted.txt"), "user drift\n").unwrap();
         let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", &[], false)
@@ -4613,6 +4619,25 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             1
         );
     });
+}
+
+#[test]
+fn cook_promotion_recovers_legacy_stale_base_from_attempt_snapshot() {
+    let mut options = batch_cook_options(
+        "cook-legacy-stale-base",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    options.workspace.task_base_sha = Some("stale-destination-head".to_string());
+    options.identity.initial_plan.metadata["cook_workspace_base_snapshot"] = serde_json::json!({
+        "schema": "homeboy/cook-workspace-base-snapshot/v1",
+        "mode": "isolated_attempt_snapshot",
+        "resolved_base": "candidate-base",
+    });
+
+    assert_eq!(
+        cook_candidate_base_sha(&options).as_deref(),
+        Some("candidate-base")
+    );
 }
 
 #[test]
