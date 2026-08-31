@@ -116,47 +116,45 @@ validate_manifest() {
     'must be a 64-character hex digest' \
     '(.binary_sha256 | type == "string" and test("^[0-9a-f]{64}$"))'
   _check_predicate "${phase}" "${artifact_name}" "${manifest}" execution_state \
-    "must be 'completed' or 'pr_closed'" \
-    '((.execution_state // "completed") == "completed" or .execution_state == "pr_closed")'
+    "must be 'completed', 'pr_closed', or 'pr_merged'" \
+    '((.execution_state // "completed") == "completed" or .execution_state == "pr_closed" or .execution_state == "pr_merged")'
   _check_predicate "${phase}" "${artifact_name}" "${manifest}" results \
-    "must record '${command}' as pass, fail, or timeout after execution, or be empty for pr_closed" \
-    "(.results | type == \"object\") and (if .execution_state == \"pr_closed\" then (.results | length == 0) else (.[\"results\"][\"${command}\"] == \"pass\" or .[\"results\"][\"${command}\"] == \"fail\" or .[\"results\"][\"${command}\"] == \"timeout\") end)"
+    "must record '${command}' as pass, fail, or timeout after execution, or be empty for a terminal PR state" \
+    "(.results | type == \"object\") and (if .execution_state == \"pr_closed\" or .execution_state == \"pr_merged\" then (.results | length == 0) else (.[\"results\"][\"${command}\"] == \"pass\" or .[\"results\"][\"${command}\"] == \"fail\" or .[\"results\"][\"${command}\"] == \"timeout\") end)"
 }
 
-# Only a pull request that is still reported active can contradict recorded
-# pr_closed evidence.
-#
-# Two cases were previously conflated into a hard failure that asserted the PR
-# was active without ever checking:
-#   * PR_ACTIVE unset/empty (the final-state probe never ran, e.g. a non-PR
-#     event) - nothing was observed, so nothing can be contradicted.
-#   * PR_ACTIVE=true that `pr_is_active` *assumed* after an unreadable probe,
-#     or that went stale because the PR merged mid-run.
-# Re-read the real state before failing three quality gates on it.
+# Only an open PR can contradict recorded terminal PR evidence. Re-read the
+# canonical state when the finalizer did not supply one, because `active=true`
+# is intentionally also used for an unreadable, fail-open probe.
 assert_pr_not_active() {
-  local phase="$1"
-  [ "${PR_ACTIVE:-}" = true ] || return 0
-
-  local observed
-  observed="$(pr_state_raw || true)"
+  local phase="$1" execution_state="$2" observed="${PR_STATE:-}"
+  if [ "${observed}" != open ] && [ "${observed}" != closed ] && [ "${observed}" != merged ]; then
+    # Keep the legacy boolean contract for direct consumers that have not yet
+    # supplied PR_STATE; workflow callers always provide the typed state.
+    [ "${PR_ACTIVE:-}" = false ] && observed=closed || observed="$(pr_lifecycle_state)"
+  fi
   case "${observed}" in
-    CLOSED|closed|MERGED|merged)
-      echo "::warning::Final PR state was reported active but the pull request is ${observed} (pr=${PR_NUMBER:-unknown}); accepting the recorded ${phase} pr_closed evidence."
+    closed|merged)
+      echo "::warning::Final PR state is ${observed} (pr=${PR_NUMBER:-unknown}); accepting recorded ${execution_state} evidence from ${phase}."
       ;;
-    *)
-      fail_closed "$(printf '%s command execution was skipped as pr_closed while the pull request is still active. pr=%s observed_state=%s reported_pr_active=%s' \
-        "${phase}" "${PR_NUMBER:-unknown}" "${observed:-<undetermined>}" "${PR_ACTIVE:-<unset>}")"
+    open)
+      fail_closed "$(printf '%s command execution was skipped as %s while the pull request is open. pr=%s final_state=%s reported_pr_active=%s' \
+        "${phase}" "${execution_state}" "${PR_NUMBER:-unknown}" "${observed}" "${PR_ACTIVE:-<unset>}")"
+      ;;
+    unknown)
+      fail_closed "$(printf '%s command execution was skipped as %s, but the final PR state could not be determined. pr=%s reported_pr_active=%s' \
+        "${phase}" "${execution_state}" "${PR_NUMBER:-unknown}" "${PR_ACTIVE:-<unset>}")"
       ;;
   esac
 }
 
 validate_manifest candidate "${candidate_artifact_name}" "${candidate_manifest}" "${CANDIDATE_SHA}"
 candidate_execution_state="$(jq -r '.execution_state // "completed"' "${candidate_manifest}")"
-if [ "${candidate_execution_state}" = pr_closed ]; then
-  assert_pr_not_active Candidate
-  printf 'results={}\ncomponent=%s\noutput-dir=%s\nlifecycle-state=pr_closed\n' \
-    "$(jq -r '.component' "${candidate_manifest}")" "${candidate_dir}/homeboy-ci-results" >> "${GITHUB_OUTPUT}"
-  echo "PR closed before candidate command execution; recording a neutral pr_closed lifecycle verdict."
+if [ "${candidate_execution_state}" = pr_closed ] || [ "${candidate_execution_state}" = pr_merged ]; then
+  assert_pr_not_active Candidate "${candidate_execution_state}"
+  printf 'results={}\ncomponent=%s\noutput-dir=%s\nlifecycle-state=%s\n' \
+    "$(jq -r '.component' "${candidate_manifest}")" "${candidate_dir}/homeboy-ci-results" "${candidate_execution_state}" >> "${GITHUB_OUTPUT}"
+  echo "PR terminal before candidate command execution; recording a neutral ${candidate_execution_state} lifecycle verdict."
   exit 0
 fi
 candidate_results="$(jq -c '.results' "${candidate_manifest}")"
@@ -181,11 +179,11 @@ if [ "${require_baseline}" = "true" ]; then
   baseline_dir="$(dirname "${baseline_manifest}")"
   validate_manifest baseline "${baseline_artifact_name}" "${baseline_manifest}" "${BASE_SHA}"
   baseline_execution_state="$(jq -r '.execution_state // "completed"' "${baseline_manifest}")"
-  if [ "${baseline_execution_state}" = pr_closed ]; then
-    assert_pr_not_active Baseline
-    printf 'results={}\ncomponent=%s\noutput-dir=%s\nlifecycle-state=pr_closed\n' \
-      "$(jq -r '.component' "${candidate_manifest}")" "${candidate_output}" >> "${GITHUB_OUTPUT}"
-    echo "PR closed before baseline command execution; recording a neutral pr_closed lifecycle verdict."
+  if [ "${baseline_execution_state}" = pr_closed ] || [ "${baseline_execution_state}" = pr_merged ]; then
+    assert_pr_not_active Baseline "${baseline_execution_state}"
+    printf 'results={}\ncomponent=%s\noutput-dir=%s\nlifecycle-state=%s\n' \
+      "$(jq -r '.component' "${candidate_manifest}")" "${candidate_output}" "${baseline_execution_state}" >> "${GITHUB_OUTPUT}"
+    echo "PR terminal before baseline command execution; recording a neutral ${baseline_execution_state} lifecycle verdict."
     exit 0
   fi
   candidate_component="$(jq -r '.component' "${candidate_manifest}")"

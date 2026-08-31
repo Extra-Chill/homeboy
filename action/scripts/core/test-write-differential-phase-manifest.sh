@@ -39,6 +39,11 @@ jq -e '.execution_state == "pr_closed" and .results == {}' "${tmp}/candidate/man
 printf 'PASS: producer records pr_closed without synthetic quality results\n'
 
 rm -rf "${tmp}/candidate"
+CLI_REVISION='homeboy 9.9.9+candidate' EXECUTION_STATE=pr_merged RESULTS='{"review test":"fail"}' run_writer >/dev/null
+jq -e '.execution_state == "pr_merged" and .results == {}' "${tmp}/candidate/manifest.json" >/dev/null
+printf 'PASS: producer records pr_merged without synthetic quality results\n'
+
+rm -rf "${tmp}/candidate"
 set +e
 output="$(CLI_REVISION='homeboy 9.9.9+candidate' EXECUTION_STATE=unknown run_writer 2>&1)"
 status=$?
@@ -48,7 +53,7 @@ if [ "${status}" -eq 0 ] || [ -e "${tmp}/candidate/manifest.json" ]; then
   exit 1
 fi
 case "${output}" in
-  *"field 'execution_state' must be 'completed' or 'pr_closed'"*) ;;
+  *"field 'execution_state' must be 'completed', 'pr_closed', or 'pr_merged'"*) ;;
   *) printf 'FAIL: unknown execution state omitted its contract error\n%s\n' "${output}"; exit 1 ;;
 esac
 printf 'PASS: producer rejects unknown execution states\n'

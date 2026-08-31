@@ -31,8 +31,8 @@ write_phase() {
 }
 
 mark_pr_closed() {
-  local phase="$1"
-  jq '.execution_state = "pr_closed" | .results = {}' "${tmp}/artifacts/${phase}/manifest.json" > "${tmp}/manifest.json"
+  local phase="$1" state="${2:-pr_closed}"
+  jq --arg state "${state}" '.execution_state = $state | .results = {}' "${tmp}/artifacts/${phase}/manifest.json" > "${tmp}/manifest.json"
   mv "${tmp}/manifest.json" "${tmp}/artifacts/${phase}/manifest.json"
 }
 
@@ -110,6 +110,17 @@ rm -f "${tmp}/output"
 PATH="${tmp}/bin:${PATH}" PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo GITHUB_REPOSITORY=example/repo PR_NUMBER=42 CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ARTIFACT_KEY=fixture-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=true GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null
 grep -F 'lifecycle-state=pr_closed' "${tmp}/output" >/dev/null || { printf 'FAIL: standalone reconciler did not resolve closed PR state\n'; exit 1; }
 printf 'PASS: standalone reconciler loads its PR state helper\n'
+
+# Regression for #13710: rerunning a workflow after its PR merged used to record
+# pr_merged candidate evidence but fail when an unauthenticated final probe
+# fail-open reported PR_ACTIVE=true. A merged terminal state is now canonical.
+rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; mark_pr_closed candidate pr_merged
+printf '#!/usr/bin/env bash\nprintf "CLOSED\\t2026-08-31T19:00:00Z"\n' > "${tmp}/bin/gh"
+chmod +x "${tmp}/bin/gh"
+rm -f "${tmp}/output"
+PATH="${tmp}/bin:${PATH}" PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo GITHUB_REPOSITORY=example/repo PR_NUMBER=42 CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ARTIFACT_KEY=fixture-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=true PR_STATE=unknown GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >/dev/null
+grep -F 'lifecycle-state=pr_merged' "${tmp}/output" >/dev/null || { printf 'FAIL: merged rerun did not produce a neutral lifecycle verdict\n'; exit 1; }
+printf 'PASS: merged PR rerun resolves contradictory active evidence without a red quality gate\n'
 
 rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; write_phase baseline base component cli '{"review test":"fail"}' "${payload_one}"; mark_pr_closed baseline
 run_case 0 'closed PR before baseline execution produces a neutral lifecycle verdict'

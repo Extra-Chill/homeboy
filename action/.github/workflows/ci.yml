@@ -577,7 +577,7 @@ jobs:
           COMPONENT: ${{ steps.phase.outputs.component }}
           CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
           RESULTS: ${{ steps.phase.outputs.results }}
-          EXECUTION_STATE: ${{ steps.phase.outputs.pr-state-reason == 'pr_closed' && 'pr_closed' || 'completed' }}
+          EXECUTION_STATE: ${{ steps.phase.outputs.pr-state-reason == 'pr_closed' && 'pr_closed' || steps.phase.outputs.pr-state-reason == 'pr_merged' && 'pr_merged' || 'completed' }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
         run: |
@@ -698,7 +698,7 @@ jobs:
           COMPONENT: ${{ steps.phase.outputs.component }}
           CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
           RESULTS: ${{ steps.phase.outputs.results }}
-          EXECUTION_STATE: ${{ steps.phase.outputs.pr-state-reason == 'pr_closed' && 'pr_closed' || 'completed' }}
+          EXECUTION_STATE: ${{ steps.phase.outputs.pr-state-reason == 'pr_closed' && 'pr_closed' || steps.phase.outputs.pr-state-reason == 'pr_merged' && 'pr_merged' || 'completed' }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
         run: |
@@ -1080,6 +1080,7 @@ jobs:
         id: final-pr-state
         if: always() && github.event_name == 'pull_request'
         env:
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: bash .homeboy-action/scripts/core/check-pr-state.sh
       - name: Download candidate Test inventory failure provenance
@@ -1148,6 +1149,7 @@ jobs:
         id: final-pr-state
         if: always() && github.event_name == 'pull_request'
         env:
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: bash .homeboy-action/scripts/core/check-pr-state.sh
       - id: action-revision
@@ -1171,6 +1173,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' && 'candidate-failure' || 'false' }}
           PR_ACTIVE: ${{ steps.final-pr-state.outputs.active }}
+          PR_STATE: ${{ steps.final-pr-state.outputs.state }}
         run: bash .homeboy-action/scripts/core/reconcile-differential-phases.sh
 
       - name: Generate GitHub App token
