@@ -246,7 +246,7 @@ pub(crate) fn resolve_cloned_extension(
 
         // Cloned installs copy: the clone temp dir is discarded after install,
         // so the shared trees must be materialized as standalone copies.
-        install_shared_assets_from_root(temp_dir, extension_dir, SharedAssetMode::Copy)?;
+        install_shared_assets_from_root(temp_dir, extension_dir, SharedAssetMode::Copy, None)?;
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
@@ -316,13 +316,14 @@ fn install_shared_assets_from_root(
     source_root: &Path,
     extension_dir: &Path,
     mode: SharedAssetMode,
+    revision: Option<&str>,
 ) -> Result<()> {
     let root_manifest = source_root.join(ROOT_MANIFEST);
     let shared_assets = shared_assets_for_root(source_root);
     if root_manifest.is_file() && runtime_generation_boundary_active()? {
         // Once runtime generations are active, extension refreshes publish a
         // successor generation rather than writing through the stable link.
-        homeboy_core::runtime_package::refresh_shared_assets(source_root)?;
+        homeboy_core::runtime_package::refresh_shared_assets_with_revision(source_root, revision)?;
     }
     for shared_dir in shared_assets {
         if matches!(
@@ -454,12 +455,14 @@ pub(crate) fn install_linked_shared_assets(
     source: &Path,
     extension_dir: &Path,
     source_root: Option<&Path>,
+    revision: Option<&str>,
 ) -> Result<()> {
     if let Some(source_root) = source_root {
         return install_shared_assets_from_root(
             source_root,
             extension_dir,
             SharedAssetMode::Symlink,
+            revision,
         );
     }
 
@@ -468,11 +471,12 @@ pub(crate) fn install_linked_shared_assets(
             source_root,
             extension_dir,
             SharedAssetMode::Symlink,
+            revision,
         );
     }
 
     if let Some(parent) = source.parent() {
-        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink)?;
+        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink, revision)?;
     }
     Ok(())
 }
@@ -624,7 +628,7 @@ pub(super) fn install_from_path(
 
     local_files::ensure_app_dirs()?;
 
-    install_linked_shared_assets(&source, &extension_dir, source_root)?;
+    install_linked_shared_assets(&source, &extension_dir, source_root, None)?;
 
     // Create symlink
     #[cfg(unix)]
