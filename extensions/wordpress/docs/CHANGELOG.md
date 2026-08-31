@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.39.11] - 2026-08-31
+
+### Changed
+- Preserve rig package bench layout
+
 ## [3.39.10] - 2026-08-31
 
 ### Fixed
