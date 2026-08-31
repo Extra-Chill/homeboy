@@ -279,7 +279,9 @@ pub fn claim_fanout_run_batch_in_store(
         if !matches!(
             batch.state,
             AgentTaskBatchState::Planning | AgentTaskBatchState::Failed
-        ) && !abandoned
+        ) && !(batch.state == AgentTaskBatchState::Queued
+            && batch.metadata["admission_blocker"].is_object())
+            && !abandoned
         {
             return Ok(None);
         }
@@ -288,6 +290,7 @@ pub fn claim_fanout_run_batch_in_store(
         }
         let metadata = batch.metadata.as_object_mut().expect("metadata object");
         metadata.remove("terminal_failure");
+        metadata.remove("admission_blocker");
         let claim_id = Uuid::new_v4().to_string();
         let admission_deadline_at = (Utc::now() + chrono::Duration::seconds(COORDINATOR_LEASE_SECONDS))
             .to_rfc3339();
@@ -367,7 +370,12 @@ pub fn heartbeat_fanout_run_batch_in_store(
     })
 }
 
-/// Persist a terminal controller failure after durable batch planning.
+/// Persist a controller failure after durable batch planning.
+///
+/// A failure while the coordinator is still admitting has not executed a child.
+/// Keep that roster queued so the same fanout identity can be claimed again when
+/// the readiness problem is repaired. Once admission has started, ordinary
+/// terminal failure semantics still apply.
 pub fn record_fanout_run_batch_failure(
     batch_id: &str,
     claim_id: &str,
@@ -398,14 +406,24 @@ pub fn record_fanout_run_batch_failure_in_store(
         if !batch.metadata.is_object() {
             batch.metadata = Value::Object(serde_json::Map::new());
         }
+        let failure_key = if batch.state == AgentTaskBatchState::Admitting {
+            "admission_blocker"
+        } else {
+            "terminal_failure"
+        };
         batch
             .metadata
             .as_object_mut()
             .expect("metadata object")
             .insert(
-                "terminal_failure".to_string(),
+                failure_key.to_string(),
                 json!({ "stage": stage, "failure": failure }),
             );
+        if failure_key == "admission_blocker" {
+            batch.state = AgentTaskBatchState::Queued;
+            batch.updated_at = Some(now_timestamp());
+            return store.write_batch(&batch);
+        }
         for child in &mut batch.child_runs {
             child.state = AgentTaskRunState::Failed;
         }
@@ -603,7 +621,7 @@ pub fn expire_stalled_fanout_admission_in_store(
             batch.metadata = Value::Object(serde_json::Map::new());
         }
         batch.metadata.as_object_mut().expect("metadata object").insert(
-            "terminal_failure".to_string(),
+            "admission_blocker".to_string(),
             json!({
                 "stage": stage,
                 "failure": {
@@ -613,10 +631,7 @@ pub fn expire_stalled_fanout_admission_in_store(
                 }
             }),
         );
-        for child in &mut batch.child_runs {
-            child.state = AgentTaskRunState::Failed;
-        }
-        batch.state = AgentTaskBatchState::Failed;
+        batch.state = AgentTaskBatchState::Queued;
         batch.updated_at = Some(now_timestamp());
         store.write_batch(&batch)?;
         Ok(true)
@@ -711,6 +726,40 @@ where
             projection_pending_child_runs: Vec::new(),
             resumable_child_runs: Vec::new(),
             resumable: false,
+            dependency_graph: None,
+            next_actions,
+            commands,
+        });
+    }
+    if batch.metadata["admission_blocker"].is_object() {
+        let commands = commands(&batch.batch_id);
+        let admission_blocker = batch.metadata["admission_blocker"].clone();
+        let mut next_actions = vec![commands.status.clone(), commands.artifacts.clone()];
+        if let Some(command) = admission_blocker
+            .pointer("/failure/next_action")
+            .and_then(Value::as_str)
+        {
+            next_actions.insert(0, command.to_string());
+        } else if let Some(command) = batch.metadata.get("replan_command").and_then(Value::as_str) {
+            next_actions.insert(0, command.to_string());
+        }
+        return Ok(AgentTaskBatchStatusReport {
+            schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
+            status: AgentTaskBatchState::Queued.outcome_status().to_string(),
+            observation_fresh: true,
+            totals: totals_for_children(&batch.child_runs),
+            admission: AgentTaskBatchAdmission {
+                expected: batch.child_runs.len(),
+                admitted: 0,
+                rejected: 0,
+                absent: batch.child_runs.len(),
+            },
+            batch,
+            unavailable_child_runs: Vec::new(),
+            admission_blocker: Some(admission_blocker),
+            projection_pending_child_runs: Vec::new(),
+            resumable_child_runs: Vec::new(),
+            resumable: true,
             dependency_graph: None,
             next_actions,
             commands,
@@ -2857,7 +2906,7 @@ mod tests {
     }
 
     #[test]
-    fn fanout_run_plan_reuses_a_repaired_preflight_roster_without_overwriting_it() {
+    fn pre_admission_failure_preserves_queued_roster_for_idempotent_retry() {
         let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "repair".to_string(),
@@ -2877,22 +2926,43 @@ mod tests {
                 "worktree_preflight",
                 json!({ "message": "worktree missing" }),
             )
-            .expect("record preflight failure");
-        let failed = store
+            .expect("record preflight blocker");
+        let blocked = store
             .status("repair-wave")
-            .expect("preflight failure remains observable");
-        assert_eq!(failed.batch.state, AgentTaskBatchState::Failed);
-        assert_eq!(failed.status, "failed");
-        assert_eq!(failed.totals.failed, 1);
-        assert!(failed.unavailable_child_runs.is_empty());
+            .expect("preflight blocker remains observable");
+        assert_eq!(blocked.batch.state, AgentTaskBatchState::Queued);
+        assert_eq!(blocked.status, "queued");
+        assert_eq!(blocked.totals.queued, 1);
+        assert_eq!(blocked.admission.admitted, 0);
+        assert_eq!(blocked.admission.absent, 1);
+        assert!(blocked.resumable);
+        assert_eq!(
+            blocked.admission_blocker.expect("pre-admission blocker")["stage"],
+            "worktree_preflight"
+        );
+        assert!(blocked.unavailable_child_runs.is_empty());
 
         let replay = store
             .persist_fanout_run_batch("repair-wave", "repair-wave", &children, json!({}))
             .expect("replay repaired roster");
 
-        assert_eq!(replay.state, AgentTaskBatchState::Failed);
-        assert!(replay.metadata.get("terminal_failure").is_some());
+        assert_eq!(replay.state, AgentTaskBatchState::Queued);
+        assert!(replay.metadata.get("admission_blocker").is_some());
         assert_eq!(replay.child_runs[0].run_id, "repair-run");
+
+        let retry_claim = store
+            .claim_fanout_run_batch("repair-wave")
+            .expect("claim repaired fanout")
+            .expect("retry claim");
+        let retried = store.read_batch("repair-wave").expect("retried roster");
+        assert_eq!(retried.child_runs.len(), 1);
+        assert_eq!(retried.child_runs[0].run_id, "repair-run");
+        assert!(retried.metadata["admission_blocker"].is_null());
+        assert!(store
+            .claim_fanout_run_batch("repair-wave")
+            .expect("second retry claim check")
+            .is_none());
+        assert!(!retry_claim.is_empty());
     }
 
     #[test]
@@ -2984,7 +3054,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_admission_is_a_durable_terminal_blocker_with_a_recovery_command() {
+    fn expired_admission_is_a_retryable_blocker_with_a_recovery_command() {
         let (_temp, store) = batch_store();
         let children = vec![FanoutRunBatchChild {
             task_id: "stuck".to_string(),
@@ -3011,16 +3081,17 @@ mod tests {
         assert!(store
             .expire_stalled_fanout_admission("stuck-wave")
             .expect("terminalize stalled admission"));
-        let status = store.status("stuck-wave").expect("read failed batch");
+        let status = store.status("stuck-wave").expect("read blocked batch");
 
-        assert_eq!(status.batch.state, AgentTaskBatchState::Failed);
-        assert_eq!(status.batch.child_runs[0].state, AgentTaskRunState::Failed);
+        assert_eq!(status.batch.state, AgentTaskBatchState::Queued);
+        assert_eq!(status.batch.child_runs[0].state, AgentTaskRunState::Queued);
+        assert!(status.resumable);
         assert_eq!(
-            status.batch.metadata["terminal_failure"]["failure"]["code"],
+            status.batch.metadata["admission_blocker"]["failure"]["code"],
             "coordinator_admission_timeout"
         );
         assert_eq!(
-            status.batch.metadata["terminal_failure"]["failure"]["next_action"],
+            status.batch.metadata["admission_blocker"]["failure"]["next_action"],
             "homeboy agent-task fanout run-plan --input @plan.json"
         );
     }
@@ -3240,9 +3311,9 @@ mod tests {
         let expired = batch_store
             .read_batch("rooted-expiry-wave")
             .expect("expired batch");
-        assert_eq!(expired.state, AgentTaskBatchState::Failed);
+        assert_eq!(expired.state, AgentTaskBatchState::Queued);
         assert_eq!(
-            expired.metadata["terminal_failure"]["failure"]["code"],
+            expired.metadata["admission_blocker"]["failure"]["code"],
             "coordinator_admission_timeout"
         );
 
@@ -3420,14 +3491,9 @@ mod tests {
             status.next_actions[0],
             "homeboy agent-task fanout resume source-wave"
         );
-        assert_eq!(
-            status.batch.metadata["dependency_graph"]["readiness"]["states"]["source"],
-            "failed"
-        );
         assert!(
-            status.batch.metadata["dependency_graph"]["readiness"]["ready"]
-                .as_array()
-                .is_some_and(Vec::is_empty)
+            status.batch.metadata["dependency_graph"]["readiness"].is_null(),
+            "a pre-admission blocker must not terminalize the dependency frontier"
         );
     }
 

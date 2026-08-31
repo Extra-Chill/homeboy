@@ -496,8 +496,28 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     // envelope's success/exit_code.
     // The mutating `resume` command keeps the aggregate exit policy, and
     // durable reconciliation / child continuation stay limited to it.
-    let portfolio = if admission_pending {
-        load_portfolio(&report.batch)?.status(&BTreeMap::new())
+    let portfolio = if report.admission_blocker.is_some() || admission_pending {
+        let observations = report
+            .batch
+            .child_runs
+            .iter()
+            .filter(|child| {
+                report.batch.metadata["declared_trackers"][&child.task_id]
+                    .as_str()
+                    .is_some()
+            })
+            .map(|child| {
+                (
+                    child.task_id.clone(),
+                    supervisor::AgentTaskFanoutPortfolioObservation {
+                        child_id: child.task_id.clone(),
+                        tracker: supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        load_portfolio(&report.batch)?.status(&observations)
     } else {
         reconcile_portfolio(&report.batch)?
     };
@@ -890,6 +910,11 @@ fn load_portfolio(
                             .ok()
                             .and_then(|record| {
                                 declared_tracker_ref(&record.metadata).map(str::to_string)
+                            })
+                            .or_else(|| {
+                                batch_record.metadata["declared_trackers"][&child.task_id]
+                                    .as_str()
+                                    .map(str::to_string)
                             })
                             .unwrap_or_else(|| {
                                 format!("homeboy://agent-task/run/{}", child.run_id)
@@ -1553,6 +1578,9 @@ fn persist_fanout_run_batch_record(
             "placement": plan.placement,
             "replan_command": secure_batch_plan_execution(&plan.fanout_id, placement),
             "dependency_graph": plan.dependency_graph_metadata()?,
+            "declared_trackers": plan.cooks.iter().filter_map(|cook| {
+                cook.task_url.as_ref().map(|tracker| (cook.cook_id.clone(), tracker.clone()))
+            }).collect::<BTreeMap<_, _>>(),
         }),
     )?;
     Ok(record.state != batch::AgentTaskBatchState::Planning)
@@ -7918,12 +7946,10 @@ fi
                     serde_json::json!({ "message": "terminal coordinator fixture" }),
                 )
                 .expect("record terminal coordinator fixture");
-                assert!(batch::status(&decoded.fanout_id)
-                    .expect("failed fanout placement status")
-                    .batch
-                    .child_runs[0]
-                    .placement
-                    .is_some());
+                let blocked =
+                    batch::status(&decoded.fanout_id).expect("blocked fanout placement status");
+                assert_eq!(blocked.status, "queued");
+                assert!(blocked.resumable);
             }
         });
     }
@@ -8929,13 +8955,13 @@ fi
             )
             .expect("record blocked preflight");
             assert_eq!(
-                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["terminal_failure"]
+                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["admission_blocker"]
                     ["failure"]["worktrees"],
                 json!(blocked.rows),
                 "the first blocked observation is durable"
             );
             assert_eq!(
-                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["terminal_failure"]
+                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["admission_blocker"]
                     ["failure"]["resolution"]["rows"][0]["state"],
                 "blocked"
             );
@@ -8969,13 +8995,13 @@ fi
             )
             .expect("refresh unchanged blocked preflight");
             assert_eq!(
-                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["terminal_failure"]
+                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["admission_blocker"]
                     ["failure"]["worktrees"],
                 json!(still_blocked.rows),
                 "retry status reflects the current provider observation"
             );
             assert_eq!(
-                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["terminal_failure"]
+                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["admission_blocker"]
                     ["failure"]["resolution"]["rows"][0]["state"],
                 "still_blocked"
             );
@@ -11255,7 +11281,7 @@ fi
     /// read. The documented recovery path (`next_actions` prints exactly this
     /// command) must survive `set -e`.
     #[test]
-    fn batch_status_read_of_a_failed_batch_is_a_successful_operation() {
+    fn pre_admission_status_is_retryable_and_preserves_declared_tracker_identity() {
         with_isolated_home(|_| {
             let batch_id = "read-of-failed-batch";
             batch::persist_fanout_run_batch(
@@ -11265,7 +11291,10 @@ fi
                     task_id: "child".to_string(),
                     run_id: "missing-child-record".to_string(),
                 }],
-                json!({}),
+                json!({
+                    "replan_command": "homeboy agent-task fanout run-plan --input @plan.json",
+                    "declared_trackers": { "child": "https://github.com/Extra-Chill/homeboy/issues/14107" }
+                }),
             )
             .expect("persist fanout batch");
             let claim_id = batch::claim_fanout_run_batch(batch_id)
@@ -11277,7 +11306,7 @@ fi
                 "worktree_preflight",
                 json!({ "message": "fixture failure before first child" }),
             )
-            .expect("persist coordinator failure");
+            .expect("persist coordinator admission blocker");
 
             let (value, exit_code) = batch_status(
                 AgentTaskFanoutBatchStatusArgs {
@@ -11285,14 +11314,25 @@ fi
                 },
                 Placement::Auto,
             )
-            .expect("reading a failed batch must still return its projection");
+            .expect("reading a blocked batch must still return its projection");
 
             assert_eq!(exit_code, 0);
-            assert_eq!(value["batch"]["status"], "failed");
-            assert_eq!(value["batch"]["batch"]["state"], "failed");
+            assert_eq!(value["batch"]["status"], "queued");
+            assert_eq!(value["batch"]["batch"]["state"], "queued");
+            assert_eq!(value["batch"]["admission"]["admitted"], 0);
+            assert_eq!(value["batch"]["admission"]["absent"], 1);
+            assert_eq!(value["batch"]["resumable"], true);
             assert_eq!(
                 value["batch"]["admission_blocker"]["stage"],
                 "worktree_preflight"
+            );
+            assert_eq!(
+                value["portfolio"]["children"][0]["tracker_ref"],
+                "https://github.com/Extra-Chill/homeboy/issues/14107"
+            );
+            assert_eq!(
+                value["portfolio"]["children"][0]["tracker"], "declared_unobserved",
+                "the declared ref is retained even before its provider/worktree observation"
             );
         });
     }
