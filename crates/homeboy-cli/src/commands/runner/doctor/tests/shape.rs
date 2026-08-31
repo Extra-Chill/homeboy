@@ -229,6 +229,10 @@ fn compact_doctor_size_fallback_retains_failed_repair() {
 
     assert_eq!(compact["checks"].as_array().unwrap().len(), 0);
     assert_eq!(compact["repairs"][0]["id"], "repair.daemon");
+    assert_eq!(
+        compact["repairs"][0]["message"],
+        "promotion wait exhausted; do not use generic reconnect"
+    );
     assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
 }
 

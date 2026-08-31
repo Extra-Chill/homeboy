@@ -109,8 +109,9 @@ pub fn apply(
     // Connect owns lease-safe dead-daemon adoption. A failed disconnect must not
     // force operators through repeated stop/adopt cycles when its authoritative
     // probe has already established that the recorded owner is gone.
-    match retry_runtime_promotion_wait(|| target.ensure_current().and_then(|_| runner::connect(id)))
-    {
+    match retry_runtime_promotion_wait(target, || {
+        target.ensure_current().and_then(|_| runner::connect(id))
+    }) {
         Ok((_, 0)) => {
             report.checks.retain(|check| check.id != "daemon.exec");
             let workspace_root = runner_config.workspace_root.as_deref().unwrap_or(".");
@@ -222,6 +223,13 @@ mod tests {
     use crate::commands::runner::doctor::types::{
         RunnerCapabilities, RunnerResources, RunnerTargetSummary,
     };
+
+    fn local_target() -> target::RunnerTarget {
+        target::RunnerTarget::Local {
+            id: "local".to_string(),
+            runner: None,
+        }
+    }
 
     #[test]
     fn unavailable_lease_missing_ownership_with_a_plan_is_terminal() {
@@ -338,8 +346,9 @@ mod tests {
 
     #[test]
     fn promotion_timeout_retries_once_and_converges() {
+        let target = local_target();
         let mut calls = 0;
-        let result = retry_runtime_promotion_wait(|| {
+        let result = retry_runtime_promotion_wait(&target, || {
             calls += 1;
             if calls == 1 {
                 Err(homeboy::core::Error::new(
@@ -358,8 +367,9 @@ mod tests {
 
     #[test]
     fn promotion_contention_retries_once_and_converges() {
+        let target = local_target();
         let mut calls = 0;
-        let result = retry_runtime_promotion_wait(|| {
+        let result = retry_runtime_promotion_wait(&target, || {
             calls += 1;
             if calls == 1 {
                 Err(homeboy::core::Error::new(
@@ -397,7 +407,7 @@ mod tests {
             .expect("hold promotion lease");
             let mut calls = 0;
 
-            let error = retry_runtime_promotion_wait(|| {
+            let error = retry_runtime_promotion_wait::<()>(&target, || {
                 calls += 1;
                 if calls == 1 {
                     let mut changed = server::load("promotion-identity").expect("load server");
@@ -409,20 +419,21 @@ mod tests {
                         serde_json::Value::Null,
                     ));
                 }
-                target.ensure_current()
+                panic!("a changed target must block the retry before connecting")
             })
             .expect_err("retry must reject the changed target");
 
             drop(lease);
-            assert_eq!(calls, 2);
+            assert_eq!(calls, 1);
             assert!(error.message.contains("target changed"), "{error:?}");
         });
     }
 
     #[test]
     fn promotion_timeout_stops_at_the_bounded_attempt_limit() {
+        let target = local_target();
         let mut calls = 0;
-        let error = retry_runtime_promotion_wait::<()>(|| {
+        let error = retry_runtime_promotion_wait::<()>(&target, || {
             calls += 1;
             Err(homeboy::core::Error::new(
                 ErrorCode::RuntimePromotionWaitTimeout,
@@ -438,8 +449,9 @@ mod tests {
 
     #[test]
     fn non_promotion_failures_are_not_retried() {
+        let target = local_target();
         let mut calls = 0;
-        let error = retry_runtime_promotion_wait::<()>(|| {
+        let error = retry_runtime_promotion_wait::<()>(&target, || {
             calls += 1;
             Err(homeboy::core::Error::new(
                 ErrorCode::SshConnectFailed,
@@ -563,13 +575,13 @@ fn apply_daemon_repair_plan(
                 .and_then(|_| runner::disconnect(runner_id))
                 .map(|_| ())
                 .map_err(|error| error.message),
-            DaemonRepairDispatch::Connect => connect_outcome_after_promotion_wait(|| {
+            DaemonRepairDispatch::Connect => connect_outcome_after_promotion_wait(target, || {
                 target
                     .ensure_current()
                     .and_then(|_| runner::connect(runner_id))
             }),
             DaemonRepairDispatch::AdoptOrphanLease { lease_id } => {
-                connect_outcome_after_promotion_wait(|| {
+                connect_outcome_after_promotion_wait(target, || {
                     target.ensure_current().and_then(|_| {
                         runner::connect_with_orphan_adoption(
                             runner_id,
@@ -584,7 +596,7 @@ fn apply_daemon_repair_plan(
                 })
             }
             DaemonRepairDispatch::ReconcileLeaselessOrphans => {
-                connect_outcome_after_promotion_wait(|| {
+                connect_outcome_after_promotion_wait(target, || {
                     target.ensure_current().and_then(|_| {
                         runner::connect_with_orphan_adoption(
                             runner_id,
@@ -599,7 +611,7 @@ fn apply_daemon_repair_plan(
                 })
             }
             DaemonRepairDispatch::ReconcileUnleasedCandidates => {
-                connect_outcome_after_promotion_wait(|| {
+                connect_outcome_after_promotion_wait(target, || {
                     target.ensure_current().and_then(|_| {
                         runner::connect_with_unleased_candidate_reconciliation(runner_id)
                     })
@@ -702,15 +714,17 @@ fn connect_outcome(
 }
 
 fn connect_outcome_after_promotion_wait(
+    target: &target::RunnerTarget,
     connect: impl FnMut() -> homeboy::core::Result<(runner::RunnerConnectReport, i32)>,
 ) -> Result<(), String> {
-    match retry_runtime_promotion_wait(connect) {
+    match retry_runtime_promotion_wait(target, connect) {
         Ok(result) => connect_outcome(Ok(result)),
         Err(error) => Err(error.message),
     }
 }
 
 fn retry_runtime_promotion_wait<T>(
+    target: &target::RunnerTarget,
     mut action: impl FnMut() -> homeboy::core::Result<T>,
 ) -> homeboy::core::Result<T> {
     for attempt in 0..PROMOTION_WAIT_CONNECT_ATTEMPTS {
@@ -724,6 +738,7 @@ fn retry_runtime_promotion_wait<T>(
                 // `connect` emitted owner/watch events during the first wait.
                 // A second bounded admission wait converges a promotion that
                 // completed at the timeout boundary without changing identity.
+                target.ensure_current()?;
             }
             result => return result,
         }
