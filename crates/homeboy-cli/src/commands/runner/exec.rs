@@ -8,8 +8,9 @@ use homeboy::core::secret_env_plan::SecretEnvPlan;
 use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::Error;
-use homeboy::runner::runners::{self as runner, RunnerExecOutput, RunnerKind};
+use homeboy::runner::runners::{self as runner, RunnerExecOutput};
 use homeboy_engine_primitives::content_hash;
+use homeboy_runner_contract::RunnerKind;
 
 use super::super::CmdResult;
 
