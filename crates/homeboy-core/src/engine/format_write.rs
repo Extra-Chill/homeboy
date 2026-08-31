@@ -8,13 +8,15 @@
 //! Generated code that compiles but isn't formatted is better than no code at
 //! all.
 //!
-//! The format command is resolved via extension manifest `scripts.format`.
+//! Formatter ownership is resolved through Extension API v1. The selected
+//! manifest remains a private execution detail for locating `scripts.format`.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::error::{Error, Result};
+use homeboy_extension_contract::api::v1::FORMAT_FILE_CAPABILITY_PREFIX;
 
 /// Result of a post-write format operation.
 #[derive(Debug, Clone, Serialize)]
@@ -118,10 +120,10 @@ pub fn format_after_write(root: &Path, changed_files: &[PathBuf]) -> Result<Form
 
 /// Resolve the format command for a set of changed files.
 ///
-/// Checks installed extensions for `scripts.format`.
+/// Selects installed extensions through their v1 `format.<extension>` capability.
 fn resolve_format_command(root: &Path, changed_files: &[PathBuf]) -> Option<String> {
     // Collect unique file extensions
-    let extensions: Vec<String> = changed_files
+    let mut extensions: Vec<String> = changed_files
         .iter()
         .filter_map(|f| {
             f.extension()
@@ -131,12 +133,21 @@ fn resolve_format_command(root: &Path, changed_files: &[PathBuf]) -> Option<Stri
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
+    extensions.sort();
 
-    // Check installed extensions for a format script
     for ext in &extensions {
-        if let Some(manifest) = find_extension_with_format(ext) {
-            let ext_path = manifest.extension_path.as_deref()?;
-            let script_rel = manifest.format_script()?;
+        let capability_id = format!("{FORMAT_FILE_CAPABILITY_PREFIX}{ext}");
+        let Some(extension_id) =
+            crate::extension::resolve::find_installed_capability_provider(&capability_id)
+        else {
+            continue;
+        };
+        let Ok(manifest) = crate::extension::catalog::load_extension(&extension_id) else {
+            continue;
+        };
+        if let (Some(ext_path), Some(script_rel)) =
+            (manifest.extension_path.as_deref(), manifest.format_script())
+        {
             let script_path = std::path::Path::new(ext_path).join(script_rel);
 
             if script_path.exists() {
@@ -166,19 +177,6 @@ fn scoped_format_arg(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-/// Find an installed extension that handles a file extension and has scripts.format.
-fn find_extension_with_format(
-    file_ext: &str,
-) -> Option<homeboy_extension_contract::ExtensionManifest> {
-    crate::extension::catalog::load_all_extensions()
-        .ok()
-        .and_then(|manifests| {
-            manifests
-                .into_iter()
-                .find(|m| m.handles_file_extension(file_ext) && m.format_script().is_some())
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +199,35 @@ mod tests {
         let result = format_after_write(dir.path(), &files).unwrap();
         assert!(result.success);
         assert!(result.command.is_none());
+    }
+
+    #[test]
+    fn resolves_formatter_from_v1_file_capability() {
+        crate::test_support::with_isolated_home(|_| {
+            let extension_dir = crate::paths::extensions()
+                .expect("extensions path")
+                .join("rust");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(extension_dir.join("format.sh"), "#!/bin/sh\n").expect("format script");
+            std::fs::write(
+                extension_dir.join("rust.json"),
+                serde_json::json!({
+                    "name": "Rust",
+                    "version": "1.0.0",
+                    "scripts": { "format": "format.sh" },
+                    "provides": { "file_extensions": ["rs"] }
+                })
+                .to_string(),
+            )
+            .expect("extension manifest");
+
+            let root = TempDir::new().expect("project root");
+            let changed = root.path().join("src/changed file.rs");
+            let command = resolve_format_command(root.path(), &[changed]).expect("format command");
+
+            assert!(command.contains("format.sh"));
+            assert!(command.ends_with("'src/changed file.rs'"));
+        });
     }
 
     #[test]
