@@ -904,11 +904,12 @@ fn run_controller_upgrade_with_operation(
 
     // Protect the reconciled controller identity while resident services are
     // restarted so their evidence cannot describe a later contender's binary.
-    let (services_restarted, services_pending_restart) = if completion_superseded {
-        (Vec::new(), Vec::new())
-    } else {
-        restart_resident_services_after_swap(success, skip_services)
-    };
+    let (services_restarted, services_pending_restart) =
+        restart_resident_services_after_reconciliation(
+            completion_superseded,
+            &final_selection_guard,
+            || restart_resident_services_after_swap(success, skip_services),
+        );
 
     let runner_disposition = runner_convergence_disposition(
         runner_completion_is_skipped(skip_runners, upgrade_completed, completion_superseded),
@@ -1996,6 +1997,18 @@ fn restart_resident_services_after_swap(
     (restarted, pending)
 }
 
+fn restart_resident_services_after_reconciliation(
+    completion_superseded: bool,
+    _selection_guard: &homeboy_core::runtime_promotion::RuntimeSelectionGuard,
+    restart: impl FnOnce() -> (Vec<ServiceRestartEntry>, Vec<ServiceRestartEntry>),
+) -> (Vec<ServiceRestartEntry>, Vec<ServiceRestartEntry>) {
+    if completion_superseded {
+        (Vec::new(), Vec::new())
+    } else {
+        restart()
+    }
+}
+
 /// Surface declared resident services that still hold the old binary, with the
 /// exact recovery command, instead of failing the upgrade silently.
 fn warn_pending_resident_services(pending: &[ServiceRestartEntry]) {
@@ -2956,6 +2969,121 @@ mod runner_source_upgrade_tests {
                     .expect("load terminal operation");
             assert_eq!(status.status, "pass");
             assert_eq!(status.phase, "completed");
+        });
+    }
+
+    #[test]
+    fn reconciled_selection_blocks_a_controller_contender_during_resident_service_restart() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let selection_guard =
+                acquire_controller_selection_guard(&mut operation, "controller upgrade result")
+                    .expect("protect reconciled controller identity");
+            let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+            let acquired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let contender_acquired = acquired.clone();
+            let contender = std::thread::spawn(move || {
+                let lease =
+                    homeboy_core::runtime_promotion::acquire_waiting_for_target_with_status(
+                        "contending controller upgrade",
+                        "active controller",
+                        homeboy_core::runtime_promotion::RuntimePromotionOwnerStatus {
+                            operation_id: "restart-contender".to_string(),
+                            status_command: "homeboy upgrade status restart-contender".to_string(),
+                        },
+                        std::time::Duration::from_secs(2),
+                        |event| {
+                            if event.wait_stage == "os_lock" {
+                                let _ = waiting_tx.send(());
+                            }
+                        },
+                    )
+                    .expect("contender acquires after protected restart");
+                contender_acquired.store(true, std::sync::atomic::Ordering::Release);
+                drop(lease);
+            });
+
+            let restarted =
+                restart_resident_services_after_reconciliation(false, &selection_guard, || {
+                    waiting_rx
+                        .recv_timeout(std::time::Duration::from_secs(1))
+                        .expect("contender reaches resident-service restart window");
+                    assert!(
+                        !acquired.load(std::sync::atomic::Ordering::Acquire),
+                        "contender cannot replace the reconciled controller during restart"
+                    );
+                    (Vec::new(), Vec::new())
+                });
+            assert_eq!(restarted, (Vec::new(), Vec::new()));
+            assert!(!acquired.load(std::sync::atomic::Ordering::Acquire));
+
+            drop(selection_guard);
+            contender.join().expect("contender exits");
+            assert!(acquired.load(std::sync::atomic::Ordering::Acquire));
+        });
+    }
+
+    #[test]
+    fn selection_and_mutation_admission_fail_on_recorded_wait_persistence_errors() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mutation_owner = homeboy_core::runtime_promotion::acquire(
+                "blocking controller upgrade",
+                "active controller",
+            )
+            .expect("acquire blocking mutation");
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_owner = std::thread::spawn(move || {
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("selection wait reports persistence attempt");
+                drop(mutation_owner);
+            });
+            let mut selection_operation = UpgradeOperation::start("homeboy upgrade");
+            selection_operation.fail_next_progress_write();
+            selection_operation.after_promotion_wait(move || {
+                release_tx.send(()).expect("release mutation owner");
+            });
+
+            let selection_error = acquire_controller_selection_guard(
+                &mut selection_operation,
+                "controller upgrade result",
+            )
+            .expect_err("selection admission fails closed on wait persistence");
+            assert!(selection_error
+                .message
+                .contains("injected upgrade progress persistence failure"));
+            release_owner.join().expect("selection blocker exits");
+
+            let selection_owner =
+                homeboy_core::runtime_promotion::protect_runtime_selection_with_status(
+                    "blocking controller selection",
+                    "active controller",
+                    homeboy_core::runtime_promotion::RuntimePromotionOwnerStatus {
+                        operation_id: "selection-owner".to_string(),
+                        status_command: "homeboy upgrade status selection-owner".to_string(),
+                    },
+                )
+                .expect("acquire blocking selection");
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_owner = std::thread::spawn(move || {
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("mutation wait reports persistence attempt");
+                drop(selection_owner);
+            });
+            let mut mutation_operation = UpgradeOperation::start("homeboy upgrade");
+            mutation_operation.fail_next_progress_write();
+            mutation_operation.after_promotion_wait(move || {
+                release_tx.send(()).expect("release selection owner");
+            });
+
+            let mutation_error =
+                acquire_controller_upgrade_lease(&mut mutation_operation, "controller upgrade")
+                    .expect_err("mutation admission fails closed on wait persistence");
+            assert!(mutation_error
+                .message
+                .contains("injected upgrade progress persistence failure"));
+            release_owner.join().expect("mutation blocker exits");
         });
     }
 

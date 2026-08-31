@@ -77,6 +77,8 @@ pub struct UpgradeOperation {
     fail_next_progress_write: bool,
     #[cfg(test)]
     before_terminal_write: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    after_promotion_wait: Option<Box<dyn FnOnce() + Send>>,
 }
 
 #[derive(Clone)]
@@ -109,6 +111,7 @@ impl UpgradeOperation {
             fail_terminal_writes_remaining: 0,
             fail_next_progress_write: false,
             before_terminal_write: None,
+            after_promotion_wait: None,
         };
         if let Some(id) = operation.id() {
             emit_upgrade_phase(&format!("operation={id}"));
@@ -140,6 +143,8 @@ impl UpgradeOperation {
             fail_next_progress_write: false,
             #[cfg(test)]
             before_terminal_write: None,
+            #[cfg(test)]
+            after_promotion_wait: None,
         };
         emit_upgrade_phase(&format!(
             "operation={}",
@@ -183,6 +188,10 @@ impl UpgradeOperation {
             _ => "waiting_for_compatible_controller_upgrade",
         }) {
             self.persistence_error.get_or_insert(error);
+        }
+        #[cfg(test)]
+        if let Some(after_wait) = self.after_promotion_wait.take() {
+            after_wait();
         }
     }
 
@@ -462,6 +471,11 @@ impl UpgradeOperation {
     #[cfg(test)]
     pub(crate) fn before_terminal_write(&mut self, callback: impl FnOnce() + Send + 'static) {
         self.before_terminal_write = Some(Box::new(callback));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn after_promotion_wait(&mut self, callback: impl FnOnce() + Send + 'static) {
+        self.after_promotion_wait = Some(Box::new(callback));
     }
 }
 
