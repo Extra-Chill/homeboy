@@ -1004,6 +1004,7 @@ mod tests {
         let output = serde_json::to_value(WorktreeOutput::List(WorktreeListCommandOutput {
             native: WorktreeListOutput {
                 worktrees: Vec::new(),
+                diagnostics: Vec::new(),
             },
             provider_worktrees: Vec::new(),
         }))

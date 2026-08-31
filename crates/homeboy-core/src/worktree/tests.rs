@@ -1649,6 +1649,27 @@ fn status_reports_missing_source_checkout_as_validation_diagnostic() {
 }
 
 #[test]
+fn list_retains_valid_records_and_diagnoses_malformed_manifests() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    let record = fixture_record(source.path(), &dir.path().join("fixture@task"));
+    write_record(&store, &record).unwrap();
+    fs::write(store.join("malformed.json"), "not json\n").unwrap();
+
+    let output = list_with_store(&store).unwrap();
+
+    assert_eq!(output.worktrees, vec![record]);
+    assert_eq!(output.diagnostics.len(), 1);
+    let diagnostic = &output.diagnostics[0];
+    assert_eq!(diagnostic.code, "internal.json_error");
+    assert_eq!(
+        diagnostic.record_path.as_deref(),
+        Some(store.join("malformed.json").to_str().unwrap())
+    );
+}
+
+#[test]
 fn cleanup_skips_unrepairable_missing_source_and_continues() {
     use crate::test_support::with_isolated_home;
 
