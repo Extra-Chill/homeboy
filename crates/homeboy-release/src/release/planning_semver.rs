@@ -235,6 +235,68 @@ pub(super) fn release_version_baseline(
     })
 }
 
+/// Identify a release completed by another workflow after this checkout started.
+///
+/// A newer tag is authoritative only when its release commit descends from this
+/// checkout's HEAD and is itself contained in the configured remote release
+/// branch. All other unreachable tags remain fail-closed as orphaned identities.
+pub(super) fn authoritative_descendant_release_tag(
+    scope: &ReleaseScope,
+    current_version: &str,
+) -> Result<Option<String>> {
+    let current_version = match semver::Version::parse(current_version) {
+        Ok(version) => version,
+        Err(_) => return Ok(None),
+    };
+
+    // Refresh remote branch and tag refs without moving the stale checkout. A
+    // remote that cannot be refreshed cannot authorize this exception, so leave
+    // it to the normal fail-closed unreachable-tag path.
+    if git::fetch_origin(&scope.git_root).is_err() {
+        return Ok(None);
+    }
+
+    let Some(tag) = scope.latest_tag_any()? else {
+        return Ok(None);
+    };
+    let Some(tag_version) = git::extract_version_from_tag(&tag)
+        .and_then(|version| semver::Version::parse(&version).ok())
+    else {
+        return Ok(None);
+    };
+    if tag_version <= current_version || scope.latest_tag()?.as_deref() == Some(tag.as_str()) {
+        return Ok(None);
+    }
+
+    let tag_commit = git::get_tag_commit(&scope.git_root, &tag)?;
+    let head_commit = git::get_head_commit(&scope.git_root)?;
+    if !git::is_ancestor(&scope.git_root, &head_commit, &tag_commit)? {
+        return Ok(None);
+    }
+
+    let subject =
+        git::execute_git_for_release(&scope.git_root, &["log", "-1", "--format=%s", &tag_commit])?;
+    if !subject.status.success()
+        || !matches!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            value if value == format!("release: {tag}") || value == format!("release:{tag}")
+        )
+    {
+        return Ok(None);
+    }
+
+    let branch = git::default_branch_name(std::path::Path::new(&scope.git_root))
+        .unwrap_or_else(|| "main".to_string());
+    let Some(remote_head) = git::remote_branch_commit(&scope.git_root, &branch)? else {
+        return Ok(None);
+    };
+    if git::is_ancestor(&scope.git_root, &tag_commit, &remote_head)? {
+        Ok(Some(tag))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(super) fn release_version_floor_base(
     scope: &ReleaseScope,
     current_version: &str,
@@ -382,12 +444,13 @@ fn commit_range(latest_tag: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_semver_recommendation, low_confidence_bump_warning, release_version_baseline,
-        resolve_tag_and_commits, validate_current_version_tag_reachable,
-        validate_release_version_floor,
+        authoritative_descendant_release_tag, build_semver_recommendation,
+        low_confidence_bump_warning, release_version_baseline, resolve_tag_and_commits,
+        validate_current_version_tag_reachable, validate_release_version_floor,
     };
     use crate::release::scope::ReleaseScope;
     use homeboy_core::component::{CommandScopeConfig, Component, ScopeConfig, VersionTarget};
+    use homeboy_core::git;
     use homeboy_core::git::SemverBump;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
@@ -724,6 +787,51 @@ mod tests {
 
         assert!(error.message.contains("v0.2.0"));
         assert!(error.message.contains("not reachable from HEAD"));
+    }
+
+    #[test]
+    fn authoritative_descendant_release_tag_defers_stale_checkout_to_remote_release_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let stale = temp.path().join("stale");
+        let owner = temp.path().join("owner");
+        let remote_path = remote.to_string_lossy().to_string();
+
+        run_git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_path],
+        );
+        run_git(temp.path(), &["clone", &remote_path, "seed"]);
+        for checkout in [&seed] {
+            run_git(checkout, &["config", "user.email", "homeboy@example.test"]);
+            run_git(checkout, &["config", "user.name", "Homeboy Test"]);
+        }
+        commit_file(&seed, "VERSION", "0.1.0", "release: v0.1.0");
+        run_git(&seed, &["tag", "v0.1.0"]);
+        run_git(&seed, &["push", "--tags", "origin", "main"]);
+        run_git(temp.path(), &["clone", &remote_path, "stale"]);
+        run_git(temp.path(), &["clone", &remote_path, "owner"]);
+        run_git(&owner, &["config", "user.email", "homeboy@example.test"]);
+        run_git(&owner, &["config", "user.name", "Homeboy Test"]);
+        commit_file(&owner, "VERSION", "0.1.1", "release: v0.1.1");
+        run_git(&owner, &["tag", "v0.1.1"]);
+        run_git(&owner, &["push", "--tags", "origin", "main"]);
+
+        let component = Component {
+            local_path: stale.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+
+        assert_eq!(
+            authoritative_descendant_release_tag(&scope, "0.1.0").expect("inspect remote release"),
+            Some("v0.1.1".to_string())
+        );
+        assert_eq!(
+            git::get_head_commit(&scope.git_root).expect("stale HEAD"),
+            git::get_tag_commit(&seed.to_string_lossy(), "v0.1.0").expect("source release")
+        );
     }
 
     #[test]

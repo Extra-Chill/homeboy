@@ -9,8 +9,8 @@ use super::plan_steps::{build_preflight_steps, build_release_steps_with_reconcil
 use super::planning_changelog::{build_changelog_plan, generate_changelog_entries};
 use super::planning_policy::release_skip_plan;
 use super::planning_semver::{
-    build_semver_recommendation, current_version_tag_at_head, current_version_tag_name,
-    release_version_baseline, validate_current_version_tag_reachable,
+    authoritative_descendant_release_tag, build_semver_recommendation, current_version_tag_at_head,
+    current_version_tag_name, release_version_baseline, validate_current_version_tag_reachable,
     validate_release_version_floor,
 };
 use super::planning_worktree::validate_release_worktree;
@@ -44,6 +44,17 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
 
     let release_scope = ReleaseScope::resolve(&component, component_id)?;
     let version_info = v.capture(version::read_component_version(&component), "version");
+    if !options.pipeline.head {
+        if let Some(info) = version_info.as_ref() {
+            if let Some(tag) = authoritative_descendant_release_tag(&release_scope, &info.version)?
+            {
+                return Ok(super::planning_policy::superseded_release_plan(
+                    component_id,
+                    &tag,
+                ));
+            }
+        }
+    }
     if let Some(ref info) = version_info {
         if let Some(message) = v
             .capture(
