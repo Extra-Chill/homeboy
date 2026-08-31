@@ -56,7 +56,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
         .unwrap_or("");
 
     // Find the extension for import rewriting
-    let ext = find_refactor_extension(from);
+    let ext = find_refactor_extension(root, from);
 
     // ── Phase 1: Rewrite caller imports across the codebase ──────────
     let mut imports_updated: usize = 0;
@@ -81,9 +81,14 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
             // callers might import individually
             let source_content = std::fs::read_to_string(&source_abs).unwrap_or_default();
             let pub_item_names: Vec<String> = if let Some(items) =
-                ext_parse_items(ext, &source_content, from)
-                    .or_else(|| core_parse_items(ext, &source_content))
-            {
+                ext_parse_items(ext, root, &source_content, from).or_else(|| {
+                    Path::new(from)
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .and_then(|file_extension| {
+                            core_parse_items(ext, file_extension, &source_content)
+                        })
+                }) {
                 items
                     .iter()
                     .filter(|item| item.visibility == "pub" || item.visibility == "pub(crate)")
@@ -128,6 +133,7 @@ pub fn move_file(from: &str, to: &str, root: &Path, write: bool) -> Result<MoveF
 
                 if let Some(rewrites) = ext_rewrite_caller_imports(
                     ext,
+                    root,
                     &search_refs,
                     &source_module,
                     &dest_module,

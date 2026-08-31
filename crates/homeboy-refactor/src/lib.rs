@@ -15,6 +15,7 @@ mod move_items;
 mod plan;
 mod primitive_builders;
 mod propagate;
+mod refactor_provider;
 mod rename;
 mod transform;
 

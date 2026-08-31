@@ -1,12 +1,15 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use homeboy_engine_primitives::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
+use homeboy_engine_primitives::command::{
+    wait_with_bounded_output, BoundedCommandOutput, DEFAULT_CAPTURE_LIMIT_BYTES,
+};
 use homeboy_extension_contract::api::v1::{
-    ExtensionApiInvokeRequest, ExtensionApiInvokeResponse, ExtensionApiOperationFailure,
-    ExtensionApiOperationFailureCode, ExtensionApiResolveRequest, COMPILER_WARNINGS_CAPABILITY_ID,
-    COMPILER_WARNING_FIXES_CAPABILITY_ID, EXTENSION_API_INVOKE_REQUEST_SCHEMA,
-    EXTENSION_API_INVOKE_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_V1,
+    ExtensionApiInvocationProcessEvidence, ExtensionApiInvokeRequest, ExtensionApiInvokeResponse,
+    ExtensionApiOperationFailure, ExtensionApiOperationFailureCode, ExtensionApiResolveRequest,
+    COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNING_FIXES_CAPABILITY_ID,
+    EXTENSION_API_INVOKE_REQUEST_SCHEMA, EXTENSION_API_INVOKE_RESPONSE_SCHEMA,
+    EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_V1, REFACTOR_FILE_CAPABILITY_PREFIX,
 };
 use homeboy_extension_contract::ExtensionManifest;
 
@@ -60,13 +63,7 @@ pub fn invoke_api(request: &ExtensionApiInvokeRequest) -> ExtensionApiInvokeResp
     };
     let script_path = std::path::Path::new(extension_path).join(script);
 
-    let mut child = match Command::new(&script_path)
-        .current_dir(&request.working_directory)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match spawn_capability(&script_path, &request.working_directory) {
         Ok(child) => child,
         Err(error) => {
             return failure(
@@ -90,14 +87,21 @@ pub fn invoke_api(request: &ExtensionApiInvokeRequest) -> ExtensionApiInvokeResp
         })
     {
         let _ = child.kill();
-        let _ = child.wait();
-        return failure(
-            ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
-            format!(
-                "Failed to send input to capability '{}' for extension '{}': {error}",
-                request.capability_id, request.extension_id
-            ),
+        let message = format!(
+            "Failed to send input to capability '{}' for extension '{}': {error}",
+            request.capability_id, request.extension_id
         );
+        return match wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES) {
+            Ok(output) => failure_with_process(
+                ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
+                message,
+                process_evidence(&output),
+            ),
+            Err(_) => failure(
+                ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
+                message,
+            ),
+        };
     }
     let output = match wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES) {
         Ok(output) => output,
@@ -111,26 +115,31 @@ pub fn invoke_api(request: &ExtensionApiInvokeRequest) -> ExtensionApiInvokeResp
             );
         }
     };
+    let evidence = process_evidence(&output);
     if !output.status.success() {
-        return failure(
+        return failure_with_process(
             ExtensionApiOperationFailureCode::CapabilityExecutionFailed,
             format!(
                 "Capability '{}' failed for extension '{}': {}",
                 request.capability_id,
                 request.extension_id,
-                String::from_utf8_lossy(&output.stderr).trim()
+                evidence.stderr.trim()
             ),
+            evidence,
         );
     }
-    let value = match serde_json::from_slice(&output.stdout) {
-        Ok(value) => value,
-        Err(error) => {
-            return failure(
+    let value = match evidence.parsed_output.clone() {
+        Some(value) => value,
+        None => {
+            let error = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .expect_err("process evidence only omits parsed output for invalid JSON");
+            return failure_with_process(
                 ExtensionApiOperationFailureCode::CapabilityOutputInvalid,
                 format!(
                     "Capability '{}' returned invalid JSON for extension '{}': {error}",
-                    request.capability_id, request.extension_id
+                    request.capability_id, request.extension_id,
                 ),
+                evidence,
             );
         }
     };
@@ -140,6 +149,16 @@ pub fn invoke_api(request: &ExtensionApiInvokeRequest) -> ExtensionApiInvokeResp
         api_version: EXTENSION_API_V1,
         output: Some(value),
         failure: None,
+        process: None,
+    }
+}
+
+fn process_evidence(output: &BoundedCommandOutput) -> ExtensionApiInvocationProcessEvidence {
+    ExtensionApiInvocationProcessEvidence {
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        parsed_output: serde_json::from_slice(&output.stdout).ok(),
     }
 }
 
@@ -147,6 +166,9 @@ fn capability_script<'a>(extension: &'a ExtensionManifest, capability_id: &str) 
     match capability_id {
         COMPILER_WARNINGS_CAPABILITY_ID => extension.compiler_warnings_script(),
         COMPILER_WARNING_FIXES_CAPABILITY_ID => extension.compiler_warning_fixes_script(),
+        capability if capability.starts_with(REFACTOR_FILE_CAPABILITY_PREFIX) => {
+            extension.refactor_script()
+        }
         _ => None,
     }
 }
@@ -161,7 +183,49 @@ fn failure_response(failure: ExtensionApiOperationFailure) -> ExtensionApiInvoke
         api_version: EXTENSION_API_V1,
         output: None,
         failure: Some(failure),
+        process: None,
     }
+}
+
+fn failure_with_process(
+    code: ExtensionApiOperationFailureCode,
+    message: String,
+    process: ExtensionApiInvocationProcessEvidence,
+) -> ExtensionApiInvokeResponse {
+    let mut response = failure(code, message);
+    response.process = Some(process);
+    response
+}
+
+fn spawn_capability(
+    script_path: &std::path::Path,
+    working_directory: &str,
+) -> std::io::Result<std::process::Child> {
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match Command::new(script_path)
+            .current_dir(working_directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(error) if is_transient_spawn_error(&error) && attempt < 2 => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(25 * (attempt + 1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.expect("transient spawn error captured before retry"))
+}
+
+fn is_transient_spawn_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+    ) || matches!(error.raw_os_error(), Some(11) | Some(26))
 }
 
 #[cfg(test)]
@@ -214,6 +278,79 @@ mod tests {
                 Some(ExtensionApiOperationFailureCode::CapabilityOutputInvalid)
             );
             assert!(response.output.is_none());
+            let process = response.process.expect("process evidence");
+            assert_eq!(process.stdout, "not json");
+            assert!(process.parsed_output.is_none());
         });
+    }
+
+    #[test]
+    fn invoke_api_preserves_nonzero_process_evidence() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/example");
+            fs::create_dir_all(extension_dir.join("scripts")).unwrap();
+            fs::write(extension_dir.join("example.json"), r#"{"name":"Example","version":"1.0.0","scripts":{"refactor":"scripts/refactor.sh"},"provides":{"file_extensions":["rs"]}}"#).unwrap();
+            write_executable(&extension_dir.join("scripts/refactor.sh"), "#!/bin/sh\ncat >/dev/null\nprintf '{\"detail\":\"failed\"}'\nprintf 'script failed' >&2\nexit 7\n");
+            let root = tempfile::TempDir::new().unwrap();
+            let response = invoke_api(&ExtensionApiInvokeRequest {
+                schema: EXTENSION_API_INVOKE_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                extension_id: "example".to_string(),
+                capability_id: "refactor.rs".to_string(),
+                working_directory: root.path().to_string_lossy().into_owned(),
+                input: serde_json::json!({}),
+            });
+            assert_eq!(
+                response.failure.map(|failure| failure.code),
+                Some(ExtensionApiOperationFailureCode::CapabilityExecutionFailed)
+            );
+            assert_eq!(
+                response.process.expect("process evidence"),
+                ExtensionApiInvocationProcessEvidence {
+                    exit_code: Some(7),
+                    stdout: "{\"detail\":\"failed\"}".to_string(),
+                    stderr: "script failed".to_string(),
+                    parsed_output: Some(serde_json::json!({"detail":"failed"}))
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn invoke_api_preserves_process_evidence_when_stdin_closes() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/example");
+            fs::create_dir_all(extension_dir.join("scripts")).unwrap();
+            fs::write(extension_dir.join("example.json"), r#"{"name":"Example","version":"1.0.0","scripts":{"refactor":"scripts/refactor.sh"},"provides":{"file_extensions":["rs"]}}"#).unwrap();
+            write_executable(
+                &extension_dir.join("scripts/refactor.sh"),
+                "#!/bin/sh\nexec 0<&-\nsleep 5\n",
+            );
+            let root = tempfile::TempDir::new().unwrap();
+            let response = invoke_api(&ExtensionApiInvokeRequest {
+                schema: EXTENSION_API_INVOKE_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                extension_id: "example".to_string(),
+                capability_id: "refactor.rs".to_string(),
+                working_directory: root.path().to_string_lossy().into_owned(),
+                input: serde_json::json!({"content": "x".repeat(1024 * 1024)}),
+            });
+
+            assert_eq!(
+                response.failure.map(|failure| failure.code),
+                Some(ExtensionApiOperationFailureCode::CapabilityExecutionFailed)
+            );
+            assert!(response.process.is_some());
+        });
+    }
+
+    #[test]
+    fn transient_spawn_errors_are_classified_for_retry() {
+        assert!(is_transient_spawn_error(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+        assert!(!is_transient_spawn_error(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
     }
 }
