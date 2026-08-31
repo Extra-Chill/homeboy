@@ -5,14 +5,14 @@ use super::cook::{
     PROVIDER_EVIDENCE_DECLARATION,
 };
 
-pub const VERIFICATION_PROFILES_EXAMPLE: &str = r#"{"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"scope":"all","suite_timeout_seconds":1800,"isolation":"private_process_group","concurrency":1,"output_budget_bytes":65536,"cleanup_policy":"terminate_process_group"}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
+pub const VERIFICATION_PROFILES_EXAMPLE: &str = r#"{"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
 
 const VERIFICATION_PROFILES_HELP: &str = r#"JSON verification profile declaration, inline or @file.json.
 
 Profiles select one typed `plan`; shared `--verify` and `--private-verify` remain explicit shell escape hatches. Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector.
 
 Complete example:
-  {"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"scope":"all","suite_timeout_seconds":1800,"isolation":"private_process_group","concurrency":1,"output_budget_bytes":65536,"cleanup_policy":"terminate_process_group"}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
+  {"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]}"#;
 
 #[derive(Args, Debug)]
 pub struct AgentTaskFanoutArgs {

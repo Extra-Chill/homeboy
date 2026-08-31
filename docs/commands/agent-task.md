@@ -519,12 +519,7 @@ assignment must match one child; unmatched selectors return the typed
       "plan": {
         "adapter": "homeboy_review_test",
         "command": ["homeboy", "review", "test", "homeboy"],
-        "scope": "changed",
-        "suite_timeout_seconds": 1800,
-        "isolation": "private_process_group",
-        "concurrency": 1,
-        "output_budget_bytes": 65536,
-        "cleanup_policy": "terminate_process_group"
+        "suite_timeout_seconds": 1800
       }
     }
   },
@@ -534,10 +529,10 @@ assignment must match one child; unmatched selectors return the typed
 }
 ```
 
-Each profile selects one `TestExecutionPlan`. Its adapter, argv command, scope,
-suite and optional per-test timeout, isolation, concurrency, output budget, and
-cleanup policy are persisted with the cook and projected once for both Cook and
-Lab handoff. Use `--verify` only for arbitrary shell programs.
+Each profile selects one `TestExecutionPlan`. The current declared contract
+enforces a canonical `homeboy review test` argv and a positive suite timeout,
+then projects that timeout once for both Cook and Lab handoff. Use `--verify`
+only for arbitrary shell programs.
 
 Add `--dry-run` to inspect the derived branch/worktree names and batch-cook spec
 without creating worktrees. Add `--run-plan` after reviewing provider readiness

@@ -4609,7 +4609,7 @@ impl BatchCookSpec {
                     gate_timeout_seconds: self
                         .test_execution_plan
                         .as_ref()
-                        .map(|plan| plan.suite_timeout_seconds)
+                        .map(|plan| plan.suite_timeout().as_secs())
                         .unwrap_or(self.gate_timeout_seconds),
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
                     gate_no_progress_timeout_seconds: self.gate_no_progress_timeout_seconds,
@@ -5047,6 +5047,9 @@ impl VerificationProfiles {
                 Some(self.profiles.keys().cloned().collect()),
             )
         })?;
+        profile.plan.declared_command().map_err(|message| {
+            Error::invalid_argument("verification-profiles.profiles.plan", message)
+        })?;
         Ok((
             shared_verify.to_vec(),
             shared_private_verify.to_vec(),
@@ -5059,13 +5062,8 @@ impl VerificationProfiles {
 fn project_declared_test_command(
     plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> Result<String> {
-    plan.validate().map_err(|message| invalid_fanout(message))?;
-    if plan.adapter
-        != homeboy_engine_primitives::test_execution::TestExecutionAdapter::HomeboyReviewTest
-    {
-        return Err(invalid_fanout("unsupported declared test adapter"));
-    }
-    Ok(homeboy_engine_primitives::shell::quote_args(&plan.command))
+    let command = plan.declared_command().map_err(invalid_fanout)?;
+    Ok(homeboy_engine_primitives::shell::quote_args(command))
 }
 
 fn sources_for_executed_gates(
@@ -6180,6 +6178,22 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn verification_profile_rejects_noncanonical_review_test_argv() {
+        let mut args = cook_batch_args();
+        args.verification_profiles = Some(
+            r#"{"profiles":{"invalid":{"plan":{"adapter":"homeboy_review_test","command":["cargo","test"],"suite_timeout_seconds":30}}},"assignments":[{"selector":"issue-6453","profile":"invalid"}]}"#.to_string(),
+        );
+
+        let error =
+            build_cook_batch_plan(&args).expect_err("adapter argv is validated before planning");
+        assert_eq!(
+            error.details["field"],
+            "verification-profiles.profiles.plan"
+        );
+        assert!(error.message.contains("homeboy review test"), "{error}");
     }
 
     fn source(
@@ -9261,13 +9275,7 @@ fi
                         "review": { "plan": {
                             "adapter": "homeboy_review_test",
                             "command": ["homeboy", "review", "test", "homeboy"],
-                            "scope": "changed",
-                            "per_test_timeout_seconds": 60,
                             "suite_timeout_seconds": 123,
-                            "isolation": "private_process_group",
-                            "concurrency": 1,
-                            "output_budget_bytes": 4096,
-                            "cleanup_policy": "terminate_process_group"
                         }}
                     },
                     "assignments": [
@@ -9286,9 +9294,7 @@ fi
                 .test_execution_plan
                 .as_ref()
                 .expect("declared plan");
-            assert_eq!(declared.suite_timeout_seconds, 123);
-            assert_eq!(declared.per_test_timeout_seconds, Some(60));
-            assert_eq!(declared.output_budget_bytes, 4096);
+            assert_eq!(declared.suite_timeout().as_secs(), 123);
 
             let round_trip = BatchCookFanoutPlan::from_value(
                 serde_json::to_value(&plan).expect("serialize plan"),

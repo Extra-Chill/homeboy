@@ -54,7 +54,6 @@ Create a task worktree through the configured or built-in provider
 | `--task-url` | `<TASK_URL>` | Task or issue URL associated with this worktree |
 | `--run-id` | `<RUN_ID>` | Agent-task run ID associated with this worktree |
 | `--cleanup-policy` | `<CLEANUP_POLICY>` | Cleanup policy for lifecycle cleanup Values: `remove-when-safe`, `preserve-on-failure`. |
-| `--require-handoff-freshness` | flag | Require bounded remote freshness proof before allocating the worktree |
 
 ## `homeboy worktree import`
 
