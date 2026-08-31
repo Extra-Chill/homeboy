@@ -164,6 +164,20 @@ pub struct LocalControllerJobClient {
     client: reqwest::blocking::Client,
 }
 
+/// The durable admission result for a typed controller job submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerJobSubmissionDisposition {
+    Created,
+    Reused,
+}
+
+/// A controller job plus the admission decision that selected it.
+#[derive(Debug, Clone)]
+pub struct ControllerJobSubmission {
+    pub job: crate::api_jobs::Job,
+    pub disposition: ControllerJobSubmissionDisposition,
+}
+
 /// Extract the `job` a controller-job endpoint returned.
 ///
 /// Reaches the payload through [`daemon_endpoint_payload`] rather than spelling
@@ -299,6 +313,15 @@ impl LocalControllerJobClient {
     /// Admit and start a typed durable controller job. The daemon, rather than
     /// the submitting CLI process, owns execution after this method returns.
     pub fn submit(&self, request: serde_json::Value) -> Result<crate::api_jobs::Job> {
+        Ok(self.submit_with_disposition(request)?.job)
+    }
+
+    /// Admit and start a typed durable controller job, preserving the daemon's
+    /// durable admission disposition for callers that expose submission receipts.
+    pub fn submit_with_disposition(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<ControllerJobSubmission> {
         let response = self
             .client
             .post(format!("{}/controller/jobs", self.endpoint))
@@ -331,6 +354,18 @@ impl LocalControllerJobClient {
                     Some("parse local controller job".to_string()),
                 )
             })?;
+        let disposition = match daemon_endpoint_payload(&value)
+            .and_then(|payload| payload.pointer("/submission/disposition"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("created") => ControllerJobSubmissionDisposition::Created,
+            Some("reused") => ControllerJobSubmissionDisposition::Reused,
+            _ => {
+                return Err(Error::internal_unexpected(
+                    "local controller-job submission response has no recognized disposition",
+                ));
+            }
+        };
         let response = self
             .client
             .post(format!(
@@ -358,15 +393,17 @@ impl LocalControllerJobClient {
                 "local controller job start failed: {value}"
             )));
         }
-        serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
-            Error::internal_unexpected("local controller-job start response has no job")
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse local controller job".to_string()),
-            )
-        })
+        let job =
+            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
+                Error::internal_unexpected("local controller-job start response has no job")
+            })?)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse local controller job".to_string()),
+                )
+            })?;
+        Ok(ControllerJobSubmission { job, disposition })
     }
 
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
@@ -3687,19 +3724,20 @@ fn enqueue_controller_job(
         request.idempotency_key.clone(),
         controller_job,
     )?;
-    let (job, compacted) = match outcome {
+    let (job, compacted, disposition) = match outcome {
         crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) => {
-            (job_store.get(job_id)?, false)
+            (job_store.get(job_id)?, false, "created")
         }
         crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
             let compacted = job_store.get(job.id).is_err();
-            (*job, compacted)
+            (*job, compacted, "reused")
         }
     };
     let job_id = job.id;
     Ok(json!({
         "command": "api.controller.jobs.create",
         "job": job,
+        "submission": { "disposition": disposition },
         "terminal_tombstone": if compacted { json!({ "status": "terminal", "compacted": true }) } else { serde_json::Value::Null },
         "poll": if compacted { json!({ "job": serde_json::Value::Null, "events": serde_json::Value::Null }) } else { json!({ "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") }) },
         "start": if compacted { serde_json::Value::Null } else { json!({ "method": "POST", "path": format!("/controller/jobs/{job_id}/start") }) },

@@ -15,7 +15,9 @@ use homeboy::core::controller_runtime::{self, ControllerRuntimeRetentionOverride
 use homeboy::core::daemon::controller_job_driver::{
     self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
 };
-use homeboy::core::daemon::LocalControllerJobClient;
+use homeboy::core::daemon::{
+    ControllerJobSubmission, ControllerJobSubmissionDisposition, LocalControllerJobClient,
+};
 use homeboy::core::defaults;
 use homeboy::core::engine;
 use homeboy::core::engine::shell::quote_arg;
@@ -508,14 +510,17 @@ fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
             Some("serialize cleanup job request".to_string()),
         )
     })?;
-    let digest = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, request.to_string().as_bytes());
-    let job = LocalControllerJobClient::connect()?.submit(serde_json::json!({
-        "type": CLEANUP_JOB_TYPE,
-        "version": CLEANUP_JOB_VERSION,
-        "idempotency_key": format!("cleanup-inventory-{digest}"),
-        "request": request,
-    }))?;
-    Ok(compact_cleanup_job(&job, "submitted"))
+    // A completed cleanup describes the inventory that existed when it ran, not
+    // a standing claim over future inventory with the same command arguments.
+    let invocation_id = uuid::Uuid::new_v4();
+    let submission =
+        LocalControllerJobClient::connect()?.submit_with_disposition(serde_json::json!({
+            "type": CLEANUP_JOB_TYPE,
+            "version": CLEANUP_JOB_VERSION,
+            "idempotency_key": format!("cleanup-inventory-{invocation_id}"),
+            "request": request,
+        }))?;
+    Ok(compact_cleanup_submission(&submission))
 }
 
 fn cleanup_job_status(job_id: &str, full: bool) -> homeboy::core::Result<Value> {
@@ -549,6 +554,17 @@ fn compact_cleanup_job(job: &homeboy::core::api_jobs::Job, command: &'static str
         "status_command": format!("homeboy cleanup status {}", job.get("id").and_then(Value::as_str).unwrap_or("<job-id>")),
         "evidence_command": format!("homeboy cleanup status {} --full", job.get("id").and_then(Value::as_str).unwrap_or("<job-id>")),
     })
+}
+
+fn compact_cleanup_submission(submission: &ControllerJobSubmission) -> Value {
+    let mut output = compact_cleanup_job(&submission.job, "submitted");
+    output["submission"] = serde_json::json!({
+        "disposition": match submission.disposition {
+            ControllerJobSubmissionDisposition::Created => "created",
+            ControllerJobSubmissionDisposition::Reused => "reused",
+        },
+    });
+    output
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
