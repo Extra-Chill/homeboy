@@ -407,6 +407,10 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
             })
         })
         .unwrap_or("unresolved");
+    let model = resolved
+        .pointer("/provider/model")
+        .and_then(Value::as_str)
+        .unwrap_or("unresolved");
     let destination = resolved
         .pointer("/workspace/path")
         .and_then(Value::as_str)
@@ -436,6 +440,7 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
         "Cook preview".to_string(),
         format!("Placement: {placement}"),
         format!("Provider: {provider}"),
+        format!("Model: {model}"),
         format!("Destination: {destination}"),
         format!("Gates: {public_gates} public, {private_gates} private"),
         format!(
@@ -1043,7 +1048,7 @@ mod tests {
 
         assert_eq!(
             render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
-            Some("Cook preview\nPlacement: local\nProvider: fixture\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
+            Some("Cook preview\nPlacement: local\nProvider: fixture\nModel: test-model\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
         );
     }
 

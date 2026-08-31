@@ -724,10 +724,27 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
             .collect::<Vec<_>>();
         rewrite_cook_identity_replay_argv(&mut replay, args);
         append_preview_lifecycle_replay_argv(&mut replay, args);
-        return redact_preview_replay_argv(replay);
+        return finalize_cook_preview_replay(replay, args);
     }
 
-    redact_preview_replay_argv(cook_replay_argv(args))
+    finalize_cook_preview_replay(cook_replay_argv(args), args)
+}
+
+fn finalize_cook_preview_replay(
+    replay: impl IntoIterator<Item = String>,
+    args: &AgentTaskCookArgs,
+) -> PreviewReplayArgv {
+    let mut replay = redact_preview_replay_argv(replay);
+    if args
+        .prompt_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.source == "stdin")
+    {
+        replay.requires.push(
+            "replay requires the original non-empty prompt on stdin for `--prompt -`".to_string(),
+        );
+    }
+    replay
 }
 
 // Unit callers do not have the original process argv. Keep their fallback

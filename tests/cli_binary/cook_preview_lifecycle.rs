@@ -1,10 +1,13 @@
 use serde_json::Value;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[test]
 fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
     let home = tempfile::tempdir().expect("home");
+    let output_dir = tempfile::tempdir().expect("output directory");
+    let output_path = output_dir.path().join("preview.json");
     let output = Command::new(homeboy_bin())
         .args([
             "agent-task",
@@ -22,6 +25,8 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
             "--verify",
             "cargo test -p homeboy-cli",
             "--preview",
+            "--output",
+            output_path.to_str().expect("output path"),
         ])
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -45,6 +50,21 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
     let preview = &envelope["data"];
     assert_eq!(preview["schema"], "homeboy/agent-task-cook-preview/v1");
     assert_eq!(preview["mutates"], false);
+    assert_eq!(
+        serde_json::from_str::<Value>(
+            &std::fs::read_to_string(&output_path).expect("preview output")
+        )
+        .expect("preview output JSON")["data"]["mutates"],
+        false,
+        "--output must contain the read-only terminal preview"
+    );
+    assert!(
+        !output_dir
+            .path()
+            .join(".preview.json.homeboy-cook-output.lock")
+            .exists(),
+        "preview must not create a Cook output lease"
+    );
     assert_eq!(
         preview["resolved"]["provider"]["backend"]["default_policy"],
         "missing"
@@ -78,6 +98,71 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
             .count(),
         0,
         "preview must not create Homeboy state"
+    );
+}
+
+#[test]
+fn stdin_prompt_preview_declares_replay_requirement() {
+    let home = tempfile::tempdir().expect("home");
+    let mut command = Command::new(homeboy_bin());
+    command
+        .args([
+            "agent-task",
+            "cook",
+            "--repo",
+            "homeboy",
+            "--task-url",
+            "https://github.com/Extra-Chill/homeboy/issues/13490",
+            "--head",
+            "fix/13490-cook-preview-lifecycle-chubes",
+            "--base",
+            "main",
+            "--verify",
+            "cargo test -p homeboy-cli",
+            "--prompt",
+            "-",
+            "--preview",
+        ])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("run Cook preview");
+    child
+        .stdin
+        .take()
+        .expect("preview stdin")
+        .write_all(b"Fix the preview replay contract.\n")
+        .expect("write preview prompt");
+    let output = child.wait_with_output().expect("wait for Cook preview");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let preview: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
+    let replay = preview["data"]["replay_argv"]
+        .as_array()
+        .expect("preview replay argv");
+    assert!(
+        replay
+            .windows(2)
+            .any(|pair| pair[0] == "--prompt" && pair[1] == "-"),
+        "stdin source remains explicit in the replay: {replay:?}"
+    );
+    assert!(
+        preview["data"]["replay_requires"]
+            .as_array()
+            .expect("preview replay requirements")
+            .iter()
+            .any(|requirement| requirement
+                == "replay requires the original non-empty prompt on stdin for `--prompt -`"),
+        "stdin replay requirement is explicit: {preview}"
     );
 }
 
