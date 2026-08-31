@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.2] - 2026-08-31
+
+### Changed
+- add native worktree handoff freshness proof
+- Consolidate runner workspace transfer accounting
+
+### Fixed
+- finalize patches on merge baselines
+- Fix Cook isolated snapshot promotion base
+
 ## [0.367.1] - 2026-08-31
 
 ### Changed
