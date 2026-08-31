@@ -991,8 +991,7 @@ fn runtime_pin(
 /// controller's selection.
 /// Ambient admission entry points, retained for this module's own tests only.
 ///
-/// These resolve the runtime root from process-global state. That is the exact
-/// split `tests/nextest_shard_parallelism_test.rs` recorded: a test holding a
+/// These resolve the runtime root from process-global state. A test holding a
 /// `HermeticTestContext` store while production code beneath it read the
 /// admission lease out of the real `$HOME`, so one test observed another's
 /// `controller_admission.owner`. `HermeticTestContext` does not mutate the

@@ -73,8 +73,7 @@ Both stores now take explicit roots for every production caller (#7505), and
 both failure families pass in parallel. Measured on an 8-core host,
 `homeboy-lab-runner --lib` went from 410.3s serial to 98.5s parallel with an
 identical failure set, and neither it nor `homeboy-agents --lib` has any
-parallel-only failure. `tests/nextest_shard_parallelism_test.rs` pins the `0` and
-carries the measurement.
+parallel-only failure.
 
 The two settings therefore now differ. The Cargo cap stays `1` until `HomeGuard`
 stops mutating process-global environment; the nextest cap is lifted.
