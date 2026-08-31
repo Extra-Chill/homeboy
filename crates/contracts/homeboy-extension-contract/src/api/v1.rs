@@ -15,6 +15,8 @@ pub const EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA: &str =
 pub const EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA: &str =
     "homeboy/extension-api-handshake-response/v1";
 pub const EXTENSION_API_V1: ExtensionApiVersion = ExtensionApiVersion { major: 1 };
+pub const FINGERPRINT_FILE_CAPABILITY_PREFIX: &str = "fingerprint.";
+pub const REFACTOR_FILE_CAPABILITY_PREFIX: &str = "refactor.";
 
 /// A transport-neutral Extension API major version.
 ///

@@ -15,7 +15,7 @@ mod extension_integration;
 mod types;
 mod whole_file_move;
 
-pub(crate) use extension_integration::core_parse_items;
+pub(crate) use extension_integration::{core_parse_items, find_refactor_extension_for_extension};
 // `refactor move` reports these two result shapes in its JSON payload.
 // `MovedItem` is reachable through `MoveResult::items_moved`/`tests_moved`.
 pub(crate) use types::{ImportRewrite, ModuleIndexEntry, MoveOptions};

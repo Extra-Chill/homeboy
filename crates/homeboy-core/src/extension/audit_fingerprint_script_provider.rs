@@ -9,6 +9,7 @@
 //! provider hooks.
 
 use homeboy_audit_contract::FingerprintOutput;
+use homeboy_extension_contract::api::v1::FINGERPRINT_FILE_CAPABILITY_PREFIX;
 
 use homeboy_core::code_audit::fingerprint_script_provider::{
     register_fingerprint_script_provider, FingerprintScriptProvider,
@@ -23,10 +24,10 @@ impl FingerprintScriptProvider for ExtensionFingerprintScriptProvider {
         relative_path: &str,
         content: &str,
     ) -> Option<FingerprintOutput> {
-        let matched = crate::extension::resolve::find_installed_file_extension(
-            file_extension,
-            crate::extension::resolve::FileExtensionCapability::Fingerprint,
-        )?;
+        let capability_id = format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}{file_extension}");
+        let extension_id =
+            crate::extension::resolve::find_installed_capability_provider(&capability_id)?;
+        let matched = crate::extension::catalog::load_extension(&extension_id).ok()?;
         super::fingerprint::run_fingerprint_script(&matched, relative_path, content)
     }
 }

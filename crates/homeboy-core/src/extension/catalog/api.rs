@@ -19,7 +19,8 @@ use homeboy_extension_contract::api::v1::{
     EXTENSION_API_DESCRIPTOR_SCHEMA, EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA,
     EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA, EXTENSION_API_READINESS_REQUEST_SCHEMA,
     EXTENSION_API_READINESS_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
-    EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
+    EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1, FINGERPRINT_FILE_CAPABILITY_PREFIX,
+    REFACTOR_FILE_CAPABILITY_PREFIX,
 };
 use homeboy_extension_contract::{evaluate_core_compatibility, ExtensionCapability};
 
@@ -93,6 +94,30 @@ fn api_descriptor(extension_id: &str) -> Result<ExtensionApiDescriptor> {
             COMPILER_WARNING_FIXES_INPUT_SCHEMA,
             COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
         ));
+    }
+    if extension.fingerprint_script().is_some() {
+        capabilities.extend(
+            extension
+                .provided_file_extensions()
+                .iter()
+                .map(|file_extension| {
+                    capability_descriptor(&format!(
+                        "{FINGERPRINT_FILE_CAPABILITY_PREFIX}{file_extension}"
+                    ))
+                }),
+        );
+    }
+    if extension.refactor_script().is_some() {
+        capabilities.extend(
+            extension
+                .provided_file_extensions()
+                .iter()
+                .map(|file_extension| {
+                    capability_descriptor(&format!(
+                        "{REFACTOR_FILE_CAPABILITY_PREFIX}{file_extension}"
+                    ))
+                }),
+        );
     }
     capabilities.extend(
         extension
@@ -692,8 +717,11 @@ mod tests {
                     "test": { "extension_script": "test.sh" },
                     "scripts": {
                         "compiler_warnings": "warnings.sh",
-                        "compiler_warning_fixes": "warning-fixes.sh"
+                        "compiler_warning_fixes": "warning-fixes.sh",
+                        "fingerprint": "fingerprint.sh",
+                        "refactor": "refactor.sh"
                     },
+                    "provides": { "file_extensions": ["rs", "php"] },
                     "executable": { "runtime": { "run_command": "fixture", "ready_check": "fixture --ready" } },
                     "recipe_run_providers": [{
                         "id": "fixture.recipe",
@@ -724,12 +752,16 @@ mod tests {
                     COMPILER_WARNING_FIXES_CAPABILITY_ID,
                     COMPILER_WARNINGS_CAPABILITY_ID,
                     "execute",
+                    "fingerprint.php",
+                    "fingerprint.rs",
                     "recipe-run-provider.fixture.recipe",
+                    "refactor.php",
+                    "refactor.rs",
                     "test"
                 ]
             );
             assert_eq!(
-                descriptor.capabilities[3].contract_version.as_deref(),
+                descriptor.capabilities[5].contract_version.as_deref(),
                 Some("2")
             );
             let warnings = descriptor

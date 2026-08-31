@@ -559,10 +559,13 @@ fn apply_rewrites(rewrites: &[ImportRewrite], root: &Path) {
 /// This is a shared utility — same as `core_fingerprint::load_grammar_for_ext`
 /// but accessible from the symbol_graph module without circular dependency.
 fn load_grammar_for_ext(ext: &str) -> Option<Grammar> {
-    let matched = crate::extension::resolve::find_installed_file_extension(
-        ext,
-        crate::extension::resolve::FileExtensionCapability::Fingerprint,
-    )?;
+    let capability_id = format!(
+        "{}{ext}",
+        homeboy_extension_contract::api::v1::FINGERPRINT_FILE_CAPABILITY_PREFIX
+    );
+    let extension_id =
+        crate::extension::resolve::find_installed_capability_provider(&capability_id)?;
+    let matched = crate::extension::catalog::load_extension(&extension_id).ok()?;
     let extension_path = matched.extension_path.as_deref()?;
 
     let grammar_path = Path::new(extension_path).join("grammar.toml");
