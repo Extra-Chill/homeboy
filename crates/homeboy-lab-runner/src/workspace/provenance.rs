@@ -481,14 +481,25 @@ pub(crate) fn verify_lab_workspace(
     {
         return Err("claims git materialization while excluding .git metadata".to_string());
     }
-    if snapshot.dirty
+    // A child process can re-observe the task checkout after a provider begins
+    // writing it. Lab dispatch evidence remains the immutable source authority.
+    let dispatch_snapshot = serde_json::from_value::<SourceSnapshot>(lab_snapshot.clone())
+        .map_err(|_| "has invalid source snapshot evidence".to_string())?;
+    if !source_snapshot_matches_dispatch_evidence(&snapshot, lab_snapshot) {
+        return Err("source snapshot does not match Lab dispatch evidence".to_string());
+    }
+    if dispatch_snapshot.dirty
         && lab
             .pointer("/workspace_cleanliness/allow_dirty_lab_workspace")
             .and_then(serde_json::Value::as_bool)
             != Some(true)
     {
-        return Err("records a dirty source checkout".to_string());
+        return Err(dirty_source_checkout_error(
+            &dispatch_snapshot,
+            materialized_workspace_path,
+        ));
     }
+    let snapshot = dispatch_snapshot;
     if !is_git_revision(source_revision) {
         return Err("has an invalid source revision".to_string());
     }
@@ -509,9 +520,6 @@ pub(crate) fn verify_lab_workspace(
     }
     if lab.get("status").and_then(|value| value.as_str()) != Some("offloaded") {
         return Err("dispatch status is not `offloaded`".to_string());
-    }
-    if !source_snapshot_matches_dispatch_evidence(&snapshot, lab_snapshot) {
-        return Err("source snapshot does not match Lab dispatch evidence".to_string());
     }
     let verification = lab.get("workspace_verification");
     let (expected_content_hash, verification_identity, content_hash_algorithm, permission_policy) =
@@ -952,8 +960,9 @@ fn nested_git_metadata(
 
 /// Runner process preparation may enrich a staged snapshot with the original
 /// prepared-workspace identity and its update lineage. Those runner-local
-/// fields are not part of the controller's dispatched snapshot bytes; every
-/// path, content, and materialization field remains an exact match.
+/// fields are not part of the controller's dispatched snapshot bytes. A child
+/// may also re-observe mutable cleanliness/hash/timestamp fields after provider
+/// execution; all path, revision, and materialization identity remains exact.
 fn source_snapshot_matches_dispatch_evidence(
     snapshot: &SourceSnapshot,
     dispatch_evidence: &serde_json::Value,
@@ -980,7 +989,46 @@ fn source_snapshot_matches_dispatch_evidence(
         .clone();
     dispatched_snapshot.prepared_workspace_update_lineage =
         snapshot.prepared_workspace_update_lineage.clone();
+    // A child runner can only re-observe these mutable fields after dispatch.
+    // The dispatch copy remains the authority used for source-state policy.
+    dispatched_snapshot.dirty = snapshot.dirty;
+    dispatched_snapshot.snapshot_hash = snapshot.snapshot_hash.clone();
+    dispatched_snapshot.synced_at = snapshot.synced_at.clone();
     dispatched_snapshot == *snapshot
+}
+
+fn dirty_source_checkout_error(snapshot: &SourceSnapshot, workspace: &Path) -> String {
+    let paths = git_status_ignoring_snapshot_excludes_raw(workspace, &snapshot.sync_excludes)
+        .ok()
+        .filter(|status| !status.is_empty())
+        .map(|status| status.lines().take(20).collect::<Vec<_>>().join(", "))
+        .unwrap_or_else(|| "unavailable".to_string());
+    format!(
+        "records a dirty source checkout at dispatch (source workspace `{}`; materialized workspace `{}`; changed paths: {paths})",
+        snapshot.local_path.as_deref().unwrap_or("<unknown-source-path>"),
+        workspace.display(),
+    )
+}
+
+fn git_status_ignoring_snapshot_excludes_raw(
+    workspace: &Path,
+    excludes: &[String],
+) -> std::result::Result<String, String> {
+    let mut args = vec![
+        "status".to_string(),
+        "--porcelain=v1".to_string(),
+        "--untracked-files=all".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+    ];
+    args.extend(
+        SYNTHETIC_BASELINE_PATHS[1..]
+            .iter()
+            .map(|path| path.to_string()),
+    );
+    args.extend(snapshot_git_exclude_pathspecs(excludes));
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git(workspace, &args)
 }
 
 fn paths_equal(left: &str, right: &str) -> bool {
@@ -1289,6 +1337,48 @@ mod tests {
         .expect("verified dirty snapshot-git provenance");
         verify_lab_workspace_git_root(workspace.path(), &provenance)
             .expect("exact checkout and verified overlay are accepted");
+    }
+
+    #[test]
+    fn clean_dispatch_snapshot_remains_authoritative_after_task_workspace_observation() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let dispatched = snapshot(workspace.path());
+        let lab = lab(workspace.path(), &dispatched);
+        let mut observed = dispatched.clone();
+        observed.dirty = true;
+        observed.snapshot_hash = "sha256:provider-authored-task-change".to_string();
+        observed.synced_at = "2026-01-01T00:01:00Z".to_string();
+
+        let provenance = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            observed,
+            lab,
+        )
+        .expect("a clean pre-dispatch source remains eligible for harvest");
+
+        assert!(!provenance.source_dirty);
+    }
+
+    #[test]
+    fn dirty_dispatch_snapshot_reports_workspace_and_changed_paths() {
+        let workspace = git_workspace();
+        std::fs::write(workspace.path().join("file.txt"), "pre-existing change\n")
+            .expect("dirty source");
+        let mut snapshot = git_snapshot(workspace.path());
+        snapshot.dirty = true;
+        let error = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            git_lab(workspace.path(), &snapshot),
+        )
+        .expect_err("a dirty dispatch snapshot must fail closed");
+
+        assert!(error.contains("source workspace"));
+        assert!(error.contains(&workspace.path().display().to_string()));
+        assert!(error.contains("file.txt"));
     }
 
     #[test]
