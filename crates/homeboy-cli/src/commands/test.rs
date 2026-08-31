@@ -14,6 +14,7 @@ use homeboy_core::extension::test::{
     run_self_check_test_workflow_with_progress, test_failure_summary_items, TestAnalysisInput,
     TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
+use homeboy_engine_primitives::test_execution::suite_timeout_from_env;
 #[cfg(test)]
 use homeboy_extension_contract::test_results::TestInventoryRejection;
 use homeboy_extension_contract::ExtensionCapability;
@@ -210,6 +211,9 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
 
 pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     validate_differential_args(&args)?;
+    // Resolve inherited policy once so every execution path and its report use
+    // the same validated deadline.
+    let test_execution_plan = suite_timeout_from_env();
     let source_ctx = resolve_source_context(
         &args.comp,
         &args.setting_args,
@@ -241,6 +245,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
             &source_ctx.source_path,
             source_ctx.component_id.clone(),
             args.json_summary,
+            test_execution_plan.clone(),
             Some(runner.run_dir()),
             observation.as_ref().map(|observation| &observation.active),
         );
@@ -256,7 +261,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
             |observation, error| finish_test_observation_error(Some(observation), error),
         )?;
 
-        let (mut output, exit_code) = report::from_main_workflow(workflow);
+        let (mut output, exit_code) = report::from_main_workflow(workflow, &test_execution_plan);
         attach_test_actionable(&mut output, run_id);
         return Ok((output, exit_code));
     }
@@ -342,6 +347,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
                 .chain(extension_test::portable_env(&ctx.component)?.public_env)
                 .collect(),
             passthrough_args: passthrough_args.clone(),
+            test_execution_plan: test_execution_plan.clone(),
         },
         runner.run_dir(),
     );
@@ -380,6 +386,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     let (mut output, exit_code) = report::from_main_workflow_with_ci_context(
         workflow,
         ci_profile::ci_context_for_job(ci_job.as_ref(), None),
+        &test_execution_plan,
     );
     let exit_code = apply_differential_verdict(
         &mut output,
@@ -392,6 +399,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
         ci_job.as_ref(),
         &settings,
         &settings_json,
+        &test_execution_plan,
     )?;
     attach_test_actionable(&mut output, run_id);
     Ok((output, exit_code))
@@ -455,6 +463,7 @@ fn apply_differential_verdict(
     ci_job: Option<&CiResolvedJob>,
     settings: &[(String, String)],
     settings_json: &[(String, Value)],
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> homeboy::core::Result<i32> {
     if !args.differential {
         return Ok(candidate_exit_code);
@@ -529,6 +538,7 @@ fn apply_differential_verdict(
             ci_job,
             settings,
             settings_json,
+            test_execution_plan,
         )?;
         cache.store(&key, &measurement, chrono::Utc::now().to_rfc3339())?;
         cache.prune_superseded(&key)?;
@@ -625,6 +635,7 @@ fn run_differential_baseline(
     ci_job: Option<&CiResolvedJob>,
     settings: &[(String, String)],
     settings_json: &[(String, Value)],
+    test_execution_plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
 ) -> homeboy::core::Result<extension_test::TestMeasurement> {
     let source_root = PathBuf::from(git::get_git_root(&source_path.to_string_lossy())?);
     let component_prefix = git::get_component_path_prefix(&source_path.to_string_lossy());
@@ -663,10 +674,11 @@ fn run_differential_baseline(
                 .chain(extension_test::portable_env(&baseline_component)?.public_env)
                 .collect(),
             passthrough_args: passthrough_args.to_vec(),
+            test_execution_plan: test_execution_plan.clone(),
         },
         &run_dir,
     );
-    let (output, _) = report::from_main_workflow(workflow?);
+    let (output, _) = report::from_main_workflow(workflow?, test_execution_plan);
     run_dir.cleanup();
     Ok(extension_test::measurement_from_test_output(&output))
 }

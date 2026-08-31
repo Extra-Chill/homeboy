@@ -412,7 +412,7 @@ commands and derive separate gate results plus reviewer evidence from them:
 
 ```bash
 homeboy agent-task finalize-pr --manual-finalization \
-  --verify 'cargo test --locked' ...
+  --verify 'homeboy review test homeboy' ...
 ```
 
 Each `--verify` runs against the same clean committed candidate in an isolated
@@ -474,7 +474,7 @@ homeboy agent-task cook \
   --task-url https://github.com/Extra-Chill/homeboy/issues/6453 \
   --workspace homeboy@fix-issue-6453 \
   --to-worktree homeboy@fix-issue-6453 \
-  --verify 'cargo test --lib' \
+  --verify 'homeboy review test homeboy' \
   --backend sandbox \
   --selector wordpress.sandbox-agent-task-executor \
   --prompt @task.txt
@@ -498,7 +498,7 @@ resolve; this is checked before any worktree is created.
 ```bash
 homeboy agent-task fanout cook-batch \
   --repo homeboy \
-  --verify 'cargo test --lib' \
+  --verify 'homeboy review test homeboy' \
   --backend sandbox \
   --selector wordpress.sandbox-agent-task-executor \
   https://github.com/Extra-Chill/homeboy/issues/6453 \
@@ -616,14 +616,14 @@ attempt to the Lab controller:
 
 ```bash
 homeboy --runner homeboy-lab --detach-after-handoff agent-task cook \
-  --to-worktree homeboy@fix-issue-6453 --verify 'cargo test --lib' --prompt @task.txt
+  --to-worktree homeboy@fix-issue-6453 --verify 'homeboy review test homeboy' --prompt @task.txt
 ```
 
 Wait for the completed Cook when the caller owns a synchronous workflow:
 
 ```bash
 homeboy --runner homeboy-lab agent-task cook \
-  --to-worktree homeboy@fix-issue-6453 --verify 'cargo test --lib' --prompt @task.txt
+  --to-worktree homeboy@fix-issue-6453 --verify 'homeboy review test homeboy' --prompt @task.txt
 ```
 
 Waiting is the default, so a synchronous caller passes no observation flag at
@@ -1408,7 +1408,7 @@ homeboy agent-task cook \
   --task-url https://tracker.example/issues/123 \
   --cwd /path/to/existing-clean-linked-worktree \
   --worktree-provider-self-repair workspace-service \
-  --verify "cargo test --workspace" \
+  --verify "homeboy review test <component>" \
   --prompt @task.txt
 ```
 

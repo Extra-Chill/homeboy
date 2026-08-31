@@ -80,7 +80,7 @@ pub enum AgentTaskCommand {
     /// `--detach-after-handoff` rather than rely on the default, and read the
     /// terminal outcome from `agent-task status <run-id>` in either case.
     #[command(
-        after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nNo default configured (agent_task.default_backend unset, e.g. a fresh or reset agent_task: {}): run `homeboy agent-task providers --set-default` to live-probe every declared backend and write a working default_backend/rotation from what actually authenticates here.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'cargo test' --preview\n\nUse --help-full for the complete advanced option reference."
+        after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nNo default configured (agent_task.default_backend unset, e.g. a fresh or reset agent_task: {}): run `homeboy agent-task providers --set-default` to live-probe every declared backend and write a working default_backend/rotation from what actually authenticates here.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy' --preview\n\nUse --help-full for the complete advanced option reference."
     )]
     Cook(Box<AgentTaskCookArgs>),
     /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
@@ -546,4 +546,27 @@ pub struct CompileLoopArgs {
     /// Declarative loop definition to compile into an agent-task plan.
     #[arg(long, value_name = "SPEC")]
     pub definition: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn cook_help_recommends_review_test() {
+        let help = crate::cli_surface::Cli::command()
+            .find_subcommand("agent-task")
+            .expect("agent-task command")
+            .find_subcommand("cook")
+            .expect("cook command")
+            .clone()
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            help.contains("--verify 'homeboy review test homeboy'"),
+            "{help}"
+        );
+        assert!(!help.contains("--verify 'cargo test'"), "{help}");
+    }
 }
