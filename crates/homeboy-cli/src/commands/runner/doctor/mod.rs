@@ -61,32 +61,26 @@ pub(crate) fn run_with_options(
 ) -> CmdResult<RunnerDoctorOutput> {
     options.scope = repair_scope(options.scope, options.repair);
     let target = target::resolve(runner_id)?;
-    let mut report = match &target {
-        target::RunnerTarget::Local { id, runner } => {
-            // The local probe's artifact root is the only filesystem root this
-            // command reads, so it is resolved once here at the entry point
-            // rather than inside the probe. The SSH branch resolves its root on
-            // the remote host and deliberately does not take this one.
-            let artifact_root = crate::core::paths::artifact_root().ok();
-            local::report(id, runner.as_ref(), &options, artifact_root.as_deref())
-        }
-        target::RunnerTarget::Ssh {
-            id,
-            runner,
-            server,
-            client,
-        } => remote::report(id, runner, server, client, &options),
-    };
+    let mut report = report_for_target(&target, &options);
 
     let migration = runner::secret_env_migration_plan(runner_id)?;
     report.secret_env_migration = (!migration.is_empty()).then_some(migration);
 
     if options.repair {
         repair::apply(&target, &options, &mut report);
+
+        // Repair is not success by itself. Re-probe the same resolved target so
+        // the terminal report verifies its identity, binary, SSH, workspace,
+        // daemon, and provider readiness after the mutation.
+        let repairs = std::mem::take(&mut report.repairs);
+        report = report_for_target(&target, &options);
+        let migration = runner::secret_env_migration_plan(runner_id)?;
+        report.secret_env_migration = (!migration.is_empty()).then_some(migration);
+        report.repairs = repairs;
     }
 
     // Only general doctor observes the complete capability surface. Scoped
-    // Lab diagnostics deliberately skip CPU, tools, workspace, and artifact
+    // Lab diagnostics deliberately skip CPU, tools, and artifact
     // probes, so treating that partial report as a complete observation would
     // evict known-good admission evidence.
     if observes_complete_capabilities(options.scope) {
@@ -108,6 +102,28 @@ pub(crate) fn run_with_options(
     }
     let exit_code = report.status.operational_exit_code();
     Ok((report, exit_code))
+}
+
+fn report_for_target(
+    target: &target::RunnerTarget,
+    options: &RunnerDoctorOptions,
+) -> RunnerDoctorOutput {
+    match target {
+        target::RunnerTarget::Local { id, runner } => {
+            // The local probe's artifact root is the only filesystem root this
+            // command reads, so it is resolved once here at the entry point
+            // rather than inside the probe. The SSH branch resolves its root on
+            // the remote host and deliberately does not take this one.
+            let artifact_root = crate::core::paths::artifact_root().ok();
+            local::report(id, runner.as_ref(), &options, artifact_root.as_deref())
+        }
+        target::RunnerTarget::Ssh {
+            id,
+            runner,
+            server,
+            client,
+        } => remote::report(id, runner, server, client, &options),
+    }
 }
 
 const COMPACT_CHECK_LIMIT: usize = 12;

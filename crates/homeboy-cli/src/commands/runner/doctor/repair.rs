@@ -1,5 +1,11 @@
 use super::*;
+use homeboy::core::ErrorCode;
 use types::{RunnerDoctorOutput, RunnerDoctorStatus, RunnerRepair};
+
+/// A connect attempt already waits for controller promotion admission. Retry a
+/// timed-out wait once because a promotion can finish just after that bounded
+/// wait without making a different runner mutation safe.
+const PROMOTION_WAIT_CONNECT_ATTEMPTS: usize = 2;
 
 pub fn apply(
     target: &target::RunnerTarget,
@@ -95,7 +101,7 @@ pub fn apply(
     // Connect owns lease-safe dead-daemon adoption. A failed disconnect must not
     // force operators through repeated stop/adopt cycles when its authoritative
     // probe has already established that the recorded owner is gone.
-    match runner::connect(id) {
+    match retry_runtime_promotion_wait(|| runner::connect(id)) {
         Ok((_, 0)) => {
             report.checks.retain(|check| check.id != "daemon.exec");
             let workspace_root = runner_config.workspace_root.as_deref().unwrap_or(".");
@@ -305,6 +311,60 @@ mod tests {
         assert!(repair.commands.is_empty());
         assert!(repair.message.contains("no validated recovery action"));
     }
+
+    #[test]
+    fn promotion_timeout_retries_once_and_converges() {
+        let mut calls = 0;
+        let result = retry_runtime_promotion_wait(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(homeboy::core::Error::new(
+                    ErrorCode::RuntimePromotionWaitTimeout,
+                    "promotion still active",
+                    serde_json::Value::Null,
+                ))
+            } else {
+                Ok("connected")
+            }
+        });
+
+        assert_eq!(result.expect("second bounded wait succeeds"), "connected");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn promotion_timeout_stops_at_the_bounded_attempt_limit() {
+        let mut calls = 0;
+        let error = retry_runtime_promotion_wait::<()>(|| {
+            calls += 1;
+            Err(homeboy::core::Error::new(
+                ErrorCode::RuntimePromotionWaitTimeout,
+                "promotion still active",
+                serde_json::Value::Null,
+            ))
+        })
+        .expect_err("the second bounded wait remains terminal");
+
+        assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+        assert_eq!(calls, PROMOTION_WAIT_CONNECT_ATTEMPTS);
+    }
+
+    #[test]
+    fn non_promotion_failures_are_not_retried() {
+        let mut calls = 0;
+        let error = retry_runtime_promotion_wait::<()>(|| {
+            calls += 1;
+            Err(homeboy::core::Error::new(
+                ErrorCode::SshConnectFailed,
+                "ssh unavailable",
+                serde_json::Value::Null,
+            ))
+        })
+        .expect_err("transport errors do not become recovery retries");
+
+        assert_eq!(error.code, ErrorCode::SshConnectFailed);
+        assert_eq!(calls, 1);
+    }
 }
 
 /// What an executor should do about one typed repair step.
@@ -407,17 +467,21 @@ fn apply_daemon_repair_plan(runner_id: &str, report: &mut RunnerDoctorOutput) ->
             DaemonRepairDispatch::Disconnect => runner::disconnect(runner_id)
                 .map(|_| ())
                 .map_err(|error| error.message),
-            DaemonRepairDispatch::Connect => connect_outcome(runner::connect(runner_id)),
+            DaemonRepairDispatch::Connect => {
+                connect_outcome_after_promotion_wait(|| runner::connect(runner_id))
+            }
             DaemonRepairDispatch::AdoptOrphanLease { lease_id } => {
-                connect_outcome(runner::connect_with_orphan_adoption(
-                    runner_id,
-                    Some(&lease_id),
-                    &[],
-                    false,
-                    None,
-                    None,
-                    None,
-                ))
+                connect_outcome_after_promotion_wait(|| {
+                    runner::connect_with_orphan_adoption(
+                        runner_id,
+                        Some(&lease_id),
+                        &[],
+                        false,
+                        None,
+                        None,
+                        None,
+                    )
+                })
             }
             DaemonRepairDispatch::ReconcileLeaselessOrphans => connect_outcome(
                 runner::connect_with_orphan_adoption(runner_id, None, &[], true, None, None, None),
@@ -516,6 +580,34 @@ fn connect_outcome(
             .unwrap_or_else(|| format!("runner connect exited with code {exit_code}"))),
         Err(error) => Err(error.message),
     }
+}
+
+fn connect_outcome_after_promotion_wait(
+    connect: impl FnMut() -> homeboy::core::Result<(runner::RunnerConnectReport, i32)>,
+) -> Result<(), String> {
+    match retry_runtime_promotion_wait(connect) {
+        Ok(result) => connect_outcome(Ok(result)),
+        Err(error) => Err(error.message),
+    }
+}
+
+fn retry_runtime_promotion_wait<T>(
+    mut action: impl FnMut() -> homeboy::core::Result<T>,
+) -> homeboy::core::Result<T> {
+    for attempt in 0..PROMOTION_WAIT_CONNECT_ATTEMPTS {
+        match action() {
+            Err(error)
+                if error.code == ErrorCode::RuntimePromotionWaitTimeout
+                    && attempt + 1 < PROMOTION_WAIT_CONNECT_ATTEMPTS =>
+            {
+                // `connect` emitted owner/watch events during the first wait.
+                // A second bounded admission wait converges a promotion that
+                // completed at the timeout boundary without changing identity.
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the bounded promotion retry returns from its final attempt")
 }
 
 fn refresh_outcome(
