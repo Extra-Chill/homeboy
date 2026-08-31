@@ -246,7 +246,12 @@ pub fn preflight_dispatch_provider_admission(
     catalog.apply_provider_runner_secret_env_contracts(&mut plan);
     catalog.validate_selected_models(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(&plan, catalog.providers())
+    preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
+    crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
+        &plan,
+        catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )
 }
 
 pub fn dispatch_with_provider_requirements(

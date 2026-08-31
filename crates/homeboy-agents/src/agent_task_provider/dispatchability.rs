@@ -570,6 +570,26 @@ pub fn preflight_plan_provider_dispatchability_with_providers(
     Ok(())
 }
 
+/// Reject deterministic provider contract defects after the effective executor
+/// config has been compiled, without invoking provider-owned live readiness.
+pub fn preflight_plan_provider_dispatchability_without_runtime_with_providers(
+    plan: &AgentTaskPlan,
+    catalog: &AgentTaskProviderCatalog,
+    cache: &mut ProviderRuntimeReadinessCache,
+) -> homeboy_core::Result<()> {
+    for task in &plan.tasks {
+        preflight_provider_dispatchability_without_runtime_with_config(
+            catalog,
+            &task.executor.backend,
+            task.executor.selector.as_deref(),
+            task.executor.model(),
+            &task.executor.config,
+            cache,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

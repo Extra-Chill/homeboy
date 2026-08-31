@@ -9998,6 +9998,46 @@ fi
     }
 
     #[test]
+    fn dry_run_and_live_provider_admission_reject_the_same_missing_readiness_invocation() {
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "opencode.agent-task-executor",
+                "backend": "opencode",
+                "capabilities": ["cli_runtime", "provider_owned_auth"],
+                "cli": {
+                    "profiles": [{ "name": "terra", "model": "openai/gpt-5.6-terra" }]
+                }
+            }))
+            .expect("provider fixture")],
+            ..AgentTaskProviderCatalog::default()
+        };
+        let mut dry_run = cook_batch_args();
+        dry_run.backend = Some("opencode".to_string());
+        dry_run.selector = None;
+        dry_run.model = Some("openai/gpt-5.6-terra".to_string());
+        dry_run.secret_env.clear();
+        dry_run.preview = true;
+        dry_run.run_plan = false;
+        let mut live = dry_run.clone();
+        live.preview = false;
+        live.run_plan = true;
+
+        let dry_error = resolve_and_validate_effective_backend_with_catalog(&mut dry_run, &catalog)
+            .expect_err("preview must reject a provider-owned auth contract without readiness");
+        let live_error = resolve_and_validate_effective_backend_with_catalog(&mut live, &catalog)
+            .expect_err("run-plan admission must reject the same provider contract");
+
+        assert_eq!(dry_error.code, live_error.code);
+        assert_eq!(dry_error.message, live_error.message);
+        assert_eq!(dry_error.details, live_error.details);
+        assert_eq!(dry_error.details["field"], "provider_dispatchability");
+        assert!(
+            dry_error.message.contains("missing_readiness_invocation")
+                || dry_error.message.contains("readiness invocation")
+        );
+    }
+
+    #[test]
     fn dry_run_and_live_provider_admission_share_typed_missing_default_remediation() {
         with_isolated_home(|_| {
             let catalog = AgentTaskProviderCatalog {
