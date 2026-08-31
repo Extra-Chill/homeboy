@@ -13,7 +13,7 @@ use super::*;
 use crate::agent_task::ResolvedAgentTaskRuntimeTool;
 use crate::agent_task_executor_evidence::link_latest_executor_evidence;
 use crate::agent_task_process_containment::{
-    contained_group_recovery_commands, AgentTaskProcessContainment,
+    contained_group_recovery_commands, AgentTaskProcessContainment, AgentTaskProcessSupervisor,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -661,8 +661,8 @@ pub(super) struct ProviderContainmentReport {
 }
 
 impl ProviderContainmentReport {
-    fn record(&mut self, containment: &AgentTaskProcessContainment, result: Result<(), String>) {
-        self.leader_pid = containment.leader_pid();
+    fn record(&mut self, supervisor: &AgentTaskProcessSupervisor, result: Result<(), String>) {
+        self.leader_pid = supervisor.leader_pid();
         if let Err(error) = result {
             self.cleanup_errors.push(error);
         }
@@ -1028,7 +1028,7 @@ fn run_materialized_provider_command_once_contained(
     // process itself — reaps the descendants instead of only the direct child
     // (#11477). Fail closed: an uncontainable provider is one whose orphans
     // nothing can reap.
-    let mut containment = match AgentTaskProcessContainment::prepare(&mut command_builder) {
+    let containment = match AgentTaskProcessContainment::prepare(&mut command_builder) {
         Ok(containment) => containment,
         Err(error) => {
             return failure_outcome(
@@ -1045,7 +1045,7 @@ fn run_materialized_provider_command_once_contained(
         }
     };
 
-    let mut child = match command_builder.spawn() {
+    let child = match command_builder.spawn() {
         Ok(child) => child,
         Err(error) => {
             return failure_outcome(
@@ -1059,6 +1059,22 @@ fn run_materialized_provider_command_once_contained(
         }
     };
 
+    let mut child = match containment.supervise(child) {
+        Ok(child) => child,
+        Err(error) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::Provider,
+                "agent_task.provider_containment_failed",
+                format!(
+                    "Homeboy could not guard the process tree of provider '{}': {error}",
+                    provider.id
+                ),
+                json!({ "provider": provider.id, "command": command, "phase": "attach" }),
+            );
+        }
+    };
     if let Some(run_id) = run_id {
         // Failure to record this diagnostic identity must not interrupt provider
         // execution. The reservation remains the execution authority.
@@ -1078,23 +1094,6 @@ fn run_materialized_provider_command_once_contained(
                 child.id(),
             );
         }
-    }
-
-    if let Err(error) = containment.attach(&child) {
-        let attach_error = error.to_string();
-        let cleanup = containment.terminate_live(&mut child);
-        containment_report.record(&containment, cleanup);
-        return failure_outcome(
-            request,
-            AgentTaskOutcomeStatus::ProviderError,
-            AgentTaskFailureClassification::Provider,
-            "agent_task.provider_containment_failed",
-            format!(
-                "Homeboy could not guard the process tree of provider '{}': {attach_error}",
-                provider.id
-            ),
-            json!({ "provider": provider.id, "command": command, "phase": "attach" }),
-        );
     }
 
     let started = Instant::now();
@@ -1244,12 +1243,12 @@ fn run_materialized_provider_command_once_contained(
     // itself failed. The child is then still unreaped and still running, so it
     // needs the live termination path rather than a leader-exited reap.
     let containment_cleanup = if killed_for_liveness || timed_out || status.is_none() {
-        containment.terminate_live(&mut child)
+        child.terminate_live()
     } else {
-        containment.reap_after_exit()
+        child.reap_after_exit()
     };
     let cancellation_acknowledged = containment_cleanup.is_ok();
-    containment_report.record(&containment, containment_cleanup);
+    containment_report.record(&child, containment_cleanup);
 
     if let Some(reader) = stdout_reader {
         reader.finish(Duration::from_millis(100));
@@ -2660,17 +2659,14 @@ fn run_provider_readiness_invocation_with_timeout(
     // A readiness invocation is still provider-owned code that can spawn
     // tooling of its own; contain it so a timed-out probe cannot strand a
     // subtree (#11477).
-    let mut containment = AgentTaskProcessContainment::prepare(&mut command)
+    let containment = AgentTaskProcessContainment::prepare(&mut command)
         .map_err(|error| format!("failed to contain provider readiness invocation: {error}"))?;
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| format!("failed to spawn provider readiness invocation: {error}"))?;
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
-        return Err(format!(
-            "failed to guard provider readiness invocation: {error}"
-        ));
-    }
+    let mut child = containment
+        .supervise(child)
+        .map_err(|error| format!("failed to guard provider readiness invocation: {error}"))?;
     let (stdin_sender, stdin_receiver) = mpsc::sync_channel(1);
     let stdin_writer = child.stdin.take().map(|mut stdin| {
         std::thread::spawn(move || {
@@ -2720,9 +2716,9 @@ fn run_provider_readiness_invocation_with_timeout(
     // Capture is received with a deadline as a second line of defence, so even
     // an OS-level cleanup failure cannot strand readiness forever.
     let cleanup = if terminal.is_ok() {
-        containment.reap_after_exit()
+        child.reap_after_exit()
     } else {
-        containment.terminate_live(&mut child)
+        child.terminate_live()
     };
     let capture_timeout = || {
         timeout
@@ -3024,7 +3020,7 @@ pub fn probe_provider_executor_resolves(
     // The probe loads the provider's full require graph, which can itself
     // spawn helpers. Contain it so a timed-out probe leaves nothing behind
     // (#11477).
-    let mut containment = match AgentTaskProcessContainment::prepare(&mut command_builder) {
+    let containment = match AgentTaskProcessContainment::prepare(&mut command_builder) {
         Ok(containment) => containment,
         Err(error) => {
             return ProviderExecutorResolution::Unresolved {
@@ -3034,7 +3030,7 @@ pub fn probe_provider_executor_resolves(
         }
     };
 
-    let mut child = match command_builder.spawn() {
+    let child = match command_builder.spawn() {
         Ok(child) => child,
         Err(error) => {
             return ProviderExecutorResolution::Unresolved {
@@ -3044,13 +3040,27 @@ pub fn probe_provider_executor_resolves(
         }
     };
 
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
-        return ProviderExecutorResolution::Unresolved {
-            command: command.clone(),
-            detail: format!("failed to guard executor probe: {error}"),
-        };
-    }
+    let mut child = match containment.supervise(child) {
+        Ok(child) => child,
+        Err(error) => {
+            return ProviderExecutorResolution::Unresolved {
+                command: command.clone(),
+                detail: format!("failed to guard executor probe: {error}"),
+            };
+        }
+    };
+
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = std::io::Read::by_ref(&mut stderr)
+                .take(64 * 1024)
+                .read_to_end(&mut buffer);
+            let _ = send.send(buffer);
+        });
+        receive
+    });
 
     let started = Instant::now();
     let status = loop {
@@ -3058,7 +3068,7 @@ pub fn probe_provider_executor_resolves(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if started.elapsed() >= EXECUTOR_RESOLUTION_PROBE_TIMEOUT {
-                    let _ = containment.terminate_live(&mut child);
+                    let _ = child.terminate_live();
                     return ProviderExecutorResolution::Unresolved {
                         command,
                         detail: "executor resolution probe timed out".to_string(),
@@ -3077,20 +3087,15 @@ pub fn probe_provider_executor_resolves(
 
     // Reap before draining stderr: a surviving descendant holding the
     // inherited pipe would block `read_to_end` indefinitely.
-    let _ = containment.reap_after_exit();
+    let _ = child.reap_after_exit();
 
     if status.success() {
         return ProviderExecutorResolution::Resolved;
     }
 
-    let stderr = child
-        .stderr
-        .take()
-        .map(|mut stderr| {
-            let mut buffer = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stderr, &mut buffer);
-            String::from_utf8_lossy(&buffer).trim().to_string()
-        })
+    let stderr = stderr_reader
+        .and_then(|reader| reader.recv_timeout(Duration::from_millis(100)).ok())
+        .map(|buffer| String::from_utf8_lossy(&buffer).trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
             "executor exited non-zero while loading its module require graph".to_string()

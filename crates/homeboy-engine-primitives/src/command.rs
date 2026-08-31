@@ -1671,7 +1671,13 @@ fn wait_for_process_group_exit(
         if status.is_none() {
             *status = child.try_wait()?;
         }
-        reap_exited_process_group_children(root_pid);
+        // `waitpid(-pgid)` may reap the direct child behind `Child` if it
+        // exits between `try_wait` and the group reap. Let `Child` establish
+        // its cached status first; group reaping is then limited to guards and
+        // other descendants owned by this controller.
+        if status.is_some() {
+            reap_exited_process_group_children(root_pid);
+        }
         if !process_group_has_live_member(root_pid) {
             break;
         }

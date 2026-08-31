@@ -230,7 +230,7 @@ mod timeout_tests {
             .iter()
             .find(|diagnostic| diagnostic.class == "agent_task.execution_deadline_exceeded")
             .expect("deadline diagnostic");
-        assert_eq!(diagnostic.data["completed_phase"], "materialization");
+        assert_eq!(diagnostic.data["completed_phase"], "provider_readiness");
         assert_eq!(diagnostic.data["remaining_budget_ms"], 0);
     }
 

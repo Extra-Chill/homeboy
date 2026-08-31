@@ -5848,6 +5848,9 @@ fn run_cook_spine(
                 let effective_baseline = initial_baseline
                     .as_ref()
                     .or(re_materialized_baseline.as_ref());
+                // Live admission belongs to the scheduler on the execution
+                // host. Keep the complete route policy intact so local
+                // persistence and external transports retain restart authority.
                 let mut dispatch_plan = plan.clone();
                 if let Some(snapshot) = base_snapshot {
                     agent_task_lifecycle::record_metadata_value_in_store(

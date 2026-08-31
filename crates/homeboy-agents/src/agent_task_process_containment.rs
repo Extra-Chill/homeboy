@@ -20,22 +20,19 @@
 //! * a controller death guard (a `fork()`ed watcher holding the read end of a
 //!   pipe this process owns) SIGKILLs that group if this process exits for any
 //!   reason, including an untrappable SIGKILL;
-//! * every exit path — timeout, liveness kill, clean exit, early `return`, and
-//!   unwind — reaps whatever is left in the group.
+//! * [`AgentTaskProcessSupervisor`] owns the direct child, so every exit path —
+//!   timeout, liveness kill, clean exit, early `return`, and unwind — terminates
+//!   the group and waits the leader.
 //!
 //! Reaping is deliberately unconditional rather than "only on failure". The
 //! orphaned test binary in #11477 outlived a provider that had already exited,
 //! so a clean provider exit is exactly the case that leaked.
 //!
-//! Known limitation, inherited from [`ControllerChildGuard`] and not addressed
-//! here: the death guard is `fork()`ed, so it inherits every open descriptor of
-//! this process — including the liveness write end of any *other* guard that is
-//! live at that moment. Two containments overlapping in one process therefore
-//! weaken each other's controller-death coverage, because the younger guard
-//! keeps the older guard's pipe from reaching EOF. Every explicit path in this
-//! module (timeout, liveness kill, clean exit, early return, unwind) is
-//! unaffected; only the "this process was SIGKILLed" fallback degrades.
+//! The forked controller-death guard closes every inherited descriptor except
+//! its own liveness pipe, so overlapping containments do not keep each other's
+//! guards alive.
 
+use std::ops::{Deref, DerefMut};
 use std::process::{Child, Command};
 
 use homeboy_core::engine::command::{
@@ -72,6 +69,19 @@ impl AgentTaskProcessContainment {
     pub(crate) fn attach(&mut self, child: &Child) -> std::io::Result<()> {
         self.leader_pid = Some(child.id());
         self.guard.attach(child)
+    }
+
+    /// Transfer the spawned child into an unwind-safe supervisor and attach the
+    /// controller death guard. An attach failure still drops the supervisor,
+    /// which terminates the group and waits the child before returning.
+    pub(crate) fn supervise(self, child: Child) -> std::io::Result<AgentTaskProcessSupervisor> {
+        let mut supervisor = AgentTaskProcessSupervisor {
+            containment: self,
+            child,
+            cleanup_complete: false,
+        };
+        supervisor.containment.attach(&supervisor.child)?;
+        Ok(supervisor)
     }
 
     /// The pid of the contained group leader, once attached.
@@ -169,10 +179,69 @@ impl AgentTaskProcessContainment {
 
 impl Drop for AgentTaskProcessContainment {
     fn drop(&mut self) {
-        // Early `return`s and unwinds are terminalization paths too. Without
-        // this, a caller that bails between spawn and its explicit cleanup
-        // leaks the whole subtree exactly the way #11477 described.
+        // Keep raw containment users from leaking descendants. Only the
+        // child-owning supervisor can additionally guarantee waiting the
+        // direct child on an early return or unwind.
         let _ = self.reap_after_exit();
+    }
+}
+
+/// Owns a contained direct child for the full post-spawn lifetime.
+///
+/// Normal paths explicitly clean up before joining pipe workers. If control
+/// instead returns early or unwinds, `Drop` terminates the process group and
+/// waits the direct child, without attempting to drain descendant-held pipes.
+pub(crate) struct AgentTaskProcessSupervisor {
+    containment: AgentTaskProcessContainment,
+    child: Child,
+    cleanup_complete: bool,
+}
+
+impl AgentTaskProcessSupervisor {
+    pub(crate) fn leader_pid(&self) -> Option<u32> {
+        self.containment.leader_pid()
+    }
+
+    pub(crate) fn terminate_live(&mut self) -> Result<(), String> {
+        let result = self.containment.terminate_live(&mut self.child);
+        if result.is_ok() {
+            self.cleanup_complete = true;
+        }
+        result
+    }
+
+    pub(crate) fn reap_after_exit(&mut self) -> Result<(), String> {
+        let group_result = self.containment.reap_after_exit();
+        let wait_result = self.child.wait().map(|_| ()).map_err(|error| {
+            format!(
+                "could not reap contained provider child{}: {error}",
+                self.containment.leader_suffix()
+            )
+        });
+        self.cleanup_complete = group_result.is_ok() && wait_result.is_ok();
+        group_result.and(wait_result)
+    }
+}
+
+impl Deref for AgentTaskProcessSupervisor {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+
+impl DerefMut for AgentTaskProcessSupervisor {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
+}
+
+impl Drop for AgentTaskProcessSupervisor {
+    fn drop(&mut self) {
+        if !self.cleanup_complete {
+            let _ = self.containment.terminate_live(&mut self.child);
+        }
     }
 }
 
@@ -283,18 +352,54 @@ mod tests {
         );
     }
 
-    /// Dropping without an explicit cleanup call is an exit path too.
+    /// Forced unwind after spawn must terminate descendants and reap the direct
+    /// child, even though no explicit cleanup path runs.
     #[test]
-    fn dropping_containment_reaps_a_surviving_descendant() {
-        let (containment, mut child, descendant_pid) =
-            spawn_leaking_child("sleep 30 & echo $!; exit 0");
-        child.wait().expect("leader exits on its own");
+    fn forced_unwind_terminates_group_and_reaps_direct_child() {
+        let mut leader_pid = 0;
+        let mut descendant_pid = 0;
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "sleep 30 & echo $!; sleep 30"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            let containment =
+                AgentTaskProcessContainment::prepare(&mut command).expect("prepare containment");
+            let mut child = command.spawn().expect("spawn contained child");
+            let stdout = child.stdout.take().expect("piped stdout");
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read descendant pid");
+            leader_pid = child.id();
+            descendant_pid = line.trim().parse().expect("descendant pid");
+            let _supervisor = containment.supervise(child).expect("supervise child");
+            panic!("force post-spawn unwind");
+        }));
 
-        drop(containment);
+        assert!(unwind.is_err());
 
         assert!(
             wait_until_gone(descendant_pid, Duration::from_secs(5)),
-            "descendant {descendant_pid} survived containment drop"
+            "descendant {descendant_pid} survived unwind cleanup"
+        );
+        assert!(
+            wait_until_gone(leader_pid, Duration::from_secs(5)),
+            "leader {leader_pid} survived unwind cleanup"
+        );
+        let wait_result = unsafe {
+            libc::waitpid(
+                leader_pid as libc::pid_t,
+                std::ptr::null_mut(),
+                libc::WNOHANG,
+            )
+        };
+        assert_eq!(wait_result, -1, "leader {leader_pid} remained waitable");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD),
+            "leader {leader_pid} was not reaped by the supervisor"
         );
     }
 

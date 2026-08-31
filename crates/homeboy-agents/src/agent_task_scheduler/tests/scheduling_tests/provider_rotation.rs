@@ -1289,6 +1289,28 @@ mod provider_rotation_tests {
         }
 
         impl AgentTaskExecutorAdapter for FailSelectedFallback {
+            fn provider_route_readiness(
+                &self,
+                request: &AgentTaskRequest,
+            ) -> ProviderRouteReadiness {
+                if request.executor.model() != Some("primary") {
+                    return ProviderRouteReadiness::dispatchable();
+                }
+                ProviderRouteReadiness {
+                    ready: false,
+                    state: "provider_account_blocked".to_string(),
+                    reason: "primary rejected".to_string(),
+                    reset_at: None,
+                    classification: Some("account".to_string()),
+                    retryable: false,
+                    remediation: Some("use fallback".to_string()),
+                    cache_identity: None,
+                    provider_identity: None,
+                    capacity_key: None,
+                    diagnostic_data: None,
+                }
+            }
+
             fn execute(
                 &self,
                 request: AgentTaskRequest,
@@ -1401,6 +1423,17 @@ mod provider_rotation_tests {
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(
             *observed.lock().expect("observed models"),
+            vec!["fallback".to_string(), "forward".to_string()]
+        );
+
+        let durable_observed = Arc::new(Mutex::new(Vec::new()));
+        let durable = AgentTaskScheduler::new(Arc::new(FailSelectedFallback {
+            observed: Arc::clone(&durable_observed),
+        }))
+        .run(plan);
+        assert_eq!(durable.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(
+            *durable_observed.lock().expect("durable observed models"),
             vec!["fallback".to_string(), "forward".to_string()]
         );
     }

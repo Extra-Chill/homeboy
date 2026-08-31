@@ -924,6 +924,13 @@ fn selected_plan_provider_dispatchability_with_providers(
     let mut admitted = plan.clone();
     let plan_rotation = plan.options.rotation.clone();
     for (task_index, task) in plan.tasks.iter().enumerate() {
+        let admission_deadline = match (
+            task.limits.execution_deadline_unix_ms,
+            plan.options.execution_budget.deadline_unix_ms,
+        ) {
+            (Some(task), Some(plan)) => Some(task.min(plan)),
+            (task, plan) => task.or(plan),
+        };
         let mut skipped = task
             .metadata
             .pointer("/provider_readiness_routing/skipped")
@@ -949,6 +956,7 @@ fn selected_plan_provider_dispatchability_with_providers(
         let mut selected = None;
         let mut first_failure = None;
         for (mut candidate, next_rotation_index) in candidates {
+            candidate.limits.execution_deadline_unix_ms = admission_deadline;
             if super::is_fixture_backend(&candidate.executor.backend)
                 || crate::agent_task_gate_executor::is_repo_local_gate_request(&candidate)
             {
@@ -1030,7 +1038,7 @@ fn selected_plan_provider_dispatchability_with_providers(
             )])
         };
         let mut error = if deadline_exhausted {
-            let deadline = task.limits.execution_deadline_unix_ms;
+            let deadline = admission_deadline;
             let mut error = homeboy_core::Error::validation_invalid_argument(
                 "execution_deadline_unix_ms",
                 "agent-task execution deadline expired during provider readiness admission",
@@ -1197,6 +1205,33 @@ mod tests {
             error.details["route_evidence"][1]["classification"],
             "timeout"
         );
+    }
+
+    #[test]
+    fn expired_plan_deadline_stops_admission_before_probe() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "require('fs').appendFileSync(process.argv[2],'probe\\n');process.stdout.write('{}');",
+        )
+        .expect("readiness script");
+        let catalog = catalog(provider(&script, &count));
+        let mut plan = AgentTaskPlan::new("plan-deadline", vec![request("model")]);
+        let deadline = crate::agent_task_timeout::now_unix_ms().saturating_sub(1);
+        plan.options.execution_budget.deadline_unix_ms = Some(deadline);
+
+        let error = admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect_err("expired plan deadline must stop admission");
+
+        assert_eq!(error.details["classification"], "timeout");
+        assert_eq!(error.details["deadline_unix_ms"], deadline);
+        assert!(!count.exists());
     }
 
     /// The exact shape of #13628: a provider whose declared credential is

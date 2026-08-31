@@ -5991,10 +5991,6 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         gate_workspace,
         &crate::cli_runtime::current_augmented_command_contract(),
     )?;
-    // Before any external effect: a backend that cannot execute must say so now
-    // rather than after a workspace exists and an execution has been spent
-    // (#11479).
-    preflight_cook_provider_credentials(&args)?;
     let no_progress = args.no_progress;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does

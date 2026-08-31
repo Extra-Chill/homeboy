@@ -74,11 +74,33 @@ pub fn provider_secret_sources_for_plan_with_providers(
     providers: &[AgentTaskExecutorProvider],
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
     let mut sources = HashMap::new();
+    let mut conflicted = BTreeSet::new();
     for request in &plan.tasks {
-        let Some(provider) = select_provider(providers, request) else {
-            continue;
-        };
-        sources.extend(provider_secret_sources(provider, Some(request)));
+        for (candidate, _) in
+            crate::agent_task_scheduler::AgentTaskScheduleSupport::provider_route_candidates(
+                request,
+                plan.options.rotation.as_ref(),
+            )
+        {
+            let Some(provider) = select_provider(providers, &candidate) else {
+                continue;
+            };
+            for (name, source) in provider_secret_sources(provider, Some(&candidate)) {
+                if conflicted.contains(&name) {
+                    continue;
+                }
+                match sources.get(&name) {
+                    None => {
+                        sources.insert(name, source);
+                    }
+                    Some(existing) if existing == &source => {}
+                    Some(_) => {
+                        sources.remove(&name);
+                        conflicted.insert(name);
+                    }
+                }
+            }
+        }
     }
     sources
 }
@@ -345,6 +367,9 @@ mod tests {
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
         AGENT_TASK_REQUEST_SCHEMA,
     };
+    use crate::agent_task_scheduler::{
+        AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+    };
 
     fn request(config: Value) -> AgentTaskRequest {
         AgentTaskRequest {
@@ -455,6 +480,145 @@ mod tests {
             )
             .expect("second account"),
             vec![("ACCOUNT_TOKEN".to_string(), "second-value".to_string())]
+        );
+    }
+
+    #[test]
+    fn plan_secret_sources_include_plan_and_task_local_rotation_fallbacks() {
+        let providers: Vec<AgentTaskExecutorProvider> = [
+            serde_json::json!({
+                "id": "test.primary",
+                "backend": "test",
+                "secret_env_requirements": [{
+                    "env": ["PRIMARY_TOKEN"],
+                    "secret_env_sources": {
+                        "PRIMARY_TOKEN": {"source": "env", "env_var": "PRIMARY_SOURCE"}
+                    }
+                }]
+            }),
+            serde_json::json!({
+                "id": "test.plan-fallback",
+                "backend": "test",
+                "provider_defaults": {
+                    "plan-account": {
+                        "required_secret_env": ["PLAN_FALLBACK_TOKEN"],
+                        "secret_env_sources": {
+                            "PLAN_FALLBACK_TOKEN": {"source": "env", "env_var": "PLAN_FALLBACK_SOURCE"}
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "id": "test.task-fallback",
+                "backend": "test",
+                "secret_env_requirements": [{
+                    "env": ["TASK_FALLBACK_TOKEN"],
+                    "when": {"path": "executor.config.provider", "equals": "task-account"},
+                    "secret_env_sources": {
+                        "TASK_FALLBACK_TOKEN": {"source": "env", "env_var": "TASK_FALLBACK_SOURCE"}
+                    }
+                }]
+            }),
+        ]
+        .into_iter()
+        .map(|value| serde_json::from_value(value).expect("provider"))
+        .collect();
+
+        let mut plan_task = request(Value::Null);
+        plan_task.executor.selector = Some("test.primary".to_string());
+        let mut task_local = request(Value::Null);
+        task_local.task_id = "task-local".to_string();
+        task_local.executor.selector = Some("test.primary".to_string());
+        task_local.metadata = serde_json::json!({
+            "provider_rotation": {
+                "entries": [
+                    {"selector": "test.primary"},
+                    {
+                        "selector": "test.task-fallback",
+                        "provider_config": {"provider": "task-account"}
+                    }
+                ]
+            }
+        });
+        let mut plan = AgentTaskPlan::new("secret-source-rotation", vec![plan_task, task_local]);
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                AgentTaskProviderRotationEntry {
+                    selector: Some("test.primary".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    selector: Some("test.plan-fallback".to_string()),
+                    provider_config: serde_json::json!({"provider": "plan-account"}),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let sources = provider_secret_sources_for_plan_with_providers(&plan, &providers);
+
+        assert_eq!(sources.len(), 3);
+        assert_eq!(
+            sources["PRIMARY_TOKEN"].env_var.as_deref(),
+            Some("PRIMARY_SOURCE")
+        );
+        assert_eq!(
+            sources["PLAN_FALLBACK_TOKEN"].env_var.as_deref(),
+            Some("PLAN_FALLBACK_SOURCE")
+        );
+        assert_eq!(
+            sources["TASK_FALLBACK_TOKEN"].env_var.as_deref(),
+            Some("TASK_FALLBACK_SOURCE")
+        );
+    }
+
+    #[test]
+    fn plan_secret_sources_dedupe_identical_mappings_and_omit_conflicts() {
+        let providers: Vec<AgentTaskExecutorProvider> = [
+            ("test.primary", "SHARED_SOURCE"),
+            ("test.identical", "SHARED_SOURCE"),
+            ("test.conflicting", "OTHER_SOURCE"),
+        ]
+        .into_iter()
+        .map(|(id, env_var)| {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "backend": "test",
+                "secret_env_requirements": [{
+                    "env": ["SHARED_TOKEN"],
+                    "secret_env_sources": {
+                        "SHARED_TOKEN": {"source": "env", "env_var": env_var}
+                    }
+                }]
+            }))
+            .expect("provider")
+        })
+        .collect();
+        let mut task = request(Value::Null);
+        task.executor.selector = Some("test.primary".to_string());
+        let mut plan = AgentTaskPlan::new("secret-source-conflict", vec![task]);
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                AgentTaskProviderRotationEntry {
+                    selector: Some("test.primary".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    selector: Some("test.identical".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    selector: Some("test.conflicting".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        assert!(
+            !provider_secret_sources_for_plan_with_providers(&plan, &providers)
+                .contains_key("SHARED_TOKEN")
         );
     }
 }

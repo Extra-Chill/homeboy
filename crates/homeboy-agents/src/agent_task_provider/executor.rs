@@ -476,10 +476,11 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             };
         }
 
-        if evidence
-            .account_blocks
-            .get(&capacity_key)
-            .is_some_and(|block| block.expires_at > now)
+        if (!verdict.ready || !verdict.checks.credentials.verified)
+            && evidence
+                .account_blocks
+                .get(&capacity_key)
+                .is_some_and(|block| block.expires_at > now)
         {
             return ProviderRouteReadiness {
                 ready: false,
@@ -621,7 +622,25 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             }
             bound
         });
-        let launch_credentials = bound_credentials.map(|bound| bound.env).or_else(|| {
+        let launch_credentials = if let Some(capacity_key) =
+            context.provider_capacity_key.as_deref()
+        {
+            let Some(bound) = bound_credentials else {
+                return failure_outcome(
+                    &request,
+                    AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::Provider,
+                    "agent_task.provider_credential_binding_missing",
+                    "provider execution lost the exact credentials bound during readiness"
+                        .to_string(),
+                    json!({
+                        "capacity_key": capacity_key,
+                        "remediation": "retry admission so readiness and execution bind one credential snapshot"
+                    }),
+                );
+            };
+            Some(bound.env)
+        } else {
             effective_provider_for_request(&request.request, self.providers())
                 .ok()
                 .flatten()
@@ -629,7 +648,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     super::secrets::provider_request_credential_env(&request.request, &provider)
                         .ok()
                 })
-        });
+        };
         if let Some(outcome) = production_execution_preflight(
             &request.request,
             self.providers(),
@@ -1066,6 +1085,29 @@ mod tests {
             json!({ "id": "test.provider", "backend": "test" }),
         )
         .expect("provider")])
+    }
+
+    #[test]
+    fn capacity_bound_execution_fails_closed_without_bound_credentials() {
+        let executor = readiness_executor();
+        let request = readiness_request("bound-model");
+        let outcome = executor.execute(
+            request,
+            AgentTaskExecutionContext {
+                plan_id: "bound-plan".to_string(),
+                run_id: None,
+                attempt: 1,
+                cancellation: Default::default(),
+                lifecycle_store: None,
+                provider_capacity_key: Some("missing-binding".to_string()),
+            },
+        );
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+        assert_eq!(
+            outcome.diagnostics[0].class,
+            "agent_task.provider_credential_binding_missing"
+        );
     }
 
     #[test]

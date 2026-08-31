@@ -89,7 +89,6 @@ const PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL: Duration = Duration::from_secs(5)
 const PROVIDER_RUNTIME_READINESS_ERROR_TTL: Duration = Duration::from_secs(2);
 const PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS: usize = 2;
 const MAX_CONCURRENT_PROVIDER_READINESS_PROBES: usize = 4;
-const EXECUTION_DEADLINE_PREFIX: &str = "execution deadline expired";
 
 #[derive(Debug)]
 struct ProviderReadinessProbeGate {
@@ -168,27 +167,11 @@ fn ensure_readiness_deadline(boundary: &str, deadline_unix_ms: Option<u64>) -> R
     }
 }
 
-fn is_caller_deadline_result(
-    result: &std::result::Result<ProviderReadinessInvocationResult, String>,
-) -> bool {
-    result
-        .as_ref()
-        .err()
-        .is_some_and(|message| message.contains(EXECUTION_DEADLINE_PREFIX))
-}
-
 fn map_readiness_result(
     provider: &AgentTaskExecutorProvider,
     result: std::result::Result<ProviderReadinessInvocationResult, String>,
-    deadline_unix_ms: Option<u64>,
 ) -> Result<ProviderReadinessInvocationResult> {
-    result.map_err(|message| {
-        if message.contains(EXECUTION_DEADLINE_PREFIX) {
-            readiness_deadline_error("probe", deadline_unix_ms)
-        } else {
-            readiness_invocation_error(provider, message)
-        }
-    })
+    result.map_err(|message| readiness_invocation_error(provider, message))
 }
 
 fn readiness_invocation_error(provider: &AgentTaskExecutorProvider, message: String) -> Error {
@@ -203,6 +186,28 @@ fn readiness_invocation_error(provider: &AgentTaskExecutorProvider, message: Str
         None,
     )
     .with_retryable(true)
+}
+
+fn publish_readiness_result(
+    shared: &ProviderRuntimeReadinessCacheShared,
+    request_key: String,
+    result: std::result::Result<ProviderReadinessInvocationResult, String>,
+) {
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let generation = state.next_generation;
+    state.next_generation = state.next_generation.wrapping_add(1);
+    state.by_request.insert(
+        request_key,
+        CachedProviderRuntimeReadiness::Complete {
+            result,
+            cached_at: Instant::now(),
+            generation,
+        },
+    );
+    shared.changed.notify_all();
 }
 
 pub fn preflight_plan_provider_runtime_readiness_with_providers(
@@ -378,7 +383,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
                         release_cache_waiter(&mut state, &request_key);
                         cache.shared.changed.notify_all();
                     }
-                    return map_readiness_result(provider, result, deadline_unix_ms);
+                    return map_readiness_result(provider, result);
                 }
                 if registered_waiter {
                     release_cache_waiter(&mut state, &request_key);
@@ -431,73 +436,51 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
             cache.shared.changed.notify_all();
             return Err(error);
         }
-        break;
-    }
+        let provider = provider.clone();
+        let config = config.clone();
+        let credential_env = credential_env.to_vec();
+        let shared = Arc::clone(&cache.shared);
+        let probe_request_key = request_key.clone();
+        drop(state);
+        let spawn_result = std::thread::Builder::new()
+            .name("provider-readiness-probe".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _permit = acquire_probe_permit(None).map_err(|error| error.message)?;
+                    let mut result = Err("provider readiness invocation did not run".to_string());
+                    for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
+                        result = run_provider_readiness_invocation_with_env_and_timeout(
+                            &provider,
+                            &config,
+                            &credential_env,
+                            Duration::from_secs(20),
+                        );
+                        let should_retry = match &result {
+                            Err(_) => true,
+                            Ok(verdict) => {
+                                !verdict.ready
+                                    && verdict.retryable
+                                    && verdict.classification == "transient_failure"
+                            }
+                        };
+                        if !should_retry {
+                            break;
+                        }
+                    }
+                    result
+                }))
+                .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _permit = acquire_probe_permit(deadline_unix_ms)
-            .map_err(|error| format!("{EXECUTION_DEADLINE_PREFIX}: {}", error.message))?;
-        ensure_readiness_deadline("probe_start", deadline_unix_ms)
-            .map_err(|error| format!("{EXECUTION_DEADLINE_PREFIX}: {}", error.message))?;
-        let mut result = Err("provider readiness invocation did not run".to_string());
-        for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
-            let Some(remaining) = remaining_deadline_duration(deadline_unix_ms) else {
-                return Err(format!(
-                    "{EXECUTION_DEADLINE_PREFIX} before readiness retry"
-                ));
-            };
-            result = run_provider_readiness_invocation_with_env_and_timeout(
-                provider,
-                config,
-                credential_env,
-                remaining.min(Duration::from_secs(20)),
+                publish_readiness_result(&shared, probe_request_key, result);
+            });
+        if let Err(error) = spawn_result {
+            publish_readiness_result(
+                &cache.shared,
+                request_key.clone(),
+                Err(format!("failed to start provider readiness probe: {error}")),
             );
-            if crate::agent_task_timeout::remaining_execution_deadline_ms(deadline_unix_ms)
-                == Some(0)
-            {
-                result = Err(format!(
-                    "{EXECUTION_DEADLINE_PREFIX} during readiness probe"
-                ));
-            }
-            let should_retry = match &result {
-                Err(_) => true,
-                Ok(verdict) => {
-                    !verdict.ready
-                        && verdict.retryable
-                        && verdict.classification == "transient_failure"
-                }
-            };
-            if !should_retry {
-                break;
-            }
         }
-        result
-    }))
-    .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
-
-    let mut state = cache
-        .shared
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if is_caller_deadline_result(&result) {
-        state.by_request.remove(&request_key);
-        cache.shared.changed.notify_all();
-        return Err(readiness_deadline_error("probe", deadline_unix_ms));
     }
-    let generation = state.next_generation;
-    state.next_generation = state.next_generation.wrapping_add(1);
-    state.by_request.insert(
-        request_key,
-        CachedProviderRuntimeReadiness::Complete {
-            result: result.clone(),
-            cached_at: Instant::now(),
-            generation,
-        },
-    );
-    cache.shared.changed.notify_all();
-    ensure_readiness_deadline("probe_publication", deadline_unix_ms)?;
-    map_readiness_result(provider, result, deadline_unix_ms)
 }
 
 pub(crate) fn effective_provider_config(config: &Value, model: Option<&str>) -> Value {
@@ -924,6 +907,49 @@ mod tests {
                 .expect("published long result")
                 .ready
         );
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn short_deadline_probe_owner_does_not_poison_long_deadline_singleflight() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("owner-different-deadlines.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),200);",
+        )
+        .expect("readiness script");
+        let provider = provider(&script, &count);
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 25;
+        let error = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"same"}),
+            &[],
+            &mut cache,
+            Some(short_deadline),
+        )
+        .expect_err("short probe owner must time out locally");
+        assert_eq!(error.details["classification"], "timeout");
+        assert_eq!(error.details["deadline_unix_ms"], short_deadline);
+
+        let verdict = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"same"}),
+            &[],
+            &mut cache,
+            Some(crate::agent_task_timeout::now_unix_ms() + 2_000),
+        )
+        .expect("long waiter receives shared result");
+        assert!(verdict.ready);
         assert_eq!(
             std::fs::read_to_string(count)
                 .expect("probe count")
