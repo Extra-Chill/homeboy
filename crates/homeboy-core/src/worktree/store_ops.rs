@@ -344,8 +344,8 @@ fn create_with_store_unlocked(
         path_override: None,
         project: None,
         capability: None,
-        allow_synthetic: false,
-        accept_bare_directory: false,
+        allow_synthetic: true,
+        accept_bare_directory: true,
         ..TargetSpec::default()
     })?;
     let source_checkout = source_checkout_for_worktree(&target)?;
