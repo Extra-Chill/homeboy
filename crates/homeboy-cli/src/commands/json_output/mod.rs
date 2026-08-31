@@ -248,9 +248,11 @@ pub(crate) fn run_command_output(
             let summarize_show = args.show_summary_eligible() && operator_output;
             let summarize_dossier = args.dossier_summary_eligible() && operator_output;
             let summarize_proof = args.proof_summary_eligible() && operator_output;
-            command_run_with_summary(
-                dispatch(Commands::Runs(args), spec, placement),
-                |payload, _| {
+            let result = dispatch(Commands::Runs(args), spec, placement);
+            if summarize_show {
+                runs_show_command_run(result)
+            } else {
+                command_run_with_summary(result, |payload, _| {
                     if let Some(rendered) =
                         super::runs_summary::render_runs_field_selection(payload)
                     {
@@ -264,8 +266,8 @@ pub(crate) fn run_command_output(
                     } else {
                         None
                     }
-                },
-            )
+                })
+            }
         }
         Commands::Release(args) => {
             let full = args.requests_full_output();
@@ -285,6 +287,22 @@ pub(crate) fn run_command_output(
     };
 
     run.with_command(spec.name)
+}
+
+fn runs_show_command_run((output_file_result, exit_code): JsonRun) -> CommandRun {
+    let stdout_result = output_file_result
+        .clone()
+        .map(|payload| super::runs_summary::project_runs_show_output(&payload));
+    let summary_stdout = output_file_result
+        .as_ref()
+        .ok()
+        .and_then(super::runs_summary::render_runs_show_summary);
+    CommandRun::from_command_stdout_result("runs", stdout_result, exit_code)
+        .with_output_file_result(output_file_result)
+        .with_presentation(CommandPresentation {
+            stdout: summary_stdout,
+            stderr: None,
+        })
 }
 
 /// Release payloads contain execution plans and step transcripts that can be
@@ -1072,6 +1090,46 @@ fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_show_stdout_is_compact_while_output_file_payload_stays_lossless() {
+        let payload = serde_json::json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "run-output-detail",
+                    "kind": "runner-exec",
+                    "status": "failed",
+                    "metadata": {
+                        "runner_terminal_projection": { "state": "terminal_checkpointed", "status": "failed" },
+                        "source_snapshot": { "marker": "full-source-snapshot", "body": "x".repeat(256 * 1024) },
+                    },
+                    "artifacts": [],
+                },
+            },
+        });
+
+        let run = runs_show_command_run((Ok(payload.clone()), 1));
+        let stdout = run.stdout_result.expect("compact stdout");
+        let output = run
+            .output_file_result
+            .expect("lossless output result")
+            .expect("lossless output");
+
+        assert!(stdout
+            .pointer("/payload/run/metadata/source_snapshot")
+            .is_none());
+        assert_eq!(
+            stdout.pointer("/payload/run/metadata/operator_projection/authoritative_runner_terminal_state/status"),
+            Some(&Value::String("failed".to_string()))
+        );
+        assert_eq!(
+            output.pointer("/payload/run/metadata/source_snapshot/marker"),
+            Some(&Value::String("full-source-snapshot".to_string()))
+        );
+        assert_eq!(output, payload);
+    }
 
     /// A rolled-back release must still report the commit it created.
     ///

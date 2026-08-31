@@ -705,7 +705,7 @@ mod output_projection_tests {
     }
 
     #[test]
-    fn default_operator_projection_has_a_fixed_bound_for_huge_evidence() {
+    fn default_operator_projection_bounds_expanding_evidence_families() {
         let mut value = production_shaped_evidence();
         let original = value.clone();
 
@@ -744,5 +744,52 @@ mod output_projection_tests {
         let expected = value.clone();
 
         assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn default_diagnosis_keeps_cause_and_refs_without_runtime_payloads() {
+        let mut value = json!({
+            "schema": "homeboy/agent-task-diagnose/v1",
+            "run_id": "run-diagnosis",
+            "state": "failed",
+            "root_cause": {
+                "class": "provider.process_stream",
+                "message": "task worktree has no .git",
+                "details": { "transcript": "t".repeat(256 * 1024) },
+            },
+            "hydrated_evidence": [{
+                "kind": "provider-transcript",
+                "uri": "file:///tmp/transcript.json",
+                "status": "ok",
+                "content": {
+                    "body": "b".repeat(256 * 1024),
+                    "runtime_log": "r".repeat(256 * 1024),
+                    "raw_events": vec![json!({ "body": "event".repeat(512) }); 100],
+                },
+            }],
+            "next_commands": ["homeboy agent-task evidence run-diagnosis --full"],
+        });
+        let full = value.clone();
+
+        project_operator_output(&mut value);
+
+        assert!(serde_json::to_vec(&value).unwrap().len() < REALISTIC_OPERATOR_RESPONSE_MAX_BYTES);
+        assert_eq!(value["root_cause"]["class"], "provider.process_stream");
+        assert_eq!(value["root_cause"]["message"], "task worktree has no .git");
+        assert!(value["root_cause"]["details"]["transcript"]
+            .as_str()
+            .unwrap()
+            .starts_with("[omitted"));
+        assert_eq!(
+            value["next_commands"][0],
+            "homeboy agent-task evidence run-diagnosis --full"
+        );
+        assert_eq!(
+            full["hydrated_evidence"][0]["content"]["body"]
+                .as_str()
+                .unwrap()
+                .len(),
+            256 * 1024
+        );
     }
 }
