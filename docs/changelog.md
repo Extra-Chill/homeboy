@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.1] - 2026-08-31
+
+### Changed
+- Pin explicit Cook model routes
+- Define Extension API v1 catalog resolution
+- Preserve declared capability contract versions
+- Define Extension API v1 descriptor handshake
+- Consolidate runner execution context markers
+
+### Fixed
+- clarify cwd repository inference
+- Fix concurrent release tag handoff
+
 ## [0.367.0] - 2026-08-30
 
 ### Added
