@@ -449,7 +449,8 @@ pub mod provider {
     /// *dispatchable* here, and the pre-dispatch preflight that enforces it
     /// before a workspace or a provider execution is spent (#11479).
     pub use crate::agent_task_provider::{
-        evaluate_provider_dispatchability, preflight_discovered_provider_credentials_for_backend,
+        evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
+        preflight_discovered_provider_credentials_for_backend,
         preflight_plan_provider_dispatchability_with_providers, preflight_provider_credentials,
         preflight_provider_credentials_for_backend, preflight_provider_dispatchability,
         preflight_provider_dispatchability_with_config,
