@@ -505,8 +505,8 @@ homeboy agent-task fanout cook-batch \
   https://github.com/Extra-Chill/homeboy/issues/6454
 ```
 
-For mixed stacks, keep shared gates on `--verify` and assign named additions or
-replacements with one JSON declaration. `--verification-profiles` accepts inline
+For mixed stacks, keep arbitrary shell gates on `--verify` and assign named typed
+test plans with one JSON declaration. `--verification-profiles` accepts inline
 JSON or `@file.json`. An assignment selector is an exact issue URL, GitHub issue
 key (`OWNER/REPO#NUMBER`), or generated task selector (`issue-NUMBER`). Every
 assignment must match one child; unmatched selectors return the typed
@@ -515,23 +515,29 @@ assignment must match one child; unmatched selectors return the typed
 ```json
 {
   "profiles": {
-    "php": { "mode": "append", "verify": ["composer audit --format=json"] },
-    "node": { "mode": "replace", "verify": ["npm audit --omit=dev"] },
-    "rust": { "verify": ["cargo fmt --check", "cargo test -p homeboy-cli"] }
+    "review": {
+      "plan": {
+        "adapter": "homeboy_review_test",
+        "command": ["homeboy", "review", "test", "homeboy"],
+        "scope": "changed",
+        "suite_timeout_seconds": 1800,
+        "isolation": "private_process_group",
+        "concurrency": 1,
+        "output_budget_bytes": 65536,
+        "cleanup_policy": "terminate_process_group"
+      }
+    }
   },
   "assignments": [
-    { "selector": "Extra-Chill/homeboy#6453", "profile": "php" },
-    { "selector": "issue-6454", "profile": "node" },
-    { "selector": "https://github.com/Extra-Chill/homeboy/issues/6455", "profile": "rust" }
+    { "selector": "Extra-Chill/homeboy#6453", "profile": "review" }
   ]
 }
 ```
 
-`append` is the default mode and adds profile gates after shared gates; `replace`
-uses only that profile's gates. The generated dry-run `plan.cooks` and
-`preflight.deterministic_gates` show every child's effective profile and exact
-commands. Those command arrays are persisted with each cook recipe and carried
-unchanged to Lab provider handoff.
+Each profile selects one `TestExecutionPlan`. Its adapter, argv command, scope,
+suite and optional per-test timeout, isolation, concurrency, output budget, and
+cleanup policy are persisted with the cook and projected once for both Cook and
+Lab handoff. Use `--verify` only for arbitrary shell programs.
 
 Add `--dry-run` to inspect the derived branch/worktree names and batch-cook spec
 without creating worktrees. Add `--run-plan` after reviewing provider readiness
