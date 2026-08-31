@@ -56,9 +56,17 @@ impl RunnerToolRegistry {
         runner: &Runner,
         tool: &RunnerRequiredTool,
     ) -> Option<RunnerToolSpec> {
-        Self::doctor_tools(runner)
+        // Runner configuration refines intrinsic defaults for this runner.
+        // Prefer it so capability preflight uses the same command contract the
+        // runner declares, then retain intrinsic metadata as the fallback.
+        declared_tool_specs(runner)
             .into_iter()
             .find(|spec| spec.tool.as_ref() == Some(tool))
+            .or_else(|| {
+                intrinsic_tool_specs()
+                    .into_iter()
+                    .find(|spec| spec.tool.as_ref() == Some(tool))
+            })
     }
 }
 

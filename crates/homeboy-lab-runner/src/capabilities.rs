@@ -668,13 +668,24 @@ fn batch_probe_script(
     let mut lines = Vec::new();
     lines.push("set +e".to_string());
     for (index, probe) in tool_probes.iter().enumerate() {
-        let argv = std::iter::once(&probe.command)
-            .chain(probe.version_args.iter())
-            .map(|arg| shell::quote_arg(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
+        // Only invoke an executable when its registry definition supplies a
+        // non-empty, read-only version probe. A bare required command retains
+        // the prior presence check rather than starting an interactive tool.
+        let condition = if probe.version_args.is_empty() {
+            format!(
+                "command -v {} >/dev/null 2>&1",
+                shell::quote_arg(&probe.command)
+            )
+        } else {
+            std::iter::once(&probe.command)
+                .chain(probe.version_args.iter())
+                .map(|arg| shell::quote_arg(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+                + " >/dev/null 2>&1"
+        };
         lines.push(format!(
-            "if {argv} >/dev/null 2>&1; then printf 'T\\t{index}\\t1\\n'; else printf 'T\\t{index}\\t0\\n'; fi"
+            "if {condition}; then printf 'T\\t{index}\\t1\\n'; else printf 'T\\t{index}\\t0\\n'; fi"
         ));
     }
     for (index, command) in command_names.iter().enumerate() {
@@ -1546,7 +1557,7 @@ mod tests {
     fn capability_preflight_accepts_configured_homeboy_and_git_version_evidence() {
         let fixture = tempdir().expect("fixture");
         let homeboy = fixture.path().join("configured-homeboy");
-        let git = fixture.path().join("git");
+        let git = fixture.path().join("configured-git");
         fs::write(
             &homeboy,
             "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nexit 1\n",
@@ -1554,7 +1565,7 @@ mod tests {
         .expect("write configured homeboy");
         fs::write(
             &git,
-            "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nexit 1\n",
+            "#!/bin/sh\n[ \"$1\" = configured-version ] && exit 0\nexit 1\n",
         )
         .expect("write git on PATH");
         make_executable(&homeboy);
@@ -1574,7 +1585,15 @@ mod tests {
                 ),
             ]),
             secret_env: Default::default(),
-            resources: Default::default(),
+            resources: HashMap::from([(
+                "tools".to_string(),
+                json!({
+                    "git": {
+                        "command": git,
+                        "version_args": ["configured-version"]
+                    }
+                }),
+            )]),
             policy: RunnerPolicy::default(),
         };
         let preflight = RunnerCapabilityPreflight {
@@ -1610,7 +1629,7 @@ mod tests {
 
         fs::write(
             &git,
-            "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nexit 1\n",
+            "#!/bin/sh\n[ \"$1\" = configured-version ] && exit 0\nexit 1\n",
         )
         .expect("restore git version probe");
         fs::write(&homeboy, "#!/bin/sh\nexit 1\n").expect("make Homeboy version probe fail");
@@ -1769,6 +1788,20 @@ mod tests {
         assert!(output.status.success());
         assert!(!side_effect.exists(), "metacharacter argument executed");
         assert!(String::from_utf8_lossy(&output.stdout).contains("R\t0\t1"));
+    }
+
+    #[test]
+    fn tool_probe_uses_presence_check_without_registry_version_arguments() {
+        let probes = vec![RunnerToolProbe {
+            tool: RunnerRequiredTool::new("interactive-tool"),
+            command: "interactive-tool".to_string(),
+            version_args: Vec::new(),
+        }];
+
+        let script = batch_probe_script(&probes, &[], &[], &[]);
+
+        assert!(script.contains("command -v interactive-tool >/dev/null 2>&1"));
+        assert!(!script.contains("if interactive-tool >/dev/null 2>&1"));
     }
 
     #[cfg(unix)]
