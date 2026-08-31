@@ -363,6 +363,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
         Self {
             verify: args.verify,
             private_verify: args.private_verify,
+            test_execution_plan: None,
             input_sources: args.input_sources,
             private_gate_reveal: args.private_gate_reveal,
             execution_policy: match args.gate_execution_policy.as_str() {

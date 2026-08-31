@@ -1266,15 +1266,7 @@ fn validate_replacement_proof_finalization_eligibility(
     if visible_gates.is_empty() {
         return Err(failed("visibility", None));
     }
-    let shell_gates = visible_gates
-        .iter()
-        .copied()
-        .filter(|gate| matches!(gate.command.as_slice(), [shell, flag, _] if shell == "sh" && flag == "-lc"))
-        .collect::<Vec<_>>();
-    if shell_gates.is_empty() {
-        return Err(failed("shell_command", None));
-    }
-    let candidate_bound_gates = shell_gates
+    let candidate_bound_gates = visible_gates
         .iter()
         .copied()
         .filter(|gate| match gate.status {
@@ -1288,10 +1280,13 @@ fn validate_replacement_proof_finalization_eligibility(
     if candidate_bound_gates.is_empty() {
         return Err(failed("candidate_checkout", None));
     }
-    if !candidate_bound_gates
-        .iter()
-        .any(|gate| crate::agent_task_review_dossier::reviewer_runnable_command(&gate.command[2]))
-    {
+    if !candidate_bound_gates.iter().any(|gate| {
+        gate.invocation()
+            .map(|invocation| invocation.reviewer_command())
+            .is_ok_and(|command| {
+                crate::agent_task_review_dossier::reviewer_runnable_command(&command)
+            })
+    }) {
         return Err(failed("reviewer_runnable_command", None));
     }
     Ok(())
@@ -1422,14 +1417,18 @@ fn verify_replacement_gates_owned(
             None,
         ));
     }
-    if !gates
-        .verify
-        .iter()
-        .any(|command| crate::agent_task_review_dossier::reviewer_runnable_command(command))
-    {
+    let has_reviewer_runnable_gate = gates
+        .test_execution_plan
+        .as_ref()
+        .and_then(|plan| plan.declared_command().ok())
+        .map(homeboy_engine_primitives::shell::quote_args)
+        .into_iter()
+        .chain(gates.verify.iter().cloned())
+        .any(|command| crate::agent_task_review_dossier::reviewer_runnable_command(&command));
+    if !has_reviewer_runnable_gate {
         let mut error = Error::validation_invalid_argument(
             "replacement_gate_proof",
-            "replacement verification requires a reviewer-runnable visible gate before shell execution",
+            "replacement verification requires a reviewer-runnable visible gate",
             Some(run_id.to_string()),
             None,
         );
@@ -1497,7 +1496,7 @@ fn verify_replacement_gates_owned(
         &observation_store,
         || {
             // This fence is deliberately irreversible. Artifact hydration and
-            // candidate validation are retryable; shell gates are not.
+            // candidate validation are retryable; durable gates are not.
             mark_replacement_gate_execution_started(lifecycle_store, run_id)
         },
     )?;
@@ -4304,15 +4303,11 @@ fn cook_review_dossier_with_stores(
         .deterministic_gates
         .iter()
         .filter_map(|gate| {
-            let [shell, flag, command] = gate.command.as_slice() else {
-                return None;
-            };
-            (shell == "sh"
-                && flag == "-lc"
-                && verification_promotion.has_visible_passed_gate_for_command(command)
-                && crate::agent_task_review_dossier::reviewer_runnable_command(command))
+            let command = gate.invocation().ok()?.reviewer_command();
+            (verification_promotion.has_visible_passed_gate_for_command(&command)
+                && crate::agent_task_review_dossier::reviewer_runnable_command(&command))
             .then(|| AgentTaskReviewTestStep {
-                command: command.clone(),
+                command,
                 expected: "passes as recorded by Cook's deterministic gate".to_string(),
             })
         })

@@ -4594,23 +4594,13 @@ impl BatchCookSpec {
                     attempt_dispatcher: None,
                 },
                 gates: VerifyGateOptions {
-                    verify: self
-                        .test_execution_plan
-                        .as_ref()
-                        .map(project_declared_test_command)
-                        .transpose()?
-                        .into_iter()
-                        .chain(self.verify.clone())
-                        .collect(),
+                    verify: self.verify.clone(),
                     private_verify: self.private_verify.clone(),
+                    test_execution_plan: self.test_execution_plan.clone(),
                     input_sources: self.input_sources.clone(),
                     private_gate_reveal: self.private_gate_reveal,
                     execution_policy: self.execution_policy,
-                    gate_timeout_seconds: self
-                        .test_execution_plan
-                        .as_ref()
-                        .map(|plan| plan.suite_timeout().as_secs())
-                        .unwrap_or(self.gate_timeout_seconds),
+                    gate_timeout_seconds: self.gate_timeout_seconds,
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
                     gate_no_progress_timeout_seconds: self.gate_no_progress_timeout_seconds,
                     rerun_completed_gates: self.rerun_completed_gates,
@@ -5057,13 +5047,6 @@ impl VerificationProfiles {
             Some(profile.plan.clone()),
         ))
     }
-}
-
-fn project_declared_test_command(
-    plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
-) -> Result<String> {
-    let command = plan.declared_command().map_err(invalid_fanout)?;
-    Ok(homeboy_engine_primitives::shell::quote_args(command))
 }
 
 fn sources_for_executed_gates(
@@ -9314,8 +9297,8 @@ fi
                     .expect("Lab handoff invocation")
                     .options
                     .gates
-                    .verify,
-                vec!["homeboy review test homeboy"]
+                    .test_execution_plan,
+                plan.cooks[1].test_execution_plan
             );
             assert_eq!(
                 round_trip.cooks[1]
@@ -9324,7 +9307,7 @@ fi
                     .options
                     .gates
                     .gate_timeout_seconds,
-                123
+                batch_args.gates.gate_timeout_seconds
             );
         });
     }
