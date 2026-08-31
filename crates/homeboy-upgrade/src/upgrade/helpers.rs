@@ -5,6 +5,7 @@ use homeboy_core::extension::lifecycle;
 use homeboy_core::extension::lifecycle::is_git_url;
 use homeboy_core::{build_identity, git};
 use semver::Version;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -24,12 +25,156 @@ use super::types::*;
 use super::update_check::RuntimeCompatibility;
 use super::validation::check_for_updates;
 
+const CONTROLLER_UPGRADE_WAIT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Serialize)]
+struct ControllerUpgradeWaitEvent {
+    #[serde(flatten)]
+    admission: homeboy_core::runtime_promotion::RuntimePromotionWaitEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_status_command: Option<String>,
+}
+
 pub fn current_version() -> &'static str {
     VERSION
 }
 
 pub fn current_build_version() -> String {
     build_identity::current().display
+}
+
+fn acquire_controller_upgrade_lease(
+    operation: &mut UpgradeOperation,
+    timeout: Duration,
+    mut progress: impl FnMut(ControllerUpgradeWaitEvent),
+) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
+    let lease_operation = operation
+        .id()
+        .map(|id| format!("controller upgrade operation={id}"))
+        .unwrap_or_else(|| "controller upgrade".to_string());
+    operation.set_phase("waiting for controller promotion admission");
+    let lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
+        &lease_operation,
+        "active controller",
+        timeout,
+        |admission| {
+            let event = controller_upgrade_wait_event(admission);
+            operation.set_phase(&format!(
+                "queued behind controller promotion owner pid={} operation={}",
+                event.admission.owner_pid, event.admission.owner_operation
+            ));
+            progress(event);
+        },
+    )?;
+    operation.set_phase("admitted for controller promotion");
+    Ok(lease)
+}
+
+fn controller_upgrade_wait_event(
+    admission: homeboy_core::runtime_promotion::RuntimePromotionWaitEvent,
+) -> ControllerUpgradeWaitEvent {
+    let owner_operation_id = admission
+        .owner_operation
+        .strip_prefix("controller upgrade operation=")
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let owner_status_command = owner_operation_id
+        .as_ref()
+        .map(|id| format!("homeboy upgrade status {id}"));
+    ControllerUpgradeWaitEvent {
+        admission,
+        owner_operation_id,
+        owner_status_command,
+    }
+}
+
+fn emit_controller_upgrade_wait(event: ControllerUpgradeWaitEvent) {
+    eprintln!(
+        "{}",
+        serde_json::to_string(&event).unwrap_or_else(|_| {
+            "{\"schema\":\"homeboy/runtime-promotion-admission/v1\",\"state\":\"queued\",\"resource_class\":\"runtime_promotion\"}".to_string()
+        })
+    );
+}
+
+#[cfg(test)]
+mod controller_upgrade_wait_tests {
+    use super::*;
+    use homeboy_core::ErrorCode;
+    use std::sync::mpsc;
+
+    #[test]
+    fn parallel_controller_upgrades_wait_and_report_the_owner_status_command() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut owner = UpgradeOperation::start("homeboy upgrade");
+            let owner_id = owner.id().expect("owner operation is durable").to_string();
+            let owner_lease =
+                acquire_controller_upgrade_lease(&mut owner, Duration::from_secs(1), |_| {
+                    unreachable!("uncontended owner does not queue")
+                })
+                .expect("owner acquires controller promotion");
+            let (queued_tx, queued_rx) = mpsc::channel();
+
+            let waiter = std::thread::spawn(move || {
+                let mut contender = UpgradeOperation::start("homeboy upgrade");
+                acquire_controller_upgrade_lease(&mut contender, Duration::from_secs(1), |event| {
+                    queued_tx.send(event).expect("report queued owner")
+                })
+                .map(drop)
+            });
+
+            let event = queued_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("contender queues behind the owner");
+            assert_eq!(event.owner_operation_id.as_deref(), Some(owner_id.as_str()));
+            assert_eq!(
+                event.owner_status_command.as_deref(),
+                Some(format!("homeboy upgrade status {owner_id}").as_str())
+            );
+            let owner_status = super::super::load_upgrade_operation_status(Some(&owner_id))
+                .expect("owner status remains inspectable while it holds the lease");
+            assert_eq!(owner_status.operation_id, owner_id);
+            assert_eq!(owner_status.phase, "admitted for controller promotion");
+            assert_eq!(
+                owner_status.inspect_command.as_deref(),
+                Some(format!("homeboy upgrade status {owner_id}").as_str())
+            );
+
+            drop(owner_lease);
+            waiter
+                .join()
+                .expect("waiter thread exits")
+                .expect("contender acquires after owner completes");
+        });
+    }
+
+    #[test]
+    fn timed_out_controller_upgrade_waiter_does_not_disturb_the_owner() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut owner = UpgradeOperation::start("homeboy upgrade");
+            let owner_lease =
+                acquire_controller_upgrade_lease(&mut owner, Duration::from_secs(1), |_| {
+                    unreachable!("uncontended owner does not queue")
+                })
+                .expect("owner acquires controller promotion");
+            let waiter = std::thread::spawn(move || {
+                let mut contender = UpgradeOperation::start("homeboy upgrade");
+                acquire_controller_upgrade_lease(&mut contender, Duration::from_millis(10), |_| {})
+                    .map(drop)
+                    .map_err(|error| error.code)
+            });
+
+            assert_eq!(
+                waiter.join().expect("waiter thread exits"),
+                Err(ErrorCode::RuntimePromotionWaitTimeout)
+            );
+            owner_lease
+                .assert_generation()
+                .expect("timed-out contender leaves the owner lease intact");
+        });
+    }
 }
 
 fn fetch_latest_github_version_at(url: &str) -> Result<String> {
@@ -401,9 +546,10 @@ pub fn run_upgrade_with_method(
                 operation.set_phase("refreshing installed extensions");
                 update_all_extensions(operation.id())
             };
-            let promotion_lease = homeboy_core::runtime_promotion::acquire(
-                "controller upgrade completion",
-                "active controller",
+            let promotion_lease = acquire_controller_upgrade_lease(
+                &mut operation,
+                CONTROLLER_UPGRADE_WAIT_TIMEOUT,
+                emit_controller_upgrade_wait,
             )?;
             let (runners_updated, runners_skipped) = if skip_runners {
                 (vec![], vec![])
@@ -498,11 +644,15 @@ pub fn run_upgrade_with_method(
         }
     }
 
+    let mut operation = UpgradeOperation::start("homeboy upgrade");
     // Keep the same promotion authority from compatibility revalidation through
     // the controller swap. Source builds retain their isolated build target, but
     // their final install shares this lease rather than opening a TOCTOU window.
-    let controller_mutation_lease =
-        homeboy_core::runtime_promotion::acquire("controller upgrade", "active controller")?;
+    let controller_mutation_lease = acquire_controller_upgrade_lease(
+        &mut operation,
+        CONTROLLER_UPGRADE_WAIT_TIMEOUT,
+        emit_controller_upgrade_wait,
+    )?;
     controller_mutation_lease.assert_generation()?;
     let extension_revalidation = (!skip_extensions)
         .then(|| preflight_extensions_for_upgrade(&candidate_version))
@@ -516,8 +666,7 @@ pub fn run_upgrade_with_method(
             extension_revalidation,
         ));
     }
-    let mut operation = UpgradeOperation::start("homeboy upgrade");
-    operation.set_phase("mutating controller");
+    operation.set_phase("revalidating controller upgrade admission");
     let controller_upgrade = run_controller_mutation_after_runner_preflight(
         runner_preflight,
         || {
@@ -545,6 +694,7 @@ pub fn run_upgrade_with_method(
                 previous_build_identity.as_deref(),
                 selected_release.as_ref(),
                 Some(&controller_mutation_lease),
+                |phase| operation.set_phase(phase),
             )
         },
     )?;
@@ -565,6 +715,7 @@ pub fn run_upgrade_with_method(
         // This is deliberately a short switch, not a drain: records admitted
         // before it retain their immutable runtime pin and remain executable.
         let installed_executable = super::execution::active_binary_path()?;
+        operation.set_phase("rotating controller runtime generation");
         homeboy_core::controller_runtime::activate_installed_generation(&installed_executable)?;
         if success {
             operation.mark_controller_promoted("controller installation completed");
