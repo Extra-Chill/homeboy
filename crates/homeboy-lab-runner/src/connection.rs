@@ -338,17 +338,78 @@ where
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     connect_with_orphan_adoption_and_live_lease(
         runner_id,
-        RemoteDaemonConnectOptions {
-            orphan_lease_id: None,
-            confirmed_no_pid_job_ids: &[],
-            reconcile_leaseless_orphans: false,
-            reconcile_unleased_candidates: false,
-            missing_lease_id: None,
-            recorded_pid: None,
-            recorded_endpoint: None,
-            live_lease_expectation: None,
-        },
+        None,
+        RunnerConnectMode::Normal.options(),
     )
+}
+
+/// The recovery action selected for an SSH runner connection.
+pub enum RunnerConnectMode<'a> {
+    Normal,
+    OrphanAdoption {
+        orphan_lease_id: Option<&'a str>,
+        confirmed_no_pid_job_ids: &'a [uuid::Uuid],
+        reconcile_leaseless_orphans: bool,
+        missing_lease_id: Option<&'a str>,
+        recorded_pid: Option<u32>,
+        recorded_endpoint: Option<&'a str>,
+    },
+    ReconcileUnleasedCandidates,
+}
+
+impl<'a> RunnerConnectMode<'a> {
+    fn options(self) -> RemoteDaemonConnectOptions<'a> {
+        match self {
+            Self::Normal => RemoteDaemonConnectOptions {
+                orphan_lease_id: None,
+                confirmed_no_pid_job_ids: &[],
+                reconcile_leaseless_orphans: false,
+                reconcile_unleased_candidates: false,
+                missing_lease_id: None,
+                recorded_pid: None,
+                recorded_endpoint: None,
+                live_lease_expectation: None,
+            },
+            Self::OrphanAdoption {
+                orphan_lease_id,
+                confirmed_no_pid_job_ids,
+                reconcile_leaseless_orphans,
+                missing_lease_id,
+                recorded_pid,
+                recorded_endpoint,
+            } => RemoteDaemonConnectOptions {
+                orphan_lease_id,
+                confirmed_no_pid_job_ids,
+                reconcile_leaseless_orphans,
+                reconcile_unleased_candidates: false,
+                missing_lease_id,
+                recorded_pid,
+                recorded_endpoint,
+                live_lease_expectation: None,
+            },
+            Self::ReconcileUnleasedCandidates => RemoteDaemonConnectOptions {
+                orphan_lease_id: None,
+                confirmed_no_pid_job_ids: &[],
+                reconcile_leaseless_orphans: false,
+                reconcile_unleased_candidates: true,
+                missing_lease_id: None,
+                recorded_pid: None,
+                recorded_endpoint: None,
+                live_lease_expectation: None,
+            },
+        }
+    }
+}
+
+/// Connect using an already-resolved SSH identity rather than reloading the
+/// mutable runner registry by id.
+pub fn connect_with_resolved_ssh_target(
+    runner_id: &str,
+    runner: &Runner,
+    server: &Server,
+    mode: RunnerConnectMode<'_>,
+) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_orphan_adoption_and_live_lease(runner_id, Some((runner, server)), mode.options())
 }
 
 /// Start and validate a second daemon without touching the recorded admission
@@ -622,16 +683,16 @@ pub fn connect_with_orphan_adoption(
 ) -> Result<(RunnerConnectReport, i32)> {
     connect_with_orphan_adoption_and_live_lease(
         runner_id,
-        RemoteDaemonConnectOptions {
+        None,
+        RunnerConnectMode::OrphanAdoption {
             orphan_lease_id,
             confirmed_no_pid_job_ids,
             reconcile_leaseless_orphans,
-            reconcile_unleased_candidates: false,
             missing_lease_id,
             recorded_pid,
             recorded_endpoint,
-            live_lease_expectation: None,
-        },
+        }
+        .options(),
     )
 }
 
@@ -643,16 +704,8 @@ pub fn connect_with_unleased_candidate_reconciliation(
 ) -> Result<(RunnerConnectReport, i32)> {
     connect_with_orphan_adoption_and_live_lease(
         runner_id,
-        RemoteDaemonConnectOptions {
-            orphan_lease_id: None,
-            confirmed_no_pid_job_ids: &[],
-            reconcile_leaseless_orphans: false,
-            reconcile_unleased_candidates: true,
-            missing_lease_id: None,
-            recorded_pid: None,
-            recorded_endpoint: None,
-            live_lease_expectation: None,
-        },
+        None,
+        RunnerConnectMode::ReconcileUnleasedCandidates.options(),
     )
 }
 
@@ -666,6 +719,7 @@ pub fn connect_with_live_lease_adoption(
 ) -> Result<(RunnerConnectReport, i32)> {
     connect_with_orphan_adoption_and_live_lease(
         runner_id,
+        None,
         RemoteDaemonConnectOptions {
             orphan_lease_id: None,
             confirmed_no_pid_job_ids: &[],
@@ -681,6 +735,7 @@ pub fn connect_with_live_lease_adoption(
 
 fn connect_with_orphan_adoption_and_live_lease(
     runner_id: &str,
+    resolved_target: Option<(&Runner, &Server)>,
     options: RemoteDaemonConnectOptions<'_>,
 ) -> Result<(RunnerConnectReport, i32)> {
     let RemoteDaemonConnectOptions {
@@ -699,18 +754,42 @@ fn connect_with_orphan_adoption_and_live_lease(
     let promotion_lease =
         homeboy_core::runtime_promotion::acquire("runner daemon reconnect", runner_id.to_string())?;
     promotion_lease.assert_generation()?;
-    let runner = load(runner_id)?;
-    let session_path = session_path(runner_id)?;
-    let homeboy = remote_runner_homeboy_path(&runner, "runner connect")?;
-
-    let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
-        return Ok(failed_connect(
-            runner_id,
-            session_path,
-            RunnerFailureKind::SshFailure,
-            "only SSH runners are supported by direct runner connect in this wave".to_string(),
-        ));
+    let loaded_runner;
+    let (runner, server, client) = match resolved_target {
+        Some((runner, server)) => {
+            let server_id = runner.server_id.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "server_id",
+                    "SSH runners require server_id",
+                    None,
+                    None,
+                )
+            })?;
+            let mut client = SshClient::from_server(server, server_id)?;
+            client.env.extend(runner.env.clone());
+            (runner, server.clone(), client)
+        }
+        None => {
+            loaded_runner = load(runner_id)?;
+            let Some((_, server, client)) = resolve_ssh_runner(&loaded_runner)? else {
+                let session_path = session_path(runner_id)?;
+                return Ok(failed_connect(
+                    runner_id,
+                    session_path,
+                    RunnerFailureKind::SshFailure,
+                    "only SSH runners are supported by direct runner connect in this wave"
+                        .to_string(),
+                ));
+            };
+            (&loaded_runner, server, client)
+        }
     };
+    let session_path = session_path(runner_id)?;
+    let homeboy = remote_runner_homeboy_path(runner, "runner connect")?;
+    let server_id = runner
+        .server_id
+        .clone()
+        .expect("resolved SSH runner has server id");
 
     let ssh_probe = client.execute_with_timeout("true", REMOTE_RUNNER_CONNECT_TIMEOUT);
     if !ssh_probe.success {
@@ -1473,7 +1552,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     wake_unmaterialized_admission_reconciliation();
     Ok((
         RunnerConnectReport {
-            runner_id: runner.id,
+            runner_id: runner.id.clone(),
             mode: Some(session.mode.clone()),
             role: Some(session.role.clone()),
             connected: true,

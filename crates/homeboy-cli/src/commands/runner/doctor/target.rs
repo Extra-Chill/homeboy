@@ -25,6 +25,35 @@ pub fn resolve(runner_id: &str) -> homeboy::core::Result<RunnerTarget> {
 }
 
 impl RunnerTarget {
+    /// Execute a connection mutation against this resolved SSH identity. The
+    /// registry is deliberately not read again between diagnosis and mutation.
+    pub fn connect(
+        &self,
+        mode: runner::RunnerConnectMode<'_>,
+    ) -> homeboy::core::Result<(runner::RunnerConnectReport, i32)> {
+        self.with_ssh_identity(|id, runner_config, server_config| {
+            runner::connect_with_resolved_ssh_target(id, runner_config, server_config, mode)
+        })
+    }
+
+    fn with_ssh_identity<T>(
+        &self,
+        action: impl FnOnce(&str, &Runner, &Server) -> homeboy::core::Result<T>,
+    ) -> homeboy::core::Result<T> {
+        let Self::Ssh {
+            id, runner, server, ..
+        } = self
+        else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "runner",
+                "Lab daemon repair requires an SSH runner",
+                None,
+                None,
+            ));
+        };
+        action(id, runner, server)
+    }
+
     /// Lifecycle operations still accept a runner id and therefore reload its
     /// registry entry. Refuse that operation if the entry no longer names the
     /// target diagnosed at the start of this doctor invocation.
@@ -96,4 +125,39 @@ fn from_registry(runner_id: &str, runner: Runner) -> homeboy::core::Result<Runne
 
 fn is_local_runner_id(runner_id: &str) -> bool {
     matches!(runner_id, "local" | "localhost" | "self")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_connect_identity_survives_registry_replacement_after_validation() {
+        crate::test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{"id":"connect-identity","host":"first.test","user":"runner"}"#,
+                false,
+            )
+            .expect("create server");
+            runner::create(
+                r#"{"id":"connect-identity","kind":"ssh","server_id":"connect-identity","workspace_root":"/tmp"}"#,
+                false,
+            )
+            .expect("create runner");
+            let target = resolve("connect-identity").expect("resolve target");
+            target.ensure_current().expect("validate target");
+
+            let mut replacement = server::load("connect-identity").expect("load server");
+            replacement.host = "second.test".to_string();
+            server::save(&replacement).expect("replace registry identity");
+
+            target
+                .with_ssh_identity(|_, runner_config, server_config| {
+                    assert_eq!(runner_config.server_id.as_deref(), Some("connect-identity"));
+                    assert_eq!(server_config.host, "first.test");
+                    Ok(())
+                })
+                .expect("connect uses the resolved identity");
+        });
+    }
 }

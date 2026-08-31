@@ -109,9 +109,8 @@ pub fn apply(
     // Connect owns lease-safe dead-daemon adoption. A failed disconnect must not
     // force operators through repeated stop/adopt cycles when its authoritative
     // probe has already established that the recorded owner is gone.
-    match retry_runtime_promotion_wait(target, || {
-        target.ensure_current().and_then(|_| runner::connect(id))
-    }) {
+    match retry_runtime_promotion_wait(target, || target.connect(runner::RunnerConnectMode::Normal))
+    {
         Ok((_, 0)) => {
             report.checks.retain(|check| check.id != "daemon.exec");
             let workspace_root = runner_config.workspace_root.as_deref().unwrap_or(".");
@@ -576,45 +575,35 @@ fn apply_daemon_repair_plan(
                 .map(|_| ())
                 .map_err(|error| error.message),
             DaemonRepairDispatch::Connect => connect_outcome_after_promotion_wait(target, || {
-                target
-                    .ensure_current()
-                    .and_then(|_| runner::connect(runner_id))
+                target.connect(runner::RunnerConnectMode::Normal)
             }),
             DaemonRepairDispatch::AdoptOrphanLease { lease_id } => {
                 connect_outcome_after_promotion_wait(target, || {
-                    target.ensure_current().and_then(|_| {
-                        runner::connect_with_orphan_adoption(
-                            runner_id,
-                            Some(&lease_id),
-                            &[],
-                            false,
-                            None,
-                            None,
-                            None,
-                        )
+                    target.connect(runner::RunnerConnectMode::OrphanAdoption {
+                        orphan_lease_id: Some(&lease_id),
+                        confirmed_no_pid_job_ids: &[],
+                        reconcile_leaseless_orphans: false,
+                        missing_lease_id: None,
+                        recorded_pid: None,
+                        recorded_endpoint: None,
                     })
                 })
             }
             DaemonRepairDispatch::ReconcileLeaselessOrphans => {
                 connect_outcome_after_promotion_wait(target, || {
-                    target.ensure_current().and_then(|_| {
-                        runner::connect_with_orphan_adoption(
-                            runner_id,
-                            None,
-                            &[],
-                            true,
-                            None,
-                            None,
-                            None,
-                        )
+                    target.connect(runner::RunnerConnectMode::OrphanAdoption {
+                        orphan_lease_id: None,
+                        confirmed_no_pid_job_ids: &[],
+                        reconcile_leaseless_orphans: true,
+                        missing_lease_id: None,
+                        recorded_pid: None,
+                        recorded_endpoint: None,
                     })
                 })
             }
             DaemonRepairDispatch::ReconcileUnleasedCandidates => {
                 connect_outcome_after_promotion_wait(target, || {
-                    target.ensure_current().and_then(|_| {
-                        runner::connect_with_unleased_candidate_reconciliation(runner_id)
-                    })
+                    target.connect(runner::RunnerConnectMode::ReconcileUnleasedCandidates)
                 })
             }
             DaemonRepairDispatch::RefreshHomeboy {
