@@ -35,6 +35,10 @@ use homeboy_extension_contract::{
     },
     CliConfig, ExtensionCapability, ExtensionManifest as InstalledExtensionManifest,
 };
+use homeboy_runner_contract::{
+    RunnerApiCapabilitiesRequest, RunnerApiCapabilitiesResponse, RunnerCapabilities,
+    RUNNER_API_CAPABILITIES_REQUEST_SCHEMA, RUNNER_API_V1,
+};
 use homeboy_upgrade::upgrade;
 
 /// A typed command package installed by a product composition root.
@@ -145,10 +149,43 @@ pub(crate) fn runner_satisfies_admission_capabilities(
     if required.is_empty() {
         return Ok(true);
     }
-    let inventory = crate::runner::runners::RunnerDiscoveryService::capabilities(runner_id)?;
+    let inventory = capabilities_from_response(
+        crate::runner::runners::RunnerDiscoveryService::capabilities_api(
+            &RunnerApiCapabilitiesRequest {
+                schema: RUNNER_API_CAPABILITIES_REQUEST_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                runner_id: runner_id.to_string(),
+            },
+        )?,
+    )?;
     Ok(runner_inventory_satisfies_admission_capabilities(
         &inventory, required,
     ))
+}
+
+fn capabilities_from_response(
+    response: RunnerApiCapabilitiesResponse,
+) -> crate::core::Result<RunnerCapabilities> {
+    if let Some(failure) = response.failure {
+        let failure_code = serde_json::to_value(failure.code)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string));
+        return Err(crate::core::Error::validation_invalid_argument(
+            "runner_api.capabilities",
+            failure.message,
+            failure_code,
+            None,
+        ));
+    }
+
+    response.capabilities.ok_or_else(|| {
+        crate::core::Error::validation_invalid_argument(
+            "runner_api.capabilities",
+            "Runner API capabilities response omitted both capabilities and failure",
+            None,
+            None,
+        )
+    })
 }
 
 pub(crate) fn runner_inventory_satisfies_admission_capabilities(
@@ -3696,6 +3733,42 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    #[test]
+    fn empty_admission_requirements_avoid_runner_lookup() {
+        assert!(runner_satisfies_admission_capabilities(
+            "runner-that-does-not-exist",
+            &BTreeSet::new()
+        )
+        .expect("empty requirements"));
+    }
+
+    #[test]
+    fn capability_admission_rejects_unknown_runners() {
+        let error = runner_satisfies_admission_capabilities(
+            "runner-that-does-not-exist",
+            &BTreeSet::from(["homeboy"]),
+        )
+        .expect_err("unknown runner must fail admission");
+
+        assert_eq!(error.details["id"], "runner_not_found");
+    }
+
+    #[test]
+    fn capability_admission_rejects_empty_api_envelopes() {
+        let error = capabilities_from_response(RunnerApiCapabilitiesResponse {
+            schema: homeboy_runner_contract::RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            runner_id: "runner-a".to_string(),
+            capabilities: None,
+            failure: None,
+        })
+        .expect_err("empty envelope must fail admission");
+
+        assert!(error
+            .message
+            .contains("omitted both capabilities and failure"));
+    }
 
     struct AdmissionFixtureCapability;
 
