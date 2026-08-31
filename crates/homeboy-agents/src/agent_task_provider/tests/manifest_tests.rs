@@ -224,12 +224,67 @@ fn provider_readiness_invocation_receives_effective_config_and_fails_closed() {
             script("let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:req.effective_config.marker==='ready',classification:'test',retryable:false,remediation:'configured marker is not ready',reason:'configured_marker',cache_key:'test-cache',identity:{provider:'test'}}));"),
         ],
         ..CommandInvocation::default()
-    });
+    }.into());
 
     assert!(run_provider_readiness_invocation(&provider, &json!({ "marker": "ready" })).is_ok());
     let result = run_provider_readiness_invocation(&provider, &json!({ "marker": "blocked" }))
         .expect("provider-owned readiness result parses");
     assert!(!result.ready);
+}
+
+#[test]
+fn provider_readiness_invocation_defaults_and_validates_its_total_timeout() {
+    let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+        "id": "ready.provider",
+        "backend": "ready",
+        "readiness_invocation": { "argv": ["ready-provider"] }
+    }))
+    .expect("provider manifest");
+
+    assert_eq!(
+        provider
+            .readiness_invocation
+            .as_ref()
+            .expect("readiness invocation")
+            .timeout_ms,
+        homeboy_extension_contract::agent_task_executor_declaration::DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS
+    );
+    assert_eq!(
+        serde_json::to_value(&provider).expect("provider export")["readiness_invocation"]
+            ["timeout_ms"],
+        json!(20_000)
+    );
+
+    let error = serde_json::from_value::<AgentTaskExecutorProvider>(json!({
+        "id": "invalid.provider",
+        "backend": "invalid",
+        "readiness_invocation": { "argv": ["invalid-provider"], "timeout_ms": 120001 }
+    }))
+    .expect_err("timeout above the core maximum must fail");
+    assert!(error
+        .to_string()
+        .contains("readiness_invocation.timeout_ms"));
+}
+
+#[test]
+fn provider_readiness_timeout_uses_an_injected_zero_duration() {
+    let (_, mut provider) = request("timed-readiness", "node ignored.js".to_string());
+    provider.readiness_invocation = Some(
+        CommandInvocation {
+            argv: vec!["node".to_string(), script("setInterval(() => {}, 1000);")],
+            ..CommandInvocation::default()
+        }
+        .into(),
+    );
+
+    let error = run_provider_readiness_invocation_with_test_timeout(
+        &provider,
+        &Value::Null,
+        Duration::ZERO,
+    )
+    .expect_err("zero injected duration must time out without sleeping");
+
+    assert!(error.contains("timed out after 0 ms"), "{error}");
 }
 
 #[test]

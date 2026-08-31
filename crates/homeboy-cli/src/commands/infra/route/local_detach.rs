@@ -555,9 +555,11 @@ fn is_unsupervised_local_cook(cli: &Cli) -> bool {
         && !consume_local_cook_launch_token()
 }
 
-fn automatic_local_cook_needs_supervision(cli: &Cli, provider_placement: Option<&str>) -> bool {
-    cli.placement == homeboy::cli_surface::Placement::Auto
-        && provider_placement == Some("local")
+fn local_cook_needs_supervision(cli: &Cli, provider_placement: Option<&str>) -> bool {
+    matches!(
+        cli.placement,
+        homeboy::cli_surface::Placement::Auto | homeboy::cli_surface::Placement::Local
+    ) && provider_placement == Some("local")
         && matches!(
             &cli.command,
             Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
@@ -628,46 +630,6 @@ fn consume_local_cook_launch_token_at(token: &std::ffi::OsStr, path: &Path) -> b
     valid
 }
 
-/// Say so when this Cook's provider is about to run inside the caller's own
-/// process tree.
-///
-/// Diagnostics only, and emitted here because this is the one point where the
-/// resolved provider placement and the caller's detachment request are both
-/// known. It is stated before the paths below can fall back to foreground
-/// execution, so an operator hears it whether or not supervision is available. A
-/// runner-owned execution is excluded: the runner, not this client, owns that
-/// attempt.
-fn announce_attached_local_cook_placement(
-    cli: &Cli,
-    runner_side: bool,
-    provider_placement: Option<&str>,
-) {
-    if runner_side || attached_local_cook_progress_is_suppressed(cli) {
-        return;
-    }
-    let disclosure = crate::commands::agent_task::run::cook_attached_local_placement_disclosure(
-        provider_placement,
-        cli.detach_after_handoff,
-    );
-    if let Some(warning) = disclosure {
-        eprintln!("{warning}");
-    }
-}
-
-/// Whether this Cook asked for a quiet submission.
-///
-/// `--no-progress` suppresses Cook's submission preamble lines, and the attached
-/// local placement warning is one of them.
-fn attached_local_cook_progress_is_suppressed(cli: &Cli) -> bool {
-    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-        command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
-    }) = &cli.command
-    else {
-        return false;
-    };
-    cook.no_progress
-}
-
 /// Durable local supervision needs both a separate child session and an exact
 /// process identity for safe cancellation. Platforms without both retain the
 /// normal foreground Cook path rather than making an ownership promise they
@@ -682,8 +644,9 @@ fn local_cook_supervision_supported() -> bool {
     false
 }
 
-/// Serve `--detach-after-handoff` by re-executing this exact controller-owned
-/// Cook in its own session and returning after durable daemon ownership exists.
+/// Re-execute a local Cook in its own session after durable daemon ownership
+/// exists. `--detach-after-handoff` only changes whether the caller waits for a
+/// handoff acknowledgement or continues observing that durable work.
 ///
 /// `runner_side` is true when this process is a Lab offload subprocess, a
 /// managed-runner placement, or a runner-resident execution. There the request
@@ -718,18 +681,14 @@ pub(super) fn intercept_local_detached_cook(
             ))
         };
     }
-    if !is_unsupervised_local_cook(cli)
-        && !automatic_local_cook_needs_supervision(cli, provider_placement)
-    {
+    let durable_local_ownership = local_cook_needs_supervision(cli, provider_placement);
+    if !is_unsupervised_local_cook(cli) && !durable_local_ownership {
         return Ok(None);
     }
-    // Diagnostics only: an attached local Cook shares this client's lifetime and
-    // nothing said so (#12570). Placement itself is unchanged.
-    announce_attached_local_cook_placement(cli, runner_side, provider_placement);
     if !local_cook_supervision_supported() {
-        return if cli.detach_after_handoff {
+        return if cli.detach_after_handoff || durable_local_ownership {
             Err(Error::validation_invalid_argument(
-                "detach-after-handoff",
+                "placement",
                 "local Cook detachment requires a platform with session detachment and exact process start identity support",
                 None,
                 None,
@@ -739,7 +698,7 @@ pub(super) fn intercept_local_detached_cook(
         };
     }
     if runner_side {
-        return if cli.detach_after_handoff {
+        return if cli.detach_after_handoff || durable_local_ownership {
             Err(runner_side_detach_error())
         } else {
             Ok(None)
@@ -790,8 +749,9 @@ pub(super) fn intercept_local_detached_cook(
         None => match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
             Ok(client) => client,
             Err(error) if controller_job_daemon_build_mismatch(&error) => {
-                // Attached callers retain foreground ownership when the resident
-                // daemon is an older build; #12581 owns that wait-policy path.
+                if durable_local_ownership {
+                    return Err(error);
+                }
                 return Ok(None);
             }
             Err(error) => return Err(error),
@@ -1615,11 +1575,11 @@ mod tests {
         );
     }
 
-    /// Only a Cook explicitly requesting detachment is intercepted; attached
-    /// local callers continue through normal routing untouched.
-    /// These cases must not spawn anything.
+    /// Local placement transfers durable ownership before provider submission;
+    /// the initiating client is only an observer. Non-local and preview Cooks
+    /// must not enter this handoff.
     #[test]
-    fn only_a_detaching_cook_is_intercepted() {
+    fn local_cook_ownership_is_not_optional() {
         let normalized = args(&[
             "homeboy",
             "--placement",
@@ -1635,26 +1595,10 @@ mod tests {
             "--verify",
             "true",
         ]);
-        let local = Cli::try_parse_from(&normalized).expect("parse attached local Cook");
+        let local = Cli::try_parse_from(&normalized).expect("parse local Cook");
         assert!(!is_unsupervised_local_cook(&local));
-        crate::test_support::with_isolated_home(|_| {
-            assert_eq!(
-                intercept_local_detached_cook(
-                    &local,
-                    &normalized,
-                    None,
-                    false,
-                    Some("local"),
-                    None,
-                )
-                .expect("attached caller falls through"),
-                None,
-            );
-            assert!(
-                agent_task_lifecycle::exact_record("attached").is_err(),
-                "an attached caller must not create the detached parent, supervisor, or attempt reservation"
-            );
-        });
+        assert!(local_cook_needs_supervision(&local, Some("local")));
+        assert!(!local_cook_needs_supervision(&local, Some("lab")));
 
         let preview = Cli::try_parse_from([
             "homeboy",
@@ -1669,13 +1613,12 @@ mod tests {
             "--preview",
         ])
         .expect("parse preview cook invocation");
-        assert!(
-            !is_unsupervised_local_cook(&preview),
-            "preview must bypass detached Cook interception"
-        );
+        assert!(!is_unsupervised_local_cook(&preview));
+        assert!(!local_cook_needs_supervision(&preview, Some("local")));
 
         let (auto, normalized) = cook_cli(&["--placement", "auto"]);
         assert!(!is_unsupervised_local_cook(&auto));
+        assert!(local_cook_needs_supervision(&auto, Some("local")));
         assert_eq!(
             intercept_local_detached_cook(&auto, &normalized, None, false, Some("lab"), None,)
                 .expect("non-local route falls through"),
@@ -1689,31 +1632,6 @@ mod tests {
             let (cli, _) = cook_cli(&["--placement", placement, "--detach-after-handoff"]);
             assert!(is_unsupervised_local_cook(&cli), "{placement}");
         }
-    }
-
-    /// The attached local placement warning is a submission preamble line, so it
-    /// obeys the same `--no-progress` suppression as the rest of them.
-    #[test]
-    fn no_progress_suppresses_the_attached_local_placement_warning() {
-        let (loud, _) = cook_cli(&["--placement", "local"]);
-        assert!(!attached_local_cook_progress_is_suppressed(&loud));
-
-        let quiet = Cli::try_parse_from([
-            "homeboy",
-            "--placement",
-            "local",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "implement the fix",
-            "--to-worktree",
-            "repo@branch",
-            "--verify",
-            "true",
-            "--no-progress",
-        ])
-        .expect("parse quiet cook invocation");
-        assert!(attached_local_cook_progress_is_suppressed(&quiet));
     }
 
     #[test]

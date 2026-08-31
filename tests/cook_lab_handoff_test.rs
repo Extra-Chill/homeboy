@@ -651,6 +651,117 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     );
 }
 
+/// Attached Cooks remain foreground observers. They must reach their normal
+/// terminal execution path rather than returning deferred-admission output.
+#[test]
+fn attached_nonlocal_cook_observes_terminal_execution() {
+    let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("attached-cook-terminal");
+    let component_id = "attached-cook-terminal";
+    let mut register = context.command(TestBinary::HomeboyFixture);
+    register.args([
+        "component",
+        "create",
+        "--local-path",
+        checkout.to_str().expect("checkout path"),
+    ]);
+    let registered = bounded_output(register);
+    assert!(
+        registered.status.success(),
+        "register Cook component failed"
+    );
+    let task_worktree = context.root().join("attached-cook-terminal-worktree");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "attached-cook-terminal",
+            task_worktree.to_str().expect("task worktree path"),
+        ],
+    );
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
+    let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    cook.env("GITHUB_ACTIONS", "true").args([
+        "agent-task",
+        "cook",
+        "--run-id",
+        "attached-cook-terminal",
+        "--repo",
+        component_id,
+        "--backend",
+        "fixture",
+        "--prompt",
+        "complete while attached",
+        "--cwd",
+        task_worktree.to_str().expect("task worktree path"),
+        "--to-worktree",
+        task_worktree.to_str().expect("task worktree path"),
+        "--verify",
+        "true",
+        "--max-attempts",
+        "1",
+        "--no-finalize",
+    ]);
+    let output = bounded_output(cook);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("pending_resource_admission"),
+        "attached Cook was deferred instead of observed: {stdout}"
+    );
+    assert!(
+        stdout.contains("Cook terminal"),
+        "attached Cook did not wait for terminal provider execution: {stdout}"
+    );
+}
+
+/// `lab-or-local` authorizes the controller fallback when no Lab runner exists.
+#[test]
+fn no_runner_lab_or_local_cook_reaches_local_execution() {
+    let context = HermeticTestContext::new();
+    let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    cook.env("GITHUB_ACTIONS", "true").args([
+        "--placement",
+        "lab-or-local",
+        "agent-task",
+        "cook",
+        "--backend",
+        "fixture",
+        "--prompt",
+        "use the authorized local fallback",
+        "--to-worktree",
+        "missing@lab-or-local-fallback",
+        "--verify",
+        "true",
+    ]);
+    let output = bounded_output(cook);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("Cook result JSON");
+
+    assert!(
+        !output.status.success(),
+        "fixture target must be unresolved"
+    );
+    assert!(
+        !stdout.contains("pending_resource_admission"),
+        "lab-or-local Cook was deferred instead of run locally: {stdout}"
+    );
+    assert!(
+        result
+            .pointer("/data/terminal_phase")
+            .and_then(serde_json::Value::as_str)
+            == Some("worktree_provider_lookup"),
+        "routing did not reach local Cook execution: {stdout}"
+    );
+}
+
 /// Historical runner recovery belongs to `runner exec`, never an unrelated
 /// Cook admission. This invokes the actual detached Cook command path so the
 /// ownership boundary remains observable.

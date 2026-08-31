@@ -126,6 +126,11 @@ pub(crate) struct ControllerJobState {
     /// Driver-owned safe projection exposed in the queued event and API logs.
     pub(crate) public_request: Value,
     pub(crate) request_digest: String,
+    /// Optional semantic identity that coalesces matching work only while its
+    /// durable job remains nonterminal. The caller's idempotency key still
+    /// permanently identifies this particular submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) active_idempotency_key: Option<String>,
     /// The controller-minted durable run this job executes for, declared by
     /// the driver from its typed request and persisted at admission — before
     /// any driver work can escape the daemon lifecycle. Recovery reconciles
@@ -1925,6 +1930,26 @@ impl JobStore {
                 Some(idempotency_key),
                 None,
             ));
+        }
+        if let Some(active_idempotency_key) = controller_job.active_idempotency_key.as_deref() {
+            let active = inner.jobs.values().find(|stored| {
+                !stored.job.status.is_terminal()
+                    && stored
+                        .controller_job
+                        .as_ref()
+                        .and_then(|state| state.active_idempotency_key.as_deref())
+                        == Some(active_idempotency_key)
+            });
+            if let Some(active) = active {
+                let active_state = active
+                    .controller_job
+                    .as_ref()
+                    .expect("active controller submission has controller state");
+                if controller_submission_fingerprint(active_state) != fingerprint {
+                    return Err(controller_idempotency_conflict(active_idempotency_key));
+                }
+                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(active.job.clone())));
+            }
         }
         let job = Job {
             id: Uuid::new_v4(),

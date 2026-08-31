@@ -3173,7 +3173,7 @@ fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
 }
 
 #[test]
-fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admission() {
+fn only_detached_cook_without_local_fallback_enters_deferred_admission() {
     let queued = Cli::parse_from([
         "homeboy",
         "--detach-after-handoff",
@@ -3186,7 +3186,7 @@ fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admissio
         "--prompt",
         "queue this on Lab",
     ]);
-    assert!(detached_cook_can_queue(&queued));
+    assert!(detached_cook_requires_deferred_admission(&queued));
 
     let local = Cli::parse_from([
         "homeboy",
@@ -3202,7 +3202,23 @@ fn detached_cook_is_the_only_split_placement_command_eligible_for_queue_admissio
         "--prompt",
         "remain local",
     ]);
-    assert!(!detached_cook_can_queue(&local));
+    assert!(!detached_cook_requires_deferred_admission(&local));
+
+    let fallback = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "lab-or-local",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@fallback",
+        "--verify",
+        "true",
+        "--prompt",
+        "run locally when Lab is unavailable",
+    ]);
+    assert!(!detached_cook_requires_deferred_admission(&fallback));
 }
 
 #[test]

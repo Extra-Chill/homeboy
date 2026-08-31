@@ -37,7 +37,6 @@ const WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS: u64 = 200;
 const WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS: u64 = 5_000;
 pub const PROVIDER_READINESS_RESULT_SCHEMA: &str =
     "homeboy/agent-task-provider-readiness-result/v1";
-const PROVIDER_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProviderCommandEnvError {
@@ -2525,6 +2524,21 @@ pub fn run_provider_readiness_invocation(
             identity: Value::Null,
         });
     };
+    run_provider_readiness_invocation_with_timeout(
+        provider,
+        effective_config,
+        Duration::from_millis(invocation.timeout_ms),
+    )
+}
+
+fn run_provider_readiness_invocation_with_timeout(
+    provider: &AgentTaskExecutorProvider,
+    effective_config: &Value,
+    timeout: Duration,
+) -> Result<ProviderReadinessInvocationResult, String> {
+    let Some(invocation) = provider.readiness_invocation.as_ref() else {
+        unreachable!("readiness invocation timeout requires an invocation")
+    };
     let Some((program, args, cwd)) = invocation_command_parts(provider, invocation) else {
         return Err(format!(
             "provider '{}' declares an empty readiness invocation",
@@ -2603,7 +2617,7 @@ pub fn run_provider_readiness_invocation(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < PROVIDER_READINESS_TIMEOUT => {
+            Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => {
@@ -2612,9 +2626,9 @@ pub fn run_provider_readiness_invocation(
                     let _ = reader.join();
                 }
                 return Err(format!(
-                    "provider '{}' readiness invocation timed out after {} seconds",
+                    "provider '{}' readiness invocation timed out after {} ms",
                     provider.id,
-                    PROVIDER_READINESS_TIMEOUT.as_secs()
+                    timeout.as_millis()
                 ));
             }
             Err(error) => {
@@ -2657,6 +2671,15 @@ pub fn run_provider_readiness_invocation(
             provider.id
         )
     })
+}
+
+#[cfg(test)]
+pub(crate) fn run_provider_readiness_invocation_with_test_timeout(
+    provider: &AgentTaskExecutorProvider,
+    effective_config: &Value,
+    timeout: Duration,
+) -> Result<ProviderReadinessInvocationResult, String> {
+    run_provider_readiness_invocation_with_timeout(provider, effective_config, timeout)
 }
 
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {

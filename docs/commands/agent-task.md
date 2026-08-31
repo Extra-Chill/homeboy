@@ -1459,6 +1459,10 @@ belong on each `agent_task_executors[]` entry:
       "remediation": "Configure EXAMPLE_API_TOKEN with homeboy agent-task auth."
     }
   ],
+  "readiness_invocation": {
+    "argv": ["example-provider", "--readiness"],
+    "timeout_ms": 30000
+  },
   "workspace_materialization": {
     "cwd": "git_checkout",
     "requires_git": true,
@@ -1484,6 +1488,10 @@ Homeboy treats these declarations as generic contracts:
 
 - `secret_env_requirements` and `runner_readiness` describe required secret env
   names and redacted readiness probes without exposing values.
+- `readiness_invocation.timeout_ms` bounds the complete provider-owned readiness
+  command, including all child probes. It defaults to 20,000 milliseconds and
+  must be between 1 and 120,000 milliseconds; providers must keep their own
+  sequential child budgets within this total.
 - `workspace_materialization` describes the checkout shape a provider needs; it
   does not name any workspace manager or product runtime.
 - `timeout_artifact_discovery` extends timeout evidence recovery with declared
