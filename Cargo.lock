@@ -708,7 +708,6 @@ dependencies = [
  "clap",
  "homeboy-agents",
  "homeboy-cli",
- "homeboy-code-audit",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension-contract",
