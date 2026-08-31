@@ -20,7 +20,7 @@ use super::memory_timeline::{
 };
 use super::results::{is_unmeasured_inventory_results, parse_execution_results_file};
 use super::scenario::apply_scenario_filter;
-use super::types::{BenchRunExecutionOutcome, BenchRunWorkflowArgs};
+use super::types::{rig_package_root_env, BenchRunExecutionOutcome, BenchRunWorkflowArgs};
 
 pub(crate) fn run_sequential_runs(
     execution_context: &ExtensionExecutionContext,
@@ -208,6 +208,10 @@ pub(crate) fn build_runner(
     // these before runner and CI environment so those explicit scopes retain
     // their established override precedence.
     for (key, value) in bench_env_vars(&args.settings, &args.settings_json) {
+        runner = runner.env(&key, &value);
+    }
+
+    if let Some((key, value)) = rig_package_root_env(args.rig_package.as_ref()) {
         runner = runner.env(&key, &value);
     }
 
