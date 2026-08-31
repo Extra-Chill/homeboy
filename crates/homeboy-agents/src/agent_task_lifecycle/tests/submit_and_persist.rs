@@ -727,8 +727,9 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
             .expect("retain terminal progress");
     assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
     assert_eq!(terminal.metadata["cook_progress"]["phase"], "terminal");
-    let terminal = record_cook_terminal_result_in_store(&lifecycle_store, run_id, false, 1)
-        .expect("record terminal Cook result");
+    let terminal =
+        record_cook_terminal_result_in_store(&lifecycle_store, run_id, "no_candidate", false, 1)
+            .expect("record terminal Cook result");
     assert_eq!(
         terminal.metadata["cook_progress"]["terminal_success"],
         false
@@ -859,8 +860,9 @@ fn cook_write_siblings_persist_into_the_injected_store_and_not_a_second_root() {
     let progress = record_cook_progress_in_store(&seeded, run_id, "terminal", 1, Some("rooted"))
         .expect("record Cook progress into the injected store");
     assert_eq!(progress.metadata["cook_progress"]["phase"], "terminal");
-    let terminal = record_cook_terminal_result_in_store(&seeded, run_id, true, 0)
-        .expect("record the terminal Cook result into the injected store");
+    let terminal =
+        record_cook_terminal_result_in_store(&seeded, run_id, "intentional_no_change", true, 0)
+            .expect("record the terminal Cook result into the injected store");
     assert_eq!(terminal.metadata["cook_progress"]["terminal_success"], true);
     record_cook_controller_failure_in_store(&seeded, run_id, &json!({ "reason": "rooted" }))
         .expect("record a controller failure into the injected store");

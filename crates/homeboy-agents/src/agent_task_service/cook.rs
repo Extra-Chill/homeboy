@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, request_is_review_form_only, AgentTaskCookLoopOptions,
     AgentTaskCookLoopReport, AgentTaskCookLoopStatus, AgentTaskIntentionalNoChange,
+    AgentTaskIntentionalNoChangeVerdict,
 };
 
 pub use crate::agent_task_cook_loop::{
@@ -330,6 +331,19 @@ fn request_requires_substantive_candidate(request: &crate::agent_task::AgentTask
                         .as_deref()
                         .is_some_and(is_change_artifact))
         })
+}
+
+fn no_change_requires_substantive_candidate(
+    declaration: &AgentTaskIntentionalNoChange,
+    request: &crate::agent_task::AgentTaskRequest,
+) -> bool {
+    match declaration.verdict {
+        AgentTaskIntentionalNoChangeVerdict::AlreadySatisfied => false,
+        AgentTaskIntentionalNoChangeVerdict::Blocked => true,
+        AgentTaskIntentionalNoChangeVerdict::InvestigationOnly => {
+            request_requires_substantive_candidate(request)
+        }
+    }
 }
 
 fn pre_artifact_execution_count(record: &agent_task_lifecycle::AgentTaskRunRecord) -> u32 {
@@ -4787,6 +4801,7 @@ fn run_cook_reported(
             if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
                 lifecycle_store,
                 run_id,
+                &result.value.status,
                 result.exit_code == 0,
                 result.exit_code,
             ) {
@@ -6435,7 +6450,8 @@ fn run_cook_spine(
                 });
         if let Some(declaration) = intentional_no_change.filter(|_| !has_substantive_candidate) {
             let review_form = review_form_from_aggregate(&aggregate)?;
-            let requires_candidate = request_requires_substantive_candidate(&source_request);
+            let requires_candidate =
+                no_change_requires_substantive_candidate(&declaration, &source_request);
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
