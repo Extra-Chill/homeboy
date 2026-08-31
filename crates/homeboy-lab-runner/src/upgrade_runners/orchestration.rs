@@ -72,7 +72,6 @@ fn runner_manifest_preflight_with_executor(
         homeboy_path.to_string(),
         "extension".to_string(),
         "list".to_string(),
-        "--skip-ready-check".to_string(),
     ];
     let inventory_options =
         runner_manifest_query_options(runner, inventory_command, allow_diagnostic_ssh);
@@ -87,7 +86,7 @@ fn runner_manifest_preflight_with_executor(
     };
     if inventory_exit_code != 0 {
         return Some(format!(
-            "runner manifest preflight could not query installed extension inventory; recover with: {homeboy_path} extension list --skip-ready-check"
+            "runner manifest preflight could not query installed extension inventory; recover with: {homeboy_path} extension list"
         ));
     }
     let inventory = match runner_extension_inventory(&inventory_output.stdout) {
@@ -111,7 +110,6 @@ fn runner_manifest_preflight_with_executor(
                 "extension".to_string(),
                 "show".to_string(),
                 extension_id.clone(),
-                "--skip-ready-check".to_string(),
             ],
             allow_diagnostic_ssh,
         );
@@ -125,7 +123,7 @@ fn runner_manifest_preflight_with_executor(
             }
         };
         if exit_code != 0 {
-            return Some(format!("runner manifest preflight failed for installed extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id} --skip-ready-check"));
+            return Some(format!("runner manifest preflight failed for installed extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id}"));
         }
         let requires_homeboy =
             match runner_extension_requires_homeboy(&output.stdout, &extension_id) {
@@ -444,10 +442,7 @@ mod manifest_preflight_tests {
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             call_count += 1;
             assert_eq!(runner_id, "lab-a");
-            assert_eq!(
-                options.command,
-                ["homeboy", "extension", "list", "--skip-ready-check"]
-            );
+            assert_eq!(options.command, ["homeboy", "extension", "list"]);
             assert!(!options.read_only_artifact_access);
             Ok(successful_output(
                 runner_id,
@@ -473,22 +468,13 @@ mod manifest_preflight_tests {
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             let stdout = match call_count {
                 0 => {
-                    assert_eq!(
-                        options.command,
-                        ["homeboy", "extension", "list", "--skip-ready-check"]
-                    );
+                    assert_eq!(options.command, ["homeboy", "extension", "list"]);
                     r#"{"success":true,"data":{"extensions":[{"id":"runner-only"}]}}"#
                 }
                 1 => {
                     assert_eq!(
                         options.command,
-                        [
-                            "homeboy",
-                            "extension",
-                            "show",
-                            "runner-only",
-                            "--skip-ready-check"
-                        ]
+                        ["homeboy", "extension", "show", "runner-only"]
                     );
                     r#"{"success":true,"data":{"extension":{"id":"runner-only","core_compatibility":{"requires_homeboy":">=3.0.0"}}}}"#
                 }
@@ -530,17 +516,11 @@ mod manifest_preflight_tests {
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             let stdout = match call_count {
                 0 => {
-                    assert_eq!(
-                        options.command,
-                        ["homeboy", "extension", "list", "--skip-ready-check"]
-                    );
+                    assert_eq!(options.command, ["homeboy", "extension", "list"]);
                     r#"{"success":true,"data":{"extensions":[{"id":"discord","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust"}]}}"#
                 }
                 1 => {
-                    assert_eq!(
-                        options.command,
-                        ["homeboy", "extension", "show", "rust", "--skip-ready-check"]
-                    );
+                    assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
                     r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}}}"#
                 }
                 _ => {
@@ -570,16 +550,10 @@ mod manifest_preflight_tests {
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             assert_eq!(runner_id, "lab-a");
             let stdout = if call_count % 2 == 0 {
-                assert_eq!(
-                    options.command,
-                    ["homeboy", "extension", "list", "--skip-ready-check"]
-                );
+                assert_eq!(options.command, ["homeboy", "extension", "list"]);
                 r#"{"success":true,"data":{"extensions":[{"id":"rust"}]}}"#
             } else {
-                assert_eq!(
-                    options.command,
-                    ["homeboy", "extension", "show", "rust", "--skip-ready-check"]
-                );
+                assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
                 manifests[call_count / 2]
             };
             assert!(!options.read_only_artifact_access);
