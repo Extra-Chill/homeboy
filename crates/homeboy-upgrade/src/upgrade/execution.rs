@@ -6,7 +6,11 @@ use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_engine_primitives::command::{
     terminate_process_tree_and_reap, terminate_remaining_process_group, ControllerChildGuard,
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -81,6 +85,43 @@ struct SourceSwapVerification<'a> {
     built_binary_identity: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ReplacementCheckpoint {
+    pub state: String,
+    pub target: PathBuf,
+    pub expected_version: Option<String>,
+    pub expected_build_identity: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub previous_build_identity: Option<String>,
+    pub previous_sha256: String,
+}
+
+impl ReplacementCheckpoint {
+    pub(crate) fn pending(
+        target: &Path,
+        expected_version: Option<&str>,
+        expected_build_identity: Option<&str>,
+        expected_sha256: Option<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            state: "pending".to_string(),
+            target: target.to_path_buf(),
+            expected_version: expected_version.map(str::to_string),
+            expected_build_identity: expected_build_identity.map(str::to_string),
+            expected_sha256,
+            previous_build_identity: installed_target_build_identity_from_disk(target)?
+                .map(|identity| identity.display),
+            previous_sha256: sha256_file(target)?,
+        })
+    }
+
+    pub(crate) fn with_state(&self, state: &str) -> Self {
+        let mut checkpoint = self.clone();
+        checkpoint.state = state.to_string();
+        checkpoint
+    }
+}
+
 /// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
 /// (the most relevant tail for a failure message) and returning the retained
 /// text plus truncation metadata. Mirrors the `bound_captured_stream` pattern
@@ -141,7 +182,7 @@ pub(crate) fn execute_upgrade(
     selected_release: Option<&SelectedRelease>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     phase: &mut dyn FnMut(&str) -> Result<()>,
-    replacement_checkpoint: &mut dyn FnMut(&str, &Path, Option<&str>, Option<&str>) -> Result<()>,
+    replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
 ) -> UpgradeExecutionResult {
     let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
@@ -173,16 +214,20 @@ pub(crate) fn execute_upgrade(
         phase("running_candidate_admission")?;
         phase("installing_controller")?;
     }
-    if method == InstallMethod::Binary {
-        replacement_checkpoint(
-            "pending",
+    let binary_checkpoint = if method == InstallMethod::Binary {
+        let checkpoint = ReplacementCheckpoint::pending(
             binary_destination
                 .as_deref()
                 .expect("binary upgrades capture a destination"),
             selected_binary_version,
             None,
+            None,
         )?;
-    }
+        replacement_checkpoint(&checkpoint)?;
+        Some(checkpoint)
+    } else {
+        None
+    };
     let output = match method {
         InstallMethod::Homebrew => {
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
@@ -266,9 +311,18 @@ pub(crate) fn execute_upgrade(
                 command.env(RELEASE_TAG_ENV, &release.tag);
                 command.env(RELEASE_VERSION_ENV, &release.version);
             }
-            command.output().map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run binary upgrade".to_string()))
-            })?
+            match command.output() {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some(checkpoint) = binary_checkpoint.as_ref() {
+                        replacement_checkpoint(&checkpoint.with_state("not_applied"))?;
+                    }
+                    return Err(Error::internal_io(
+                        error.to_string(),
+                        Some("run binary upgrade".to_string()),
+                    ));
+                }
+            }
         }
         InstallMethod::Unknown => {
             return Err(Error::validation_invalid_argument(
@@ -281,6 +335,10 @@ pub(crate) fn execute_upgrade(
     };
 
     if !output.status.success() {
+        if let Some(checkpoint) = binary_checkpoint.as_ref() {
+            let state = replacement_observed_state(checkpoint)?;
+            replacement_checkpoint(&checkpoint.with_state(state))?;
+        }
         // Keep both bounded streams: installers may log progress to stderr while
         // a staged candidate returns the actionable failure contract on stdout.
         let error_detail = upgrade_failure_detail(&output.stderr, &output.stdout)
@@ -293,14 +351,20 @@ pub(crate) fn execute_upgrade(
     }
 
     if method == InstallMethod::Binary {
-        replacement_checkpoint(
-            "applied",
-            binary_destination
-                .as_deref()
-                .expect("binary upgrades capture a destination"),
-            selected_binary_version,
-            None,
-        )?;
+        let checkpoint = binary_checkpoint
+            .as_ref()
+            .expect("binary replacement has a pending checkpoint");
+        if !replacement_was_applied(checkpoint)? {
+            replacement_checkpoint(
+                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+            )?;
+            return Err(binary_swap_failure(
+                selected_binary_version.expect("binary upgrades select a release version"),
+                binary_destination.as_deref(),
+                active_binary_info_at(&checkpoint.target)?.as_ref(),
+            ));
+        }
+        replacement_checkpoint(&checkpoint.with_state("applied"))?;
     }
 
     phase("verifying_install")?;
@@ -584,7 +648,7 @@ fn complete_source_upgrade(
     source_revision: Option<String>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     phase: &mut dyn FnMut(&str) -> Result<()>,
-    replacement_checkpoint: &mut dyn FnMut(&str, &Path, Option<&str>, Option<&str>) -> Result<()>,
+    replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
 ) -> UpgradeExecutionResult {
     let replacement_target = replacement_target.ok_or_else(|| {
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
@@ -625,20 +689,26 @@ fn complete_source_upgrade(
     )?;
     promotion_lease.assert_generation()?;
     phase("installing_controller")?;
-    replacement_checkpoint(
-        "pending",
+    let replacement = ReplacementCheckpoint::pending(
         replacement_target,
         candidate_identity.version.as_deref(),
         candidate_identity.build_identity.as_deref(),
+        Some(sha256_file(&built_binary)?),
     )?;
+    replacement_checkpoint(&replacement)?;
     upgrade_phase("installing source-built binary");
-    install_source_built_binary(&built_binary, replacement_target)?;
-    replacement_checkpoint(
-        "applied",
-        replacement_target,
-        candidate_identity.version.as_deref(),
-        candidate_identity.build_identity.as_deref(),
-    )?;
+    if let Err(error) = install_source_built_binary(&built_binary, replacement_target) {
+        let state = replacement_observed_state(&replacement)?;
+        replacement_checkpoint(&replacement.with_state(state))?;
+        return Err(error);
+    }
+    if !replacement_was_applied(&replacement)? {
+        replacement_checkpoint(&replacement.with_state(replacement_observed_state(&replacement)?))?;
+        return Err(Error::internal_unexpected(
+            "source installer completed without an observable controller byte transition",
+        ));
+    }
+    replacement_checkpoint(&replacement.with_state("applied"))?;
     phase("verifying_install")?;
     upgrade_phase("verifying installed source binary");
 
@@ -1127,6 +1197,106 @@ fn make_source_install_executable(path: &Path) -> Result<()> {
 
 fn display_path(path: &Path) -> String {
     path.display().to_string()
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "hash controller replacement target {}",
+                path.display()
+            )),
+        )
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "hash controller replacement target {}",
+                    path.display()
+                )),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+pub(crate) fn replacement_applied_identity(
+    checkpoint: &ReplacementCheckpoint,
+) -> Result<Option<homeboy_core::build_identity::BuildIdentity>> {
+    let current_sha256 = match sha256_file(&checkpoint.target) {
+        Ok(digest) => digest,
+        Err(_) => return Ok(None),
+    };
+    if current_sha256 == checkpoint.previous_sha256
+        || checkpoint
+            .expected_sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &current_sha256)
+    {
+        return Ok(None);
+    }
+    let Some(identity) = installed_target_build_identity_from_disk(&checkpoint.target)? else {
+        return Ok(None);
+    };
+    let matches_expected = checkpoint.expected_build_identity.as_deref().map_or_else(
+        || {
+            checkpoint
+                .expected_version
+                .as_deref()
+                .is_some_and(|expected| identity.version == expected)
+        },
+        |expected| identity.display == expected,
+    );
+    Ok(matches_expected.then_some(identity))
+}
+
+pub(crate) fn replacement_was_applied(checkpoint: &ReplacementCheckpoint) -> Result<bool> {
+    let current_sha256 = match sha256_file(&checkpoint.target) {
+        Ok(digest) => digest,
+        Err(_) => return Ok(false),
+    };
+    if current_sha256 == checkpoint.previous_sha256 {
+        return Ok(false);
+    }
+    if let Some(expected) = checkpoint.expected_sha256.as_deref() {
+        return Ok(current_sha256 == expected);
+    }
+    Ok(replacement_applied_identity(checkpoint)
+        .ok()
+        .flatten()
+        .is_some())
+}
+
+fn replacement_target_changed(checkpoint: &ReplacementCheckpoint) -> Option<bool> {
+    if !checkpoint.target.exists() {
+        return None;
+    }
+    sha256_file(&checkpoint.target)
+        .ok()
+        .map(|current| current != checkpoint.previous_sha256)
+}
+
+pub(crate) fn replacement_observed_state(
+    checkpoint: &ReplacementCheckpoint,
+) -> Result<&'static str> {
+    if replacement_was_applied(checkpoint)? {
+        Ok("applied")
+    } else {
+        match replacement_target_changed(checkpoint) {
+            Some(true) => Ok("changed_unverified"),
+            Some(false) => Ok("not_applied"),
+            None => Ok("evidence_unavailable"),
+        }
+    }
 }
 
 /// Read back the active binary version after a successful swap, retrying while

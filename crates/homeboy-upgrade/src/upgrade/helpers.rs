@@ -459,7 +459,7 @@ fn run_controller_upgrade_with_operation(
                 previous_build_identity.as_deref(),
                 Some(previous_version.as_str()),
             )?;
-            let (extensions_updated, extension_skips) =
+            let (mut extensions_updated, mut extension_skips) =
                 if !controller_allows_extension_refresh(false, &initial_completion) {
                     operation.mark_extensions(
                         "not_run",
@@ -478,7 +478,7 @@ fn run_controller_upgrade_with_operation(
                 };
             let mut completion;
             drop(selection_guard);
-            let (runners_updated, runners_skipped) = if skip_runners {
+            let (mut runners_updated, mut runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
                 let promotion_lease =
@@ -513,6 +513,12 @@ fn run_controller_upgrade_with_operation(
                 previous_build_identity.as_deref(),
                 Some(previous_version.as_str()),
             )?;
+            if completion.superseded {
+                extensions_updated.clear();
+                extension_skips.clear();
+                runners_updated.clear();
+                runners_skipped.clear();
+            }
             let partial = runner_convergence_failed(
                 &runners_updated,
                 &runners_skipped,
@@ -524,13 +530,17 @@ fn run_controller_upgrade_with_operation(
                 &runners_skipped,
                 completion.version.as_deref(),
             );
-            let extensions_status = extension_component_status(
-                !skip_extensions,
-                skip_extensions,
-                &extensions_updated,
-                &extension_skips,
-            );
-            let result = UpgradeResult {
+            let extensions_status = if completion.superseded {
+                superseded_extension_status()
+            } else {
+                extension_component_status(
+                    !skip_extensions,
+                    skip_extensions,
+                    &extensions_updated,
+                    &extension_skips,
+                )
+            };
+            let mut result = UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
                 previous_version: previous_version.clone(),
@@ -561,33 +571,42 @@ fn run_controller_upgrade_with_operation(
                     },
                 )),
                 extensions: Some(extensions_status.clone()),
-                runners: Some(runner_component_status(
-                    runner_disposition,
-                    &runners_updated,
-                    &runners_skipped,
-                    false,
-                )),
+                runners: Some(if completion.superseded {
+                    superseded_runner_status()
+                } else {
+                    runner_component_status(
+                        runner_disposition,
+                        &runners_updated,
+                        &runners_skipped,
+                        false,
+                    )
+                }),
                 partial,
                 runner_convergence: Some(runner_disposition),
-                message: format!(
-                    "{}{}",
-                    match runner_disposition {
-                        RunnerConvergenceDisposition::Partial => {
-                            "PARTIAL: controller is already current, but configured runners did not converge"
+                message: if completion.superseded {
+                    superseded_completion_message(completion.build_identity.as_deref())
+                } else {
+                    format!(
+                        "{}{}",
+                        match runner_disposition {
+                            RunnerConvergenceDisposition::Partial => {
+                                "PARTIAL: controller is already current, but configured runners did not converge"
                                 .to_string()
-                        }
-                        RunnerConvergenceDisposition::Skipped => {
-                            "Already at latest version; runner convergence skipped".to_string()
-                        }
-                        RunnerConvergenceDisposition::NoRunnersConfigured => {
-                            "Already at latest version; no configured runners".to_string()
-                        }
-                        RunnerConvergenceDisposition::Converged => {
-                            "Already at latest version; configured runners converged".to_string()
-                        }
-                    },
-                    extension_partial_clause(Some(&extensions_status)),
-                ),
+                            }
+                            RunnerConvergenceDisposition::Skipped => {
+                                "Already at latest version; runner convergence skipped".to_string()
+                            }
+                            RunnerConvergenceDisposition::NoRunnersConfigured => {
+                                "Already at latest version; no configured runners".to_string()
+                            }
+                            RunnerConvergenceDisposition::Converged => {
+                                "Already at latest version; configured runners converged"
+                                    .to_string()
+                            }
+                        },
+                        extension_partial_clause(Some(&extensions_status)),
+                    )
+                },
                 restart_required: false,
                 extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
                 extensions_updated,
@@ -604,7 +623,10 @@ fn run_controller_upgrade_with_operation(
                 services_pending_restart: Vec::new(),
                 operation_id: None,
             };
-            drop(final_selection_guard);
+            if completion.superseded {
+                invalidate_superseded_evidence(&mut result);
+            }
+            finish_completed_under_selection(operation, &result, final_selection_guard)?;
             return Ok(result);
         }
     }
@@ -614,6 +636,11 @@ fn run_controller_upgrade_with_operation(
     // their final install shares this lease rather than opening a TOCTOU window.
     let controller_mutation_lease =
         acquire_controller_upgrade_lease(operation, "controller upgrade")?;
+    super::operation::freeze_prior_pending_replacements(
+        operation
+            .id()
+            .expect("controller upgrades require a durable operation"),
+    )?;
     controller_mutation_lease.assert_generation()?;
     let extension_revalidation = (!skip_extensions)
         .then(|| preflight_extensions_for_upgrade(&candidate_version))
@@ -690,19 +717,11 @@ fn run_controller_upgrade_with_operation(
                         result
                     };
                     let mut replacement_checkpoint =
-                        |state: &str,
-                         target: &Path,
-                         expected_version: Option<&str>,
-                         expected_build_identity: Option<&str>| {
+                        |checkpoint: &super::execution::ReplacementCheckpoint| {
                             let _phase = phase_sync.lock().expect("serialize upgrade progress");
                             operation
                                 .borrow_mut()
-                                .record_replacement_checkpoint_durable(
-                                    state,
-                                    target,
-                                    expected_version,
-                                    expected_build_identity,
-                                )
+                                .record_replacement_checkpoint_durable(checkpoint)
                         };
                     execute_upgrade(
                         install_method,
@@ -786,7 +805,7 @@ fn run_controller_upgrade_with_operation(
     // Auto-update all installed extensions after the upgrade command completes.
     // This prevents CI/local extension version drift that causes baseline
     // mismatches and inconsistent audit findings.
-    let (extensions_updated, extension_skips) =
+    let (mut extensions_updated, mut extension_skips) =
         if !controller_allows_extension_refresh(superseded, &initial_completion) {
             operation.mark_extensions(
                 "not_run",
@@ -809,7 +828,7 @@ fn run_controller_upgrade_with_operation(
 
     drop(selection_guard);
 
-    let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
+    let (mut runners_updated, mut runners_skipped) = if upgrade_completed && !skip_runners {
         let promotion_lease =
             acquire_controller_upgrade_lease(operation, "controller upgrade completion")?;
         promotion_lease.assert_generation()?;
@@ -864,6 +883,10 @@ fn run_controller_upgrade_with_operation(
             "superseded",
             "controller changed before upgrade completion was recorded",
         )?;
+        extensions_updated.clear();
+        extension_skips.clear();
+        runners_updated.clear();
+        runners_skipped.clear();
     }
 
     let runner_disposition = runner_convergence_disposition(
@@ -873,14 +896,18 @@ fn run_controller_upgrade_with_operation(
         completion.version.as_deref(),
     );
 
-    let extensions_status = extension_component_status(
-        upgrade_completed,
-        skip_extensions,
-        &extensions_updated,
-        &extension_skips,
-    );
+    let extensions_status = if completion_superseded {
+        superseded_extension_status()
+    } else {
+        extension_component_status(
+            upgrade_completed,
+            skip_extensions,
+            &extensions_updated,
+            &extension_skips,
+        )
+    };
 
-    let result = UpgradeResult {
+    let mut result = UpgradeResult {
         command: "upgrade".to_string(),
         install_method,
         previous_version,
@@ -912,27 +939,35 @@ fn run_controller_upgrade_with_operation(
             },
         )),
         extensions: Some(extensions_status.clone()),
-        runners: Some(runner_component_status(
-            runner_disposition,
-            &runners_updated,
-            &runners_skipped,
-            !upgrade_completed && !skip_runners,
-        )),
+        runners: Some(if completion_superseded {
+            superseded_runner_status()
+        } else {
+            runner_component_status(
+                runner_disposition,
+                &runners_updated,
+                &runners_skipped,
+                !upgrade_completed && !skip_runners,
+            )
+        }),
         partial: runner_convergence_failed(
             &runners_updated,
             &runners_skipped,
             completion.version.as_deref(),
         ),
         runner_convergence: Some(runner_disposition),
-        message: upgrade_message(
-            success,
-            completion.version.as_deref(),
-            completion.build_identity.as_deref(),
-            runner_disposition,
-            &runners_updated,
-            &runners_skipped,
-            Some(&extensions_status),
-        ),
+        message: if completion_superseded {
+            superseded_completion_message(completion.build_identity.as_deref())
+        } else {
+            upgrade_message(
+                success,
+                completion.version.as_deref(),
+                completion.build_identity.as_deref(),
+                runner_disposition,
+                &runners_updated,
+                &runners_skipped,
+                Some(&extensions_status),
+            )
+        },
         // Source replacement updates the on-disk executable, but this command
         // exits immediately afterwards. Re-execing only `--version` skips the
         // normal completion path and provides no lifecycle benefit.
@@ -950,7 +985,10 @@ fn run_controller_upgrade_with_operation(
         services_pending_restart,
         operation_id: None,
     };
-    drop(final_selection_guard);
+    if completion_superseded {
+        invalidate_superseded_evidence(&mut result);
+    }
+    finish_completed_under_selection(operation, &result, final_selection_guard)?;
     Ok(result)
 }
 
@@ -1541,6 +1579,44 @@ fn component_status(status: &str, summary: &str) -> UpgradeComponentStatus {
     }
 }
 
+fn superseded_extension_status() -> UpgradeComponentStatus {
+    component_status(
+        "not_run",
+        "extension evidence was invalidated after controller supersession",
+    )
+}
+
+fn superseded_runner_status() -> UpgradeComponentStatus {
+    component_status(
+        "not_run",
+        "runner evidence was invalidated after controller supersession",
+    )
+}
+
+fn superseded_completion_message(active_identity: Option<&str>) -> String {
+    match active_identity {
+        Some(identity) => format!(
+            "Controller operation was superseded by active build {identity}; extension and runner evidence was invalidated"
+        ),
+        None => "Controller operation was superseded; extension and runner evidence was invalidated"
+            .to_string(),
+    }
+}
+
+fn invalidate_superseded_evidence(result: &mut UpgradeResult) {
+    result.extensions = Some(superseded_extension_status());
+    result.runners = Some(superseded_runner_status());
+    result.partial = false;
+    result.runner_convergence = Some(RunnerConvergenceDisposition::Skipped);
+    result.message = superseded_completion_message(result.new_build_identity.as_deref());
+    result.extensions_updated.clear();
+    result.extensions_skipped.clear();
+    result.extension_skips.clear();
+    result.extensions_unrefreshed.clear();
+    result.runners_updated.clear();
+    result.runners_skipped.clear();
+}
+
 fn extension_component_status(
     attempted: bool,
     skipped_by_flag: bool,
@@ -2029,6 +2105,30 @@ fn complete_upgrade_operation(
         return Err(error);
     }
     Ok(result)
+}
+
+fn finish_completed_under_selection(
+    operation: &mut UpgradeOperation,
+    result: &UpgradeResult,
+    selection_guard: homeboy_core::runtime_promotion::RuntimeSelectionGuard,
+) -> Result<()> {
+    let terminal = match operation.finish_completed_durable(result) {
+        Ok(()) => Ok(()),
+        Err(completion_error) => {
+            match operation.replace_pending_terminal_with_failure(&completion_error) {
+                Ok(()) => Err(completion_error),
+                Err(mut terminal_error) => {
+                    terminal_error.details["completion_error"] = serde_json::json!({
+                        "code": format!("{:?}", completion_error.code),
+                        "message": completion_error.message,
+                    });
+                    Err(terminal_error)
+                }
+            }
+        }
+    };
+    drop(selection_guard);
+    terminal
 }
 
 fn acquire_controller_selection_guard(
@@ -2758,6 +2858,152 @@ mod runner_source_upgrade_tests {
                     .expect("operation remains inspectable");
             assert_eq!(status.status, "pass");
             assert_eq!(status.phase, "completed");
+        });
+    }
+
+    #[test]
+    fn final_identity_and_terminal_cas_block_the_exact_controller_contender_interleaving() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let operation_id = operation.id().expect("durable operation").to_string();
+            let selection_guard =
+                homeboy_core::runtime_promotion::protect_runtime_selection_with_status(
+                    "controller upgrade result",
+                    "active controller",
+                    homeboy_core::runtime_promotion::RuntimePromotionOwnerStatus {
+                        operation_id: operation_id.clone(),
+                        status_command: format!("homeboy upgrade status {operation_id}"),
+                    },
+                )
+                .expect("protect final identity");
+            let result = source_upgrade_noop_result(
+                InstallMethod::Source,
+                "0.367.2".to_string(),
+                Some("0.367.2+selected".to_string()),
+                SourceUpgradeDecision::SameIdentity,
+            );
+            let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+            let acquired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let contender_acquired = acquired.clone();
+            let contender = std::thread::spawn(move || {
+                let lease =
+                    homeboy_core::runtime_promotion::acquire_waiting_for_target_with_status(
+                        "contending controller upgrade",
+                        "active controller",
+                        homeboy_core::runtime_promotion::RuntimePromotionOwnerStatus {
+                            operation_id: "contender".to_string(),
+                            status_command: "homeboy upgrade status contender".to_string(),
+                        },
+                        std::time::Duration::from_secs(2),
+                        |event| {
+                            if event.wait_stage == "os_lock" {
+                                let _ = waiting_tx.send(());
+                            }
+                        },
+                    )
+                    .expect("contender acquires after terminal CAS");
+                contender_acquired.store(true, std::sync::atomic::Ordering::Release);
+                drop(lease);
+            });
+            let progress_id = operation_id.clone();
+            let acquired_before_terminal = acquired.clone();
+            operation.before_terminal_write(move || {
+                waiting_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("contender reaches final-read/terminal-CAS window");
+                assert!(
+                    !acquired_before_terminal.load(std::sync::atomic::Ordering::Acquire),
+                    "contender cannot supersede identity before completion"
+                );
+                super::super::operation::persist_extension_progress(
+                    &progress_id,
+                    "wordpress",
+                    1,
+                    2,
+                    std::time::Duration::from_secs(1),
+                )
+                .expect("force terminal metadata CAS retry");
+            });
+
+            finish_completed_under_selection(&mut operation, &result, selection_guard)
+                .expect("terminal CAS completes under selection guard");
+            contender.join().expect("contender exits");
+            assert!(acquired.load(std::sync::atomic::Ordering::Acquire));
+            let status =
+                super::super::operation::load_upgrade_operation_status(Some(&operation_id))
+                    .expect("load terminal operation");
+            assert_eq!(status.status, "pass");
+            assert_eq!(status.phase, "completed");
+        });
+    }
+
+    #[test]
+    fn exhausted_completion_cas_is_frozen_as_failure_before_selection_release() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let operation_id = operation.id().expect("durable operation").to_string();
+            operation.fail_next_terminal_writes(3);
+            let selection_guard =
+                homeboy_core::runtime_promotion::protect_runtime_selection_with_status(
+                    "controller upgrade result",
+                    "active controller",
+                    homeboy_core::runtime_promotion::RuntimePromotionOwnerStatus {
+                        operation_id: operation_id.clone(),
+                        status_command: format!("homeboy upgrade status {operation_id}"),
+                    },
+                )
+                .expect("protect final identity");
+            let result = source_upgrade_noop_result(
+                InstallMethod::Source,
+                "0.367.2".to_string(),
+                Some("0.367.2+selected".to_string()),
+                SourceUpgradeDecision::SameIdentity,
+            );
+
+            finish_completed_under_selection(&mut operation, &result, selection_guard)
+                .expect_err("completion CAS exhaustion remains an operation error");
+            let status =
+                super::super::operation::load_upgrade_operation_status(Some(&operation_id))
+                    .expect("load terminal operation");
+            assert_eq!(status.status, "error");
+            assert_eq!(status.phase, "failed");
+        });
+    }
+
+    #[test]
+    fn exhausted_completion_and_failure_cas_retain_a_retryable_failure_intent() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let operation_id = operation.id().expect("durable operation").to_string();
+            operation.fail_next_terminal_writes(6);
+            let selection_guard =
+                homeboy_core::runtime_promotion::protect_runtime_selection_with_status(
+                    "controller upgrade result",
+                    "active controller",
+                    homeboy_core::runtime_promotion::RuntimePromotionOwnerStatus {
+                        operation_id: operation_id.clone(),
+                        status_command: format!("homeboy upgrade status {operation_id}"),
+                    },
+                )
+                .expect("protect final identity");
+            let result = source_upgrade_noop_result(
+                InstallMethod::Source,
+                "0.367.2".to_string(),
+                Some("0.367.2+selected".to_string()),
+                SourceUpgradeDecision::SameIdentity,
+            );
+
+            let terminal_error =
+                finish_completed_under_selection(&mut operation, &result, selection_guard)
+                    .expect_err("both bounded terminal attempts are exhausted");
+            operation
+                .finish_failed_durable(&terminal_error)
+                .expect("outer error handling retries the retained failure intent");
+            let status =
+                super::super::operation::load_upgrade_operation_status(Some(&operation_id))
+                    .expect("load terminal operation");
+            assert_eq!(status.status, "error");
+            assert_eq!(status.phase, "failed");
         });
     }
 
@@ -3844,6 +4090,114 @@ mod convergence_tests {
             exit_code: 0,
             detail: String::new(),
         }
+    }
+
+    #[test]
+    fn late_supersession_invalidates_the_complete_prior_generation_result() {
+        let stale_runner = runner("0.309.0", "0.310.0", true);
+        let stale_extension = ExtensionUpgradeEntry {
+            extension_id: "wordpress".to_string(),
+            old_version: "1".to_string(),
+            new_version: "2".to_string(),
+            linked: false,
+            source_path: None,
+            git_root: None,
+            source_url: None,
+            source_revision: None,
+            source_update: Default::default(),
+        };
+        let stale_skip = ExtensionUpgradeSkip {
+            extension_id: "woocommerce".to_string(),
+            reason: "stale generation failure".to_string(),
+        };
+        let mut result = UpgradeResult {
+            command: "upgrade".to_string(),
+            install_method: InstallMethod::Binary,
+            previous_version: "0.309.0".to_string(),
+            new_version: Some("0.311.0".to_string()),
+            previous_build_identity: Some("0.309.0+old".to_string()),
+            new_build_identity: Some("0.311.0+contender".to_string()),
+            source_revision: None,
+            upgraded: true,
+            outcome: Some("controller_superseded".to_string()),
+            preflight: None,
+            controller: Some(component_status("superseded", "controller superseded")),
+            extensions: Some(component_status("partial", "stale extension evidence")),
+            runners: Some(component_status("partial", "stale runner evidence")),
+            partial: true,
+            runner_convergence: Some(RunnerConvergenceDisposition::Partial),
+            message: "stale runner and extension classifications".to_string(),
+            restart_required: false,
+            extensions_updated: vec![stale_extension],
+            extensions_skipped: vec!["woocommerce".to_string()],
+            extension_skips: vec![stale_skip],
+            runners_updated: vec![stale_runner.clone()],
+            runners_skipped: vec![stale_runner],
+            extensions_unrefreshed: vec![UnrefreshedExtensionWarning {
+                extension_id: "wordpress".to_string(),
+                invoking_user: "alice".to_string(),
+                symlink_path: "/tmp/extensions/wordpress".to_string(),
+                source_path: "/tmp/wordpress".to_string(),
+                behind: Some(1),
+                dirty: false,
+                dirty_paths: Vec::new(),
+                recovery_command: "git pull".to_string(),
+            }],
+            services_restarted: Vec::new(),
+            services_pending_restart: Vec::new(),
+            operation_id: None,
+        };
+
+        invalidate_superseded_evidence(&mut result);
+
+        assert_eq!(result.new_version.as_deref(), Some("0.311.0"));
+        assert_eq!(
+            result.new_build_identity.as_deref(),
+            Some("0.311.0+contender")
+        );
+        assert_eq!(result.outcome.as_deref(), Some("controller_superseded"));
+        assert_eq!(
+            result
+                .controller
+                .as_ref()
+                .map(|status| status.status.as_str()),
+            Some("superseded")
+        );
+        assert_eq!(
+            result
+                .extensions
+                .as_ref()
+                .map(|status| status.status.as_str()),
+            Some("not_run")
+        );
+        assert_eq!(
+            result.runners.as_ref().map(|status| status.status.as_str()),
+            Some("not_run")
+        );
+        assert_eq!(
+            result.runner_convergence,
+            Some(RunnerConvergenceDisposition::Skipped)
+        );
+        assert!(!result.partial);
+        assert!(result.message.contains("0.311.0+contender"));
+        assert!(result.message.contains("evidence was invalidated"));
+        let payload = serde_json::to_value(&result).expect("serialize result");
+        for field in [
+            "extensions_updated",
+            "extensions_skipped",
+            "extension_skips",
+            "extensions_unrefreshed",
+            "runners_updated",
+            "runners_skipped",
+        ] {
+            assert!(
+                payload.get(field).is_none(),
+                "stale field survived: {field}"
+            );
+        }
+        assert!(!payload.to_string().contains("wordpress"));
+        assert!(!payload.to_string().contains("woocommerce"));
+        assert!(!payload.to_string().contains("lab"));
     }
 
     #[test]
