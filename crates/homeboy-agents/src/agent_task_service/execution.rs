@@ -127,7 +127,15 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
     ) {
         Ok(plan) => plan,
         Err(error) => {
-            let kind = if error.retryable == Some(true) {
+            let route_evidence = error
+                .hints
+                .iter()
+                .map(|hint| hint.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let kind = if route_evidence.contains("\"classification\":\"capability\"") {
+                AgentTaskPlanValidationKind::UnavailableCapability
+            } else if route_evidence.contains("\"classification\":\"capacity\"") {
                 AgentTaskPlanValidationKind::TemporaryCapacity
             } else {
                 AgentTaskPlanValidationKind::MissingReadiness
@@ -2421,23 +2429,11 @@ fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
 /// Queue admission validates provider eligibility and credential provenance
 /// before a record is claimed Running. Workspace preparation remains after the
 /// claim because it creates controller-owned filesystem state.
-fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()> {
-    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
-    // Re-admit from the persisted current route and its remaining chain. The
-    // scheduler receives the durable plan and performs the same advancement,
-    // so a TTL-bounded negative verdict never destroys recovery routes.
-    let plan = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-        plan,
-        &catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )?;
-    catalog.validate_selected_models(&plan)?;
-    catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
-    preflight_plan_secret_env(&plan)?;
-    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-        &plan,
-        catalog.providers(),
-    )
+fn preflight_queued_plan_provider_eligibility(_plan: &AgentTaskPlan) -> Result<()> {
+    // Queue admission must not turn a short-lived negative probe into a durable
+    // exclusion or skip. The scheduler evaluates the full chain after claim and
+    // can therefore emit a terminal aggregate with zero execution usage.
+    Ok(())
 }
 
 fn run_plan_with_scheduler(

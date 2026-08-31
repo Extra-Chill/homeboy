@@ -102,6 +102,16 @@ fn provider_capacity_key(
     ))
 }
 
+fn reported_capacity_key(request_key: &str, evidence: &AgentTaskProviderRuntimeEvidence) -> String {
+    let encoded = serde_json::to_vec(&(
+        request_key,
+        evidence.cache_identity.as_deref(),
+        evidence.provider_identity.as_deref(),
+    ))
+    .unwrap_or_default();
+    homeboy_engine_primitives::content_hash::sha256_hex(&encoded)
+}
+
 fn provider_credential_identity(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
@@ -116,6 +126,13 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             .ok()
             .flatten()
             .and_then(|provider| provider_capacity_key(&request, &provider).ok())
+            .map(|request_key| {
+                self.evidence
+                    .lock()
+                    .ok()
+                    .and_then(|evidence| evidence.reported_capacity_keys.get(&request_key).cloned())
+                    .unwrap_or(request_key)
+            })
             .unwrap_or_else(|| provider_usage_cap_key_for_request(&request))
     }
 
@@ -155,7 +172,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             }
             Err(_) => return ProviderRouteReadiness::dispatchable(),
         };
-        let capacity_key = match provider_capacity_key(&request, &provider) {
+        let request_capacity_key = match provider_capacity_key(&request, &provider) {
             Ok(key) => key,
             Err(error) => {
                 return ProviderRouteReadiness {
@@ -171,6 +188,43 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 }
             }
         };
+        let mut readiness_cache = match self.evidence.lock() {
+            Ok(evidence) => evidence,
+            Err(_) => {
+                return ProviderRouteReadiness {
+                    ready: false,
+                    state: "provider_evidence_unavailable".to_string(),
+                    reason: "provider evidence lock was poisoned".to_string(),
+                    reset_at: None,
+                    classification: Some("evidence".to_string()),
+                    retryable: true,
+                    remediation: None,
+                    cache_identity: None,
+                    provider_identity: Some(provider.id.clone()),
+                }
+            }
+        }
+        .readiness
+        .clone();
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![provider.clone()],
+            diagnostics: Vec::new(),
+            version: None,
+        };
+        let evaluated = super::dispatchability::evaluate_request_dispatchability(
+            &catalog,
+            &request,
+            &mut readiness_cache,
+        );
+        let verdict = evaluated.dispatchability;
+        let runtime_evidence = evaluated.runtime_evidence;
+        let capacity_key = runtime_evidence
+            .as_ref()
+            .filter(|evidence| {
+                evidence.cache_identity.is_some() || evidence.provider_identity.is_some()
+            })
+            .map(|evidence| reported_capacity_key(&request_capacity_key, evidence))
+            .unwrap_or_else(|| request_capacity_key.clone());
         let now = chrono::Utc::now();
         let mut evidence = match self.evidence.lock() {
             Ok(evidence) => evidence,
@@ -188,6 +242,18 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 }
             }
         };
+        if evidence.reported_capacity_keys.len() >= 64
+            && !evidence
+                .reported_capacity_keys
+                .contains_key(&request_capacity_key)
+        {
+            if let Some(oldest) = evidence.reported_capacity_keys.keys().next().cloned() {
+                evidence.reported_capacity_keys.remove(&oldest);
+            }
+        }
+        evidence
+            .reported_capacity_keys
+            .insert(request_capacity_key, capacity_key.clone());
         if let Some(reset_at) = evidence.usage_caps.active(&capacity_key, now) {
             return ProviderRouteReadiness {
                 ready: false,
@@ -220,19 +286,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             };
         }
         evidence.account_blocks.remove(&capacity_key);
-        let mut readiness_cache = evidence.readiness.clone();
         drop(evidence);
-        let catalog = AgentTaskProviderCatalog {
-            providers: vec![provider.clone()],
-            diagnostics: Vec::new(),
-            version: None,
-        };
-        let verdict = super::dispatchability::evaluate_request_dispatchability(
-            &catalog,
-            &request,
-            &mut readiness_cache,
-        );
-        let runtime_evidence = verdict.runtime_evidence.clone();
         ProviderRouteReadiness {
             ready: verdict.ready,
             state: verdict.state.to_string(),
@@ -261,12 +315,17 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         let Ok(Some(provider)) = effective_provider_for_request(&request, self.providers()) else {
             return;
         };
-        let Ok(capacity_key) = provider_capacity_key(&request, &provider) else {
+        let Ok(request_capacity_key) = provider_capacity_key(&request, &provider) else {
             return;
         };
         let Ok(mut evidence) = self.evidence.lock() else {
             return;
         };
+        let capacity_key = evidence
+            .reported_capacity_keys
+            .get(&request_capacity_key)
+            .cloned()
+            .unwrap_or(request_capacity_key);
         if let Some(reset_at) = reset_at_from_outcome(outcome) {
             evidence.usage_caps.record(capacity_key.clone(), reset_at);
         }
@@ -858,6 +917,79 @@ mod tests {
         assert_ne!(first, second);
         assert!(!first.contains("account-one"));
         assert!(!second.contains("account-two"));
+    }
+
+    #[test]
+    fn provider_reported_account_switch_does_not_inherit_capacity_evidence() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let account = root.path().join("account");
+        let script = root.path().join("readiness.js");
+        std::fs::write(&account, "account-a").expect("account A");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const account=fs.readFileSync(process.argv[2],'utf8').trim();process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'capacity-'+account,identity:{account}}));",
+        )
+        .expect("readiness script");
+        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "test.provider",
+            "backend": "test"
+        }))
+        .expect("provider");
+        provider.readiness_invocation = Some(homeboy_core::command_invocation::CommandInvocation {
+            argv: vec![
+                "node".to_string(),
+                script.display().to_string(),
+                account.display().to_string(),
+            ],
+            ..Default::default()
+        });
+        let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
+        let request = readiness_request("model");
+        assert!(executor.provider_route_readiness(&request).ready);
+
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        executor.record_provider_outcome(
+            &request,
+            &AgentTaskOutcome {
+                task_id: request.task_id.clone(),
+                status: AgentTaskOutcomeStatus::ProviderError,
+                failure_classification: Some(AgentTaskFailureClassification::RateLimited),
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS.to_string(),
+                    message: "usage cap".to_string(),
+                    data: json!({"reset_at": reset_at.to_rfc3339()}),
+                }],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            executor.provider_route_readiness(&request).state,
+            "usage_capped"
+        );
+
+        std::fs::write(&account, "account-b").expect("account B");
+        executor
+            .evidence
+            .lock()
+            .expect("evidence")
+            .readiness
+            .expire_all();
+        assert!(
+            executor.provider_route_readiness(&request).ready,
+            "provider-reported account B must not inherit account A's cap"
+        );
+
+        std::fs::write(&account, "account-a").expect("restore account A");
+        executor
+            .evidence
+            .lock()
+            .expect("evidence")
+            .readiness
+            .expire_all();
+        assert_eq!(
+            executor.provider_route_readiness(&request).state,
+            "usage_capped"
+        );
     }
 
     #[test]

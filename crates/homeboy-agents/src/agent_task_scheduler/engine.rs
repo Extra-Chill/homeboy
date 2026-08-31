@@ -2237,6 +2237,30 @@ fn provider_readiness_exhausted_outcome(
     } else {
         AgentTaskFailureClassification::Provider
     };
+    let capability_only = !classifications.is_empty()
+        && classifications
+            .iter()
+            .all(|classification| *classification == "capability");
+    let diagnostic_class = if capability_only {
+        "agent_task.provider_capability_unavailable"
+    } else {
+        "agent_task.provider_readiness_routes_exhausted"
+    };
+    let diagnostic_data = if capability_only {
+        serde_json::json!({
+            "layer": "provider",
+            "required_capabilities": scheduled.request.executor.required_capabilities,
+            "skipped": scheduled.readiness_skips,
+            "classifications": classifications.clone(),
+            "retryable": retryable,
+        })
+    } else {
+        serde_json::json!({
+            "skipped": scheduled.readiness_skips,
+            "classifications": classifications.clone(),
+            "retryable": retryable,
+        })
+    };
     let mut outcome = AgentTaskOutcome {
         task_id: scheduled.request.task_id.clone(),
         status: AgentTaskOutcomeStatus::ProviderError,
@@ -2246,13 +2270,9 @@ fn provider_readiness_exhausted_outcome(
         ),
         failure_classification: Some(failure_classification),
         diagnostics: vec![AgentTaskDiagnostic {
-            class: "agent_task.provider_readiness_routes_exhausted".to_string(),
+            class: diagnostic_class.to_string(),
             message: "all configured provider routes were skipped before dispatch".to_string(),
-            data: serde_json::json!({
-                "skipped": scheduled.readiness_skips,
-                "classifications": classifications.clone(),
-                "retryable": retryable,
-            }),
+            data: diagnostic_data,
         }],
         ..Default::default()
     };

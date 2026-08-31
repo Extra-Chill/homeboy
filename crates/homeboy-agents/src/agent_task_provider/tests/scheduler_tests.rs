@@ -301,8 +301,8 @@ fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
         &mut ProviderRuntimeReadinessCache::default(),
     )
     .expect("Cook admits the first ready production route");
-    assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
-    assert_eq!(plan.tasks[0].executor.config["account"], "ready-account");
+    assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
+    assert!(plan.tasks[0].executor.config.get("account").is_none());
 
     let aggregate = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::from_catalog(catalog),
@@ -471,6 +471,46 @@ fn scheduler_reports_missing_provider_capability() {
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].data["required_capabilities"],
         json!(["workspace_write"])
+    );
+}
+
+#[test]
+fn scheduler_rotates_from_an_incapable_plan_level_primary_to_a_capable_fallback() {
+    let command = format!(
+        "node {}",
+        script("let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded'}));")
+    );
+    let (mut request, mut primary) = request("task-capability-rotation", command);
+    primary.id = "test.primary".to_string();
+    primary.capabilities.clear();
+    let mut fallback = primary.clone();
+    fallback.id = "test.fallback".to_string();
+    fallback.capabilities = vec!["workspace_write".to_string()];
+    request.executor.selector = Some(primary.id.clone());
+    request.executor.required_capabilities = vec!["workspace_write".to_string()];
+    let mut plan = AgentTaskPlan::new("plan-capability-rotation", vec![request]);
+    plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+        entries: vec![AgentTaskProviderRotationEntry {
+            selector: Some(fallback.id.clone()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 1);
+
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![primary, fallback]),
+    ))
+    .run(plan);
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
+        1
+    );
+    assert_eq!(
+        aggregate.outcomes[0].metadata["execution_budget"]["provider_rotations_used"],
+        1
     );
 }
 

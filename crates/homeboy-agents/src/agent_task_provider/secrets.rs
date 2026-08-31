@@ -129,17 +129,10 @@ fn provider_secret_env(
             names.extend(requirement.env.iter().cloned());
         }
     }
-    if let Some(request) = request {
-        if let Some(provider_name) = request
-            .executor
-            .config
-            .get("provider")
-            .and_then(Value::as_str)
-        {
-            if let Some(defaults) = provider.provider_defaults.get(provider_name) {
-                names.extend(provider_config_secret_env(defaults));
-            }
-        }
+    if let Some(defaults) =
+        request.and_then(|request| effective_provider_default(provider, request))
+    {
+        names.extend(provider_config_secret_env(defaults));
     }
     names.sort();
     names.dedup();
@@ -193,17 +186,10 @@ pub(super) fn provider_secret_sources(
             sources.extend(secret_source_map_from_extra(&requirement.extra));
         }
     }
-    if let Some(request) = request {
-        if let Some(provider_name) = request
-            .executor
-            .config
-            .get("provider")
-            .and_then(Value::as_str)
-        {
-            if let Some(defaults) = provider.provider_defaults.get(provider_name) {
-                sources.extend(provider_config_secret_sources(defaults));
-            }
-        }
+    if let Some(defaults) =
+        request.and_then(|request| effective_provider_default(provider, request))
+    {
+        sources.extend(provider_config_secret_sources(defaults));
     }
     sources
 }
@@ -286,7 +272,12 @@ fn provider_config_secret_env(config: &Value) -> Vec<String> {
         return Vec::new();
     };
     let mut names = Vec::new();
-    for key in ["secret_env", "secretEnv"] {
+    for key in [
+        "secret_env",
+        "secretEnv",
+        "required_secret_env",
+        "requiredSecretEnv",
+    ] {
         match config.get(key) {
             Some(Value::String(name)) => names.push(name.clone()),
             Some(Value::Array(items)) => names.extend(
@@ -298,6 +289,23 @@ fn provider_config_secret_env(config: &Value) -> Vec<String> {
         }
     }
     names
+}
+
+fn effective_provider_default<'a>(
+    provider: &'a AgentTaskExecutorProvider,
+    request: &AgentTaskRequest,
+) -> Option<&'a Value> {
+    if let Some(name) = request
+        .executor
+        .config
+        .get("provider")
+        .and_then(Value::as_str)
+    {
+        return provider.provider_defaults.get(name);
+    }
+    (provider.provider_defaults.len() == 1)
+        .then(|| provider.provider_defaults.values().next())
+        .flatten()
 }
 
 fn requirement_matches_request(when: Option<&Value>, request: Option<&AgentTaskRequest>) -> bool {
@@ -339,4 +347,81 @@ fn value_at_contract_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value>
         current = current.get(part)?;
     }
     Some(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
+
+    fn request(config: Value) -> AgentTaskRequest {
+        AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "credential-default".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config,
+            },
+            instructions: "test".to_string(),
+            inputs: Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
+            metadata: Value::Null,
+        }
+    }
+
+    #[test]
+    fn sole_default_required_secret_is_effective_without_an_explicit_provider() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "only-account": { "required_secret_env": ["ONLY_ACCOUNT_TOKEN"] }
+            }
+        }))
+        .expect("provider");
+
+        assert_eq!(
+            provider_secret_env(&provider, Some(&request(Value::Null))),
+            vec!["ONLY_ACCOUNT_TOKEN"]
+        );
+    }
+
+    #[test]
+    fn explicit_default_includes_required_secret_env_with_multiple_accounts() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "first": { "required_secret_env": "FIRST_TOKEN" },
+                "second": { "requiredSecretEnv": ["SECOND_TOKEN"] }
+            }
+        }))
+        .expect("provider");
+
+        assert_eq!(
+            provider_secret_env(
+                &provider,
+                Some(&request(serde_json::json!({"provider":"second"})))
+            ),
+            vec!["SECOND_TOKEN"]
+        );
+    }
 }

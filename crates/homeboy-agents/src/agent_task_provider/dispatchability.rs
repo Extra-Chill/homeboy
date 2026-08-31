@@ -18,8 +18,6 @@ pub struct AgentTaskProviderDispatchability {
     pub state: &'static str,
     pub ready: bool,
     pub reason: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_evidence: Option<AgentTaskProviderRuntimeEvidence>,
     pub checks: AgentTaskProviderDispatchabilityChecks,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configuration_diagnosis: Option<AgentTaskProviderConfigurationDiagnosis>,
@@ -140,6 +138,7 @@ pub fn evaluate_provider_dispatchability_with_config(
     probe_runtime: bool,
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> AgentTaskProviderDispatchability {
+    let mut runtime_evidence = None;
     evaluate_provider_dispatchability_with_config_and_credentials(
         catalog,
         backend,
@@ -149,6 +148,7 @@ pub fn evaluate_provider_dispatchability_with_config(
         probe_runtime,
         &[],
         cache,
+        &mut runtime_evidence,
     )
 }
 
@@ -165,6 +165,7 @@ fn evaluate_provider_dispatchability_with_config_and_credentials(
     probe_runtime: bool,
     credential_env: &[(String, String)],
     cache: &mut ProviderRuntimeReadinessCache,
+    runtime_evidence_out: &mut Option<AgentTaskProviderRuntimeEvidence>,
 ) -> AgentTaskProviderDispatchability {
     let candidate_providers = catalog
         .providers()
@@ -187,7 +188,6 @@ fn evaluate_provider_dispatchability_with_config_and_credentials(
             state,
             ready: false,
             reason: reason.to_string(),
-            runtime_evidence: None,
             checks: AgentTaskProviderDispatchabilityChecks {
                 route: AgentTaskProviderDispatchabilityCheck {
                     ready: false,
@@ -457,11 +457,11 @@ fn evaluate_provider_dispatchability_with_config_and_credentials(
     } else {
         unreachable!("provider-owned auth without verification is rejected above")
     };
+    *runtime_evidence_out = runtime_evidence;
     AgentTaskProviderDispatchability {
         state,
         ready,
         reason: reason.to_string(),
-        runtime_evidence,
         checks: AgentTaskProviderDispatchabilityChecks {
             route: AgentTaskProviderDispatchabilityCheck {
                 ready: true,
@@ -529,58 +529,115 @@ fn sanitize_classification(classification: &str) -> String {
     }
 }
 
+pub(crate) struct EvaluatedRequestDispatchability {
+    pub(crate) dispatchability: AgentTaskProviderDispatchability,
+    pub(crate) runtime_evidence: Option<AgentTaskProviderRuntimeEvidence>,
+}
+
 pub(crate) fn evaluate_request_dispatchability(
     catalog: &AgentTaskProviderCatalog,
     request: &crate::agent_task::AgentTaskRequest,
     cache: &mut ProviderRuntimeReadinessCache,
-) -> AgentTaskProviderDispatchability {
+) -> EvaluatedRequestDispatchability {
     let provider = match effective_provider_for_request(request, catalog.providers()) {
         Ok(Some(provider)) => provider,
         Ok(None) => {
+            let resolved = resolve_provider_for_backend(
+                catalog.providers(),
+                &request.executor.backend,
+                request.executor.selector.as_deref(),
+            );
+            if let Some(provider) = resolved.clone().resolved() {
+                let missing =
+                    super::secrets::provider_request_secret_env_missing(request, provider);
+                if !missing.is_empty() {
+                    let mut verdict = unavailable_request_dispatchability(
+                        "credentials_missing",
+                        "required provider credentials are not configured for this route",
+                        "auth_failure",
+                        false,
+                        Some("configure the required credential material for this provider route"),
+                    );
+                    verdict.dispatchability.checks.route = AgentTaskProviderDispatchabilityCheck {
+                        ready: true,
+                        reason: Some(provider.id.clone()),
+                    };
+                    verdict.dispatchability.checks.credentials.missing = missing;
+                    verdict.dispatchability.checks.credentials.status =
+                        AgentTaskProviderCredentialStatus::Missing;
+                    return verdict;
+                }
+            }
+            let route_exists = resolved.resolved().is_some();
             return unavailable_request_dispatchability(
+                if route_exists {
+                    "provider_capability_unavailable"
+                } else {
+                    "route_unavailable"
+                },
                 "no provider satisfies the effective route and required capabilities",
+                if route_exists { "capability" } else { "route" },
+                false,
+                None,
+            );
+        }
+        Err(reason) => {
+            return unavailable_request_dispatchability(
+                "route_unavailable",
+                &reason,
+                "route",
+                false,
+                None,
             )
         }
-        Err(reason) => return unavailable_request_dispatchability(&reason),
     };
     let missing = super::secrets::provider_request_secret_env_missing(request, &provider);
     if !missing.is_empty() {
         let mut verdict = unavailable_request_dispatchability(
+            "credentials_missing",
             "required provider credentials are not configured for this route",
+            "auth_failure",
+            false,
+            Some("configure the required credential material for this provider route"),
         );
-        verdict.state = "credentials_missing";
-        verdict.checks.route = AgentTaskProviderDispatchabilityCheck {
+        verdict.dispatchability.checks.route = AgentTaskProviderDispatchabilityCheck {
             ready: true,
             reason: Some(provider.id.clone()),
         };
-        verdict.checks.credentials = AgentTaskProviderDispatchabilityCredentialCheck {
-            status: AgentTaskProviderCredentialStatus::Missing,
-            ready: false,
-            missing,
-            verified: false,
-            reason: Some("required credential material is missing".to_string()),
-            remediation: Vec::new(),
-        };
+        verdict.dispatchability.checks.credentials =
+            AgentTaskProviderDispatchabilityCredentialCheck {
+                status: AgentTaskProviderCredentialStatus::Missing,
+                ready: false,
+                missing,
+                verified: false,
+                reason: Some("required credential material is missing".to_string()),
+                remediation: Vec::new(),
+            };
         return verdict;
     }
     let credential_env = match super::secrets::provider_request_credential_env(request, &provider) {
         Ok(credential_env) => credential_env,
         Err(_) => {
             let mut verdict = unavailable_request_dispatchability(
+                "credentials_unusable",
                 "provider credentials could not be resolved for live validation",
+                "auth_failure",
+                false,
+                Some("repair the provider credential source or select another account"),
             );
-            verdict.state = "credentials_unusable";
-            verdict.checks.route = AgentTaskProviderDispatchabilityCheck {
+            verdict.dispatchability.checks.route = AgentTaskProviderDispatchabilityCheck {
                 ready: true,
                 reason: Some(provider.id.clone()),
             };
-            verdict.checks.credentials.status = AgentTaskProviderCredentialStatus::Unusable;
-            verdict.checks.credentials.reason =
+            verdict.dispatchability.checks.credentials.status =
+                AgentTaskProviderCredentialStatus::Unusable;
+            verdict.dispatchability.checks.credentials.reason =
                 Some("credential material could not be resolved".to_string());
             return verdict;
         }
     };
-    evaluate_provider_dispatchability_with_config_and_credentials(
+    let mut runtime_evidence = None;
+    let dispatchability = evaluate_provider_dispatchability_with_config_and_credentials(
         &AgentTaskProviderCatalog {
             providers: vec![provider],
             diagnostics: Vec::new(),
@@ -593,38 +650,58 @@ pub(crate) fn evaluate_request_dispatchability(
         true,
         &credential_env,
         cache,
-    )
+        &mut runtime_evidence,
+    );
+    EvaluatedRequestDispatchability {
+        dispatchability,
+        runtime_evidence,
+    }
 }
 
-fn unavailable_request_dispatchability(reason: &str) -> AgentTaskProviderDispatchability {
+fn unavailable_request_dispatchability(
+    state: &'static str,
+    reason: &str,
+    classification: &str,
+    retryable: bool,
+    remediation: Option<&str>,
+) -> EvaluatedRequestDispatchability {
     let unavailable = AgentTaskProviderDispatchabilityCheck {
         ready: false,
         reason: None,
     };
-    AgentTaskProviderDispatchability {
-        state: "route_unavailable",
-        ready: false,
-        reason: reason.to_string(),
-        runtime_evidence: None,
-        checks: AgentTaskProviderDispatchabilityChecks {
-            route: AgentTaskProviderDispatchabilityCheck {
-                ready: false,
-                reason: Some(reason.to_string()),
+    EvaluatedRequestDispatchability {
+        runtime_evidence: Some(AgentTaskProviderRuntimeEvidence {
+            classification: classification.to_string(),
+            retryable,
+            remediation: remediation.map(str::to_string),
+            cache_identity: None,
+            provider_identity: None,
+        }),
+        dispatchability: AgentTaskProviderDispatchability {
+            state,
+            ready: false,
+            reason: reason.to_string(),
+            configuration_diagnosis: None,
+            checks: AgentTaskProviderDispatchabilityChecks {
+                route: AgentTaskProviderDispatchabilityCheck {
+                    ready: false,
+                    reason: Some(reason.to_string()),
+                },
+                model: unavailable.clone(),
+                credentials: AgentTaskProviderDispatchabilityCredentialCheck {
+                    status: AgentTaskProviderCredentialStatus::Unverified,
+                    ready: false,
+                    missing: Vec::new(),
+                    verified: false,
+                    reason: Some(
+                        "credential readiness was not evaluated because the route is unavailable"
+                            .to_string(),
+                    ),
+                    remediation: Vec::new(),
+                },
+                configuration: unavailable.clone(),
+                runtime: unavailable,
             },
-            model: unavailable.clone(),
-            credentials: AgentTaskProviderDispatchabilityCredentialCheck {
-                status: AgentTaskProviderCredentialStatus::Unverified,
-                ready: false,
-                missing: Vec::new(),
-                verified: false,
-                reason: Some(
-                    "credential readiness was not evaluated because the route is unavailable"
-                        .to_string(),
-                ),
-                remediation: Vec::new(),
-            },
-            configuration: unavailable.clone(),
-            runtime: unavailable,
         },
     }
 }
@@ -739,20 +816,18 @@ pub fn admit_plan_provider_dispatchability_with_providers(
     catalog: &AgentTaskProviderCatalog,
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> homeboy_core::Result<AgentTaskPlan> {
-    let mut admitted = plan.clone();
-    preflight_plan_provider_dispatchability_with_providers(&mut admitted, catalog, cache)?;
-    admitted.rebuild_homeboy_plan();
-    Ok(admitted)
+    preflight_plan_provider_dispatchability_with_providers(plan, catalog, cache)?;
+    Ok(plan.clone())
 }
 
 pub fn preflight_plan_provider_dispatchability_with_providers(
-    plan: &mut AgentTaskPlan,
+    plan: &AgentTaskPlan,
     catalog: &AgentTaskProviderCatalog,
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> homeboy_core::Result<()> {
     let plan_rotation = plan.options.rotation.clone();
     let max_rotations = plan.options.execution_budget.max_provider_rotations;
-    for task in &mut plan.tasks {
+    for task in &plan.tasks {
         let prior_rotations = task
             .metadata
             .pointer("/provider_readiness_routing/provider_rotations_used")
@@ -772,8 +847,6 @@ pub fn preflight_plan_provider_dispatchability_with_providers(
             .and_then(|value| value.get("base_secret_env"))
             .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
             .unwrap_or_else(|| task.executor.secret_env.clone());
-        let policy =
-            AgentTaskScheduleSupport::rotation_policy_for_request(task, plan_rotation.as_ref());
         let candidates = AgentTaskScheduleSupport::provider_route_candidates(
             task,
             plan_rotation.as_ref(),
@@ -791,12 +864,13 @@ pub fn preflight_plan_provider_dispatchability_with_providers(
                     &base_secret_env,
                 );
             }
-            let verdict = evaluate_request_dispatchability(catalog, &candidate, cache);
+            let evaluated = evaluate_request_dispatchability(catalog, &candidate, cache);
+            let verdict = evaluated.dispatchability;
             if verdict.ready {
                 selected = Some((candidate, transitions));
                 break;
             }
-            let runtime_evidence = verdict.runtime_evidence.clone();
+            let runtime_evidence = evaluated.runtime_evidence;
             current_skipped.push(serde_json::json!({
                 "backend": candidate.executor.backend,
                 "selector": candidate.executor.selector,
@@ -816,60 +890,10 @@ pub fn preflight_plan_provider_dispatchability_with_providers(
             }
         }
         skipped.extend(current_skipped.iter().cloned());
-        if let Some((mut candidate, transitions)) = selected {
-            if let Ok(Some(provider)) =
-                effective_provider_for_request(&candidate, catalog.providers())
-            {
-                if let Some(identity) =
-                    crate::agent_task_dispatch_service::runtime_identity_for_provider(&provider)
-                {
-                    if !candidate.metadata.is_object() {
-                        candidate.metadata = serde_json::json!({});
-                    }
-                    candidate.metadata["resolved_runtime_identity"] =
-                        serde_json::to_value(&identity).unwrap_or_default();
-                    if let Some(selection) = candidate.executor.runtime_selection.as_mut() {
-                        selection.runtime_id = Some(identity.runtime_id);
-                        selection.executor_provider_id = Some(identity.provider_id);
-                        selection.substrate_ref = Some(identity.source_revision);
-                    }
-                }
-            }
-            let mut remaining = policy.unwrap_or_default();
-            let mut initial = task.clone();
-            if let Some(entry) = remaining.entries.first() {
-                AgentTaskScheduleSupport::apply_initial_rotation_entry_model(&mut initial, entry);
-            }
-            let initial_index =
-                AgentTaskScheduleSupport::initial_rotation_index(&initial, &remaining);
-            let consumed = initial_index.saturating_add(transitions);
-            remaining
-                .entries
-                .drain(..consumed.min(remaining.entries.len()));
-            if !candidate.metadata.is_object() {
-                candidate.metadata = serde_json::json!({});
-            }
-            candidate.metadata["provider_rotation"] =
-                serde_json::to_value(remaining).unwrap_or_default();
-            candidate.metadata["provider_readiness_routing"] = serde_json::json!({
-                "skipped": skipped,
-                "provider_rotations_used": prior_rotations.saturating_add(transitions as u32),
-                "selected": {
-                    "backend": candidate.executor.backend,
-                    "selector": candidate.executor.selector,
-                    "model": candidate.executor.model(),
-                },
-            });
-            candidate.metadata["provider_admission"] = serde_json::json!({
-                "schema": "homeboy/agent-task-provider-admission/v1",
-                "base_secret_env": base_secret_env,
-                "remaining_rotation": candidate.metadata["provider_rotation"],
-                "readiness_routing": candidate.metadata["provider_readiness_routing"],
-            });
-            *task = candidate;
+        if selected.is_some() {
             continue;
         }
-        let (candidate, _) = first_failure.expect("every plan has an initial route");
+        let (candidate, first_verdict) = first_failure.expect("every plan has an initial route");
         let retryable = current_skipped.iter().any(|route| {
             route
                 .get("runtime_evidence")
@@ -877,18 +901,25 @@ pub fn preflight_plan_provider_dispatchability_with_providers(
                 .and_then(Value::as_bool)
                 == Some(true)
         });
+        let mut hints = vec![serde_json::json!({
+            "kind": "provider_rotation_exhausted",
+            "routes": skipped,
+        })
+        .to_string()];
+        if !first_verdict.checks.credentials.missing.is_empty() {
+            hints.push(format!(
+                "Missing provider credentials: {}",
+                first_verdict.checks.credentials.missing.join(", ")
+            ));
+        }
         return Err(homeboy_core::Error::validation_invalid_argument(
             "provider_dispatchability",
             format!(
-                "agent-task backend `{}` is not dispatchable across any reachable rotation route",
-                candidate.executor.backend
+                "agent-task backend `{}` is not dispatchable across any reachable rotation route: {}",
+                candidate.executor.backend, first_verdict.reason
             ),
             Some(candidate.executor.backend),
-            Some(vec![serde_json::json!({
-                "kind": "provider_rotation_exhausted",
-                "routes": skipped,
-            })
-            .to_string()]),
+            Some(hints),
         )
         .with_retryable(retryable));
     }
@@ -1346,11 +1377,11 @@ mod tests {
         .expect("ready fallback admits the plan");
 
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
-        assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
-        assert_eq!(
-            plan.tasks[0].metadata["provider_readiness_routing"]["provider_rotations_used"],
-            1
-        );
+        assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
+        assert!(plan.tasks[0]
+            .metadata
+            .get("provider_readiness_routing")
+            .is_none());
     }
 
     #[test]
@@ -1382,11 +1413,11 @@ mod tests {
         )
         .expect("readiness transition consumes no dispatch attempt");
 
-        assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
+        assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
     }
 
     #[test]
-    fn repeated_admission_does_not_restore_consumed_rotation_budget() {
+    fn repeated_admission_reconsiders_a_recovered_primary_from_the_durable_plan() {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let block_fallback = root.path().join("block-fallback");
@@ -1426,17 +1457,25 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
         )
         .expect("first fallback is admitted");
-        assert_eq!(admitted.tasks[0].executor.model(), Some("fallback-one"));
-        std::fs::write(&block_fallback, "blocked").expect("block first fallback");
+        assert_eq!(admitted.tasks[0].executor.model(), Some("primary"));
+        assert_eq!(admitted.options.rotation.as_ref().unwrap().entries.len(), 2);
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;fs.appendFileSync(process.argv[2],model+'\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='primary',classification:model==='primary'?'ready':'account',retryable:false,remediation:'',reason:'',cache_key:model,identity:{model}}));",
+        )
+        .expect("recover primary probe");
 
         admit_plan_provider_dispatchability_with_providers(
             &admitted,
             &catalog,
             &mut ProviderRuntimeReadinessCache::default(),
         )
-        .expect_err("re-admission cannot restore the consumed rotation");
+        .expect("restart-style re-admission sees the recovered primary");
         let probes = std::fs::read_to_string(count).expect("probe log");
-        assert!(!probes.lines().any(|model| model == "fallback-two"));
+        assert_eq!(
+            probes.lines().filter(|model| *model == "primary").count(),
+            2
+        );
     }
 
     #[test]
@@ -1502,10 +1541,10 @@ mod tests {
         .expect("transient primary recovers");
         assert_eq!(admitted.tasks[0].executor.model(), Some("primary"));
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
-        assert_eq!(
-            admitted.tasks[0].metadata["provider_readiness_routing"]["provider_rotations_used"],
-            0
-        );
+        assert!(admitted.tasks[0]
+            .metadata
+            .get("provider_readiness_routing")
+            .is_none());
     }
 
     #[test]
@@ -1566,13 +1605,13 @@ mod tests {
         .expect("route after missing conditional credential is selected");
         assert_eq!(
             admitted.tasks[0].executor.selector.as_deref(),
-            Some("test.fallback")
+            Some("test.primary")
         );
         assert!(admitted.tasks[0].executor.secret_env.is_empty());
-        assert_eq!(
-            admitted.tasks[0].metadata["provider_readiness_routing"]["skipped"][1]["state"],
-            "credentials_missing"
-        );
+        assert!(admitted.tasks[0]
+            .metadata
+            .get("provider_readiness_routing")
+            .is_none());
     }
 
     #[test]
@@ -1613,7 +1652,8 @@ mod tests {
             &catalog(provider),
             &task,
             &mut ProviderRuntimeReadinessCache::default(),
-        );
+        )
+        .dispatchability;
 
         assert!(verdict.ready, "{verdict:?}");
         assert_eq!(

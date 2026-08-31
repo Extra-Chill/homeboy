@@ -4826,7 +4826,7 @@ fn cook_preflight_exposes_missing_readiness_invocation_diagnosis_without_provide
 }
 
 #[test]
-fn compiled_cook_persists_and_executes_the_first_ready_production_provider_route() {
+fn compiled_cook_preserves_rotation_and_executes_the_first_ready_production_provider_route() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("executed.json");
@@ -4896,8 +4896,9 @@ fn compiled_cook_persists_and_executes_the_first_ready_production_provider_route
         )
         .expect("Cook compiles to its first ready route");
         let plan = options.identity.initial_plan;
-        assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
-        assert_eq!(plan.tasks[0].executor.config["account"], "ready-account");
+        assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
+        assert!(plan.tasks[0].executor.config.get("account").is_none());
+        assert_eq!(plan.options.rotation.as_ref().unwrap().entries.len(), 1);
 
         let aggregate = AgentTaskScheduler::new(Arc::new(
             crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(catalog),

@@ -20,6 +20,7 @@ pub(super) struct ProviderEvidenceStore {
     pub(super) readiness: ProviderRuntimeReadinessCache,
     pub(super) usage_caps: ProviderUsageCapRegistry,
     pub(super) account_blocks: BTreeMap<String, AccountBlockEvidence>,
+    pub(super) reported_capacity_keys: BTreeMap<String, String>,
     pub(super) next_generation: u64,
 }
 

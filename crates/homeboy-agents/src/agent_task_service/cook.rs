@@ -2735,17 +2735,21 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
         )?;
     // The shared verdict considers the ordered rotation routes with their
     // effective model/config before Cook can consume a provider execution.
-    options.identity.initial_plan =
+    // Never persist a TTL-bounded readiness decision as a reduced route chain.
+    // Runtime scheduling re-evaluates the complete durable policy. Deterministic
+    // exhaustion still fails compilation; retryable exhaustion reaches runtime
+    // so it can carry zero-dispatch budget evidence.
+    if let Err(error) =
         crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
             &options.identity.initial_plan,
             catalog,
             readiness_cache,
-        )?;
-    catalog.validate_selected_models(&options.identity.initial_plan)?;
-    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-        &options.identity.initial_plan,
-        catalog.providers(),
-    )?;
+        )
+    {
+        if error.retryable != Some(true) {
+            return Err(error);
+        }
+    }
     // Finalization disclosure is derived from the compiled provider invocation,
     // not a pre-resolution CLI value. The plan is persisted in the recipe and
     // remains authoritative across continuation.

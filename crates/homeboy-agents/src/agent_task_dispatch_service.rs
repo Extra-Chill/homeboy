@@ -14,8 +14,8 @@ use crate::agent_task_dispatch_plan::{
 use crate::agent_task_lifecycle as lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
-    default_backend_for_component, enforce_runtime_preflight_checks_for_plan,
-    preflight_plan_provider_config_with_providers, resolve_provider_for_backend,
+    default_backend_for_component, preflight_plan_provider_config_with_providers,
+    preflight_provider_credentials_for_backend, resolve_provider_for_backend,
     AgentTaskProviderCatalog, ProviderResolution,
 };
 use crate::agent_task_scheduler::{
@@ -199,15 +199,21 @@ fn dispatch_with_provider_catalog(
     let plan = build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
-    let plan = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-        &plan,
-        catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )?;
-    catalog.validate_selected_models(&plan)?;
-    catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
-    preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
+    if let Err(error) =
+        crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            catalog,
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+    {
+        if error.retryable != Some(true) {
+            preflight_dispatch_provider_secrets(&plan)?;
+            return Err(with_declared_credential_hints(error, &plan, catalog));
+        }
+    }
+    // Keep the complete route chain durable. The scheduler evaluates readiness
+    // immediately before each possible execution and records zero-dispatch
+    // exhaustion evidence when every route is unavailable.
     run_dispatch_plan(
         plan,
         request.run_id.as_deref(),
@@ -222,14 +228,46 @@ pub fn preflight_dispatch_provider_admission(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
-    let plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
+    let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
-    let plan = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-        &plan,
-        catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )?;
+    if let Err(error) =
+        crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            catalog,
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+    {
+        if !matches!(
+            resolve_provider_for_backend(
+                catalog.providers(),
+                &request.backend,
+                request.selector.as_deref()
+            ),
+            ProviderResolution::Resolved(_)
+        ) {
+            crate::agent_task_provider::validate_provider_runner_readiness_for_backend_with_catalog(
+                catalog,
+                &request.backend,
+                request.selector.as_deref(),
+            )?;
+        }
+        preflight_provider_credentials_for_backend(
+            catalog.providers(),
+            &request.backend,
+            request.selector.as_deref(),
+        )?;
+        catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+        catalog.validate_selected_models(&plan)?;
+        preflight_dispatch_provider_secrets(&plan)?;
+        preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
+        crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
+            &plan,
+            catalog,
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )?;
+        return Err(error);
+    }
     catalog.validate_selected_models(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
@@ -251,15 +289,18 @@ pub fn dispatch_with_provider_requirements(
         provider_requires_cwd_git_checkout,
     )?;
     let catalog = AgentTaskProviderCatalog::discover();
-    let plan = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-        &plan,
-        &catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )?;
-    catalog.validate_selected_models(&plan)?;
-    enforce_runtime_preflight_checks_for_plan(&plan)?;
-    preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
+    if let Err(error) =
+        crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            &catalog,
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )
+    {
+        if error.retryable != Some(true) {
+            preflight_dispatch_provider_secrets(&plan)?;
+            return Err(with_declared_credential_hints(error, &plan, &catalog));
+        }
+    }
     run_dispatch_plan(
         plan,
         request.run_id.as_deref(),
@@ -267,6 +308,27 @@ pub fn dispatch_with_provider_requirements(
         backend_selection,
         executor,
     )
+}
+
+fn with_declared_credential_hints(
+    mut error: Error,
+    plan: &AgentTaskPlan,
+    catalog: &AgentTaskProviderCatalog,
+) -> Error {
+    for provider in catalog.providers().iter().filter(|provider| {
+        plan.tasks
+            .iter()
+            .any(|task| task.executor.backend == provider.backend)
+    }) {
+        for name in crate::agent_task_provider::provider_required_secret_env_names(provider) {
+            if !error.hints.iter().any(|hint| hint.message.contains(&name)) {
+                error.hints.push(homeboy_core::error::Hint {
+                    message: format!("Required provider credential: {name}"),
+                });
+            }
+        }
+    }
+    error
 }
 
 /// The only durable dispatch-to-scheduler path. Both provider-catalog entry

@@ -67,6 +67,23 @@ impl Default for ProviderRuntimeReadinessCache {
     }
 }
 
+#[cfg(test)]
+impl ProviderRuntimeReadinessCache {
+    pub(crate) fn expire_all(&self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for cached in state.by_request.values_mut() {
+            if let CachedProviderRuntimeReadiness::Complete { cached_at, .. } = cached {
+                *cached_at =
+                    Instant::now() - PROVIDER_RUNTIME_READINESS_READY_TTL - Duration::from_secs(1);
+            }
+        }
+    }
+}
+
 const PROVIDER_RUNTIME_READINESS_READY_TTL: Duration = Duration::from_secs(30);
 const PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL: Duration = Duration::from_secs(5);
 const PROVIDER_RUNTIME_READINESS_ERROR_TTL: Duration = Duration::from_secs(2);
@@ -83,7 +100,11 @@ struct ProviderReadinessProbePermit(&'static ProviderReadinessProbeGate);
 
 impl Drop for ProviderReadinessProbePermit {
     fn drop(&mut self) {
-        let mut active = self.0.active.lock().expect("readiness probe gate");
+        let mut active = self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *active = active.saturating_sub(1);
         self.0.changed.notify_one();
     }
@@ -95,9 +116,15 @@ fn acquire_probe_permit() -> ProviderReadinessProbePermit {
         active: Mutex::new(0),
         changed: Condvar::new(),
     });
-    let mut active = gate.active.lock().expect("readiness probe gate");
+    let mut active = gate
+        .active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     while *active >= MAX_CONCURRENT_PROVIDER_READINESS_PROBES {
-        active = gate.changed.wait(active).expect("readiness probe gate");
+        active = gate
+            .changed
+            .wait(active)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
     *active += 1;
     ProviderReadinessProbePermit(gate)
@@ -221,21 +248,24 @@ pub(crate) fn readiness_verdict_with_credentials(
     );
     let mut registered_waiter = false;
     loop {
-        let mut state = cache.shared.state.lock().map_err(|_| {
-            Error::validation_invalid_argument(
-                "provider_runtime_readiness",
-                "provider readiness cache lock was poisoned",
-                Some(provider.backend.clone()),
-                None,
-            )
-        })?;
+        let mut state = cache
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.by_request.get(&request_key) {
             Some(CachedProviderRuntimeReadiness::InFlight) => {
                 if !registered_waiter {
                     *state.waiters.entry(request_key.clone()).or_default() += 1;
                     registered_waiter = true;
                 }
-                drop(cache.shared.changed.wait(state));
+                drop(
+                    cache
+                        .shared
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
                 continue;
             }
             Some(CachedProviderRuntimeReadiness::Complete {
@@ -281,7 +311,13 @@ pub(crate) fn readiness_verdict_with_credentials(
             {
                 state.by_request.remove(&oldest);
             } else {
-                drop(cache.shared.changed.wait(state));
+                drop(
+                    cache
+                        .shared
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
                 continue;
             }
         }
@@ -292,29 +328,32 @@ pub(crate) fn readiness_verdict_with_credentials(
         break;
     }
 
-    let _permit = acquire_probe_permit();
-    let mut result = Err("provider readiness invocation did not run".to_string());
-    for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
-        result = run_provider_readiness_invocation_with_env(provider, config, credential_env);
-        if !matches!(
-            &result,
-            Ok(verdict)
-                if !verdict.ready
-                    && verdict.retryable
-                    && verdict.classification == "transient_failure"
-        ) {
-            break;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _permit = acquire_probe_permit();
+        let mut result = Err("provider readiness invocation did not run".to_string());
+        for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
+            result = run_provider_readiness_invocation_with_env(provider, config, credential_env);
+            let should_retry = match &result {
+                Err(_) => true,
+                Ok(verdict) => {
+                    !verdict.ready
+                        && verdict.retryable
+                        && verdict.classification == "transient_failure"
+                }
+            };
+            if !should_retry {
+                break;
+            }
         }
-    }
+        result
+    }))
+    .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
 
-    let mut state = cache.shared.state.lock().map_err(|_| {
-        Error::validation_invalid_argument(
-            "provider_runtime_readiness",
-            "provider readiness cache lock was poisoned",
-            Some(provider.backend.clone()),
-            None,
-        )
-    })?;
+    let mut state = cache
+        .shared
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let generation = state.next_generation;
     state.next_generation = state.next_generation.wrapping_add(1);
     state.by_request.insert(
@@ -675,7 +714,7 @@ mod tests {
             }
         });
         assert_eq!(
-            std::fs::read_to_string(count)
+            std::fs::read_to_string(&count)
                 .expect("probe count")
                 .lines()
                 .count(),
@@ -811,11 +850,29 @@ mod tests {
             assert!(readiness_verdict(&provider, &json!({"model":"error"}), &mut cache).is_err());
         }
         assert_eq!(
-            std::fs::read_to_string(count)
+            std::fs::read_to_string(&count)
                 .expect("probe count")
                 .lines()
                 .count(),
-            1
+            PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS
+        );
+        std::fs::write(
+            &script,
+            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'recovered',identity:{account:'recovered'}}));",
+        )
+        .expect("recover probe");
+        cache.expire_all();
+        assert!(
+            readiness_verdict(&provider, &json!({"model":"error"}), &mut cache)
+                .expect("recovered probe")
+                .ready
+        );
+        assert_eq!(
+            std::fs::read_to_string(&count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS + 1
         );
     }
 }
