@@ -959,6 +959,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
     let execution = args.execution_plan(skip_checks);
     validate_apply_boundary(&execution)?;
     let component_ids = resolve_component_ids(&args, &args.components)?;
+    validate_positional_component_ids(&args, &component_ids)?;
     if args.package_only {
         validate_package_only_intent(&args, &component_ids)?;
     }
@@ -1617,6 +1618,30 @@ fn resolve_component_ids(
     }
 }
 
+/// Validate explicit positional batches before release setup can execute any
+/// one target. Single targets retain `--path` portable-config resolution.
+fn validate_positional_component_ids(
+    args: &ReleaseExecuteArgs,
+    component_ids: &[String],
+) -> homeboy::core::Result<()> {
+    if args.project.is_some() || args.components.len() < 2 {
+        return Ok(());
+    }
+
+    for component_id in component_ids {
+        component::load(component_id).map_err(|error| {
+            error.with_hint(
+                "Release inspection commands use a verb before the component ID: \
+                 homeboy release changes <component-id>, homeboy release gap <component-id>, \
+                 homeboy release contains <component-id> <commit>, or \
+                 homeboy release readiness list <component-id>.",
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1749,6 +1774,64 @@ mod tests {
 
         assert_eq!(components, vec!["api"]);
         assert_eq!(release_args.bump.as_deref(), Some("minor"));
+    }
+
+    #[test]
+    fn invalid_positional_component_prevents_valid_batch_target_execution() {
+        homeboy::core::test_support::with_isolated_home(|home| {
+            let component_path = home.path().join("homeboy");
+            std::fs::create_dir_all(&component_path).expect("component directory");
+            std::fs::write(
+                component_path.join("homeboy.json"),
+                r#"{"id":"homeboy","remote_path":"homeboy"}"#,
+            )
+            .expect("portable component config");
+            component::write_standalone_registration(&component::Component::new(
+                "homeboy".to_string(),
+                component_path.to_string_lossy().to_string(),
+                "homeboy".to_string(),
+                None,
+            ))
+            .expect("component registration");
+
+            let error = match run_execute(args(&["inspect", "homeboy"])) {
+                Ok(_) => panic!("an unknown batch target must fail before homeboy releases"),
+                Err(error) => error,
+            };
+
+            assert_eq!(error.code.as_str(), "component.not_found");
+            assert_eq!(error.details["id"], "inspect");
+            assert!(error.hints.iter().any(|hint| hint
+                .message
+                .contains("homeboy release changes <component-id>")));
+        });
+    }
+
+    #[test]
+    fn single_positional_component_with_path_allows_portable_config_fallback() {
+        homeboy::core::test_support::with_isolated_home(|home| {
+            let component_path = home.path().join("portable");
+            std::fs::create_dir_all(&component_path).expect("component directory");
+            std::fs::write(
+                component_path.join("homeboy.json"),
+                r#"{"id":"portable","remote_path":"portable"}"#,
+            )
+            .expect("portable component config");
+            let mut release_args = args(&["portable"]);
+            release_args.path = Some(component_path.to_string_lossy().to_string());
+            let component_ids =
+                resolve_component_ids(&release_args, &release_args.components).expect("target");
+
+            assert!(component::load("portable").is_err());
+            assert_eq!(
+                component::resolve_effective(Some("portable"), release_args.path.as_deref(), None,)
+                    .expect("portable fallback")
+                    .id,
+                "portable"
+            );
+            validate_positional_component_ids(&release_args, &component_ids)
+                .expect("single portable target remains valid");
+        });
     }
 
     fn skip_args(skip_checks: Option<Vec<&str>>) -> ReleaseExecuteArgs {
