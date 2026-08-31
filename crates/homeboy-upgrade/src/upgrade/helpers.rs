@@ -883,13 +883,6 @@ fn run_controller_upgrade_with_operation(
         (vec![], vec![])
     };
 
-    // After a verified binary swap, long-running services still hold the old
-    // binary in memory until restarted. Restart each declared resident service
-    // (config-driven; nothing is hardcoded in core) unless restarts were
-    // skipped, in which case report each as pending with its recovery command.
-    let (services_restarted, services_pending_restart) =
-        restart_resident_services_after_swap(success, skip_services);
-
     let final_selection_guard =
         acquire_controller_selection_guard(operation, "controller upgrade result")?;
     let completion = reconcile_controller_identity(
@@ -908,6 +901,14 @@ fn run_controller_upgrade_with_operation(
         runners_updated.clear();
         runners_skipped.clear();
     }
+
+    // Protect the reconciled controller identity while resident services are
+    // restarted so their evidence cannot describe a later contender's binary.
+    let (services_restarted, services_pending_restart) = if completion_superseded {
+        (Vec::new(), Vec::new())
+    } else {
+        restart_resident_services_after_swap(success, skip_services)
+    };
 
     let runner_disposition = runner_convergence_disposition(
         runner_completion_is_skipped(skip_runners, upgrade_completed, completion_superseded),
@@ -2170,6 +2171,7 @@ fn acquire_controller_selection_guard(
         |event| operation.record_promotion_wait(&event),
     )?;
     operation.clear_promotion_wait_durable()?;
+    operation.take_persistence_error()?;
     Ok(guard)
 }
 
