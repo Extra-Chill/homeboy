@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand, ValueEnum};
 
-use homeboy::runner::runners::RunnerKind;
+use homeboy_runner_contract::RunnerKind;
 
 use super::super::DynamicSetArgs;
 use super::doctor;

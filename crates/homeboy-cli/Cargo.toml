@@ -43,6 +43,7 @@ homeboy-tunnel = { version = "0.1.0", path = "../homeboy-tunnel" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-lab-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-contract" }
 homeboy-lab-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-runner-contract" }
+homeboy-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-runner-contract" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

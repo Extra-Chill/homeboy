@@ -527,7 +527,7 @@ fn concurrent_schedulers_dispatch_one_reserved_provider_execution() {
 fn lab_handoff_run_plan_executes_with_runner_provenance_after_transport_is_consumed() {
     with_isolated_home(|_| {
         let execution_runner = homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
-        let transport_runner = homeboy_lab_runner_contract::RUNNER_ID_ENV;
+        let transport_runner = homeboy_runner_contract::RUNNER_ID_ENV;
         let previous_execution_runner = std::env::var_os(execution_runner);
         let previous_transport_runner = std::env::var_os(transport_runner);
         std::env::set_var(execution_runner, "homeboy-lab");
