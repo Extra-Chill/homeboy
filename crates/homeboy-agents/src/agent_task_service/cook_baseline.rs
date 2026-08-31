@@ -1112,7 +1112,7 @@ mod tests {
         let homeboy = bin.join("homeboy");
         std::fs::write(
             &homeboy,
-            "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\ncat marker >&2\nexit 1\n",
+            "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\nexit 1\n",
         )
         .expect("homeboy adapter");
         let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
