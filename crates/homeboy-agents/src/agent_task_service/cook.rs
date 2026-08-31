@@ -2739,16 +2739,22 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
     // Runtime scheduling re-evaluates the complete durable policy. Deterministic
     // exhaustion still fails compilation; retryable exhaustion reaches runtime
     // so it can carry zero-dispatch budget evidence.
-    if let Err(error) =
-        crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-            &options.identity.initial_plan,
-            catalog,
-            readiness_cache,
-        )
-    {
-        if error.retryable != Some(true) {
-            return Err(error);
+    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &options.identity.initial_plan,
+        catalog,
+        readiness_cache,
+    ) {
+        Ok(selected_plan) => {
+            catalog.validate_selected_models(&selected_plan)?;
+            catalog.enforce_runtime_preflight_checks_for_plan(&selected_plan)?;
+            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
+                &selected_plan,
+                catalog.providers(),
+            )?;
+            super::execution::preflight_plan_secret_env(&selected_plan)?;
         }
+        Err(error) if error.retryable == Some(true) => {}
+        Err(error) => return Err(error),
     }
     // Finalization disclosure is derived from the compiled provider invocation,
     // not a pre-resolution CLI value. The plan is persisted in the recipe and

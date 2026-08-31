@@ -4804,12 +4804,8 @@ fn cook_preflight_exposes_missing_readiness_invocation_diagnosis_without_provide
             !error.message.contains("select a verified backend"),
             "Cook must diagnose the owning provider contract, not suggest switching: {error}"
         );
-        let verdict = error.details["tried"]
-            .as_array()
-            .and_then(|hints| hints.first())
-            .and_then(|hint| hint.as_str())
-            .and_then(|hint| serde_json::from_str::<serde_json::Value>(hint).ok())
-            .expect("the shared typed dispatchability diagnosis is attached to Cook preflight");
+        let verdict = &error.details["dispatchability"];
+        assert!(verdict.is_object());
         assert_eq!(
             verdict["configuration_diagnosis"]["kind"],
             "missing_readiness_invocation"
@@ -4887,7 +4883,7 @@ fn compiled_cook_preserves_rotation_and_executes_the_first_ready_production_prov
         );
         let mut options = compile_options("production-readiness-cook");
         options.identity.initial_plan.options.execution_budget =
-            AgentTaskExecutionBudget::new(1, 0, 1);
+            AgentTaskExecutionBudget::new(1, 0, 0);
         let options = compile_cook_attempt_with_catalog_and_readiness_cache(
             options,
             command,
@@ -4921,7 +4917,7 @@ fn compiled_cook_preserves_rotation_and_executes_the_first_ready_production_prov
         );
         assert_eq!(
             aggregate.outcomes[0].metadata["execution_budget"]["provider_rotations_used"],
-            1
+            0
         );
     });
 }

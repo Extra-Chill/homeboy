@@ -35,27 +35,6 @@ pub(super) fn provider_request_secret_env_missing(
         .collect()
 }
 
-pub(super) fn provider_request_credential_identity(
-    request: &AgentTaskRequest,
-    provider: &AgentTaskExecutorProvider,
-) -> Vec<(String, String)> {
-    match provider_request_credential_env(request, provider) {
-        Ok(values) => values
-            .into_iter()
-            .map(|(name, value)| {
-                (
-                    name,
-                    homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes()),
-                )
-            })
-            .collect(),
-        Err(_) => provider_secret_env(provider, Some(request))
-            .into_iter()
-            .map(|name| (name, "unresolved".to_string()))
-            .collect(),
-    }
-}
-
 pub(super) fn provider_request_credential_env(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
@@ -65,6 +44,13 @@ pub(super) fn provider_request_credential_env(
     let names = provider_secret_env(provider, Some(request));
     let sources = provider_secret_sources(provider, Some(request));
     resolve_secret_env_with_fallbacks(&names, &sources)
+}
+
+pub(super) fn provider_declared_credential_env(
+    provider: &AgentTaskExecutorProvider,
+) -> std::result::Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
+    let names = super::credential_readiness::provider_required_secret_env_names(provider);
+    resolve_secret_env_with_fallbacks(&names, &provider_declared_secret_sources(provider))
 }
 
 pub fn provider_runner_secret_env_for_plan_with_providers(
@@ -196,8 +182,9 @@ pub(super) fn provider_secret_sources(
 
 /// Every secret source a provider declares for itself, independent of any
 /// dispatch request: its unconditional `secret_env_requirements` sources plus
-/// every `provider_defaults` entry's `secret_env_sources` (regardless of which
-/// default a request would eventually select).
+/// a sole provider default, which is the same implicit-default rule scheduling
+/// uses. Multiple account defaults remain request-scoped; merging them here
+/// would let map iteration choose an arbitrary source for a shared env name.
 ///
 /// This is the single source-resolution path behind `agent-task auth status`,
 /// `agent-task providers --secret-env`, and provider credential readiness
@@ -212,8 +199,10 @@ pub(super) fn provider_declared_secret_sources(
     provider: &AgentTaskExecutorProvider,
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
     let mut sources = provider_secret_sources(provider, None);
-    for provider_default in provider.provider_defaults.values() {
-        sources.extend(provider_config_secret_sources(provider_default));
+    if provider.provider_defaults.len() == 1 {
+        if let Some(provider_default) = provider.provider_defaults.values().next() {
+            sources.extend(provider_config_secret_sources(provider_default));
+        }
     }
     sources
 }
@@ -422,6 +411,50 @@ mod tests {
                 Some(&request(serde_json::json!({"provider":"second"})))
             ),
             vec!["SECOND_TOKEN"]
+        );
+    }
+
+    #[test]
+    fn multiple_defaults_with_the_same_env_keep_sources_account_scoped() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let first = root.path().join("first.json");
+        let second = root.path().join("second.json");
+        std::fs::write(&first, r#"{"token":"first-value"}"#).expect("first credential");
+        std::fs::write(&second, r#"{"token":"second-value"}"#).expect("second credential");
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "first": {
+                    "required_secret_env": "ACCOUNT_TOKEN",
+                    "secret_env_sources": {"ACCOUNT_TOKEN": {"source":"json-file", "path":first, "field":"token"}}
+                },
+                "second": {
+                    "required_secret_env": "ACCOUNT_TOKEN",
+                    "secret_env_sources": {"ACCOUNT_TOKEN": {"source":"json-file", "path":second, "field":"token"}}
+                }
+            }
+        }))
+        .expect("provider");
+
+        assert!(provider_declared_credential_env(&provider)
+            .expect("unscoped credentials")
+            .is_empty());
+        assert_eq!(
+            provider_request_credential_env(
+                &request(serde_json::json!({"provider":"first"})),
+                &provider,
+            )
+            .expect("first account"),
+            vec![("ACCOUNT_TOKEN".to_string(), "first-value".to_string())]
+        );
+        assert_eq!(
+            provider_request_credential_env(
+                &request(serde_json::json!({"provider":"second"})),
+                &provider,
+            )
+            .expect("second account"),
+            vec![("ACCOUNT_TOKEN".to_string(), "second-value".to_string())]
         );
     }
 }

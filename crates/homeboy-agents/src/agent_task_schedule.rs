@@ -750,6 +750,7 @@ mod cancellation {
         pub attempt: u32,
         pub cancellation: AgentTaskCancellationToken,
         pub(crate) lifecycle_store: Option<crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+        pub(crate) provider_capacity_key: Option<String>,
     }
 
     impl AgentTaskExecutionContext {

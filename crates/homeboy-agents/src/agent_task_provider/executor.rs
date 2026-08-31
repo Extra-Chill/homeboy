@@ -1,4 +1,4 @@
-use super::command_runner::{failure_outcome, run_materialized_provider_command};
+use super::command_runner::{failure_outcome, run_materialized_provider_command_with_credentials};
 use super::*;
 
 const PROVIDER_ACCOUNT_BLOCK_TTL: chrono::Duration = chrono::Duration::minutes(5);
@@ -85,6 +85,16 @@ fn provider_capacity_key(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
 ) -> homeboy_core::Result<String> {
+    let credential_env =
+        super::secrets::provider_request_credential_env(request, provider).unwrap_or_default();
+    provider_capacity_key_with_credentials(request, provider, &credential_env)
+}
+
+fn provider_capacity_key_with_credentials(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    credential_env: &[(String, String)],
+) -> homeboy_core::Result<String> {
     let effective_config = provider_capacity_config(request);
     let value = serde_json::json!({
         "provider": provider,
@@ -93,7 +103,10 @@ fn provider_capacity_key(
         "required_capabilities": request.executor.required_capabilities,
         "effective_config": effective_config,
         "resolved_runtime_identity": request.metadata.get("resolved_runtime_identity"),
-        "credential_identity": provider_credential_identity(request, provider),
+        "credential_identity": credential_env.iter().map(|(name, value)| (
+            name,
+            homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes()),
+        )).collect::<Vec<_>>(),
     });
     let encoded = serde_json::to_vec(&value)
         .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
@@ -112,11 +125,106 @@ fn reported_capacity_key(request_key: &str, evidence: &AgentTaskProviderRuntimeE
     homeboy_engine_primitives::content_hash::sha256_hex(&encoded)
 }
 
-fn provider_credential_identity(
+fn production_execution_preflight(
     request: &AgentTaskRequest,
-    provider: &AgentTaskExecutorProvider,
-) -> Vec<(String, String)> {
-    super::secrets::provider_request_credential_identity(request, provider)
+    providers: &[AgentTaskExecutorProvider],
+    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
+    evidence: &Arc<Mutex<ProviderEvidenceStore>>,
+    credential_env: Option<&[(String, String)]>,
+) -> Option<AgentTaskOutcome> {
+    let Ok(Some(provider)) = effective_provider_for_request(request, providers) else {
+        return None;
+    };
+    let catalog = AgentTaskProviderCatalog {
+        providers: providers.to_vec(),
+        diagnostics: diagnostics.to_vec(),
+        version: None,
+    };
+    let execution_plan = AgentTaskPlan::new(
+        format!("execution-preflight-{}", request.task_id),
+        vec![request.clone()],
+    );
+    for preflight in [
+        catalog.validate_selected_models(&execution_plan),
+        catalog.enforce_runtime_preflight_checks_for_plan(&execution_plan),
+        super::config_preflight::preflight_plan_provider_config_with_providers(
+            &execution_plan,
+            catalog.providers(),
+        ),
+    ] {
+        if let Err(error) = preflight {
+            return Some(AgentTaskOutcome {
+                task_id: request.task_id.clone(),
+                status: AgentTaskOutcomeStatus::Failed,
+                failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
+                summary: Some(format!(
+                    "provider route failed execution preflight: {}",
+                    error.message
+                )),
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: "agent_task.provider_execution_preflight_failed".to_string(),
+                    message: error.message,
+                    data: error.details,
+                }],
+                ..Default::default()
+            });
+        }
+    }
+    let mut readiness_cache = evidence
+        .lock()
+        .map(|evidence| evidence.readiness.clone())
+        .unwrap_or_default();
+    let dispatchability = match credential_env {
+        Some(credential_env) => {
+            super::dispatchability::evaluate_request_dispatchability_with_credentials(
+                &catalog,
+                request,
+                provider,
+                credential_env,
+                &mut readiness_cache,
+            )
+        }
+        None => super::dispatchability::evaluate_request_dispatchability(
+            &catalog,
+            request,
+            &mut readiness_cache,
+        ),
+    }
+    .dispatchability;
+    if dispatchability.ready {
+        return None;
+    }
+    let timeout = dispatchability
+        .checks
+        .runtime
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("execution deadline expired"));
+    Some(AgentTaskOutcome {
+        task_id: request.task_id.clone(),
+        status: if timeout {
+            AgentTaskOutcomeStatus::Timeout
+        } else {
+            AgentTaskOutcomeStatus::Failed
+        },
+        failure_classification: Some(if timeout {
+            AgentTaskFailureClassification::Timeout
+        } else if !dispatchability.checks.model.ready || !dispatchability.checks.route.ready {
+            AgentTaskFailureClassification::CapabilityMissing
+        } else {
+            AgentTaskFailureClassification::InvalidInput
+        }),
+        summary: Some(format!(
+            "provider route failed execution preflight: {}",
+            dispatchability.reason
+        )),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.provider_execution_preflight_failed".to_string(),
+            message: dispatchability.reason.clone(),
+            data: serde_json::to_value(dispatchability).unwrap_or(Value::Null),
+        }],
+        ..Default::default()
+    })
 }
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
@@ -126,31 +234,23 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             .ok()
             .flatten()
             .and_then(|provider| provider_capacity_key(&request, &provider).ok())
-            .map(|request_key| {
-                self.evidence
-                    .lock()
-                    .ok()
-                    .and_then(|evidence| evidence.reported_capacity_keys.get(&request_key).cloned())
-                    .unwrap_or(request_key)
-            })
             .unwrap_or_else(|| provider_usage_cap_key_for_request(&request))
     }
 
     fn provider_route_readiness(&self, request: &AgentTaskRequest) -> ProviderRouteReadiness {
+        if is_fixture_backend(&request.executor.backend) || is_repo_local_gate_request(request) {
+            return ProviderRouteReadiness::dispatchable();
+        }
         let request = request_with_effective_provider_contract(request, self.providers());
         let provider = match effective_provider_for_request(&request, self.providers()) {
             Ok(Some(provider)) => provider,
-            // Static resolution failures retain their established execution
-            // diagnostics. Readiness routing only skips a route after an exact
-            // production provider identity has resolved.
             Ok(None) => {
-                let route_exists = resolve_provider_for_backend(
+                let resolution = resolve_provider_for_backend(
                     self.providers(),
                     &request.executor.backend,
                     request.executor.selector.as_deref(),
-                )
-                .resolved()
-                .is_some();
+                );
+                let route_exists = resolution.clone().resolved().is_some();
                 let requires_provider_capabilities = request
                     .capability_requirements()
                     .is_ok_and(|requirements| !requirements.provider.is_empty());
@@ -166,28 +266,140 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                         remediation: None,
                         cache_identity: None,
                         provider_identity: None,
+                        capacity_key: None,
+                        diagnostic_data: Some(
+                            ProviderRouteDiagnosticData::ProviderCapabilityUnavailable {
+                                layer: "provider".to_string(),
+                                required_capabilities: request
+                                    .executor
+                                    .required_capabilities
+                                    .clone(),
+                            },
+                        ),
                     };
                 }
-                return ProviderRouteReadiness::dispatchable();
+                let (state, reason, diagnostic_data) = match resolution {
+                    ProviderResolution::NotFound => {
+                        let diagnostics = runtime_discovery_diagnostics_for_backend(
+                            self.diagnostics(),
+                            &request.executor.backend,
+                        );
+                        (
+                            "provider_missing",
+                            provider_not_found_message(&request.executor.backend, &diagnostics),
+                            ProviderRouteDiagnosticData::ProviderMissing {
+                                backend: request.executor.backend.clone(),
+                                runtime_discovery_diagnostics: diagnostics,
+                            },
+                        )
+                    }
+                    ProviderResolution::SelectorMismatch {
+                        available_ids,
+                        selector_hint,
+                    } => (
+                            "provider_selector_mismatch",
+                            selector_mismatch_message(
+                                &request.executor.backend,
+                                request.executor.selector.as_deref(),
+                            ),
+                            ProviderRouteDiagnosticData::ProviderSelectorMismatch {
+                                backend: request.executor.backend.clone(),
+                                selector: request.executor.selector.clone(),
+                                available_provider_ids: available_ids,
+                                hint: selector_hint,
+                            },
+                        ),
+                    ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => (
+                        "provider_ambiguous",
+                        format!(
+                            "multiple extension agent-task providers match backend '{}'; pass --selector with one provider id: {}",
+                            request.executor.backend,
+                            candidate_ids.join(", ")
+                        ),
+                        ProviderRouteDiagnosticData::ProviderAmbiguous {
+                            backend: request.executor.backend.clone(),
+                            available_provider_ids: candidate_ids,
+                        },
+                    ),
+                    ProviderResolution::Resolved(_) => (
+                        "provider_capability_unavailable",
+                        "the route does not satisfy required provider capabilities".to_string(),
+                        ProviderRouteDiagnosticData::ProviderCapabilityUnavailable {
+                            layer: "provider".to_string(),
+                            required_capabilities: request.executor.required_capabilities.clone(),
+                        },
+                    ),
+                };
+                return ProviderRouteReadiness {
+                    ready: false,
+                    state: state.to_string(),
+                    reason,
+                    reset_at: None,
+                    classification: Some("capability".to_string()),
+                    retryable: false,
+                    remediation: None,
+                    cache_identity: None,
+                    provider_identity: None,
+                    capacity_key: None,
+                    diagnostic_data: Some(diagnostic_data),
+                };
             }
-            Err(_) => return ProviderRouteReadiness::dispatchable(),
-        };
-        let request_capacity_key = match provider_capacity_key(&request, &provider) {
-            Ok(key) => key,
-            Err(error) => {
+            Err(reason) => {
                 return ProviderRouteReadiness {
                     ready: false,
                     state: "provider_identity_invalid".to_string(),
-                    reason: error.message,
+                    reason,
                     reset_at: None,
                     classification: Some("identity".to_string()),
                     retryable: false,
                     remediation: None,
                     cache_identity: None,
-                    provider_identity: Some(provider.id.clone()),
+                    provider_identity: None,
+                    capacity_key: None,
+                    diagnostic_data: None,
                 }
             }
         };
+        let credential_env =
+            match super::secrets::provider_request_credential_env(&request, &provider) {
+                Ok(env) => env,
+                Err(error) => {
+                    return ProviderRouteReadiness {
+                        ready: false,
+                        state: "provider_credentials_unavailable".to_string(),
+                        reason: error.message,
+                        reset_at: None,
+                        classification: Some("auth_failure".to_string()),
+                        retryable: false,
+                        remediation: Some(
+                            "repair the selected provider credential source".to_string(),
+                        ),
+                        cache_identity: None,
+                        provider_identity: Some(provider.id.clone()),
+                        capacity_key: None,
+                        diagnostic_data: None,
+                    };
+                }
+            };
+        let request_capacity_key =
+            match provider_capacity_key_with_credentials(&request, &provider, &credential_env) {
+                Ok(key) => key,
+                Err(error) => {
+                    return ProviderRouteReadiness {
+                        ready: false,
+                        state: "provider_identity_invalid".to_string(),
+                        reason: error.message,
+                        reset_at: None,
+                        classification: Some("identity".to_string()),
+                        retryable: false,
+                        remediation: None,
+                        cache_identity: None,
+                        provider_identity: Some(provider.id.clone()),
+                        capacity_key: None,
+                        diagnostic_data: None,
+                    }
+                }
+            };
         let mut readiness_cache = match self.evidence.lock() {
             Ok(evidence) => evidence,
             Err(_) => {
@@ -201,6 +413,8 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     remediation: None,
                     cache_identity: None,
                     provider_identity: Some(provider.id.clone()),
+                    capacity_key: None,
+                    diagnostic_data: None,
                 }
             }
         }
@@ -211,9 +425,11 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             diagnostics: Vec::new(),
             version: None,
         };
-        let evaluated = super::dispatchability::evaluate_request_dispatchability(
+        let evaluated = super::dispatchability::evaluate_request_dispatchability_with_credentials(
             &catalog,
             &request,
+            provider.clone(),
+            &credential_env,
             &mut readiness_cache,
         );
         let verdict = evaluated.dispatchability;
@@ -239,21 +455,11 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     remediation: None,
                     cache_identity: None,
                     provider_identity: Some(provider.id.clone()),
+                    capacity_key: None,
+                    diagnostic_data: None,
                 }
             }
         };
-        if evidence.reported_capacity_keys.len() >= 64
-            && !evidence
-                .reported_capacity_keys
-                .contains_key(&request_capacity_key)
-        {
-            if let Some(oldest) = evidence.reported_capacity_keys.keys().next().cloned() {
-                evidence.reported_capacity_keys.remove(&oldest);
-            }
-        }
-        evidence
-            .reported_capacity_keys
-            .insert(request_capacity_key, capacity_key.clone());
         if let Some(reset_at) = evidence.usage_caps.active(&capacity_key, now) {
             return ProviderRouteReadiness {
                 ready: false,
@@ -265,6 +471,8 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 remediation: None,
                 cache_identity: Some(capacity_key.clone()),
                 provider_identity: Some(provider.id.clone()),
+                capacity_key: Some(capacity_key.clone()),
+                diagnostic_data: None,
             };
         }
 
@@ -283,9 +491,20 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 remediation: Some("switch provider account credentials or wait for the bounded account block to expire".to_string()),
                 cache_identity: Some(capacity_key.clone()),
                 provider_identity: Some(provider.id.clone()),
+                capacity_key: Some(capacity_key.clone()),
+                diagnostic_data: None,
             };
         }
         evidence.account_blocks.remove(&capacity_key);
+        if verdict.ready {
+            evidence
+                .launch_credentials
+                .entry(capacity_key.clone())
+                .or_default()
+                .push_back(BoundProviderCredentials {
+                    env: credential_env,
+                });
+        }
         drop(evidence);
         ProviderRouteReadiness {
             ready: verdict.ready,
@@ -307,25 +526,21 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             provider_identity: runtime_evidence
                 .and_then(|evidence| evidence.provider_identity)
                 .or_else(|| Some(provider.id)),
+            capacity_key: Some(capacity_key),
+            diagnostic_data: None,
         }
     }
 
-    fn record_provider_outcome(&self, request: &AgentTaskRequest, outcome: &AgentTaskOutcome) {
-        let request = request_with_effective_provider_contract(request, self.providers());
-        let Ok(Some(provider)) = effective_provider_for_request(&request, self.providers()) else {
-            return;
-        };
-        let Ok(request_capacity_key) = provider_capacity_key(&request, &provider) else {
-            return;
-        };
+    fn record_provider_outcome(
+        &self,
+        _request: &AgentTaskRequest,
+        capacity_key: &str,
+        outcome: &AgentTaskOutcome,
+    ) {
         let Ok(mut evidence) = self.evidence.lock() else {
             return;
         };
-        let capacity_key = evidence
-            .reported_capacity_keys
-            .get(&request_capacity_key)
-            .cloned()
-            .unwrap_or(request_capacity_key);
+        let capacity_key = capacity_key.to_string();
         if let Some(reset_at) = reset_at_from_outcome(outcome) {
             evidence.usage_caps.record(capacity_key.clone(), reset_at);
         }
@@ -333,25 +548,14 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             if outcome.failure_classification
                 == Some(AgentTaskFailureClassification::ProviderAccountBlocked)
             {
-                if evidence.account_blocks.len() >= 64
-                    && !evidence.account_blocks.contains_key(&capacity_key)
-                {
-                    if let Some(oldest) = evidence
-                        .account_blocks
-                        .iter()
-                        .min_by_key(|(_, block)| block.generation)
-                        .map(|(key, _)| key.clone())
-                    {
-                        evidence.account_blocks.remove(&oldest);
-                    }
-                }
-                let generation = evidence.next_generation;
-                evidence.next_generation = evidence.next_generation.wrapping_add(1);
+                let now = chrono::Utc::now();
+                evidence
+                    .account_blocks
+                    .retain(|_, block| block.expires_at > now);
                 evidence.account_blocks.insert(
                     capacity_key,
                     AccountBlockEvidence {
-                        expires_at: chrono::Utc::now() + PROVIDER_ACCOUNT_BLOCK_TTL,
-                        generation,
+                        expires_at: now + PROVIDER_ACCOUNT_BLOCK_TTL,
                     },
                 );
             } else if matches!(
@@ -404,6 +608,36 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         }
         if is_repo_local_gate_request(&request) {
             return run_repo_local_gate_task(&request);
+        }
+        let bound_credentials = self.evidence.lock().ok().and_then(|mut evidence| {
+            let key = context.provider_capacity_key.as_deref()?;
+            let bound = evidence.launch_credentials.get_mut(key)?.pop_front();
+            if evidence
+                .launch_credentials
+                .get(key)
+                .is_some_and(VecDeque::is_empty)
+            {
+                evidence.launch_credentials.remove(key);
+            }
+            bound
+        });
+        let launch_credentials = bound_credentials.map(|bound| bound.env).or_else(|| {
+            effective_provider_for_request(&request.request, self.providers())
+                .ok()
+                .flatten()
+                .and_then(|provider| {
+                    super::secrets::provider_request_credential_env(&request.request, &provider)
+                        .ok()
+                })
+        });
+        if let Some(outcome) = production_execution_preflight(
+            &request.request,
+            self.providers(),
+            self.diagnostics(),
+            &self.evidence,
+            launch_credentials.as_deref(),
+        ) {
+            return outcome;
         }
 
         let requirements = match request.capability_requirements() {
@@ -592,7 +826,12 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 &ready_tools,
             ));
 
-        run_materialized_provider_command(&request, &provider, &context)
+        run_materialized_provider_command_with_credentials(
+            &request,
+            &provider,
+            &context,
+            launch_credentials.as_deref(),
+        )
     }
 }
 
@@ -839,7 +1078,8 @@ mod tests {
             failure_classification: Some(AgentTaskFailureClassification::ProviderAccountBlocked),
             ..Default::default()
         };
-        executor.record_provider_outcome(&blocked, &blocked_outcome);
+        let capacity_key = executor.provider_route_capacity_key(&blocked);
+        executor.record_provider_outcome(&blocked, &capacity_key, &blocked_outcome);
 
         assert_eq!(
             executor.provider_route_readiness(&blocked).state,
@@ -860,7 +1100,8 @@ mod tests {
             message: "usage cap".to_string(),
             data: json!({ "reset_at": reset_at.to_rfc3339() }),
         }];
-        executor.record_provider_outcome(&capped, &blocked_outcome);
+        let capacity_key = executor.provider_route_capacity_key(&capped);
+        executor.record_provider_outcome(&capped, &capacity_key, &blocked_outcome);
 
         let separately_constructed_for_later_plan = readiness_executor();
         let readiness = separately_constructed_for_later_plan.provider_route_readiness(&capped);
@@ -884,6 +1125,37 @@ mod tests {
                 .provider_route_readiness(&blocked)
                 .ready,
             "expired negative evidence must re-admit a recovered account"
+        );
+    }
+
+    #[test]
+    fn account_block_registry_preserves_more_than_sixty_four_active_bindings() {
+        let executor = readiness_executor();
+        for index in 0..65 {
+            let request = readiness_request(&format!("model-{index}"));
+            let key = executor.provider_route_capacity_key(&request);
+            executor.record_provider_outcome(
+                &request,
+                &key,
+                &AgentTaskOutcome {
+                    task_id: request.task_id.clone(),
+                    status: AgentTaskOutcomeStatus::ProviderError,
+                    failure_classification: Some(
+                        AgentTaskFailureClassification::ProviderAccountBlocked,
+                    ),
+                    ..Default::default()
+                },
+            );
+        }
+
+        assert_eq!(
+            executor
+                .evidence
+                .lock()
+                .expect("provider evidence")
+                .account_blocks
+                .len(),
+            65
         );
     }
 
@@ -945,11 +1217,14 @@ mod tests {
         });
         let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
         let request = readiness_request("model");
-        assert!(executor.provider_route_readiness(&request).ready);
+        let readiness = executor.provider_route_readiness(&request);
+        assert!(readiness.ready);
+        let capacity_key = readiness.capacity_key.expect("reported capacity binding");
 
         let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
         executor.record_provider_outcome(
             &request,
+            &capacity_key,
             &AgentTaskOutcome {
                 task_id: request.task_id.clone(),
                 status: AgentTaskOutcomeStatus::ProviderError,
@@ -1028,6 +1303,7 @@ mod tests {
             attempt: 1,
             cancellation: Default::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         };
 
         let (_, path, error) = materialize_executor_request_at_root(

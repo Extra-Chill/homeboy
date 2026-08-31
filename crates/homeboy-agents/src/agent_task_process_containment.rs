@@ -86,17 +86,45 @@ impl AgentTaskProcessContainment {
     /// This replaces `Child::kill`, which signals only the direct child and
     /// leaves its build/test descendants running.
     pub(crate) fn terminate_live(&mut self, child: &mut Child) -> Result<(), String> {
-        // Recorded before the attempt so a failed termination is never retried
-        // against a pid the kernel may have recycled.
-        self.reaped = true;
-        terminate_process_tree_and_reap(child)
-            .map(|_| ())
-            .map_err(|error| {
-                format!(
-                    "could not terminate the contained provider process group{}: {error}",
-                    self.leader_suffix()
-                )
-            })
+        match terminate_process_tree_and_reap(child) {
+            Ok(_) => {
+                self.reaped = true;
+                Ok(())
+            }
+            Err(primary_error) => {
+                // A supervision error must not become an early return that
+                // leaves the direct child unreaped. Retry group cleanup, then
+                // independently kill and wait for the child as a final fallback.
+                let group_error = self
+                    .leader_pid
+                    .and_then(|pid| terminate_remaining_process_group(pid).err());
+                let kill_error = child
+                    .kill()
+                    .err()
+                    .filter(|error| error.kind() != std::io::ErrorKind::InvalidInput);
+                let wait_error = child.wait().err();
+                // Reaping the direct child does not prove descendants in its
+                // process group are gone. Leave the containment live when
+                // group cleanup failed so Drop retries the group.
+                self.reaped = group_error.is_none() && wait_error.is_none();
+
+                let mut details = vec![primary_error.to_string()];
+                if let Some(error) = group_error {
+                    details.push(format!("fallback group cleanup failed: {error}"));
+                }
+                if let Some(error) = kill_error {
+                    details.push(format!("fallback child kill failed: {error}"));
+                }
+                if let Some(error) = wait_error {
+                    details.push(format!("fallback child reap failed: {error}"));
+                }
+                Err(format!(
+                    "could not terminate the contained provider process group{}: {}",
+                    self.leader_suffix(),
+                    details.join("; ")
+                ))
+            }
+        }
     }
 
     /// Reap whatever is still alive in the group after its leader exited on its
@@ -109,16 +137,27 @@ impl AgentTaskProcessContainment {
         if self.reaped {
             return Ok(());
         }
-        self.reaped = true;
         let Some(leader_pid) = self.leader_pid else {
+            self.reaped = true;
             return Ok(());
         };
-        terminate_remaining_process_group(leader_pid).map_err(|error| {
-            format!(
-                "contained provider process group{} outlived its leader and did not exit: {error}",
-                self.leader_suffix()
-            )
-        })
+        match terminate_remaining_process_group(leader_pid) {
+            Ok(()) => {
+                self.reaped = true;
+                Ok(())
+            }
+            Err(primary_error) => {
+                let retry_error = terminate_remaining_process_group(leader_pid).err();
+                self.reaped = retry_error.is_none();
+                Err(format!(
+                    "contained provider process group{} outlived its leader and did not exit: {primary_error}{}",
+                    self.leader_suffix(),
+                    retry_error
+                        .map(|error| format!("; cleanup retry failed: {error}"))
+                        .unwrap_or_default()
+                ))
+            }
+        }
     }
 
     fn leader_suffix(&self) -> String {

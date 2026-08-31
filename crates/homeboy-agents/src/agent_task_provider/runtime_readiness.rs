@@ -9,8 +9,8 @@ use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
 use super::command_runner::{
-    run_provider_readiness_invocation_with_env, validate_provider_immediate_failure_patterns,
-    ProviderReadinessInvocationResult,
+    run_provider_readiness_invocation_with_env_and_timeout,
+    validate_provider_immediate_failure_patterns, ProviderReadinessInvocationResult,
 };
 use super::resolution::select_provider;
 use super::AgentTaskExecutorProvider;
@@ -89,6 +89,7 @@ const PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL: Duration = Duration::from_secs(5)
 const PROVIDER_RUNTIME_READINESS_ERROR_TTL: Duration = Duration::from_secs(2);
 const PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS: usize = 2;
 const MAX_CONCURRENT_PROVIDER_READINESS_PROBES: usize = 4;
+const EXECUTION_DEADLINE_PREFIX: &str = "execution deadline expired";
 
 #[derive(Debug)]
 struct ProviderReadinessProbeGate {
@@ -110,7 +111,7 @@ impl Drop for ProviderReadinessProbePermit {
     }
 }
 
-fn acquire_probe_permit() -> ProviderReadinessProbePermit {
+fn acquire_probe_permit(deadline_unix_ms: Option<u64>) -> Result<ProviderReadinessProbePermit> {
     static GATE: OnceLock<ProviderReadinessProbeGate> = OnceLock::new();
     let gate = GATE.get_or_init(|| ProviderReadinessProbeGate {
         active: Mutex::new(0),
@@ -121,13 +122,73 @@ fn acquire_probe_permit() -> ProviderReadinessProbePermit {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     while *active >= MAX_CONCURRENT_PROVIDER_READINESS_PROBES {
-        active = gate
+        let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
+            return Err(readiness_deadline_error("probe_permit", deadline_unix_ms));
+        };
+        let (next, timeout) = gate
             .changed
-            .wait(active)
+            .wait_timeout(active, wait)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active = next;
+        if timeout.timed_out() && *active >= MAX_CONCURRENT_PROVIDER_READINESS_PROBES {
+            return Err(readiness_deadline_error("probe_permit", deadline_unix_ms));
+        }
     }
     *active += 1;
-    ProviderReadinessProbePermit(gate)
+    Ok(ProviderReadinessProbePermit(gate))
+}
+
+fn remaining_deadline_duration(deadline_unix_ms: Option<u64>) -> Option<Duration> {
+    match crate::agent_task_timeout::remaining_execution_deadline_ms(deadline_unix_ms) {
+        Some(0) => None,
+        Some(remaining) => Some(Duration::from_millis(remaining)),
+        None => Some(Duration::from_secs(24 * 60 * 60)),
+    }
+}
+
+fn readiness_deadline_error(boundary: &str, deadline_unix_ms: Option<u64>) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "execution_deadline_unix_ms",
+        format!("agent-task execution deadline expired during provider readiness {boundary}"),
+        deadline_unix_ms.map(|value| value.to_string()),
+        None,
+    )
+    .with_retryable(false);
+    error.details["classification"] = json!("timeout");
+    error.details["zero_provider_executions"] = json!(true);
+    error.details["deadline_unix_ms"] = json!(deadline_unix_ms);
+    error
+}
+
+fn ensure_readiness_deadline(boundary: &str, deadline_unix_ms: Option<u64>) -> Result<()> {
+    if remaining_deadline_duration(deadline_unix_ms).is_none() {
+        Err(readiness_deadline_error(boundary, deadline_unix_ms))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_caller_deadline_result(
+    result: &std::result::Result<ProviderReadinessInvocationResult, String>,
+) -> bool {
+    result
+        .as_ref()
+        .err()
+        .is_some_and(|message| message.contains(EXECUTION_DEADLINE_PREFIX))
+}
+
+fn map_readiness_result(
+    provider: &AgentTaskExecutorProvider,
+    result: std::result::Result<ProviderReadinessInvocationResult, String>,
+    deadline_unix_ms: Option<u64>,
+) -> Result<ProviderReadinessInvocationResult> {
+    result.map_err(|message| {
+        if message.contains(EXECUTION_DEADLINE_PREFIX) {
+            readiness_deadline_error("probe", deadline_unix_ms)
+        } else {
+            readiness_invocation_error(provider, message)
+        }
+    })
 }
 
 fn readiness_invocation_error(provider: &AgentTaskExecutorProvider, message: String) -> Error {
@@ -237,7 +298,19 @@ pub(crate) fn readiness_verdict_with_credentials(
     credential_env: &[(String, String)],
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> Result<ProviderReadinessInvocationResult> {
+    readiness_verdict_with_credentials_and_deadline(provider, config, credential_env, cache, None)
+}
+
+pub(crate) fn readiness_verdict_with_credentials_and_deadline(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    cache: &mut ProviderRuntimeReadinessCache,
+    deadline_unix_ms: Option<u64>,
+) -> Result<ProviderReadinessInvocationResult> {
+    ensure_readiness_deadline("probe", deadline_unix_ms)?;
     let base_key = readiness_request_key(provider, config)?;
+    ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
     let credential_identity = credential_env
         .iter()
         .map(|(name, value)| (name, content_hash::sha256_hex(value.as_bytes())))
@@ -246,6 +319,7 @@ pub(crate) fn readiness_verdict_with_credentials(
         &serde_json::to_vec(&(base_key, credential_identity))
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     );
+    ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
     let mut registered_waiter = false;
     loop {
         let mut state = cache
@@ -253,19 +327,33 @@ pub(crate) fn readiness_verdict_with_credentials(
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(error) = ensure_readiness_deadline("cache_lock", deadline_unix_ms) {
+            if registered_waiter {
+                release_cache_waiter(&mut state, &request_key);
+                cache.shared.changed.notify_all();
+            }
+            return Err(error);
+        }
         match state.by_request.get(&request_key) {
             Some(CachedProviderRuntimeReadiness::InFlight) => {
                 if !registered_waiter {
                     *state.waiters.entry(request_key.clone()).or_default() += 1;
                     registered_waiter = true;
                 }
-                drop(
-                    cache
-                        .shared
-                        .changed
-                        .wait(state)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                );
+                let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
+                    release_cache_waiter(&mut state, &request_key);
+                    return Err(readiness_deadline_error("cache_wait", deadline_unix_ms));
+                };
+                let (mut state, timeout) = cache
+                    .shared
+                    .changed
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if timeout.timed_out() {
+                    release_cache_waiter(&mut state, &request_key);
+                    return Err(readiness_deadline_error("cache_wait", deadline_unix_ms));
+                }
+                drop(state);
                 continue;
             }
             Some(CachedProviderRuntimeReadiness::Complete {
@@ -277,12 +365,20 @@ pub(crate) fn readiness_verdict_with_credentials(
                     Err(_) => PROVIDER_RUNTIME_READINESS_ERROR_TTL,
                 };
                 if cached_at.elapsed() <= ttl {
+                    if let Err(error) = ensure_readiness_deadline("cached_result", deadline_unix_ms)
+                    {
+                        if registered_waiter {
+                            release_cache_waiter(&mut state, &request_key);
+                            cache.shared.changed.notify_all();
+                        }
+                        return Err(error);
+                    }
                     let result = result.clone();
                     if registered_waiter {
                         release_cache_waiter(&mut state, &request_key);
                         cache.shared.changed.notify_all();
                     }
-                    return result.map_err(|message| readiness_invocation_error(provider, message));
+                    return map_readiness_result(provider, result, deadline_unix_ms);
                 }
                 if registered_waiter {
                     release_cache_waiter(&mut state, &request_key);
@@ -311,13 +407,18 @@ pub(crate) fn readiness_verdict_with_credentials(
             {
                 state.by_request.remove(&oldest);
             } else {
-                drop(
-                    cache
-                        .shared
-                        .changed
-                        .wait(state)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                );
+                let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
+                    return Err(readiness_deadline_error("cache_capacity", deadline_unix_ms));
+                };
+                let (state, timeout) = cache
+                    .shared
+                    .changed
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                drop(state);
+                if timeout.timed_out() {
+                    return Err(readiness_deadline_error("cache_capacity", deadline_unix_ms));
+                }
                 continue;
             }
         }
@@ -325,14 +426,39 @@ pub(crate) fn readiness_verdict_with_credentials(
             request_key.clone(),
             CachedProviderRuntimeReadiness::InFlight,
         );
+        if let Err(error) = ensure_readiness_deadline("probe_publication", deadline_unix_ms) {
+            state.by_request.remove(&request_key);
+            cache.shared.changed.notify_all();
+            return Err(error);
+        }
         break;
     }
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _permit = acquire_probe_permit();
+        let _permit = acquire_probe_permit(deadline_unix_ms)
+            .map_err(|error| format!("{EXECUTION_DEADLINE_PREFIX}: {}", error.message))?;
+        ensure_readiness_deadline("probe_start", deadline_unix_ms)
+            .map_err(|error| format!("{EXECUTION_DEADLINE_PREFIX}: {}", error.message))?;
         let mut result = Err("provider readiness invocation did not run".to_string());
         for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
-            result = run_provider_readiness_invocation_with_env(provider, config, credential_env);
+            let Some(remaining) = remaining_deadline_duration(deadline_unix_ms) else {
+                return Err(format!(
+                    "{EXECUTION_DEADLINE_PREFIX} before readiness retry"
+                ));
+            };
+            result = run_provider_readiness_invocation_with_env_and_timeout(
+                provider,
+                config,
+                credential_env,
+                remaining.min(Duration::from_secs(20)),
+            );
+            if crate::agent_task_timeout::remaining_execution_deadline_ms(deadline_unix_ms)
+                == Some(0)
+            {
+                result = Err(format!(
+                    "{EXECUTION_DEADLINE_PREFIX} during readiness probe"
+                ));
+            }
             let should_retry = match &result {
                 Err(_) => true,
                 Ok(verdict) => {
@@ -354,6 +480,11 @@ pub(crate) fn readiness_verdict_with_credentials(
         .state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if is_caller_deadline_result(&result) {
+        state.by_request.remove(&request_key);
+        cache.shared.changed.notify_all();
+        return Err(readiness_deadline_error("probe", deadline_unix_ms));
+    }
     let generation = state.next_generation;
     state.next_generation = state.next_generation.wrapping_add(1);
     state.by_request.insert(
@@ -365,7 +496,8 @@ pub(crate) fn readiness_verdict_with_credentials(
         },
     );
     cache.shared.changed.notify_all();
-    result.map_err(|message| readiness_invocation_error(provider, message))
+    ensure_readiness_deadline("probe_publication", deadline_unix_ms)?;
+    map_readiness_result(provider, result, deadline_unix_ms)
 }
 
 pub(crate) fn effective_provider_config(config: &Value, model: Option<&str>) -> Value {
@@ -436,7 +568,7 @@ fn readiness_error(
     } else {
         homeboy_core::redaction::redact_string(&verdict.reason)
     };
-    let mut hints = vec![json!({
+    let evidence = json!({
         "kind": "provider_runtime_readiness_failed",
         "provider_id": provider.id,
         "backend": provider.backend,
@@ -447,12 +579,12 @@ fn readiness_error(
             &serde_json::to_vec(&verdict.identity).unwrap_or_default()
         ),
         "effective_model": config.get("model"),
-    })
-    .to_string()];
+    });
+    let mut hints = Vec::new();
     if !verdict.remediation.trim().is_empty() {
         hints.push(homeboy_core::redaction::redact_string(&verdict.remediation));
     }
-    Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "provider_runtime_readiness",
         format!(
             "agent-task backend '{}' is not ready for its selected runtime/model: {} ({reason})",
@@ -461,7 +593,9 @@ fn readiness_error(
         Some(provider.backend.clone()),
         Some(hints),
     )
-    .with_retryable(verdict.retryable)
+    .with_retryable(verdict.retryable);
+    error.details["runtime_readiness_evidence"] = evidence;
+    error
 }
 
 #[cfg(test)]
@@ -723,6 +857,83 @@ mod tests {
     }
 
     #[test]
+    fn short_deadline_waiter_does_not_poison_long_deadline_singleflight() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("different-deadlines.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),200);",
+        )
+        .expect("readiness script");
+        let provider = provider(&script, &count);
+        let cache = ProviderRuntimeReadinessCache::default();
+        let long_provider = provider.clone();
+        let mut long_cache = cache.clone();
+        let long = std::thread::spawn(move || {
+            readiness_verdict_with_credentials_and_deadline(
+                &long_provider,
+                &json!({"model":"same"}),
+                &[],
+                &mut long_cache,
+                Some(crate::agent_task_timeout::now_unix_ms() + 2_000),
+            )
+        });
+        let started = Instant::now() + Duration::from_secs(5);
+        loop {
+            let in_flight = cache
+                .shared
+                .state
+                .lock()
+                .expect("readiness cache")
+                .by_request
+                .values()
+                .any(|entry| matches!(entry, CachedProviderRuntimeReadiness::InFlight));
+            if in_flight {
+                break;
+            }
+            assert!(
+                !long.is_finished(),
+                "long probe finished before publication"
+            );
+            assert!(Instant::now() < started, "long probe did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 25;
+        let error = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"same"}),
+            &[],
+            &mut cache.clone(),
+            Some(short_deadline),
+        )
+        .expect_err("short waiter must time out locally");
+        assert_eq!(error.details["classification"], "timeout");
+        assert_eq!(error.details["deadline_unix_ms"], short_deadline);
+        assert!(
+            long.join()
+                .expect("long waiter")
+                .expect("long readiness")
+                .ready
+        );
+
+        let mut cache = cache;
+        assert!(
+            readiness_verdict(&provider, &json!({"model":"same"}), &mut cache)
+                .expect("published long result")
+                .ready
+        );
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn distinct_readiness_keys_probe_concurrently() {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("unused-count");
@@ -874,5 +1085,48 @@ mod tests {
                 .count(),
             PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS + 1
         );
+    }
+
+    #[test]
+    fn expired_execution_deadline_returns_typed_timeout_without_a_probe() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let provider = provider(&readiness_script(root.path()), &count);
+
+        let error = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"ready"}),
+            &[],
+            &mut ProviderRuntimeReadinessCache::default(),
+            Some(crate::agent_task_timeout::now_unix_ms().saturating_sub(1)),
+        )
+        .expect_err("expired deadline stops before probing");
+
+        assert_eq!(error.details["classification"], "timeout");
+        assert_eq!(error.details["zero_provider_executions"], true);
+        assert!(!count.exists());
+    }
+
+    #[test]
+    fn readiness_command_timeout_is_capped_to_the_absolute_deadline() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("slow.js");
+        std::fs::write(&script, "setTimeout(()=>process.stdout.write('{}'),5000);")
+            .expect("slow readiness script");
+        let provider = provider(&script, &count);
+        let started = Instant::now();
+
+        let error = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"slow"}),
+            &[],
+            &mut ProviderRuntimeReadinessCache::default(),
+            Some(crate::agent_task_timeout::now_unix_ms() + 100),
+        )
+        .expect_err("absolute deadline interrupts readiness");
+
+        assert_eq!(error.details["classification"], "timeout");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

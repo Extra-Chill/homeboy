@@ -1010,6 +1010,7 @@ mod committed_harvest_tests {
             rotation_transitions_used: 0,
             rotation_attempts: Vec::new(),
             readiness_skips: Vec::new(),
+            provider_capacity_key: "test-capacity".to_string(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
             source_workspace_root: None,
@@ -1161,6 +1162,7 @@ mod committed_harvest_tests {
             rotation_transitions_used: 0,
             rotation_attempts: Vec::new(),
             readiness_skips: Vec::new(),
+            provider_capacity_key: "test-capacity".to_string(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
             source_workspace_root: None,
@@ -1415,6 +1417,7 @@ mod committed_harvest_tests {
             rotation_transitions_used: 0,
             rotation_attempts: Vec::new(),
             readiness_skips: Vec::new(),
+            provider_capacity_key: "test-capacity".to_string(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
             // The durable source workspace is the real, persistent checkout.

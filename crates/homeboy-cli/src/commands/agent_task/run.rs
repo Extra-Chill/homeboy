@@ -1224,6 +1224,106 @@ mod preview_tests {
     }
 
     #[test]
+    fn backend_preview_readiness_injects_sole_default_fallback_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let credential = root.path().join("credential.json");
+        let readiness = root.path().join("readiness.js");
+        std::fs::write(&credential, r#"{"token":"fallback-token"}"#).expect("credential");
+        std::fs::write(
+            &readiness,
+            "const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
+        )
+        .expect("readiness script");
+        let catalog = provider::AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "fallback.agent-task-executor",
+                "backend": "fallback",
+                "invocation": { "argv": ["true"] },
+                "readiness_invocation": { "argv": ["node", readiness] },
+                "provider_defaults": {
+                    "only": {
+                        "required_secret_env": ["PREVIEW_FALLBACK_TOKEN"],
+                        "secret_env_sources": {
+                            "PREVIEW_FALLBACK_TOKEN": {
+                                "source": "json-file",
+                                "path": credential,
+                                "field": "token"
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("provider")],
+            ..Default::default()
+        };
+
+        assert_eq!(ready_cook_backends(&catalog), vec!["fallback"]);
+    }
+
+    #[test]
+    fn cook_validation_uses_valid_fallback_without_mutating_durable_primary() {
+        use homeboy::agents::agent_task_scheduler::{
+            AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+        };
+        use homeboy::agents::agent_tasks::{
+            AgentTaskExecutor, AgentTaskLimits, AgentTaskPlan, AgentTaskPolicy, AgentTaskRequest,
+            AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
+        };
+
+        let provider: provider::AgentTaskExecutorProvider =
+            serde_json::from_value(serde_json::json!({
+                "id": "model.agent-task-executor",
+                "backend": "model-backend",
+                "invocation": {"argv":["true"]},
+                "cli": {"profiles":[{"name":"valid-fallback", "model":"valid-fallback"}]}
+            }))
+            .expect("provider");
+        let catalog = provider::AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        };
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "cook-model-fallback".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "model-backend".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: Some("invalid-primary".to_string()),
+                config: Value::Null,
+            },
+            instructions: "run".to_string(),
+            inputs: Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
+            metadata: Value::Null,
+        };
+        let mut plan = AgentTaskPlan::new("cook-model-fallback", vec![request]);
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![AgentTaskProviderRotationEntry {
+                model: Some("valid-fallback".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        validate_cook_provider_execution_plan(&plan, &catalog)
+            .expect("fallback route validates Cook");
+        assert_eq!(plan.tasks[0].executor.model(), Some("invalid-primary"));
+    }
+
+    #[test]
     fn preview_reports_missing_backend_policy_before_prompt_validation() {
         crate::test_support::with_isolated_home(|_| {
             let (preview, exit_code) =
@@ -6856,13 +6956,22 @@ pub(crate) fn compile_cook_plan(
     // refresh the persisted effective-route disclosure.
     resolve_cook_execution_budget(args, &mut plan)?;
     let catalog = homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover();
-    homeboy::agents::agent_task_provider::preflight_plan_provider_dispatchability_with_providers(
-        &mut plan,
-        &catalog,
-        &mut homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )?;
-    catalog.validate_selected_models(&plan)?;
+    validate_cook_provider_execution_plan(&plan, &catalog)?;
     Ok(plan)
+}
+
+fn validate_cook_provider_execution_plan(
+    plan: &homeboy::agents::agent_tasks::AgentTaskPlan,
+    catalog: &homeboy::agents::agent_task_provider::AgentTaskProviderCatalog,
+) -> homeboy::core::Result<()> {
+    let selected_plan =
+        homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            &catalog,
+            &mut homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        )?;
+    catalog.validate_selected_models(&selected_plan)?;
+    Ok(())
 }
 
 pub(crate) fn validate_provider_evidence_inputs(

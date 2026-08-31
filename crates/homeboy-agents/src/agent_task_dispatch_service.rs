@@ -199,23 +199,28 @@ fn dispatch_with_provider_catalog(
     let plan = build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
-    if let Err(error) =
-        crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+    let execution_plan =
+        match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
             &plan,
             catalog,
             &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-        )
-    {
-        if error.retryable != Some(true) {
-            preflight_dispatch_provider_secrets(&plan)?;
-            return Err(with_declared_credential_hints(error, &plan, catalog));
-        }
-    }
+        ) {
+            Ok(plan) => {
+                validate_selected_execution_plan(&plan, catalog)?;
+                plan
+            }
+            Err(error) if error.retryable == Some(true) => plan.clone(),
+            Err(error) => {
+                preflight_dispatch_provider_secrets(&plan)?;
+                return Err(with_declared_credential_hints(error, &plan, catalog));
+            }
+        };
     // Keep the complete route chain durable. The scheduler evaluates readiness
     // immediately before each possible execution and records zero-dispatch
     // exhaustion evidence when every route is unavailable.
     run_dispatch_plan(
         plan,
+        execution_plan,
         request.run_id.as_deref(),
         request.core.queue_only,
         backend_selection,
@@ -231,43 +236,44 @@ pub fn preflight_dispatch_provider_admission(
     let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
-    if let Err(error) =
-        crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-            &plan,
-            catalog,
-            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-        )
-    {
-        if !matches!(
-            resolve_provider_for_backend(
-                catalog.providers(),
-                &request.backend,
-                request.selector.as_deref()
-            ),
-            ProviderResolution::Resolved(_)
-        ) {
-            crate::agent_task_provider::validate_provider_runner_readiness_for_backend_with_catalog(
+    let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &plan,
+        catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            if !matches!(
+                resolve_provider_for_backend(
+                    catalog.providers(),
+                    &request.backend,
+                    request.selector.as_deref()
+                ),
+                ProviderResolution::Resolved(_)
+            ) {
+                crate::agent_task_provider::validate_provider_runner_readiness_for_backend_with_catalog(
                 catalog,
                 &request.backend,
                 request.selector.as_deref(),
             )?;
-        }
-        preflight_provider_credentials_for_backend(
-            catalog.providers(),
-            &request.backend,
-            request.selector.as_deref(),
-        )?;
-        catalog.apply_provider_runner_secret_env_contracts(&mut plan);
-        catalog.validate_selected_models(&plan)?;
-        preflight_dispatch_provider_secrets(&plan)?;
-        preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
-        crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
+            }
+            preflight_provider_credentials_for_backend(
+                catalog.providers(),
+                &request.backend,
+                request.selector.as_deref(),
+            )?;
+            catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+            catalog.validate_selected_models(&plan)?;
+            preflight_dispatch_provider_secrets(&plan)?;
+            preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
+            crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
             &plan,
             catalog,
             &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
         )?;
-        return Err(error);
-    }
+            return Err(error);
+        }
+    };
     catalog.validate_selected_models(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
@@ -289,24 +295,44 @@ pub fn dispatch_with_provider_requirements(
         provider_requires_cwd_git_checkout,
     )?;
     let catalog = AgentTaskProviderCatalog::discover();
-    if let Err(error) =
-        crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+    let execution_plan =
+        match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
             &plan,
             &catalog,
             &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-        )
-    {
-        if error.retryable != Some(true) {
-            preflight_dispatch_provider_secrets(&plan)?;
-            return Err(with_declared_credential_hints(error, &plan, &catalog));
-        }
-    }
+        ) {
+            Ok(plan) => {
+                validate_selected_execution_plan(&plan, &catalog)?;
+                plan
+            }
+            Err(error) if error.retryable == Some(true) => plan.clone(),
+            Err(error) => {
+                preflight_dispatch_provider_secrets(&plan)?;
+                return Err(with_declared_credential_hints(error, &plan, &catalog));
+            }
+        };
     run_dispatch_plan(
         plan,
+        execution_plan,
         request.run_id.as_deref(),
         request.core.queue_only,
         backend_selection,
         executor,
+    )
+}
+
+fn validate_selected_execution_plan(
+    plan: &AgentTaskPlan,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<()> {
+    catalog.validate_selected_models(plan)?;
+    catalog.enforce_runtime_preflight_checks_for_plan(plan)?;
+    preflight_dispatch_provider_secrets(plan)?;
+    preflight_plan_provider_config_with_providers(plan, catalog.providers())?;
+    crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
+        plan,
+        catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
     )
 }
 
@@ -335,13 +361,14 @@ fn with_declared_credential_hints(
 /// points prepare a plan differently, then share lifecycle transitions,
 /// scheduler execution, aggregate persistence, and report construction here.
 fn run_dispatch_plan(
-    plan: AgentTaskPlan,
+    durable_plan: AgentTaskPlan,
+    execution_plan: AgentTaskPlan,
     requested_run_id: Option<&str>,
     queue_only: bool,
     backend_selection: Option<BackendSelection>,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
-    let submitted = lifecycle::submit_plan(&plan, requested_run_id)?;
+    let submitted = lifecycle::submit_plan(&durable_plan, requested_run_id)?;
     let run_id = submitted.run_id.clone();
 
     if queue_only {
@@ -364,7 +391,7 @@ fn run_dispatch_plan(
             Err(error) => {
                 lifecycle::record_pre_execution_failure(
                     &run_id,
-                    &plan,
+                    &durable_plan,
                     "validate_harvest_transport",
                     &error,
                 )?;
@@ -375,8 +402,8 @@ fn run_dispatch_plan(
     let aggregate = AgentTaskScheduler::new_controller(executor)
         .with_harvest_context(harvest_context)
         .with_run_id(run_id.clone())
-        .run(plan.clone());
-    let record = lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
+        .run(execution_plan);
+    let record = lifecycle::record_run_aggregate(&run_id, &durable_plan, &aggregate)?;
     let exit_code = aggregate_exit_code(&aggregate);
 
     Ok(AgentTaskRunResult {

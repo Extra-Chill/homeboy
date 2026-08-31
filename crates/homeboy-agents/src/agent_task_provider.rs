@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(not(test))]
@@ -18,7 +18,8 @@ pub(crate) use crate::agent_task::{
 };
 use crate::agent_task_gate_executor::{is_repo_local_gate_request, run_repo_local_gate_task};
 use crate::agent_task_scheduler::{
-    AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan, ProviderRouteReadiness,
+    AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
+    ProviderRouteDiagnosticData, ProviderRouteReadiness,
 };
 use crate::agent_task_secrets::{
     resolve_secret_env_with_fallbacks, secret_env_status_with_fallbacks,
@@ -87,13 +88,15 @@ pub use credential_readiness::{
 };
 pub use dispatchability::{
     admit_plan_provider_dispatchability_with_providers, evaluate_provider_dispatchability,
-    evaluate_provider_dispatchability_with_config,
+    evaluate_provider_dispatchability_with_cache, evaluate_provider_dispatchability_with_config,
     preflight_plan_provider_dispatchability_with_providers,
     preflight_plan_provider_dispatchability_without_runtime_with_providers,
     preflight_provider_dispatchability, preflight_provider_dispatchability_with_config,
     preflight_provider_dispatchability_without_runtime_with_config,
     AgentTaskProviderConfigurationDiagnosis, AgentTaskProviderCredentialStatus,
-    AgentTaskProviderDispatchability, AgentTaskProviderOwner, AgentTaskProviderRuntimeEvidence,
+    AgentTaskProviderDispatchability, AgentTaskProviderDispatchabilityCheck,
+    AgentTaskProviderDispatchabilityChecks, AgentTaskProviderDispatchabilityCredentialCheck,
+    AgentTaskProviderOwner, AgentTaskProviderRuntimeEvidence,
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;
@@ -111,7 +114,8 @@ pub use runtime_preflight_checks::{
     RuntimePreflightReadiness,
 };
 pub(crate) use runtime_readiness::{
-    effective_provider_config, readiness_request_key, readiness_verdict_with_credentials,
+    effective_provider_config, readiness_request_key,
+    readiness_verdict_with_credentials_and_deadline,
 };
 pub use runtime_readiness::{
     preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,

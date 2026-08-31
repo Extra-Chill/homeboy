@@ -127,15 +127,15 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
     ) {
         Ok(plan) => plan,
         Err(error) => {
-            let route_evidence = error
-                .hints
-                .iter()
-                .map(|hint| hint.message.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let kind = if route_evidence.contains("\"classification\":\"capability\"") {
+            let classifications = error.details["route_evidence"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|route| route["classification"].as_str())
+                .collect::<Vec<_>>();
+            let kind = if classifications.contains(&"capability") {
                 AgentTaskPlanValidationKind::UnavailableCapability
-            } else if route_evidence.contains("\"classification\":\"capacity\"") {
+            } else if classifications.contains(&"capacity") {
                 AgentTaskPlanValidationKind::TemporaryCapacity
             } else {
                 AgentTaskPlanValidationKind::MissingReadiness
@@ -2391,7 +2391,7 @@ fn prepare_plan_workspaces(plan: &mut AgentTaskPlan, run_id: Option<&str>) -> Re
     Ok(())
 }
 
-fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
+pub(crate) fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
     let mut secret_env_plan = SecretEnvPlan::from_secret_env_names(
         plan.tasks
             .iter()

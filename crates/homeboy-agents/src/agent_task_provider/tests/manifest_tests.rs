@@ -190,6 +190,7 @@ fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
             attempt: 1,
             cancellation: AgentTaskCancellationToken::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         },
     );
 
@@ -334,6 +335,7 @@ process.stdin.on('end', () => {
             attempt: 1,
             cancellation: Default::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         },
     );
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
@@ -421,6 +423,7 @@ process.stdin.once('data', input => {
             attempt: 1,
             cancellation: Default::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         },
     );
 
@@ -487,6 +490,7 @@ fn runtime_tool_cannot_claim_capability_without_a_probe() {
             attempt: 1,
             cancellation: Default::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         },
     );
 
@@ -538,6 +542,7 @@ fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
             attempt: 1,
             cancellation: Default::default(),
             lifecycle_store: Some(lifecycle_store),
+            provider_capacity_key: None,
         },
     );
 
@@ -580,6 +585,7 @@ fn runtime_tool_readiness_obeys_the_command_policy() {
             attempt: 1,
             cancellation: Default::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         },
     );
 
@@ -627,6 +633,7 @@ fn runtime_tool_capability_probe_obeys_the_command_policy() {
             attempt: 1,
             cancellation: Default::default(),
             lifecycle_store: None,
+            provider_capacity_key: None,
         },
     );
 

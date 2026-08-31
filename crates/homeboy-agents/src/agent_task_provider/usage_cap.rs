@@ -126,16 +126,11 @@ impl ProviderUsageCapRegistry {
         match self.capped.get(&key) {
             Some(existing) if *existing >= reset_at => {}
             _ => {
-                if self.capped.len() >= 64 && !self.capped.contains_key(&key) {
-                    if let Some(earliest_reset) = self
-                        .capped
-                        .iter()
-                        .min_by_key(|(_, reset)| **reset)
-                        .map(|(key, _)| key.clone())
-                    {
-                        self.capped.remove(&earliest_reset);
-                    }
-                }
+                // Stale rows may be discarded, but active capacity evidence is
+                // authoritative and must never be silently dropped merely
+                // because many accounts are active at once.
+                let now = Utc::now();
+                self.capped.retain(|_, reset| *reset > now);
                 self.capped.insert(key, reset_at);
             }
         }
@@ -313,5 +308,44 @@ mod tests {
         registry.record(&key, now() + chrono::Duration::minutes(5));
 
         assert_eq!(registry.active(&key, now()), Some(later));
+    }
+
+    #[test]
+    fn registry_preserves_more_than_sixty_four_active_capacity_bindings() {
+        let mut registry = ProviderUsageCapRegistry::default();
+        let reset_at = Utc::now() + chrono::Duration::hours(1);
+        for index in 0..64 {
+            registry.record(format!("active-{index}"), reset_at);
+        }
+
+        registry.record("overflow", reset_at);
+
+        assert_eq!(registry.capped.len(), 65);
+        for index in 0..64 {
+            assert_eq!(
+                registry.active(&format!("active-{index}"), Utc::now()),
+                Some(reset_at)
+            );
+        }
+        assert_eq!(registry.active("overflow", Utc::now()), Some(reset_at));
+    }
+
+    #[test]
+    fn bounded_registry_prunes_expired_bindings_before_admitting_new_evidence() {
+        let mut registry = ProviderUsageCapRegistry::default();
+        registry.capped.insert(
+            "expired".to_string(),
+            Utc::now() - chrono::Duration::seconds(1),
+        );
+        for index in 0..63 {
+            registry.capped.insert(
+                format!("active-{index}"),
+                Utc::now() + chrono::Duration::hours(1),
+            );
+        }
+        registry.record("replacement", Utc::now() + chrono::Duration::hours(1));
+
+        assert!(!registry.capped.contains_key("expired"));
+        assert!(registry.capped.contains_key("replacement"));
     }
 }

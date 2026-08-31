@@ -1440,7 +1440,6 @@ impl AgentTaskScheduleSupport {
     pub(crate) fn provider_route_candidates(
         request: &AgentTaskRequest,
         plan_rotation: Option<&AgentTaskProviderRotationPolicy>,
-        max_provider_rotations: u32,
     ) -> Vec<(AgentTaskRequest, usize)> {
         let policy = Self::rotation_policy_for_request(request, plan_rotation);
         let mut candidate = request.clone();
@@ -1452,12 +1451,11 @@ impl AgentTaskScheduleSupport {
             Self::apply_initial_rotation_entry_model(&mut candidate, entry);
         }
         let mut index = Self::initial_rotation_index(&candidate, policy);
-        let mut candidates = vec![(candidate.clone(), 0)];
-        let max_transitions = max_provider_rotations as usize;
-        while index < policy.entries.len() && candidates.len() <= max_transitions {
+        let mut candidates = vec![(candidate.clone(), index)];
+        while index < policy.entries.len() {
             Self::apply_rotation_entry(&mut candidate, &policy.entries[index], policy);
             index += 1;
-            candidates.push((candidate.clone(), candidates.len()));
+            candidates.push((candidate.clone(), index));
         }
         candidates
     }
@@ -1479,7 +1477,6 @@ impl AgentTaskScheduleSupport {
         policy: Option<&AgentTaskProviderRotationPolicy>,
         usage_caps: &crate::agent_task_provider::ProviderUsageCapRegistry,
         now: chrono::DateTime<chrono::Utc>,
-        max_provider_rotations: u32,
         capacity_key: &dyn Fn(&AgentTaskRequest) -> String,
     ) -> Vec<UsageCapSkip> {
         let mut skipped = Vec::new();
@@ -1494,9 +1491,7 @@ impl AgentTaskScheduleSupport {
             let backend = scheduled.request.executor.backend.clone();
             let selector = scheduled.request.executor.selector.clone();
             let model = scheduled.request.executor.model().map(str::to_string);
-            if scheduled.rotation_index >= policy.entries.len()
-                || scheduled.rotation_transitions_used >= max_provider_rotations as usize
-            {
+            if scheduled.rotation_index >= policy.entries.len() {
                 skipped.push(UsageCapSkip {
                     backend,
                     selector,
@@ -1516,7 +1511,6 @@ impl AgentTaskScheduleSupport {
             let entry = &policy.entries[scheduled.rotation_index];
             Self::apply_rotation_entry(&mut scheduled.request, entry, policy);
             scheduled.rotation_index += 1;
-            scheduled.rotation_transitions_used += 1;
         }
         skipped
     }
@@ -1575,7 +1569,7 @@ impl AgentTaskScheduleSupport {
 
     pub(super) fn attach_readiness_skip_evidence(
         outcome: &mut AgentTaskOutcome,
-        skipped: &[serde_json::Value],
+        skipped: &[ProviderRouteEvidence],
     ) {
         if skipped.is_empty() {
             return;
