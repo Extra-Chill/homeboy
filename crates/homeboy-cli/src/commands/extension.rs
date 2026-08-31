@@ -688,6 +688,10 @@ pub struct ExtensionRuntimeDiagnostics {
     pub linked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_manifest_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_generation: Option<String>,
     pub runtime_manifest_found: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runtime_ids: Vec<String>,
@@ -1745,6 +1749,11 @@ fn extension_runtime_diagnostics(
         .unwrap_or_default();
     let source_revision = source_revision
         .or_else(|| homeboy_core::extension::lifecycle::read_source_revision(extension_id));
+    let root_manifest_path = extension
+        .as_ref()
+        .and_then(|extension| extension.extension_path.as_ref())
+        .and_then(|path| runtime_root_manifest_path(Path::new(path)))
+        .map(|path| path.to_string_lossy().to_string());
     let matching_manifests = discover_agent_runtime_catalog()
         .manifests
         .into_iter()
@@ -1770,6 +1779,8 @@ fn extension_runtime_diagnostics(
         path,
         linked,
         source_revision,
+        root_manifest_path,
+        runtime_generation: active_runtime_generation(),
         runtime_manifest_found: !runtime_ids.is_empty(),
         runtime_ids,
         tools,
@@ -1783,6 +1794,25 @@ fn extension_runtime_diagnostics(
             refresh: format!("homeboy extension refresh <source> --id {}", shell_arg(extension_id)),
         },
     }
+}
+
+fn runtime_root_manifest_path(extension_path: &Path) -> Option<std::path::PathBuf> {
+    let extension_path = std::fs::canonicalize(extension_path).ok()?;
+    let parent = extension_path.parent()?;
+    let root = if parent.file_name()?.to_str()? == "agent-runtimes" {
+        parent.parent()?
+    } else {
+        parent
+    };
+    let manifest = root.join("homeboy-extension-root.json");
+    manifest.is_file().then_some(manifest)
+}
+
+fn active_runtime_generation() -> Option<String> {
+    homeboy_core::paths::homeboy()
+        .ok()
+        .and_then(|root| std::fs::read_link(root.join("runtime-generations/current")).ok())
+        .and_then(|generation| generation.to_str().map(str::to_string))
 }
 
 fn runtime_diagnostic_env<'a>(
@@ -2325,6 +2355,48 @@ mod tests {
             assert!(diagnostics.freshness.refresh_behavior.contains("reports"));
 
             std::env::remove_var("HOMEBOY_GENERIC_TOOL_BIN");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_runtime_diagnostics_reports_durable_root_and_generation() {
+        with_isolated_home(|home| {
+            let config = home.path().join(".config/homeboy");
+            let source = config.join("extension-sources/opencode/agent-runtimes/opencode");
+            fs::create_dir_all(&source).expect("durable extension source");
+            fs::write(
+                source.join("opencode.json"),
+                r#"{"name":"OpenCode","version":"2.0.0"}"#,
+            )
+            .expect("extension manifest");
+            fs::write(
+                config.join("extension-sources/opencode/homeboy-extension-root.json"),
+                r#"{"shared_assets":["agent-runtimes"]}"#,
+            )
+            .expect("root manifest");
+            fs::create_dir_all(config.join("extensions")).expect("extensions directory");
+            symlink(&source, config.join("extensions/opencode")).expect("extension link");
+            fs::create_dir_all(config.join("runtime-generations/generation-2/agent-runtimes"))
+                .expect("runtime generation");
+            symlink("generation-2", config.join("runtime-generations/current"))
+                .expect("current generation link");
+
+            let diagnostics = extension_runtime_diagnostics("opencode", None);
+
+            assert_eq!(
+                diagnostics.root_manifest_path.as_deref(),
+                Some(
+                    config
+                        .join("extension-sources/opencode/homeboy-extension-root.json")
+                        .to_str()
+                        .expect("UTF-8 root manifest path")
+                )
+            );
+            assert_eq!(
+                diagnostics.runtime_generation.as_deref(),
+                Some("generation-2")
+            );
         });
     }
 

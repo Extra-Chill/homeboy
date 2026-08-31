@@ -152,7 +152,12 @@ fn replace_from_path(
     }
 
     local_files::ensure_app_dirs()?;
-    install_linked_shared_assets(&source, &extension_dir, source_root.as_deref())?;
+    install_linked_shared_assets(
+        &source,
+        &extension_dir,
+        source_root.as_deref(),
+        requested_revision,
+    )?;
 
     let old_path = installed_source_path(&extension_dir);
     let source_revision = git::short_head_revision(&source).or_else(|| {

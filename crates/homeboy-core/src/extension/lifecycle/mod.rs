@@ -228,6 +228,23 @@ fn durable_refresh_source(source: &str, extension_id: &str) -> Result<String> {
         remove_path(&staging_root, "replace staged durable extension source")?;
     }
 
+    if let Some(source_root) = runtime_package_source_root(&source) {
+        // Preserve the canonical repository layout. Runtime materialization
+        // resolves the root manifest from the parent of `agent-runtimes`, not
+        // from an isolated runtime package.
+        copy_dir_recursive(
+            &source,
+            &staging_root.join("agent-runtimes").join(extension_id),
+        )?;
+        copy_shared_refresh_assets(Some(source_root), &staging_root)?;
+        replace_durable_refresh_source(&staging_root, &durable_root)?;
+        return Ok(durable_root
+            .join("agent-runtimes")
+            .join(extension_id)
+            .to_string_lossy()
+            .to_string());
+    }
+
     let manifest_at_source = source.join(format!("{}.json", extension_id));
     if manifest_at_source.exists() {
         let staged_extension = staging_root.join(extension_id);
@@ -259,6 +276,13 @@ fn durable_refresh_source(source: &str, extension_id: &str) -> Result<String> {
         Some(source.to_string_lossy().to_string()),
         None,
     ))
+}
+
+fn runtime_package_source_root(source: &Path) -> Option<&Path> {
+    let runtime_packages = source.parent()?;
+    (runtime_packages.file_name()?.to_str()? == "agent-runtimes")
+        .then(|| runtime_packages.parent())
+        .flatten()
 }
 
 fn absolute_source_path(source: &str) -> Result<PathBuf> {
@@ -995,6 +1019,124 @@ exec '{}' "$@"
                     .trim(),
                 "stale-marker",
                 "fixture keeps the copied stale marker that used to win reporting"
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_nested_runtime_package_preserves_root_assets_and_publishes_generation() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let source = home.join("source-repo");
+            let boundary_source = home.join("boundary-source");
+            write_extension_fixture(&old_source, "opencode");
+            write_extension_fixture_with_version(
+                &source.join("agent-runtimes"),
+                "opencode",
+                "2.0.0",
+            );
+            write_declared_runtime_shared_assets(&source);
+            if !run_git(&source, &["init", "--quiet"]) || !commit_all(&source, "runtime source") {
+                return;
+            }
+            let source_revision =
+                git_output(&source, &["rev-parse", "--short", "HEAD"]).expect("source revision");
+            fs::create_dir_all(&boundary_source).expect("boundary source");
+            write_shared_asset_manifest(&boundary_source, &[]);
+
+            install(
+                &old_source.join("opencode").to_string_lossy(),
+                Some("opencode"),
+            )
+            .expect("install old extension");
+            crate::runtime_package::refresh_shared_assets(&boundary_source)
+                .expect("activate runtime generation boundary");
+
+            refresh(
+                &source.join("agent-runtimes/opencode").to_string_lossy(),
+                Some("opencode"),
+                None,
+            )
+            .expect("refresh nested runtime package");
+
+            assert_eq!(
+                load_extension("opencode")
+                    .expect("refreshed extension")
+                    .version,
+                "2.0.0"
+            );
+            assert!(home
+                .join(".config/homeboy/extension-sources/opencode/homeboy-extension-root.json")
+                .is_file());
+            assert!(home
+                .join(".config/homeboy/agent-runtimes/opencode/opencode.json")
+                .is_file());
+            assert!(fs::read_to_string(
+                home.join(".config/homeboy/agent-runtimes/opencode/opencode.json")
+            )
+            .expect("stable runtime manifest")
+            .contains("2.0.0"));
+            assert_eq!(
+                fs::read_to_string(
+                    home.join(".config/homeboy/agent-runtimes/opencode/.source-revision")
+                )
+                .expect("stable runtime revision")
+                .trim(),
+                source_revision
+            );
+            assert_eq!(
+                fs::read_link(home.join(".config/homeboy/extensions/opencode"))
+                    .expect("durable extension link"),
+                home.join(".config/homeboy/extension-sources/opencode/agent-runtimes/opencode")
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_nested_runtime_package_failure_preserves_extension_and_generation() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let source = home.join("source-repo");
+            let boundary_source = home.join("boundary-source");
+            write_extension_fixture(&old_source, "opencode");
+            write_extension_fixture_with_version(
+                &source.join("agent-runtimes"),
+                "opencode",
+                "2.0.0",
+            );
+            fs::write(source.join("homeboy-extension-root.json"), "not json")
+                .expect("malformed root manifest");
+            fs::create_dir_all(&boundary_source).expect("boundary source");
+            write_shared_asset_manifest(&boundary_source, &[]);
+
+            install(
+                &old_source.join("opencode").to_string_lossy(),
+                Some("opencode"),
+            )
+            .expect("install old extension");
+            crate::runtime_package::refresh_shared_assets(&boundary_source)
+                .expect("activate runtime generation boundary");
+            let current = fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
+                .expect("active generation");
+
+            refresh(
+                &source.join("agent-runtimes/opencode").to_string_lossy(),
+                Some("opencode"),
+                None,
+            )
+            .expect_err("malformed root manifest should reject refresh");
+
+            assert_eq!(
+                fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
+                    .expect("preserved generation"),
+                current
+            );
+            assert_eq!(
+                fs::read_link(home.join(".config/homeboy/extensions/opencode"))
+                    .expect("preserved extension link"),
+                old_source.join("opencode")
             );
         });
     }
