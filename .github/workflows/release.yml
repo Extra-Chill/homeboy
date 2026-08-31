@@ -2,7 +2,7 @@
 #
 # Triggers on push to main (and manual dispatch). Checks for releasable
 # conventional commits since the last tag. If found:
-#   1. Quality gate (audit, lint, test)
+#   1. Quality gate (lint, test)
 #   2. Version bump + changelog generation from conventional commits
 #   3. Cross-platform binary builds via cargo-dist
 #   4. Publish GitHub Release assets and the Homebrew formula
@@ -32,13 +32,7 @@ on:
         description: 'Existing tag to publish/recover without preparing a new release'
         type: string
         default: ''
-      release_blocking_commands:
-        description: 'Comma-separated quality commands that may block release preparation'
-        type: string
-        default: 'review lint,review test'
-
 env:
-  RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'review lint,review test' }}
   HOMEBOY_NO_UPDATE_CHECK: '1'
   RELEASE_MIN_FREE_KB: '5242880'
   # Must match homeboy-action's `release-branch` input default. The check job
@@ -193,7 +187,7 @@ jobs:
           # release-profile optimization before the real build job.
           source-build-profile: dev
           commands: release
-          expected-commands: review audit,review lint,review test
+          expected-commands: review lint,review test
           args: --skip-checks=audit,lint,test
           release-dry-run: 'true'
 
@@ -363,59 +357,7 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # ── Step 3: Quality checks (parallel read-only checks + advisory repair) ──
-  # Release preparation is gated by release-quality-policy, not by raw job
-  # failures. Commands opt in to release blocking through RELEASE_BLOCKING_COMMANDS
-  # (default: lint,test). Audit still runs and files issues, but stale/full-tree
-  # audit debt does not block releases unless audit is explicitly listed.
-  gate-audit:
-    name: Audit
-    needs:
-      - check
-      - gate-build
-    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      audit-result: ${{ steps.audit.outcome }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.release_tag || github.sha }}
-          fetch-depth: 0
-
-      - name: Download homeboy binary
-        uses: actions/download-artifact@v7
-        with:
-          name: homeboy-binary
-          path: .homeboy-bin
-
-      - name: Verify homeboy binary present
-        run: |
-          if [ ! -f .homeboy-bin/homeboy ]; then
-            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not a code finding in this change. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
-            exit 1
-          fi
-          chmod +x .homeboy-bin/homeboy
-
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        continue-on-error: true
-        with:
-          client-id: ${{ secrets.HOMEBOY_APP_ID }}
-          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-
-      - name: Run advisory audit
-        id: audit
-        uses: Extra-Chill/homeboy-action@v2
-        continue-on-error: true
-        with:
-          binary-path: .homeboy-bin/homeboy
-          commands: review audit
-          expected-commands: review audit,review lint,review test
-          args: ${{ github.event.before && format('--profile=pr --changed-since {0}', github.event.before) || '--profile=pr' }}
-          app-token: ${{ steps.app-token.outputs.token || '' }}
-
+  # ── Step 3: Quality checks ──
   gate-lint:
     name: Lint
     needs:
@@ -455,7 +397,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: review lint
-          expected-commands: review audit,review lint,review test
+          expected-commands: review lint,review test
           args: ${{ github.event.before && format('--changed-since {0}', github.event.before) || '' }}
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -499,51 +441,13 @@ jobs:
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
       - uses: Extra-Chill/homeboy-action@v2
-        env:
-          RELEASE_BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}
         with:
           binary-path: .homeboy-bin/homeboy
           commands: review test
-          expected-commands: review audit,review lint,review test
+          expected-commands: review lint,review test
           args: ${{ github.event.before && format('--skip-lint --changed-since {0}', github.event.before) || '--skip-lint' }}
           execution-timeout-seconds: '3000'
           app-token: ${{ steps.app-token.outputs.token || '' }}
-
-  # ── Step 3b: Release-blocking quality policy ──
-  # Release preparation is gated by release-quality-policy, not by raw job
-  # failures or generic source auto-refactor. Generic release auto-refactor /
-  # autofix was removed (#8046): the release pipeline no longer mutates source,
-  # opens autofix branches, or creates autofix PRs. Audit baseline consumption
-  # (--changed-since against homeboy.json baselines.audit.known_fingerprints)
-  # and automated categorized issue filing (app-token) are preserved in the
-  # read-only gate jobs. Extension-declared generated-drift maintenance is
-  # preserved as a narrow allowlisted transaction in core
-  # (changes_are_only_drift / drift_file_paths), not as a release-workflow
-  # source-mutation step.
-  release-quality-policy:
-    name: Release Quality Policy
-    needs:
-      - check
-      - gate-build
-      - gate-audit
-      - gate-lint
-      - gate-test
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.gate-build.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout workflow event commit
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Enforce release-blocking commands
-        env:
-          BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}
-          AUDIT_RESULT: ${{ needs.gate-audit.outputs.audit-result || needs.gate-audit.result }}
-          LINT_RESULT: ${{ needs.gate-lint.result }}
-          TEST_RESULT: ${{ needs.gate-test.result }}
-        run: |
-          bash .github/release-quality-policy.sh
 
   # ── Step 4: Version bump + changelog + tag ──
   prepare:
@@ -551,8 +455,9 @@ jobs:
     needs:
       - check
       - gate-build
-      - release-quality-policy
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
+      - gate-lint
+      - gate-test
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '' || (needs.gate-lint.result == 'success' && needs.gate-test.result == 'success')) }}
     runs-on: ubuntu-latest
     # Version, tag, and release-state transitions are the only serialized
     # section. Unlike check, this lock never cancels an active mutation.
@@ -672,7 +577,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: release
-          expected-commands: review audit,review lint,review test
+          expected-commands: review lint,review test
           args: --skip-checks=audit,lint,test
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           release-branch: ${{ needs.check.outputs['verified-release-branch'] }}
@@ -1567,10 +1472,8 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-audit
       - gate-lint
       - gate-test
-      - release-quality-policy
       - prepare
       - plan
       - build-local-artifacts
@@ -1598,10 +1501,8 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-audit
       - gate-lint
       - gate-test
-      - release-quality-policy
       - prepare
       - plan
       - build-local-artifacts

@@ -751,7 +751,6 @@ fn test_runner_ci_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
 
     for key in [
         "GITHUB_ACTIONS",
-        "RELEASE_BLOCKING_COMMANDS",
         "HOMEBOY_TEST_INVENTORY_ONLY",
         "HOMEBOY_TEST_INVENTORY_FILE",
         "HOMEBOY_TEST_SHARD_MANIFEST",
