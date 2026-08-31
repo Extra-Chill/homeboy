@@ -5,6 +5,22 @@ use crate::error::{Error, Result};
 
 use super::Project;
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentLocalPathDiagnosticStatus {
+    Missing,
+    Stale,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ComponentLocalPathDiagnostic {
+    pub component_id: String,
+    pub local_path: String,
+    pub status: ComponentLocalPathDiagnosticStatus,
+    pub message: String,
+    pub repair_command: String,
+}
+
 pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
     let mut blockers = Vec::new();
     let standalone_snapshot = super::StandaloneComponentConfigSnapshot::load();
@@ -123,16 +139,14 @@ pub fn validate_deploy_component_local_paths(
     let mut scoped_blockers = Vec::new();
     let mut hygiene_blockers = Vec::new();
     for attachment in &project.components {
-        let Some(blocker) =
-            component_local_path_blocker(project, &attachment.id, &attachment.local_path)
-        else {
+        let Some(blocker) = component_local_path_diagnostic(project, attachment) else {
             continue;
         };
 
         if scoped_ids.contains(&attachment.id) {
-            scoped_blockers.push(blocker);
+            scoped_blockers.push(blocker.message);
         } else {
-            hygiene_blockers.push(blocker);
+            hygiene_blockers.push(blocker.message);
         }
     }
 
@@ -211,9 +225,8 @@ pub fn component_local_path_findings(project: &Project, component_id: &str) -> V
         .components
         .iter()
         .filter(|attachment| attachment.id == component_id)
-        .filter_map(|attachment| {
-            component_local_path_blocker(project, &attachment.id, &attachment.local_path)
-        })
+        .filter_map(|attachment| component_local_path_diagnostic(project, attachment))
+        .map(|diagnostic| diagnostic.message)
         .collect()
 }
 
@@ -240,23 +253,31 @@ pub(crate) fn component_local_path_blockers(project: &Project) -> Vec<String> {
     project
         .components
         .iter()
-        .filter_map(|attachment| {
-            component_local_path_blocker(project, &attachment.id, &attachment.local_path)
-        })
+        .filter_map(|attachment| component_local_path_diagnostic(project, attachment))
+        .map(|diagnostic| diagnostic.message)
         .collect()
 }
 
-fn component_local_path_blocker(
+pub fn component_local_path_diagnostic(
     project: &Project,
-    component_id: &str,
-    local_path: &str,
-) -> Option<String> {
-    let trimmed = local_path.trim();
+    attachment: &super::ProjectComponentAttachment,
+) -> Option<ComponentLocalPathDiagnostic> {
+    let trimmed = attachment.local_path.trim();
     if trimmed.is_empty() {
-        return Some(format!(
-            "Component '{}' is missing local_path - attach a checkout with: homeboy project components attach-path {} <local-path>",
-            component_id, project.id
-        ));
+        let repair_command = format!(
+            "homeboy project components attach-path {} <local-path>",
+            project.id
+        );
+        return Some(ComponentLocalPathDiagnostic {
+            component_id: attachment.id.clone(),
+            local_path: attachment.local_path.clone(),
+            status: ComponentLocalPathDiagnosticStatus::Missing,
+            message: format!(
+                "Component '{}' is missing local_path - attach a checkout with: {}",
+                attachment.id, repair_command
+            ),
+            repair_command,
+        });
     }
 
     let expanded = shellexpand::tilde(trimmed);
@@ -265,10 +286,20 @@ fn component_local_path_blocker(
         return None;
     }
 
-    Some(format!(
-        "Component '{}' local_path '{}' does not exist - update it with: homeboy project components attach-path {} <local-path>",
-        component_id, trimmed, project.id
-    ))
+    let repair_command = format!(
+        "homeboy project components attach-path {} <local-path>",
+        project.id
+    );
+    Some(ComponentLocalPathDiagnostic {
+        component_id: attachment.id.clone(),
+        local_path: attachment.local_path.clone(),
+        status: ComponentLocalPathDiagnosticStatus::Stale,
+        message: format!(
+            "Component '{}' local_path '{}' does not exist - update it with: {}",
+            attachment.id, trimmed, repair_command
+        ),
+        repair_command,
+    })
 }
 
 #[cfg(test)]

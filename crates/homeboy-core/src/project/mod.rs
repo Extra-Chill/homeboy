@@ -46,8 +46,10 @@ pub use pins::{
 };
 pub(crate) use readiness::component_local_path_blockers;
 pub use readiness::{
-    calculate_deploy_readiness, component_local_path_findings, validate_component_local_path,
-    validate_component_local_paths, validate_deploy_component_local_paths,
+    calculate_deploy_readiness, component_local_path_diagnostic, component_local_path_findings,
+    validate_component_local_path, validate_component_local_paths,
+    validate_deploy_component_local_paths, ComponentLocalPathDiagnostic,
+    ComponentLocalPathDiagnosticStatus,
 };
 pub use report::{
     build_components_output, build_create_output, build_delete_output, build_init_output,
