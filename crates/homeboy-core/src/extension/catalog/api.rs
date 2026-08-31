@@ -1,15 +1,21 @@
 use homeboy_core::error::Result;
 use homeboy_extension_contract::api::v1::{
-    ExtensionApiCapabilityDescriptor, ExtensionApiCompatibility, ExtensionApiCompatibilityFailure,
-    ExtensionApiCompatibilityFailureCode, ExtensionApiCompatibilityStatus, ExtensionApiDescriptor,
-    ExtensionApiExecutionRequirements, ExtensionApiHandshakeRequest, ExtensionApiHandshakeResponse,
-    ExtensionApiIdentity, ExtensionApiReadinessDescriptor, ExtensionApiRuntimeRequirement,
-    ExtensionApiVersion, EXTENSION_API_DESCRIPTOR_SCHEMA, EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA,
-    EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA, EXTENSION_API_V1,
+    ExtensionApiCapabilityDescriptor, ExtensionApiCatalogDiagnostic,
+    ExtensionApiCatalogDiagnosticCode, ExtensionApiCatalogEntry, ExtensionApiCatalogEntryStatus,
+    ExtensionApiCatalogRequest, ExtensionApiCatalogResponse, ExtensionApiCompatibility,
+    ExtensionApiCompatibilityFailure, ExtensionApiCompatibilityFailureCode,
+    ExtensionApiCompatibilityStatus, ExtensionApiDescriptor, ExtensionApiExecutionRequirements,
+    ExtensionApiHandshakeRequest, ExtensionApiHandshakeResponse, ExtensionApiIdentity,
+    ExtensionApiOperationFailure, ExtensionApiOperationFailureCode,
+    ExtensionApiReadinessDescriptor, ExtensionApiResolveRequest, ExtensionApiResolveResponse,
+    ExtensionApiRuntimeRequirement, ExtensionApiVersion, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
+    EXTENSION_API_CATALOG_RESPONSE_SCHEMA, EXTENSION_API_DESCRIPTOR_SCHEMA,
+    EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA, EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA,
+    EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
 };
 use homeboy_extension_contract::{evaluate_core_compatibility, ExtensionCapability};
 
-use super::load_extension;
+use super::{discover_extensions, load_extension, DiscoveredExtension};
 
 const SUPPORTED_API_VERSIONS: &[ExtensionApiVersion] = &[EXTENSION_API_V1];
 
@@ -187,6 +193,229 @@ pub fn negotiate_api(
     })
 }
 
+/// List every installed extension through the stable v1 catalog contract.
+pub fn list_api(request: &ExtensionApiCatalogRequest) -> ExtensionApiCatalogResponse {
+    if let Some(failure) = validate_operation_request(
+        &request.schema,
+        EXTENSION_API_CATALOG_REQUEST_SCHEMA,
+        request.api_version,
+    ) {
+        return ExtensionApiCatalogResponse {
+            schema: EXTENSION_API_CATALOG_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            entries: Vec::new(),
+            failure: Some(failure),
+        };
+    }
+
+    let entries = discover_extensions()
+        .into_iter()
+        .map(|extension| match extension {
+            DiscoveredExtension::Valid(extension) => {
+                let id = extension.id.clone();
+                match negotiate_api(
+                    &id,
+                    &ExtensionApiHandshakeRequest {
+                        schema: EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA.to_string(),
+                        supported_versions: vec![request.api_version],
+                    },
+                ) {
+                    Ok(handshake) => {
+                        let status = if handshake.compatibility.status
+                            == ExtensionApiCompatibilityStatus::Compatible
+                        {
+                            ExtensionApiCatalogEntryStatus::Available
+                        } else {
+                            ExtensionApiCatalogEntryStatus::Incompatible
+                        };
+                        ExtensionApiCatalogEntry {
+                            id,
+                            status,
+                            descriptor: handshake.descriptor,
+                            compatibility: Some(handshake.compatibility),
+                            diagnostic: None,
+                        }
+                    }
+                    Err(error) => {
+                        invalid_catalog_entry(id, "catalog_projection_failed", error.message)
+                    }
+                }
+            }
+            DiscoveredExtension::Invalid(failure) => {
+                invalid_catalog_entry(failure.id, failure.category, failure.diagnostic.to_string())
+            }
+        })
+        .collect();
+
+    ExtensionApiCatalogResponse {
+        schema: EXTENSION_API_CATALOG_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        entries,
+        failure: None,
+    }
+}
+
+/// Resolve one explicitly named installed extension capability through v1.
+pub fn resolve_api(request: &ExtensionApiResolveRequest) -> ExtensionApiResolveResponse {
+    if let Some(failure) = validate_operation_request(
+        &request.schema,
+        EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
+        request.api_version,
+    ) {
+        return resolve_failure(None, None, failure);
+    }
+
+    let catalog = list_api(&ExtensionApiCatalogRequest {
+        schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+        api_version: request.api_version,
+    });
+    let Some(entry) = catalog
+        .entries
+        .into_iter()
+        .find(|entry| entry.id == request.extension_id)
+    else {
+        return resolve_failure(
+            None,
+            None,
+            operation_failure(
+                ExtensionApiOperationFailureCode::ExtensionNotFound,
+                format!("Extension '{}' is not installed", request.extension_id),
+            ),
+        );
+    };
+
+    if entry.status == ExtensionApiCatalogEntryStatus::Invalid {
+        return resolve_failure(
+            None,
+            None,
+            operation_failure(
+                ExtensionApiOperationFailureCode::ExtensionInvalid,
+                format!(
+                    "Extension '{}' has an invalid installation",
+                    request.extension_id
+                ),
+            ),
+        );
+    }
+
+    let (Some(descriptor), Some(compatibility)) = (entry.descriptor, entry.compatibility) else {
+        return resolve_failure(
+            None,
+            None,
+            operation_failure(
+                ExtensionApiOperationFailureCode::ExtensionInvalid,
+                format!(
+                    "Extension '{}' has an incomplete catalog projection",
+                    request.extension_id
+                ),
+            ),
+        );
+    };
+    if entry.status == ExtensionApiCatalogEntryStatus::Incompatible {
+        return resolve_failure(
+            Some(descriptor),
+            Some(compatibility),
+            operation_failure(
+                ExtensionApiOperationFailureCode::ExtensionIncompatible,
+                format!(
+                    "Extension '{}' is incompatible with this Homeboy runtime",
+                    request.extension_id
+                ),
+            ),
+        );
+    }
+
+    let Some(capability) = descriptor
+        .capabilities
+        .iter()
+        .find(|capability| capability.id == request.capability_id)
+        .cloned()
+    else {
+        return resolve_failure(
+            Some(descriptor),
+            Some(compatibility),
+            operation_failure(
+                ExtensionApiOperationFailureCode::CapabilityNotProvided,
+                format!(
+                    "Extension '{}' does not provide capability '{}'",
+                    request.extension_id, request.capability_id
+                ),
+            ),
+        );
+    };
+
+    ExtensionApiResolveResponse {
+        schema: EXTENSION_API_RESOLVE_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        descriptor: Some(descriptor),
+        capability: Some(capability),
+        compatibility: Some(compatibility),
+        failure: None,
+    }
+}
+
+fn validate_operation_request(
+    actual_schema: &str,
+    expected_schema: &str,
+    api_version: ExtensionApiVersion,
+) -> Option<ExtensionApiOperationFailure> {
+    if actual_schema != expected_schema {
+        return Some(operation_failure(
+            ExtensionApiOperationFailureCode::InvalidRequestSchema,
+            format!("Unsupported request schema '{actual_schema}'; expected '{expected_schema}'"),
+        ));
+    }
+    (api_version != EXTENSION_API_V1).then(|| {
+        operation_failure(
+            ExtensionApiOperationFailureCode::UnsupportedApiVersion,
+            format!(
+                "Extension API major {} is not supported; Homeboy supports major {}",
+                api_version.major, EXTENSION_API_V1.major
+            ),
+        )
+    })
+}
+
+fn invalid_catalog_entry(id: String, category: &str, message: String) -> ExtensionApiCatalogEntry {
+    ExtensionApiCatalogEntry {
+        id,
+        status: ExtensionApiCatalogEntryStatus::Invalid,
+        descriptor: None,
+        compatibility: None,
+        diagnostic: Some(ExtensionApiCatalogDiagnostic {
+            code: if category == "target_missing" {
+                ExtensionApiCatalogDiagnosticCode::BrokenInstallation
+            } else {
+                ExtensionApiCatalogDiagnosticCode::InvalidManifest
+            },
+            category: category.to_string(),
+            message,
+        }),
+    }
+}
+
+fn resolve_failure(
+    descriptor: Option<ExtensionApiDescriptor>,
+    compatibility: Option<ExtensionApiCompatibility>,
+    failure: ExtensionApiOperationFailure,
+) -> ExtensionApiResolveResponse {
+    ExtensionApiResolveResponse {
+        schema: EXTENSION_API_RESOLVE_RESPONSE_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        descriptor,
+        capability: None,
+        compatibility,
+        failure: Some(failure),
+    }
+}
+
+fn operation_failure(
+    code: ExtensionApiOperationFailureCode,
+    message: String,
+) -> ExtensionApiOperationFailure {
+    ExtensionApiOperationFailure { code, message }
+}
+
 fn capability_descriptor(id: &str) -> ExtensionApiCapabilityDescriptor {
     versioned_capability_descriptor(id, None)
 }
@@ -219,6 +448,22 @@ mod tests {
             manifest.to_string(),
         )
         .expect("extension manifest");
+    }
+
+    fn catalog_request() -> ExtensionApiCatalogRequest {
+        ExtensionApiCatalogRequest {
+            schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+        }
+    }
+
+    fn resolve_request(extension_id: &str, capability_id: &str) -> ExtensionApiResolveRequest {
+        ExtensionApiResolveRequest {
+            schema: EXTENSION_API_RESOLVE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: extension_id.to_string(),
+            capability_id: capability_id.to_string(),
+        }
     }
 
     #[test]
@@ -376,6 +621,117 @@ mod tests {
                 response.compatibility.failures[0].code,
                 ExtensionApiCompatibilityFailureCode::InvalidHandshakeSchema
             );
+        });
+    }
+
+    #[test]
+    fn catalog_is_sorted_and_retains_invalid_installs() {
+        crate::test_support::with_isolated_home(|_| {
+            write_extension(
+                "zeta",
+                serde_json::json!({ "name": "Zeta", "version": "1.0.0" }),
+            );
+            let broken_dir = crate::paths::extensions()
+                .expect("extensions path")
+                .join("alpha");
+            std::fs::create_dir_all(&broken_dir).expect("broken extension directory");
+            std::fs::write(broken_dir.join("alpha.json"), "{").expect("broken manifest");
+
+            let response = list_api(&catalog_request());
+
+            assert!(response.failure.is_none());
+            assert_eq!(
+                response
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["alpha", "zeta"]
+            );
+            assert_eq!(
+                response.entries[0].status,
+                ExtensionApiCatalogEntryStatus::Invalid
+            );
+            assert_eq!(
+                response.entries[0]
+                    .diagnostic
+                    .as_ref()
+                    .expect("diagnostic")
+                    .category,
+                "manifest_json_malformed"
+            );
+            assert_eq!(
+                response.entries[1].status,
+                ExtensionApiCatalogEntryStatus::Available
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_returns_the_named_capability() {
+        crate::test_support::with_isolated_home(|_| {
+            write_extension(
+                "fixture",
+                serde_json::json!({
+                    "name": "Fixture",
+                    "version": "1.0.0",
+                    "test": { "extension_script": "test.sh" }
+                }),
+            );
+
+            let response = resolve_api(&resolve_request("fixture", "test"));
+
+            assert!(response.failure.is_none());
+            assert_eq!(response.capability.expect("capability").id, "test");
+            assert_eq!(
+                response.descriptor.expect("descriptor").identity.id,
+                "fixture"
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_reports_missing_capability_without_dropping_descriptor() {
+        crate::test_support::with_isolated_home(|_| {
+            write_extension(
+                "fixture",
+                serde_json::json!({ "name": "Fixture", "version": "1.0.0" }),
+            );
+
+            let response = resolve_api(&resolve_request("fixture", "test"));
+
+            assert_eq!(
+                response.failure.expect("failure").code,
+                ExtensionApiOperationFailureCode::CapabilityNotProvided
+            );
+            assert!(response.descriptor.is_some());
+        });
+    }
+
+    #[test]
+    fn resolve_reports_incompatible_extension_before_capability_selection() {
+        crate::test_support::with_isolated_home(|_| {
+            write_extension(
+                "fixture",
+                serde_json::json!({
+                    "name": "Fixture",
+                    "version": "1.0.0",
+                    "test": { "extension_script": "test.sh" },
+                    "requires": { "homeboy": ">=999.0.0" }
+                }),
+            );
+
+            let response = resolve_api(&resolve_request("fixture", "test"));
+
+            assert_eq!(
+                response.failure.expect("failure").code,
+                ExtensionApiOperationFailureCode::ExtensionIncompatible
+            );
+            assert_eq!(
+                response.compatibility.expect("compatibility").status,
+                ExtensionApiCompatibilityStatus::Incompatible
+            );
+            assert!(response.capability.is_none());
         });
     }
 }

@@ -21,6 +21,10 @@ The wire schemas are:
 - `homeboy/extension-api-descriptor/v1`
 - `homeboy/extension-api-handshake-request/v1`
 - `homeboy/extension-api-handshake-response/v1`
+- `homeboy/extension-api-catalog-request/v1`
+- `homeboy/extension-api-catalog-response/v1`
+- `homeboy/extension-api-resolve-request/v1`
+- `homeboy/extension-api-resolve-response/v1`
 
 Additive optional fields may be added within v1. Changes to identity,
 capability meaning, compatibility decisions, or required fields require a new
@@ -59,6 +63,25 @@ Failures are typed as `invalid_handshake_schema`, `no_shared_api_version`,
 Responses always advertise Homeboy's supported versions. A descriptor is
 returned only when an API major was selected.
 
+## Catalog And Resolve
+
+`extension::catalog::list_api` lists every installed extension in ascending ID
+order. Valid entries carry their v1 descriptor and compatibility result.
+Malformed manifests and broken installations remain in the catalog as `invalid`
+entries with safe typed diagnostics; catalog projection never silently drops
+them.
+
+`extension::catalog::resolve_api` resolves one explicit extension ID and open
+capability ID. It returns the same descriptor and compatibility values exposed
+by catalog, plus the selected capability descriptor. Failure codes distinguish
+invalid request schemas, unsupported API majors, missing or invalid extensions,
+incompatible extensions, and capabilities the selected extension does not
+provide.
+
+Component-aware owner election remains application policy over this primitive.
+The v1 wire contract does not serialize Homeboy's internal `Component` or
+`Project` models.
+
 ## Contract Classification
 
 `homeboy-extension-contract` predates the stable API and contains several kinds
@@ -76,6 +99,6 @@ stability.
 ## Next Operations
 
 The descriptor handshake deliberately does not define invocation lifecycle.
-Subsequent v1 slices will add typed catalog and resolve requests, followed by
-idempotent invoke, cancel, reconcile, readiness, activity, and terminal-result
-contracts anchored to canonical control-plane references from issue #13697.
+Subsequent v1 slices will add idempotent invoke, cancel, reconcile, readiness,
+activity, and terminal-result contracts anchored to canonical control-plane
+references from issue #13697.

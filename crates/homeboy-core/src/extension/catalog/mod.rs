@@ -13,7 +13,7 @@ mod api;
 mod manifest;
 mod summary;
 
-pub use api::{api_descriptor, negotiate_api};
+pub use api::{api_descriptor, list_api, negotiate_api, resolve_api};
 pub use manifest::{
     deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
     structured_sidecars,
