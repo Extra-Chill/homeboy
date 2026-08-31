@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.367.3] - 2026-08-31
+
+### Changed
+- Route capability resolution through Extension API v1
+- Remove generic Runner exports from the Lab contract
+- Migrate extension inventory to v1 API
+
+### Fixed
+- make setup timeout configurable
+- Fix intentional no-change Cook outcomes
+- accept repository path targets
+- recover persisted manual intents
+- finalize rotated provider candidates
+- make dirty recovery adoption executable
+- preserve Git extra workspaces
+- terminalize runner pre-provider failures
+
 ## [0.367.2] - 2026-08-31
 
 ### Changed

@@ -14,6 +14,10 @@ pub struct RuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_command: Option<String>,
 
+    /// Maximum setup command runtime. Defaults to 300 seconds when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_timeout_seconds: Option<u64>,
+
     /// Shell command to check if extension is ready. Exit 0 = ready.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_check: Option<String>,
