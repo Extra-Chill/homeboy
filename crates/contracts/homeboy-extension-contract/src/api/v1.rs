@@ -376,4 +376,34 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn external_check_inventory_wire_shape_excludes_private_execution_data() {
+        let response = ExtensionApiExternalCheckDetailInventoryResponse {
+            schema: EXTENSION_API_EXTERNAL_CHECK_DETAIL_INVENTORY_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            providers: vec![ExtensionApiExternalCheckDetailInventoryEntry {
+                provider: Some("example-ci".to_string()),
+                owning_extension: "fixture".to_string(),
+                resolvable: true,
+                validation: ExtensionApiExternalCheckDetailProviderValidation::Valid,
+                diagnostic: None,
+            }],
+            failure: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).expect("inventory response JSON"),
+            serde_json::json!({
+                "schema": EXTENSION_API_EXTERNAL_CHECK_DETAIL_INVENTORY_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "providers": [{
+                    "provider": "example-ci",
+                    "owning_extension": "fixture",
+                    "resolvable": true,
+                    "validation": "valid"
+                }]
+            })
+        );
+    }
 }

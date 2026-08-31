@@ -24,13 +24,15 @@ use homeboy_extension_contract::api::v1::{
     EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA, EXTENSION_API_READINESS_REQUEST_SCHEMA,
     EXTENSION_API_READINESS_RESPONSE_SCHEMA, EXTENSION_API_RECIPE_RUN_PLAN_REQUEST_SCHEMA,
     EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
-    EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1, FINGERPRINT_FILE_CAPABILITY_PREFIX,
+    EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
+    EXTERNAL_CHECK_DETAIL_RESOLVER_CAPABILITY_PREFIX, FINGERPRINT_FILE_CAPABILITY_PREFIX,
     FINGERPRINT_INPUT_SCHEMA, FINGERPRINT_OUTPUT_SCHEMA, FORMAT_FILE_CAPABILITY_PREFIX,
     RECIPE_RUN_PROVIDER_CAPABILITY_PREFIX, REFACTOR_ANALYSIS_INPUT_SCHEMA,
     REFACTOR_ANALYSIS_OUTPUT_SCHEMA, REFACTOR_FILE_CAPABILITY_PREFIX,
 };
 use homeboy_extension_contract::{
     evaluate_core_compatibility, ExtensionCapability, ExtensionManifest,
+    EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
 };
 
 #[cfg(test)]
@@ -92,6 +94,20 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
                         provider.declared_str("version"),
                         EXTENSION_API_RECIPE_RUN_PLAN_REQUEST_SCHEMA,
                         EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA,
+                    )
+                })
+            }),
+    );
+    capabilities.extend(
+        extension
+            .external_check_detail_resolvers
+            .iter()
+            .filter_map(|resolver| {
+                resolver.declared_provider().map(|provider| {
+                    schema_capability_descriptor(
+                        &format!("{EXTERNAL_CHECK_DETAIL_RESOLVER_CAPABILITY_PREFIX}{provider}"),
+                        EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA,
+                        EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
                     )
                 })
             }),

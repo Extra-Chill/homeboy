@@ -8,9 +8,11 @@ use super::{
 };
 
 mod environment;
+mod external_check_detail;
 mod invocation;
 mod recipe_run;
 pub use environment::*;
+pub use external_check_detail::*;
 pub use invocation::*;
 pub use recipe_run::*;
 
