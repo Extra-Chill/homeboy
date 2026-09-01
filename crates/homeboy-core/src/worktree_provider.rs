@@ -74,6 +74,7 @@ pub struct WorktreeProviderWorkspace {
 pub struct WorktreeListReport {
     pub native: worktree::WorktreeListOutput,
     pub provider_worktrees: Vec<WorktreeProviderWorkspace>,
+    pub provider_diagnostics: Vec<worktree_providers::WorktreeProviderInventoryDiagnostic>,
 }
 
 #[derive(Debug, Clone)]
@@ -905,6 +906,7 @@ impl WorktreeInventoryProvider for CommandWorktreeProvider<'_> {
     fn list(&self) -> Result<Vec<WorktreeProviderWorkspace>> {
         Ok(
             worktree_providers::list_enabled_worktree_providers_from_config(self.config)?
+                .0
                 .into_iter()
                 .map(command_workspace)
                 .collect(),
@@ -1345,9 +1347,11 @@ impl<'a> WorktreeProviderRegistry<'a> {
         let (native_worktrees, mut diagnostics) =
             NativeWorktreeProvider::workspaces_from_records(worktree::list_workspace_refs()?);
         native.diagnostics.append(&mut diagnostics);
+        let (configured_worktrees, provider_diagnostics) =
+            worktree_providers::list_enabled_worktree_providers_from_config(self.config)?;
         let provider_worktrees = native_worktrees
             .into_iter()
-            .chain(CommandWorktreeProvider::new(self.config).list()?)
+            .chain(configured_worktrees.into_iter().map(command_workspace))
             .filter(|workspace| {
                 matches!(
                     workspace.ownership.provider,
@@ -1358,6 +1362,7 @@ impl<'a> WorktreeProviderRegistry<'a> {
         Ok(WorktreeListReport {
             native,
             provider_worktrees,
+            provider_diagnostics,
         })
     }
 
