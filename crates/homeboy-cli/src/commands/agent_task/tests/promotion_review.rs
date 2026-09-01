@@ -549,7 +549,7 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 
 #[cfg(unix)]
 #[test]
-fn direct_cook_promotion_uses_selected_retained_large_patch() {
+fn direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_path() {
     with_temp_home(|| {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
@@ -778,36 +778,57 @@ fn direct_cook_promotion_uses_selected_retained_large_patch() {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&provider, permissions).expect("make provider executable");
 
-        let cli = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "promote",
-            cook_id,
-            "--artifact-id",
-            artifact_id,
-            "--to-worktree",
-            "fixture@selected-large-patch",
-            "--provider-argv",
-            "sh",
-            "--provider-argv",
-            provider.to_str().expect("provider path"),
-            "--dry-run",
-            "--gates-from-cook-recipe",
-        ])
-        .expect("parse public direct promotion command");
-        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent-task command");
-        };
-        let super::super::AgentTaskCommand::Promote(args) = agent_task.command else {
-            panic!("promote command");
-        };
-        let (report, exit_code) = review::promote_artifact(*args)
-            .expect("selected Cook candidate remains directly promotable");
+        agent_task_lifecycle::materialize_recovered_patch_artifact(
+            candidate_run_id,
+            Some(task_id),
+            Some(artifact_id),
+        )
+        .expect("recover retained patch into the canonical aggregate");
+        let (run_source, aggregate_path) =
+            review::read_promotion_source(candidate_run_id).expect("read run source");
+        let aggregate_path = aggregate_path.expect("canonical aggregate path");
+        let (path_source, _) = review::read_promotion_source(&aggregate_path.display().to_string())
+            .expect("read exact aggregate source");
+        assert_eq!(run_source, path_source);
 
-        assert_eq!(exit_code, 0);
-        assert_eq!(report["status"], "dry_run");
-        assert_eq!(report["source"]["run_id"], candidate_run_id);
-        assert_eq!(report["patch_artifact"]["id"], artifact_id);
+        let mut reports = Vec::new();
+        for source_spec in [
+            candidate_run_id.to_string(),
+            aggregate_path.display().to_string(),
+        ] {
+            let cli = crate::cli_surface::Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "promote",
+                &source_spec,
+                "--artifact-id",
+                artifact_id,
+                "--to-worktree",
+                "fixture@selected-large-patch",
+                "--provider-argv",
+                "sh",
+                "--provider-argv",
+                provider.to_str().expect("provider path"),
+                "--dry-run",
+                "--gates-from-cook-recipe",
+            ])
+            .expect("parse public direct promotion command");
+            let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let super::super::AgentTaskCommand::Promote(args) = agent_task.command else {
+                panic!("promote command");
+            };
+            let (report, exit_code) = review::promote_artifact(*args)
+                .expect("recovered candidate remains directly promotable");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(report["status"], "dry_run");
+            assert_eq!(report["source"]["run_id"], candidate_run_id);
+            assert_eq!(report["patch_artifact"]["id"], artifact_id);
+            reports.push(report);
+        }
+        assert_eq!(reports[0]["patch_artifact"], reports[1]["patch_artifact"]);
     });
 }
 
