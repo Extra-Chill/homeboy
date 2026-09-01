@@ -4574,7 +4574,7 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
         AgentTaskCommand::Evidence(args) => Some(&args.run_id),
         AgentTaskCommand::Diagnose(args) => Some(&args.run_id),
         AgentTaskCommand::Review(args) => Some(&args.run_id),
-        AgentTaskCommand::Retry(args) if !args.run => Some(&args.run_id),
+        AgentTaskCommand::Retry(args) => Some(&args.run_id),
         AgentTaskCommand::Reconcile(args) => Some(&args.run_id),
         _ => None,
     };
@@ -4583,13 +4583,24 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
     };
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    Some(agent_task_lifecycle::run_record_exists_resolved_in_store(
-        &lifecycle_store,
-        run_id,
-    )?)
-    .map(Ok)
-    .transpose()
-    .map(|present| present.unwrap_or(false))
+    let present =
+        agent_task_lifecycle::run_record_exists_resolved_in_store(&lifecycle_store, run_id)?;
+    if !present {
+        return Ok(false);
+    }
+    if let AgentTaskCommand::Retry(args) = &agent_task.command {
+        if args.run {
+            let record = agent_task_lifecycle::reconcile_status_in_store(
+                &lifecycle_store,
+                run_id,
+                agent_task_lifecycle::AgentTaskStatusOptions::default(),
+                false,
+            )?
+            .record;
+            return Ok(record.metadata["cook_id"].is_string());
+        }
+    }
+    Ok(true)
 }
 
 fn lab_offload_command_for_materialized_args(
