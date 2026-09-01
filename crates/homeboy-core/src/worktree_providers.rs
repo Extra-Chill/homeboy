@@ -506,6 +506,17 @@ pub struct WorktreeProviderResolution {
     pub worktree: WorktreeProviderHandle,
 }
 
+/// A failed configured-provider inventory probe. Inventory is observational, so
+/// one unavailable provider must not hide workspaces returned by its siblings.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeProviderInventoryDiagnostic {
+    pub provider_id: String,
+    pub operation: String,
+    pub classification: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeProviderTaskAttachmentStatus {
@@ -1095,6 +1106,7 @@ pub fn resolve_apply_enabled_worktree_provider_identity_from_config(
         .cloned()
         .collect::<Vec<_>>();
     provider_ids.sort();
+    let mut failures = Vec::new();
     for provider_id in provider_ids {
         let provider = &config.worktree_providers[&provider_id];
         if !provider.enabled || !provider.apply_enabled {
@@ -1102,8 +1114,10 @@ pub fn resolve_apply_enabled_worktree_provider_identity_from_config(
         }
         match (&provider.commands.resolve_identity, &provider.commands.attest_safety) {
             (Some(command), Some(_)) => {
-                if let Some(identity) = run_provider_identity_command(&provider_id, provider, command, handle)? {
-                    return Ok(identity);
+                match run_provider_identity_command(&provider_id, provider, command, handle) {
+                    Ok(Some(identity)) => return Ok(identity),
+                    Ok(None) => {}
+                    Err(error) => failures.push(error),
                 }
             }
             (None, None) => continue,
@@ -1111,7 +1125,14 @@ pub fn resolve_apply_enabled_worktree_provider_identity_from_config(
         }
     }
     let started = std::time::Instant::now();
-    let resolution = resolve_apply_enabled_worktree_provider_from_config(handle, config, None)?;
+    let resolution = match resolve_apply_enabled_worktree_provider_from_config(handle, config, None)
+    {
+        Ok(resolution) => resolution,
+        Err(error) if is_worktree_provider_not_found(&error) => {
+            return Err(failures.into_iter().next().unwrap_or(error));
+        }
+        Err(error) => return Err(error),
+    };
     let elapsed_ms = started.elapsed().as_millis();
     let token = compatibility_identity_token(&resolution);
     Ok(WorktreeProviderExactIdentity {
@@ -2464,6 +2485,7 @@ fn resolve_worktree_provider_with_policy_from_config(
         .cloned()
         .collect::<Vec<_>>();
     provider_ids.sort();
+    let mut failures = Vec::new();
     for provider_id in provider_ids.iter().cloned() {
         let provider = &config.worktree_providers[&provider_id];
         if !provider.enabled {
@@ -2473,7 +2495,14 @@ fn resolve_worktree_provider_with_policy_from_config(
             continue;
         }
         if let Some(command) = provider.commands.resolve.as_ref() {
-            let worktrees = run_provider_resolve_command(&provider_id, provider, command, handle)?;
+            let worktrees =
+                match run_provider_resolve_command(&provider_id, provider, command, handle) {
+                    Ok(worktrees) => worktrees,
+                    Err(error) => {
+                        failures.push(error);
+                        continue;
+                    }
+                };
             if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
                 if validate_safety {
                     validate_provider_handle(
@@ -2493,7 +2522,13 @@ fn resolve_worktree_provider_with_policy_from_config(
         let Some(command) = provider.commands.list.as_ref() else {
             continue;
         };
-        let worktrees = run_provider_list_command(&provider_id, provider, command)?;
+        let worktrees = match run_provider_list_command(&provider_id, provider, command) {
+            Ok(worktrees) => worktrees,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
         if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
             if validate_safety {
                 validate_provider_handle(
@@ -2510,6 +2545,10 @@ fn resolve_worktree_provider_with_policy_from_config(
         }
     }
 
+    if let Some(error) = failures.into_iter().next() {
+        return Err(error);
+    }
+
     Err(worktree_provider_not_found_error(
         handle,
         config,
@@ -2523,7 +2562,10 @@ pub(crate) fn is_worktree_provider_not_found(error: &Error) -> bool {
 
 pub(crate) fn list_enabled_worktree_providers_from_config(
     config: &HomeboyConfig,
-) -> Result<Vec<WorktreeProviderResolution>> {
+) -> Result<(
+    Vec<WorktreeProviderResolution>,
+    Vec<WorktreeProviderInventoryDiagnostic>,
+)> {
     let mut provider_ids = config
         .worktree_providers
         .keys()
@@ -2531,6 +2573,7 @@ pub(crate) fn list_enabled_worktree_providers_from_config(
         .collect::<Vec<_>>();
     provider_ids.sort();
     let mut resolutions = Vec::new();
+    let mut diagnostics = Vec::new();
     for provider_id in provider_ids {
         let provider = &config.worktree_providers[&provider_id];
         if !provider.enabled {
@@ -2539,16 +2582,36 @@ pub(crate) fn list_enabled_worktree_providers_from_config(
         let Some(command) = provider.commands.list.as_ref() else {
             continue;
         };
-        resolutions.extend(
-            run_provider_list_command(&provider_id, provider, command)?
-                .into_iter()
-                .map(|worktree| WorktreeProviderResolution {
+        match run_provider_list_command(&provider_id, provider, command) {
+            Ok(worktrees) => resolutions.extend(worktrees.into_iter().map(|worktree| {
+                WorktreeProviderResolution {
                     provider_id: provider_id.clone(),
                     worktree,
-                }),
-        );
+                }
+            })),
+            Err(error) => diagnostics.push(provider_inventory_diagnostic(&provider_id, error)),
+        }
     }
-    Ok(resolutions)
+    Ok((resolutions, diagnostics))
+}
+
+fn provider_inventory_diagnostic(
+    provider_id: &str,
+    error: Error,
+) -> WorktreeProviderInventoryDiagnostic {
+    WorktreeProviderInventoryDiagnostic {
+        provider_id: provider_id.to_string(),
+        operation: error.details["worktree_provider_operation"]
+            .as_str()
+            .unwrap_or("list")
+            .to_string(),
+        classification: error.details["worktree_provider_call_classification"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        message: error.message,
+        retryable: error.retryable.unwrap_or(false),
+    }
 }
 
 pub(crate) fn worktree_provider_not_found_error(
@@ -9691,6 +9754,135 @@ printf '{{"schema":"%s","provider_id":"fixture","handle":"%s","task_url":"%s","p
                 .expect("the owning split provider resolves after a typed miss");
         assert_eq!(identity.provider_id, "owner");
         assert_eq!(identity.token, "owner-token");
+    }
+
+    #[test]
+    fn split_exact_identity_survives_a_broken_sibling_provider() {
+        let (_root, workspace) = linked_workspace("branch");
+        let mut broken = default_command_provider();
+        broken.commands.resolve_identity = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "exit 7".to_string(),
+        ]);
+        broken.commands.attest_safety = Some(vec!["true".to_string()]);
+        let mut healthy = default_command_provider();
+        healthy.commands.resolve_identity = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf '%s' '{{\"schema\":\"homeboy/worktree-provider-identity/v1\",\"provider_id\":\"healthy\",\"token\":\"healthy-token\",\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"primary\":false,\"latency_ms\":0,\"budget_ms\":0}}'",
+                workspace.display()
+            ),
+        ]);
+        healthy.commands.attest_safety = Some(vec!["true".to_string()]);
+        let mut config = config_with_provider(broken);
+        config
+            .worktree_providers
+            .insert("healthy".to_string(), healthy);
+
+        let identity =
+            resolve_apply_enabled_worktree_provider_identity_from_config("fixture@branch", &config)
+                .expect("healthy split identity resolves despite an unavailable sibling");
+
+        assert_eq!(identity.provider_id, "healthy");
+        assert_eq!(identity.token, "healthy-token");
+    }
+
+    #[test]
+    fn exact_handle_resolution_survives_a_broken_sibling_provider() {
+        let (_root, workspace) = linked_workspace("branch");
+        let mut broken = default_command_provider();
+        broken.commands.resolve = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "exit 7".to_string(),
+        ]);
+        broken.list_result_mapping = Some(worktrees_mapping());
+        let mut healthy = default_command_provider();
+        healthy.commands.resolve = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf '%s' '{{\"worktrees\":[{{\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'",
+                workspace.display()
+            ),
+        ]);
+        healthy.list_result_mapping = Some(worktrees_mapping());
+        let mut config = config_with_provider(broken);
+        config
+            .worktree_providers
+            .insert("healthy".to_string(), healthy);
+
+        let resolution =
+            resolve_apply_enabled_worktree_provider_from_config("fixture@branch", &config, None)
+                .expect("healthy exact provider resolves despite an unavailable sibling");
+
+        assert_eq!(resolution.provider_id, "healthy");
+        assert_eq!(resolution.worktree.path, workspace.display().to_string());
+    }
+
+    #[test]
+    fn exact_selected_provider_failure_remains_fail_closed() {
+        let mut provider = default_command_provider();
+        provider.commands.resolve = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "exit 7".to_string(),
+        ]);
+        provider.list_result_mapping = Some(worktrees_mapping());
+        let config = config_with_provider(provider);
+
+        let error = resolve_apply_enabled_worktree_provider_by_id_from_config(
+            "fixture@branch",
+            "fixture",
+            &config,
+        )
+        .expect_err("the requested provider failure must not be treated as a miss");
+
+        assert_eq!(error.details["worktree_provider_id"], "fixture");
+        assert_eq!(error.details["worktree_provider_operation"], "resolve");
+        assert_eq!(
+            error.details["worktree_provider_call_classification"],
+            "command"
+        );
+    }
+
+    #[test]
+    fn provider_inventory_returns_healthy_rows_and_typed_failure_diagnostics() {
+        let (_root, workspace) = linked_workspace("branch");
+        let mut broken = default_command_provider();
+        broken.commands.list = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "exit 7".to_string(),
+        ]);
+        broken.list_result_mapping = Some(worktrees_mapping());
+        let mut healthy = default_command_provider();
+        healthy.commands.list = Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf '%s' '{{\"worktrees\":[{{\"handle\":\"fixture@branch\",\"path\":\"{}\",\"branch\":\"branch\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'",
+                workspace.display()
+            ),
+        ]);
+        healthy.list_result_mapping = Some(worktrees_mapping());
+        let mut config = config_with_provider(broken);
+        config
+            .worktree_providers
+            .insert("healthy".to_string(), healthy);
+
+        let (resolutions, diagnostics) =
+            list_enabled_worktree_providers_from_config(&config).expect("inventory completes");
+
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].provider_id, "healthy");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].provider_id, "fixture");
+        assert_eq!(diagnostics[0].operation, "list");
+        assert_eq!(diagnostics[0].classification, "command");
+        assert!(!diagnostics[0].retryable);
     }
 
     #[test]

@@ -265,7 +265,9 @@ pub enum WorktreeOutput {
     Holder(WorktreeOwnershipProbe),
     Remove(WorktreeRemoveOutput),
     Cleanup(WorktreeCleanupCommandOutput),
-    QuarantineList(Vec<TaskWorktreeRegistryQuarantine>),
+    QuarantineList {
+        quarantines: Vec<TaskWorktreeRegistryQuarantine>,
+    },
     QuarantineClear(TaskWorktreeRegistryQuarantine),
 }
 
@@ -291,6 +293,9 @@ pub struct WorktreeListCommandOutput {
     pub native: WorktreeListOutput,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub provider_worktrees: Vec<ProviderWorktreeOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provider_diagnostics:
+        Vec<homeboy::core::worktree_providers::WorktreeProviderInventoryDiagnostic>,
 }
 
 #[derive(Serialize)]
@@ -650,6 +655,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             WorktreeOutput::List(WorktreeListCommandOutput {
                 native: report.native,
                 provider_worktrees,
+                provider_diagnostics: report.provider_diagnostics,
             })
         }
         WorktreeCommand::Inventory {
@@ -768,9 +774,9 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             })
         }
         WorktreeCommand::Quarantine { command } => match command {
-            WorktreeQuarantineCommand::List => {
-                WorktreeOutput::QuarantineList(worktree::list_task_worktree_registry_quarantines()?)
-            }
+            WorktreeQuarantineCommand::List => WorktreeOutput::QuarantineList {
+                quarantines: worktree::list_task_worktree_registry_quarantines()?,
+            },
             WorktreeQuarantineCommand::Clear {
                 provenance_path,
                 verified_terminal,
@@ -1009,12 +1015,24 @@ mod tests {
                 diagnostics: Vec::new(),
             },
             provider_worktrees: Vec::new(),
+            provider_diagnostics: Vec::new(),
         }))
         .expect("serialize worktree list");
 
         assert_eq!(output["action"], "list");
         assert_eq!(output["worktrees"], serde_json::json!([]));
         assert!(output.get("provider_worktrees").is_none());
+    }
+
+    #[test]
+    fn worktree_quarantine_list_serializes_as_a_stable_object() {
+        let output = serde_json::to_value(WorktreeOutput::QuarantineList {
+            quarantines: Vec::new(),
+        })
+        .expect("serialize quarantine list");
+
+        assert_eq!(output["action"], "quarantine_list");
+        assert_eq!(output["quarantines"], serde_json::json!([]));
     }
 
     #[test]
