@@ -579,6 +579,47 @@ fn agent_task_run_plan_component_contract_paths_get_component_contract_evidence_
 }
 
 #[test]
+fn agent_task_run_plan_workspace_gets_its_own_materialized_provenance() {
+    let controller = tempfile::tempdir().expect("controller");
+    let source = controller.path().join("derived-baseline");
+    let issue_worktree = controller.path().join("homeboy@issue-14145");
+    let plan = source.join(".ci/cook-retry.agent-task-plan.json");
+    std::fs::create_dir_all(plan.parent().expect("plan parent")).expect("plan parent directory");
+    std::fs::create_dir_all(&issue_worktree).expect("issue worktree directory");
+    std::fs::write(
+        &plan,
+        serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "derived-cook-retry",
+            "tasks": [{
+                "task_id": "issue-14145",
+                "instructions": "fix provenance",
+                "executor": { "backend": "test" },
+                "workspace": { "root": issue_worktree }
+            }]
+        })
+        .to_string(),
+    )
+    .expect("plan file");
+
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        format!("--plan=@{}", plan.display()),
+    ];
+
+    let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0].role, "agent_task_plan_workspace");
+    assert_eq!(
+        workspaces[0].path,
+        issue_worktree.canonicalize().expect("issue worktree")
+    );
+}
+
+#[test]
 fn agent_task_run_plan_file_inside_primary_workspace_needs_no_extra_sync() {
     let controller = tempfile::tempdir().expect("controller");
     let source = controller.path().join("primary");
