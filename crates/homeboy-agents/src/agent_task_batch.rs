@@ -1048,13 +1048,14 @@ where
     Ok(Some(graph))
 }
 
-/// Read the graph-projected executable frontier. Resume callers use this to
-/// avoid finalizing a dependent before its upstream candidate is accepted.
-pub(crate) fn fanout_ready_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
-    AgentTaskBatchStore::from_current_data_root()?.fanout_ready_child_run_ids(batch_id)
+/// Read the graph-projected dependency blocks. Resume callers must only
+/// synthesize a dependency-blocked cell for a child the graph explicitly
+/// blocks; a terminal independent child is absent from the ready frontier too.
+pub(crate) fn fanout_blocked_child_run_ids(batch_id: &str) -> Result<Option<HashSet<String>>> {
+    AgentTaskBatchStore::from_current_data_root()?.fanout_blocked_child_run_ids(batch_id)
 }
 
-pub fn fanout_ready_child_run_ids_in_store(
+pub fn fanout_blocked_child_run_ids_in_store(
     store: &AgentTaskBatchStore,
     batch_id: &str,
 ) -> Result<Option<HashSet<String>>> {
@@ -1062,18 +1063,20 @@ pub fn fanout_ready_child_run_ids_in_store(
     let Some(graph) = report.dependency_graph else {
         return Ok(None);
     };
-    let ready = graph["readiness"]["ready"]
-        .as_array()
+    let blocked = graph["readiness"]["states"]
+        .as_object()
         .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
+        .flat_map(|states| states.iter())
+        .filter_map(|(task_id, state)| {
+            (state.as_str() == Some("blocked_by_dependency")).then_some(task_id.as_str())
+        })
         .collect::<HashSet<_>>();
     Ok(Some(
         report
             .batch
             .child_runs
             .into_iter()
-            .filter(|child| ready.contains(child.task_id.as_str()))
+            .filter(|child| blocked.contains(child.task_id.as_str()))
             .map(|child| child.run_id)
             .collect(),
     ))
@@ -1625,9 +1628,9 @@ impl AgentTaskBatchStore {
         record_dependency_action_receipt_in_store(self, batch_id, key, receipt)
     }
 
-    /// Read the graph-projected executable frontier.
-    pub fn fanout_ready_child_run_ids(&self, batch_id: &str) -> Result<Option<HashSet<String>>> {
-        fanout_ready_child_run_ids_in_store(self, batch_id)
+    /// Read the graph-projected dependency blocks.
+    pub fn fanout_blocked_child_run_ids(&self, batch_id: &str) -> Result<Option<HashSet<String>>> {
+        fanout_blocked_child_run_ids_in_store(self, batch_id)
     }
 
     /// Resolve the durable child runs owned by a fanout.
