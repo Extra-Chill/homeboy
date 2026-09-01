@@ -481,14 +481,16 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             .as_ref()
             .map(|reference| reference.artifact_id.clone()),
     )?;
-    let (raw, source_path) = read_promotion_source(source_spec)?;
-    let source_run_id = match agent_task_lifecycle::reconcile_status(source_spec) {
-        Ok(record) => Some(record.run_id),
-        Err(_) => match source_path.as_deref() {
-            Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
-            None => None,
-        },
-    };
+    let (mut raw, mut source_path) = read_promotion_source(source_spec)?;
+    let source_run_id = match source_path.as_deref() {
+        Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
+        None => None,
+    }
+    .or_else(|| {
+        agent_task_lifecycle::reconcile_status(source_spec)
+            .ok()
+            .map(|record| record.run_id)
+    });
     if source_run_id.is_none() && args.idempotency_key.is_some() {
         return Err(Error::validation_invalid_argument(
             "idempotency_key",
@@ -525,6 +527,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             task_id.as_deref(),
             artifact_id.as_deref(),
         )?;
+        (raw, source_path) = read_promotion_source(run_id)?;
     }
     let promotion_request = agent_task_service::AgentTaskPromotionRequest {
         source: raw,

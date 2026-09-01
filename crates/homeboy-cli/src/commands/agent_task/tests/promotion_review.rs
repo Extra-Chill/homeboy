@@ -547,6 +547,270 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn direct_cook_promotion_uses_selected_retained_large_patch() {
+    with_temp_home(|| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&source).expect("create source");
+        init_runtime_component_checkout(&source);
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "selected-large-patch",
+                target.to_str().expect("target path"),
+                "main",
+            ])
+            .current_dir(&source)
+            .status()
+            .expect("create target worktree")
+            .success());
+
+        let cook_id = "cook-direct-selected-large-patch";
+        let candidate_run_id = "cook-direct-selected-large-patch-attempt-1";
+        let retry_run_id = "cook-direct-selected-large-patch-attempt-2";
+        let task_id = "provider";
+        let artifact_id = "cook-homeboy-attempt-1-uncommitted-changes";
+        let plan = AgentTaskPlan::new(
+            "cook-direct-selected-large-patch-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": task_id,
+                "executor": {"backend": "fixture", "model": "fixture-model"},
+                "instructions": "produce a retained large patch",
+                "workspace": {"root": source},
+            }))
+            .expect("candidate task")],
+        );
+        let options = homeboy::agents::agent_task_service::CookRequest {
+            identity: homeboy::agents::agent_task_service::CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: candidate_run_id.to_string(),
+                initial_plan: plan.clone(),
+            },
+            workspace: homeboy::agents::agent_task_service::CookWorkspace {
+                to_worktree: "fixture@selected-large-patch".to_string(),
+                source_worktree_path: Some(source.clone()),
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            gates: Default::default(),
+            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
+            finalization: homeboy::agents::agent_task_service::CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                base: "main".to_string(),
+                head: None,
+                title: "selected large patch".to_string(),
+                commit_message: "selected large patch".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: "fixture".to_string(),
+                ai_model: Some("fixture-model".to_string()),
+                ai_used_for: "test".to_string(),
+            },
+            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+        };
+        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(candidate_run_id)).expect("submit candidate");
+
+        let patch = format!(
+            "diff --git a/large.txt b/large.txt\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/large.txt\n@@ -0,0 +1 @@\n+{}\n",
+            "x".repeat(300 * 1024),
+        );
+        assert!(patch.len() > 256 * 1024);
+        let patch_sha256 = homeboy_engine_primitives::content_hash::sha256_hex(patch.as_bytes());
+        let artifact = AgentTaskArtifact {
+            id: artifact_id.to_string(),
+            kind: "patch".to_string(),
+            path: Some("runner-artifact://expired/large.patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(patch_sha256.clone()),
+            metadata: json!({
+                "run_id": candidate_run_id,
+                "task_id": task_id,
+                "producer_attempt": 1,
+                "base_ref": "main",
+                "provider_backend": "fixture",
+                "provider_model": "fixture-model",
+                "repository_identity": "fixture",
+                "workspace_identity": "fixture",
+            }),
+            ..Default::default()
+        };
+        agent_task_lifecycle::record_run_aggregate(
+            candidate_run_id,
+            &plan,
+            &AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: task_id.to_string(),
+                    status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                    artifacts: vec![artifact],
+                    metadata: json!({"model": "fixture-model"}),
+                    ..Default::default()
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .expect("record recoverable candidate");
+
+        let observation_store = homeboy::core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        let retained = observation_store
+            .artifact_root()
+            .expect("artifact root")
+            .join("direct-cook-selected-large-patch.patch");
+        std::fs::create_dir_all(retained.parent().expect("retained patch parent"))
+            .expect("create retained patch parent");
+        std::fs::write(&retained, &patch).expect("retain patch under controller ownership");
+        observation_store
+            .record_verified_artifact_with_id(
+                candidate_run_id,
+                "patch",
+                &retained,
+                "direct-cook-selected-large-patch",
+                Some(patch.len() as i64),
+                Some(&patch_sha256),
+                json!({"agent_task": {
+                    "projection": "controller_local",
+                    "task_id": task_id,
+                    "logical_artifact_id": artifact_id,
+                }}),
+            )
+            .expect("record retained patch projection");
+
+        let retry_plan = AgentTaskPlan::new(
+            "cook-direct-selected-large-patch-retry-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "review",
+                "executor": {"backend": "fixture", "model": "fixture-model"},
+                "instructions": "review without changing the candidate",
+                "workspace": {"root": source},
+            }))
+            .expect("retry task")],
+        );
+        agent_task_lifecycle::submit_plan(&retry_plan, Some(retry_run_id)).expect("submit retry");
+        agent_task_lifecycle::record_run_aggregate(
+            retry_run_id,
+            &retry_plan,
+            &AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: retry_plan.plan_id.clone(),
+                status:
+                    homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: "review".to_string(),
+                    status: AgentTaskOutcomeStatus::Succeeded,
+                    outputs: json!({"review_form": {
+                        "summary": "The retained candidate is ready.",
+                        "what_changed": ["No additional patch was needed."],
+                        "compatibility": "No additional impact.",
+                        "used_for": "Reviewed the retained candidate."
+                    }}),
+                    ..Default::default()
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .expect("record no-change retry");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            candidate_run_id,
+        )
+        .expect("index candidate attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            2,
+            retry_run_id,
+        )
+        .expect("index latest retry");
+        agent_task_lifecycle::record_promotion(
+            retry_run_id,
+            json!({
+                "status": "gate_failed",
+                "gate_results": [{"name": "fixture", "exit_code": 1}],
+                "provenance": {"gate_retry": "intentional_no_change"},
+            }),
+        )
+        .expect("record retry provenance");
+
+        let provider = temp.path().join("promotion-provider.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                target.display(),
+            ),
+        )
+        .expect("write promotion provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "promote",
+            cook_id,
+            "--artifact-id",
+            artifact_id,
+            "--to-worktree",
+            "fixture@selected-large-patch",
+            "--provider-argv",
+            "sh",
+            "--provider-argv",
+            provider.to_str().expect("provider path"),
+            "--dry-run",
+            "--gates-from-cook-recipe",
+        ])
+        .expect("parse public direct promotion command");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Promote(args) = agent_task.command else {
+            panic!("promote command");
+        };
+        let (report, exit_code) = review::promote_artifact(*args)
+            .expect("selected Cook candidate remains directly promotable");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(report["status"], "dry_run");
+        assert_eq!(report["source"]["run_id"], candidate_run_id);
+        assert_eq!(report["patch_artifact"]["id"], artifact_id);
+    });
+}
+
 #[derive(Debug, Clone)]
 struct CommittingExecutor {
     workspace: std::path::PathBuf,
