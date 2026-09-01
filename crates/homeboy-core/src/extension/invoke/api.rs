@@ -7,10 +7,8 @@ use homeboy_engine_primitives::command::{
 use homeboy_extension_contract::api::v1::{
     ExtensionApiInvocationProcessEvidence, ExtensionApiInvokeRequest, ExtensionApiInvokeResponse,
     ExtensionApiOperationFailure, ExtensionApiOperationFailureCode, ExtensionApiResolveRequest,
-    COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNING_FIXES_CAPABILITY_ID,
     EXTENSION_API_INVOKE_REQUEST_SCHEMA, EXTENSION_API_INVOKE_RESPONSE_SCHEMA,
-    EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_V1, FINGERPRINT_FILE_CAPABILITY_PREFIX,
-    REFACTOR_FILE_CAPABILITY_PREFIX,
+    EXTENSION_API_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_V1,
 };
 use homeboy_extension_contract::ExtensionManifest;
 
@@ -190,18 +188,13 @@ pub(super) fn execute_capability_process(
     Ok(output)
 }
 
+/// Resolve the script implementing a capability.
+///
+/// The mapping lives on the manifest contract so catalog projection and this
+/// invocation path cannot drift: an advertised JSON-stdin capability is always
+/// resolvable here.
 fn capability_script<'a>(extension: &'a ExtensionManifest, capability_id: &str) -> Option<&'a str> {
-    match capability_id {
-        COMPILER_WARNINGS_CAPABILITY_ID => extension.compiler_warnings_script(),
-        COMPILER_WARNING_FIXES_CAPABILITY_ID => extension.compiler_warning_fixes_script(),
-        capability if capability.starts_with(FINGERPRINT_FILE_CAPABILITY_PREFIX) => {
-            extension.fingerprint_script()
-        }
-        capability if capability.starts_with(REFACTOR_FILE_CAPABILITY_PREFIX) => {
-            extension.refactor_script()
-        }
-        _ => None,
-    }
+    extension.json_capability_script(capability_id)
 }
 
 fn failure(code: ExtensionApiOperationFailureCode, message: String) -> ExtensionApiInvokeResponse {
@@ -267,6 +260,7 @@ fn is_transient_spawn_error(error: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_extension_contract::api::v1::COMPILER_WARNINGS_CAPABILITY_ID;
     use std::fs;
 
     fn write_executable(path: &std::path::Path, content: &str) {
