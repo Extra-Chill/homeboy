@@ -209,7 +209,13 @@ fn dispatch_with_provider_catalog(
                 validate_selected_execution_plan(&plan, catalog)?;
                 plan
             }
-            Err(error) if error.retryable == Some(true) => plan.clone(),
+            Err(error) if error.retryable == Some(true) => {
+                return Err(record_retryable_dispatch_admission_failure(
+                    &plan,
+                    request.run_id.as_deref(),
+                    with_declared_credential_hints(error, &plan, catalog),
+                ));
+            }
             Err(error) => {
                 preflight_dispatch_provider_secrets(&plan)?;
                 return Err(with_declared_credential_hints(error, &plan, catalog));
@@ -301,7 +307,13 @@ pub fn dispatch_with_provider_requirements(
                 validate_selected_execution_plan(&plan, &catalog)?;
                 plan
             }
-            Err(error) if error.retryable == Some(true) => plan.clone(),
+            Err(error) if error.retryable == Some(true) => {
+                return Err(record_retryable_dispatch_admission_failure(
+                    &plan,
+                    request.run_id.as_deref(),
+                    with_declared_credential_hints(error, &plan, &catalog),
+                ));
+            }
             Err(error) => {
                 preflight_dispatch_provider_secrets(&plan)?;
                 return Err(with_declared_credential_hints(error, &plan, &catalog));
@@ -350,6 +362,31 @@ fn with_declared_credential_hints(
                 });
             }
         }
+    }
+    error
+}
+
+/// A retryable admission denial is still a denied execution. Materialize the
+/// submitted plan and terminal pre-execution diagnostic rather than letting a
+/// scheduler reservation choose a fresh route from the original plan.
+fn record_retryable_dispatch_admission_failure(
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+    mut error: Error,
+) -> Error {
+    let result = (|| {
+        let submitted = lifecycle::submit_plan(plan, requested_run_id)?;
+        lifecycle::record_pre_execution_failure(
+            &submitted.run_id,
+            plan,
+            "admit_plan_provider_dispatchability",
+            &error,
+        )?;
+        error.details["run_id"] = serde_json::json!(submitted.run_id);
+        Ok(())
+    })();
+    if let Err(record_error) = result {
+        return record_error;
     }
     error
 }
@@ -1125,6 +1162,115 @@ mod tests {
                 1
             );
             assert_eq!(plan.options.rotation.as_ref().unwrap().entries.len(), 1);
+        });
+    }
+
+    #[test]
+    fn retryable_direct_admission_denial_never_runs_or_rederives_a_route() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("readiness fixture");
+            let script = temp.path().join("temporarily-unavailable.js");
+            std::fs::write(
+                &script,
+                "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'capacity',retryable:true,remediation:'retry later',reason:'temporary capacity',cache_key:input.effective_config.model,identity:{model:input.effective_config.model}}));",
+            )
+            .expect("readiness script");
+            let provider = |id: &str| {
+                let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+                    serde_json::from_value(serde_json::json!({
+                        "id": id,
+                        "backend": "test"
+                    }))
+                    .expect("provider fixture");
+                provider.readiness_invocation = Some(
+                    homeboy_core::command_invocation::CommandInvocation {
+                        argv: vec!["node".to_string(), script.display().to_string()],
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+                provider
+            };
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![provider("test.primary"), provider("test.fallback")],
+                ..Default::default()
+            };
+            let run_id = format!("retryable-admission-{}", uuid::Uuid::new_v4());
+            let request = AgentTaskDispatchRequest {
+                prompt: Some("run".to_string()),
+                prompt_is_literal: false,
+                tasks: Vec::new(),
+                cwd: None,
+                workspace: None,
+                repo: None,
+                component: None,
+                task_url: None,
+                backend: "test".to_string(),
+                selector: Some("test.primary".to_string()),
+                model: Some("primary".to_string()),
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                concurrency: 1,
+                run_id: Some(run_id.clone()),
+                task_id: None,
+                core: DispatchCoreInputs {
+                    resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
+                        backend: "test".to_string(),
+                        selector: Some("test.primary".to_string()),
+                        model: Some("primary".to_string()),
+                        rotation: Some(AgentTaskProviderRotationPolicy {
+                            entries: vec![
+                                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                    selector: Some("test.fallback".to_string()),
+                                    model: Some("fallback".to_string()),
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }),
+                        rotation_starts_with_first_entry: false,
+                        retry: Default::default(),
+                        liveness_timeout_ms: None,
+                        runtime_identity: None,
+                    }),
+                    ..Default::default()
+                },
+                backend_selection: None,
+            };
+
+            let error =
+                dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
+                    .expect_err("temporary route unavailability denies direct dispatch");
+            let record = crate::agent_task_lifecycle::reconcile_status(&run_id)
+                .expect("durable admission failure");
+            let persisted = crate::agent_task_lifecycle::load_plan(&run_id)
+                .expect("unadmitted plan remains inspectable");
+
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(error.details["run_id"], run_id);
+            assert_ne!(
+                record.lifecycle.execution.state,
+                homeboy_core::run_lifecycle_record::RunExecutionState::Running
+            );
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["phase"],
+                "admit_plan_provider_dispatchability"
+            );
+            assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+            assert!(record
+                .metadata
+                .get("provider_executions")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty));
+            assert_eq!(
+                persisted.tasks[0].executor.selector.as_deref(),
+                Some("test.primary")
+            );
+            assert_eq!(persisted.tasks[0].executor.model(), Some("primary"));
+            assert!(persisted.tasks[0]
+                .metadata
+                .get("provider_readiness_routing")
+                .is_none());
         });
     }
 
