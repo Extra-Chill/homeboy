@@ -14,7 +14,6 @@ use crate::agent_task::{
 };
 
 const CANONICAL_PATCH_CANDIDATE_LIMIT: usize = 16;
-const CANONICAL_PATCH_BYTES_PER_CANDIDATE_LIMIT: u64 = 256 * 1024;
 const CANONICAL_PATCH_BYTES_TOTAL_LIMIT: u64 = 1024 * 1024;
 const DECLARED_BASE_GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const DECLARED_BASE_GIT_HEARTBEAT: Duration = Duration::from_secs(1);
@@ -3383,9 +3382,7 @@ fn canonical_recoverable_patch_artifacts_internal(
                 continue;
             }
         };
-        if patch_bytes > CANONICAL_PATCH_BYTES_PER_CANDIDATE_LIMIT
-            || read_patch_bytes.saturating_add(patch_bytes) > CANONICAL_PATCH_BYTES_TOTAL_LIMIT
-        {
+        if read_patch_bytes.saturating_add(patch_bytes) > CANONICAL_PATCH_BYTES_TOTAL_LIMIT {
             omitted_patch_bytes = omitted_patch_bytes.saturating_add(patch_bytes);
             unavailable.push(json!({
                 "id": artifact.id,
