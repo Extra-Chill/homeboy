@@ -572,7 +572,6 @@ fn register_startup_providers_after_reconcile(
     crate::agents::agent_task_secrets::register();
     // Register the extension provider-discovery validator so core's
     // extension install/repair can verify declared agent-runtime providers.
-    crate::agents::agent_task_provider::discovery::register();
     // Register the command-label resolver so core::runner can map dispatched
     // argv to a hot-command label without depending on the full CLI parser.
     crate::runner::set_command_label_resolver(|argv| {

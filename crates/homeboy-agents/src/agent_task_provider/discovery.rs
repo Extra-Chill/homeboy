@@ -289,24 +289,20 @@ fn expected_agent_runtime_provider_refs(
     Ok(expected)
 }
 
-/// Agent-task implementation of core's extension provider-discovery validator.
-struct ExtensionProviderDiscoveryValidatorImpl;
+/// Resolves an extension's registered executors against this host's agent-task
+/// providers, so extension install, replace, and relink can reject a declaration
+/// that registers cleanly but cannot actually be dispatched.
+///
+/// Pass this into a lifecycle mutation from a caller that has the agent-task
+/// subsystem. A caller without it uses
+/// `ExtensionLifecycleValidation::declaration_only`, which still enforces
+/// registrability.
+pub struct AgentTaskExecutorDiscovery;
 
-impl homeboy_core::extension::registry::ExtensionProviderDiscoveryValidator
-    for ExtensionProviderDiscoveryValidatorImpl
-{
-    fn validate_installed_extension_provider_discovery(&self, extension_id: &str) -> Result<()> {
+impl homeboy_core::extension::registry::ExtensionExecutorDiscovery for AgentTaskExecutorDiscovery {
+    fn validate_registered_executors(&self, extension_id: &str) -> Result<()> {
         validate_installed_extension_agent_runtime_provider_discovery(extension_id)
     }
-}
-
-/// Register the extension provider-discovery validator so core's extension
-/// install/repair can verify declared agent-runtime providers are discoverable
-/// without depending on the agent-task subsystem.
-pub fn register() {
-    homeboy_core::extension::registry::register_extension_provider_discovery_validator(Box::new(
-        ExtensionProviderDiscoveryValidatorImpl,
-    ));
 }
 
 #[cfg(test)]

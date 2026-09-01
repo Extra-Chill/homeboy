@@ -150,6 +150,7 @@ fn validate_workspace_relative_path(argument: &str, value: &str) -> homeboy::cor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::extension::registry::ExtensionLifecycleValidation;
     fn install_fixture_extension(
         id: &str,
         provider_id: &str,
@@ -171,8 +172,12 @@ mod tests {
             .to_string(),
         )
         .expect("manifest");
-        homeboy_core::extension::lifecycle::install(&source.path().display().to_string(), Some(id))
-            .expect("install extension");
+        homeboy_core::extension::lifecycle::install(
+            &source.path().display().to_string(),
+            Some(id),
+            ExtensionLifecycleValidation::declaration_only(),
+        )
+        .expect("install extension");
         // Installed extensions are linked to their source. Keep the fixture
         // alive until discovery and execution complete.
         source

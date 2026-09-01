@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use homeboy_core::config::{self, from_str};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::registry::validate_installed_extension_provider_discovery;
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use homeboy_core::git;
 use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;
@@ -105,9 +105,10 @@ pub(crate) fn shared_assets_for_extension_source(source: &Path) -> Vec<(String, 
 pub(super) fn install_configured_extension(
     source: &str,
     extension_id: &str,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<InstallResult> {
     if super::is_git_url(source) {
-        return super::install(source, Some(extension_id));
+        return super::install(source, Some(extension_id), validation);
     }
 
     let source_path = Path::new(source);
@@ -122,10 +123,11 @@ pub(super) fn install_configured_extension(
             Some(extension_id),
             Some(source_path),
             None,
+            validation,
         );
     }
 
-    super::install(source, Some(extension_id))
+    super::install(source, Some(extension_id), validation)
 }
 
 /// Install a extension by cloning from a git repository URL.
@@ -137,6 +139,7 @@ pub(super) fn install_from_url(
     url: &str,
     id_override: Option<&str>,
     revision: Option<&str>,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<InstallResult> {
     let extension_id = match id_override {
         Some(id) => slugify_id(id)?,
@@ -201,7 +204,7 @@ pub(super) fn install_from_url(
     }
 
     let manifest_path = paths::extension_manifest(&extension_id)?;
-    if let Err(err) = validate_installed_extension_provider_discovery(&extension_id) {
+    if let Err(err) = validation.validate_installed_extension(&extension_id) {
         let _ = std::fs::remove_dir_all(&extension_dir);
         return Err(err);
     }
@@ -546,6 +549,7 @@ pub(super) fn install_from_path(
     id_override: Option<&str>,
     source_root: Option<&Path>,
     revision: Option<&str>,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<InstallResult> {
     let source = Path::new(source_path);
 
@@ -596,6 +600,7 @@ pub(super) fn install_from_path(
                     Some(&extension_id),
                     Some(&source),
                     revision,
+                    validation,
                 );
             }
         }
@@ -654,7 +659,7 @@ pub(super) fn install_from_path(
         return Err(err);
     }
     let manifest_path = paths::extension_manifest(&extension_id)?;
-    if let Err(err) = validate_installed_extension_provider_discovery(&extension_id) {
+    if let Err(err) = validation.validate_installed_extension(&extension_id) {
         let _ = std::fs::remove_file(&extension_dir);
         return Err(err);
     }

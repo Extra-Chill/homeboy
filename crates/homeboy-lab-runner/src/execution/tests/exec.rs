@@ -3,6 +3,7 @@ use crate::{
     RunnerActiveJobSource, RunnerActiveJobState, RunnerSession, RunnerSessionRole,
     RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
 };
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use homeboy_core::runner_execution_envelope::{
     PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
@@ -1329,6 +1330,7 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
         homeboy_core::extension::lifecycle::install(
             &extension.path().display().to_string(),
             Some("fixture"),
+            ExtensionLifecycleValidation::declaration_only(),
         )
         .expect("install provider fixture");
 
