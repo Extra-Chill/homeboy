@@ -4940,6 +4940,16 @@ impl BatchCookSpec {
                 "each fanout cook requires verify or private_verify so PR finalization has deterministic gates",
             ));
         }
+        // Batch children compile directly to Cook, bypassing the single-Cook
+        // command path that resolves retry intent after dispatch planning.
+        let configured_rotations = batch_cook_configured_rotations(self);
+        let retry_budget = agent_task_service::resolve_cook_budget(
+            self.max_attempts,
+            configured_rotations,
+            self.attempts,
+            self.same_provider_retries,
+            self.provider_rotations,
+        )?;
         let mut prompt = self.prompt.clone();
         let workspace_root = self.workspace.as_deref().or(self.cwd.as_deref());
         let mut provider_config = self.provider_config.clone();
@@ -4995,9 +5005,9 @@ impl BatchCookSpec {
                 tasks_json: None,
                 provider_config,
                 client_context: Some(merged_client_context(plan, self)),
-                attempts: self.attempts,
-                same_provider_retries: self.same_provider_retries,
-                provider_rotations: self.provider_rotations,
+                attempts: Some(retry_budget.provider_executions),
+                same_provider_retries: Some(retry_budget.same_provider_remediations),
+                provider_rotations: Some(retry_budget.provider_rotations),
                 queue_only: false,
                 timeout_ms: None,
                 resolved_provider_policy: None,
@@ -5099,6 +5109,31 @@ impl BatchCookSpec {
             },
         })
     }
+}
+
+fn batch_cook_configured_rotations(cook: &BatchCookSpec) -> u32 {
+    // An explicitly selected route stays pinned unless the child explicitly
+    // requests rotations, matching the single-Cook command's policy.
+    if cook.backend.is_some() && cook.model.is_some() && cook.provider_rotations.is_none() {
+        return 0;
+    }
+    homeboy::core::defaults::load_config()
+        .agent_task
+        .rotation
+        .and_then(|rotation| {
+            serde_json::from_value::<
+                homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy,
+            >(rotation)
+            .ok()
+        })
+        .map(|rotation| {
+            let entries = u32::try_from(rotation.entries.len()).unwrap_or(u32::MAX);
+            rotation
+                .max_total_attempts()
+                .min(entries.saturating_add(1))
+                .saturating_sub(1)
+        })
+        .unwrap_or(0)
 }
 
 fn cook_recipe_source_identity(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec) -> Result<String> {
@@ -6935,6 +6970,73 @@ mod tests {
             &args(),
         )
         .expect("test batch plan")
+    }
+
+    #[test]
+    fn batch_children_fund_declared_retries_and_configured_rotation() {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let mut config = homeboy::core::defaults::load_config();
+            config.agent_task.rotation = Some(
+                serde_json::to_value(
+                    homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                        entries: vec![
+                            homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                model: Some("fallback-one".to_string()),
+                                ..Default::default()
+                            },
+                            homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                model: Some("fallback-two".to_string()),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                )
+                .expect("serialize configured rotation"),
+            );
+            homeboy::core::defaults::save_config(&config).expect("save configured rotation");
+            let plan = test_batch_plan();
+            let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile child policies");
+
+            for (cook, compiled) in plan.cooks.iter().zip(&compiled) {
+                let invocation = cook
+                    .to_cook_invocation(&plan)
+                    .expect("compile child policy");
+
+                assert_eq!(invocation.options.retry_policy.max_attempts, 3);
+                assert_eq!(invocation.dispatch.core.attempts, Some(5));
+                assert_eq!(invocation.dispatch.core.same_provider_retries, Some(2));
+                assert_eq!(invocation.dispatch.core.provider_rotations, Some(2));
+                assert_eq!(
+                    compiled
+                        .identity
+                        .initial_plan
+                        .options
+                        .execution_budget
+                        .max_provider_executions,
+                    5
+                );
+                assert_eq!(
+                    compiled
+                        .identity
+                        .initial_plan
+                        .options
+                        .execution_budget
+                        .max_same_provider_retries,
+                    2
+                );
+                assert_eq!(
+                    compiled
+                        .identity
+                        .initial_plan
+                        .options
+                        .execution_budget
+                        .max_provider_rotations,
+                    2
+                );
+            }
+        });
     }
 
     #[derive(Debug)]
