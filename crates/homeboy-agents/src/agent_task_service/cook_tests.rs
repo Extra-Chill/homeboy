@@ -4697,7 +4697,11 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                     ..Default::default()
                 },
                 compile_command("runtime", None, None),
-                "runtime readiness validation failed",
+                // `runtime_unavailable`'s reason now surfaces the provider's own
+                // reported classification and reason instead of the old generic
+                // string, matching `offline_provider_owned_auth_remains_runtime_unavailable`
+                // (#13974).
+                "runtime_unavailable: configuration: runtime unavailable",
             ),
             (
                 "unverified-provider-auth",

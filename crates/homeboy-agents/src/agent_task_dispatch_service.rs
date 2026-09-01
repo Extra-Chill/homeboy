@@ -272,14 +272,12 @@ pub fn preflight_dispatch_provider_admission(
             return Err(error);
         }
     };
+    // `plan` is the admission-derived selected route (fixture/gate bypass
+    // already applied). Re-deriving dispatchability from scratch here would
+    // drop that bypass and hard-fail a route admission just approved (#13974).
     catalog.validate_selected_models(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
-    crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
-        &plan,
-        catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )
+    preflight_plan_provider_config_with_providers(&plan, catalog.providers())
 }
 
 pub fn dispatch_with_provider_requirements(
@@ -322,15 +320,17 @@ fn validate_selected_execution_plan(
     plan: &AgentTaskPlan,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
+    // `plan` already cleared full dispatchability (including live runtime
+    // probing) for its selected route during admission, with the fixture/gate
+    // bypass that route selection depends on. Re-deriving dispatchability here
+    // from scratch would re-run that evaluation without the bypass and hard-fail
+    // a plan admission just approved (#13974). Only run the checks admission
+    // does not already cover: declared model support, provider-declared runtime
+    // preflight checks, secret material, and provider config preflight rules.
     catalog.validate_selected_models(plan)?;
     catalog.enforce_runtime_preflight_checks_for_plan(plan)?;
     preflight_dispatch_provider_secrets(plan)?;
-    preflight_plan_provider_config_with_providers(plan, catalog.providers())?;
-    crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
-        plan,
-        catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )
+    preflight_plan_provider_config_with_providers(plan, catalog.providers())
 }
 
 fn with_declared_credential_hints(
