@@ -1442,6 +1442,11 @@ fn envelope_submission_replays_and_persists_no_legacy_execution_request() {
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim envelope")
         .expect("claimed envelope");
+    assert!(claim.request.is_none());
+    assert!(serde_json::to_value(&claim)
+        .expect("claim serializes")
+        .get("request")
+        .is_none());
     assert_eq!(
         claim.envelope.dispatch.as_ref().expect("dispatch").command,
         request.command
@@ -2040,13 +2045,19 @@ fn remote_runner_job_env_is_scoped_to_submitted_job() {
 
     assert_eq!(
         first_claim
-            .request
+            .envelope
+            .dispatch
+            .as_ref()
+            .expect("typed dispatch")
             .env
             .get("STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH"),
         Some(&"/tmp/sample-runtime".to_string())
     );
     assert!(!second_claim
-        .request
+        .envelope
+        .dispatch
+        .as_ref()
+        .expect("typed dispatch")
         .env
         .contains_key("STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH"));
 }

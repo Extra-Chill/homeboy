@@ -8,14 +8,15 @@
 use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 
-use crate::api_jobs::{Job, RemoteRunnerJobRequest};
+use crate::api_jobs::Job;
 use crate::error::{Error, ErrorCode, Result};
+use crate::runner_execution_envelope::RunnerExecutionEnvelope;
 
 pub const RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA: &str = "homeboy/runner-job-execution-context/v1";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_EVIDENCE_SCHEMA: &str =
     "homeboy/runner-job-execution-context-evidence/v1";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY: &str = "runner-job-execution-context";
-pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION: u32 = 1;
+pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION: u32 = 2;
 pub const RUNNER_JOB_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_ID";
 pub const RUNNER_CHILD_RESERVATION_ENV: &str = "HOMEBOY_RUNNER_CHILD_RESERVATION";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID";
@@ -40,13 +41,17 @@ impl RunnerJobExecutionProtocol {
 
     pub fn verify(&self) -> Result<()> {
         if self.capability == RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
-            && self.version == RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION
+            && (1..=RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION).contains(&self.version)
         {
             return Ok(());
         }
         Err(rejected(
             "worker does not advertise the required execution-context protocol",
         ))
+    }
+
+    pub fn uses_envelope_only_claim(&self) -> bool {
+        self.version >= 2
     }
 }
 
@@ -94,36 +99,39 @@ impl RunnerJobExecutionContext {
     /// Construct the only remote context source: a durable accepted job with a
     /// live broker claim. Generic runner jobs use their durable run/job identity
     /// as their controller attempt; agent-task callers retain their explicit IDs.
-    pub fn from_claim(job: &Job, request: &RemoteRunnerJobRequest) -> Result<Self> {
+    pub fn from_claim(job: &Job, envelope: &RunnerExecutionEnvelope) -> Result<Self> {
+        let dispatch = envelope
+            .dispatch
+            .as_ref()
+            .ok_or_else(|| rejected("accepted dispatch has no typed runner dispatch"))?;
         let runner_id = required(&job.claimed_by_runner_id, "claimed runner")?;
         let expected_runner_id = required(&job.target_runner_id, "target runner")?;
-        if runner_id != expected_runner_id || runner_id != request.runner_id.trim() {
+        if runner_id != expected_runner_id || runner_id != dispatch.runner_id.trim() {
             return Err(rejected(
                 "runner identity does not match the accepted dispatch receipt",
             ));
         }
         let claim_id = required(&job.claim_id, "claim")?;
-        let controller_run_id = metadata_id(request, "controller_run_id")
+        let controller_run_id = metadata_id(&envelope.metadata, "controller_run_id")
             .or_else(|| {
-                request
+                envelope
                     .lifecycle
                     .as_ref()
                     .and_then(|l| l.durable_run_id.clone())
             })
             .or_else(|| {
-                request
+                envelope
                     .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("run_id"))
+                    .get("run_id")
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             })
             .unwrap_or_else(|| job.id.to_string());
-        let controller_attempt_id = metadata_id(request, "controller_attempt_id")
+        let controller_attempt_id = metadata_id(&envelope.metadata, "controller_attempt_id")
             .unwrap_or_else(|| controller_run_id.clone());
-        let accepted_handoff_id = metadata_id(request, "accepted_handoff_id")
+        let accepted_handoff_id = metadata_id(&envelope.metadata, "accepted_handoff_id")
             .unwrap_or_else(|| format!("{}:{}", controller_attempt_id, job.id));
-        let runtime_id = request
+        let runtime_id = dispatch
             .command
             .first()
             .map(String::as_str)
@@ -261,7 +269,7 @@ impl RunnerJobExecutionContext {
     /// Turn a received assertion into a capability after proving it against the
     /// actual broker claim. The authentication bit is never serialized, so a
     /// forged JSON payload cannot reach a provider entry point.
-    pub fn verify_claim(&self, job: &Job, request: &RemoteRunnerJobRequest) -> Result<Self> {
+    pub fn verify_claim(&self, job: &Job, envelope: &RunnerExecutionEnvelope) -> Result<Self> {
         if job.status != crate::api_jobs::JobStatus::Running
             || job
                 .claim_expires_at_ms
@@ -269,7 +277,7 @@ impl RunnerJobExecutionContext {
         {
             return Err(rejected("durable runner claim is no longer live"));
         }
-        let verified = Self::from_claim(job, request)?;
+        let verified = Self::from_claim(job, envelope)?;
         if self != &verified {
             return Err(rejected(
                 "dispatch receipt does not match the accepted runner job",
@@ -433,10 +441,8 @@ impl RunnerJobExecutionContext {
     }
 }
 
-fn metadata_id(request: &RemoteRunnerJobRequest, key: &str) -> Option<String> {
-    request
-        .metadata
-        .as_ref()?
+fn metadata_id(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    metadata
         .get(key)?
         .as_str()
         .map(str::trim)

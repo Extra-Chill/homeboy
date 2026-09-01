@@ -566,6 +566,69 @@ fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
     });
 }
 
+#[test]
+fn detached_handoff_persists_only_the_runner_api_replay_envelope() {
+    with_isolated_home(|_| {
+        let run_id = "envelope-intent-before-post";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("controller proxy");
+        let legacy = replay_request(run_id, &command);
+        let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: legacy.submission_key().expect("submission key").to_string(),
+            envelope: legacy.execution_envelope(),
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+        };
+
+        let pending = record_lab_offload_submission_envelope(run_id, &submission)
+            .expect("persist Runner API intent");
+        let intent = &pending.metadata["runner_submission_intent"];
+        let expected_fingerprint =
+            homeboy_core::api_jobs::runner_api_submission_payload_fingerprint(&submission)
+                .expect("fingerprint");
+
+        assert!(intent.get("replay_request").is_none());
+        assert_eq!(intent["replay_envelope_request"], json!(submission));
+        assert_eq!(intent["payload_fingerprint"], expected_fingerprint);
+        assert!(has_live_pending_runner_submission_intent(
+            &pending,
+            chrono::Utc::now()
+        ));
+
+        ensure_runner_continuation_provider_reset_hook();
+        let store = JobStore::default();
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let _provider = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
+            store: store.clone(),
+            submitted: Arc::clone(&submitted),
+            lookups: Arc::new(Mutex::new(Vec::new())),
+            fail_after_accept_once: Arc::new(Mutex::new(false)),
+        }));
+        assert!(reconcile_pending_runner_submission_intent_in_store(
+            &test_lifecycle_store(),
+            run_id
+        )
+        .expect("reconcile envelope intent"));
+        let submitted_job_id = submitted.lock().expect("submissions")[0];
+        assert_eq!(
+            store
+                .submit_runner_api_request(submission)
+                .expect("idempotent replay")
+                .id,
+            submitted_job_id
+        );
+    });
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The attempt proxy is created, terminalized and read back through
 /// the same injected store, so "this attempt record is Failed with a staging
