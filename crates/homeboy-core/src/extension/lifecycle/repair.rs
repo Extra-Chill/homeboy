@@ -560,31 +560,13 @@ mod tests {
     };
     use crate::extension::catalog::load_extension;
     use crate::extension::lifecycle::{install, read_source_revision, read_source_url};
-    use homeboy_core::test_support::with_isolated_home;
+    use homeboy_core::test_support::{
+        with_isolated_home, write_extension_fixture, write_extension_fixture_with_version,
+    };
     use std::fs;
     use std::path::Path;
     use std::process::Command;
     use tempfile::TempDir;
-
-    fn write_extension_fixture(root: &Path, id: &str) {
-        write_extension_fixture_with_version(root, id, "1.0.0");
-    }
-
-    fn write_extension_fixture_with_version(root: &Path, id: &str, version: &str) {
-        let dir = root.join(id);
-        fs::create_dir_all(&dir).expect("extension dir");
-        fs::write(
-            dir.join(format!("{}.json", id)),
-            format!(
-                r#"{{
-  "name": "{} extension",
-  "version": "{}"
-}}"#,
-                id, version
-            ),
-        )
-        .expect("extension manifest");
-    }
 
     fn write_extension_fixture_with_setup_command(root: &Path, id: &str, setup_command: &str) {
         let dir = root.join(id);
