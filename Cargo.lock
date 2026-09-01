@@ -814,6 +814,7 @@ dependencies = [
  "homeboy-refactor",
  "homeboy-refactor-contract",
  "homeboy-release",
+ "homeboy-resource-topology-contract",
  "homeboy-review",
  "homeboy-rig",
  "homeboy-runner-contract",
@@ -924,6 +925,7 @@ dependencies = [
  "homeboy-redaction",
  "homeboy-refactor-contract",
  "homeboy-release-contract",
+ "homeboy-resource-topology-contract",
  "homeboy-runner-contract",
  "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
@@ -1202,6 +1204,14 @@ name = "homeboy-release-contract"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "homeboy-resource-topology-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
