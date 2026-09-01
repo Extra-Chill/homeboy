@@ -40,15 +40,12 @@ pub use action::execute_action;
 pub use api::invoke_api;
 pub use context::ResolvedExtensionInvocationContext;
 pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
-pub(crate) use environment::prepare_capability_run;
-use environment::{
-    build_action_env, build_exec_env, execute_extension_command, execute_extension_runtime,
-};
+use environment::{build_action_env, execute_extension_runtime};
+pub(crate) use environment::{build_exec_env, execute_extension_command, prepare_capability_run};
 pub use environment_api::{
     declared_environment_secret_names as declared_secret_names, resolve_environment_api,
     EnvironmentResolutionContext,
 };
-use homeboy_core::extension::readiness::extension_ready_status;
 pub(crate) use runner::{read_extension_phase_timings, tail_lines};
 pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
 pub(crate) use runtime_helper::WRITE_TEST_RESULTS_ENV;
@@ -270,93 +267,6 @@ pub fn run_extension(
         exit_code: execution.result.exit_code,
         project_id: execution.project_id,
         output,
-    })
-}
-
-/// Run an extension-owned deployment provider command and retain its structured
-/// stdout for the deploy result. Provider-specific validation and mutation stay
-/// entirely inside the extension command.
-pub fn run_deployment_provider(
-    extension_id: &str,
-    provider_id: &str,
-    project_id: &str,
-    component_id: &str,
-    component_path: &str,
-    contract: &std::path::Path,
-    dry_run: bool,
-) -> Result<ExtensionRunResult> {
-    let extension = load_extension(extension_id)?;
-    let provider = crate::extension::catalog::deployment_providers(&extension)
-        .into_iter()
-        .find(|provider| provider.id == provider_id)
-        .ok_or_else(|| Error::validation_invalid_argument(
-            "deployment_provider.provider",
-            format!("Extension '{extension_id}' does not declare deployment provider '{provider_id}'"),
-            None,
-            None,
-        ))?;
-    let readiness = extension_ready_status(&extension);
-    if readiness.ready != Some(true) {
-        return Err(Error::validation_invalid_argument(
-            "deployment_provider.extension",
-            format!("Deployment extension '{extension_id}' is not ready"),
-            readiness.detail.or(readiness.reason),
-            None,
-        ));
-    }
-    let extension_path = validation::require(
-        extension.extension_path.as_ref(),
-        "extension",
-        "extension_path not set",
-    )?;
-    let contract = contract.to_str().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "deployment_provider.contract",
-            "Contract path is not valid UTF-8",
-            None,
-            None,
-        )
-    })?;
-    let quoted_contract = shell::quote_path(contract);
-    let command_template = if dry_run {
-        provider.dry_run_command.as_deref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "deployment_provider.dry_run_command",
-                format!("Provider '{provider_id}' does not declare a non-mutating dry-run command"),
-                None,
-                None,
-            )
-        })?
-    } else {
-        &provider.command
-    };
-    let command = template::render(
-        command_template,
-        &[
-            ("extension_path", extension_path),
-            ("payload.contract", &quoted_contract),
-        ],
-    );
-    let execution = execute_extension_command(
-        &command,
-        &[],
-        Some(extension_path),
-        &build_exec_env(
-            extension_id,
-            Some(project_id),
-            Some(component_id),
-            "{}",
-            Some(extension_path),
-            None,
-            None,
-            Some(component_path),
-        ),
-        ExtensionExecutionMode::Captured,
-    )?;
-    Ok(ExtensionRunResult {
-        exit_code: execution.exit_code,
-        project_id: Some(project_id.to_string()),
-        output: Some(execution.output),
     })
 }
 
@@ -759,44 +669,6 @@ mod tests {
             assert_eq!(
                 result.output.expect("output").stdout,
                 attachment.path().to_string_lossy()
-            );
-        });
-    }
-
-    #[test]
-    fn deployment_provider_uses_the_declared_non_mutating_command() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let contract = tempfile::NamedTempFile::new().expect("contract");
-            let component = tempfile::tempdir().expect("component");
-            write_extension(
-                home.path(),
-                "fixture-provider",
-                serde_json::json!({
-                    "name": "fixture-provider", "version": "1.0.0",
-                    "deployment_providers": [{
-                        "id": "fixture.deploy",
-                        "command": "sh {{extension_path}}/run.sh apply {{payload.contract}}",
-                        "dry_run_command": "sh {{extension_path}}/run.sh validate {{payload.contract}}"
-                    }]
-                }),
-                "#!/bin/sh\nprintf '%s|%s' \"$1\" \"$HOMEBOY_COMPONENT_PATH\"\n",
-            );
-
-            let result = run_deployment_provider(
-                "fixture-provider",
-                "fixture.deploy",
-                "site",
-                "fixture",
-                component.path().to_str().expect("component path"),
-                contract.path(),
-                true,
-            )
-            .expect("provider dry run");
-
-            assert_eq!(result.exit_code, 0);
-            assert_eq!(
-                result.output.expect("output").stdout,
-                format!("validate|{}", component.path().display())
             );
         });
     }

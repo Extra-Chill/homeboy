@@ -7,10 +7,12 @@ use super::{
     ExtensionApiVersion,
 };
 
+mod deployment;
 mod environment;
 mod external_check_detail;
 mod invocation;
 mod recipe_run;
+pub use deployment::*;
 pub use environment::*;
 pub use external_check_detail::*;
 pub use invocation::*;

@@ -14,10 +14,7 @@ mod manifest;
 
 pub use api::{capability_provider_ids, list_api, readiness_api_batch};
 pub(crate) use api::{resolve_api, snapshot_api, validate_operation_request};
-pub use manifest::{
-    deployment_provider_layered_input, deployment_providers, structured_sidecar_schema_version,
-    structured_sidecars,
-};
+pub use manifest::{structured_sidecar_schema_version, structured_sidecars};
 
 pub const EXTENSION_RELINK_ACTION_ID: &str = "extension.relink";
 pub const EXTENSION_UNINSTALL_ACTION_ID: &str = "extension.uninstall";
