@@ -398,12 +398,12 @@ homeboy runner refresh-plan --runner <runner-id> --workspace . --runner-cwd /run
 ```
 
 Plans a runner-backed refresh loop before dispatching matrix-style work, without
-executing the workload. It composes the existing runner/workspace/run artifact
-primitives into one envelope: a `RunnerExecutionEnvelope`, a handoff describing
-workspace mapping and Homeboy binary provenance (controller CLI vs. runner
-configured binary vs. active daemon, with version/build drift diagnostics),
-declared evidence/artifact paths, and the ordered `next_commands` to verify the
-runner, sync the workspace, run the refresh, and inspect the produced evidence.
+executing the workload. Its `RunnerExecutionEnvelope` owns typed dispatch,
+workspace mapping, secret and lifecycle policy, and declared artifacts. The v2
+handoff contains only the planned execution record and Homeboy binary provenance
+(controller CLI vs. runner configured binary vs. active daemon, with
+version/build drift diagnostics). Ordered `next_commands` verify the runner,
+sync the workspace, run the refresh, and inspect the produced evidence.
 Source and fixture paths passed with `--source`/`--fixture` must exist before the
 plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
 
