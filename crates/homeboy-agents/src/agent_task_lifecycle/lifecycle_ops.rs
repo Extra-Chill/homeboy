@@ -4074,6 +4074,7 @@ pub fn record_provider_execution_runtime_evidence_in_store(
     attempt: u32,
     stdout_uri: Option<String>,
     stderr_uri: Option<String>,
+    structured_progress_uri: Option<String>,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let key = format!("{task_id}:{attempt}");
@@ -4091,6 +4092,7 @@ pub fn record_provider_execution_runtime_evidence_in_store(
         execution["runtime_evidence"] = json!({
             "stdout": stdout_uri,
             "stderr": stderr_uri,
+            "structured_progress": structured_progress_uri,
             "capture": "bounded_incremental",
         });
         true
@@ -4111,6 +4113,7 @@ pub(crate) fn record_provider_execution_runtime_evidence(
     attempt: u32,
     stdout_uri: Option<String>,
     stderr_uri: Option<String>,
+    structured_progress_uri: Option<String>,
 ) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     record_provider_execution_runtime_evidence_in_store(
@@ -4120,7 +4123,45 @@ pub(crate) fn record_provider_execution_runtime_evidence(
         attempt,
         stdout_uri,
         stderr_uri,
+        structured_progress_uri,
     )
+}
+
+/// Persist the timestamp of a workspace change observed by provider supervision.
+/// The status projection uses this finite lifecycle fact and never inspects a workspace.
+pub(crate) fn record_provider_execution_workspace_activity(
+    run_id: &str,
+    task_id: &str,
+    attempt: u32,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let run_id = sanitize_run_id(run_id);
+    let key = format!("{task_id}:{attempt}");
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
+        let Some(execution) = record.metadata["provider_executions"]
+            .as_array_mut()
+            .and_then(|executions| {
+                executions
+                    .iter_mut()
+                    .find(|execution| execution["key"] == key)
+            })
+        else {
+            return false;
+        };
+        if execution["state"] != json!("running") {
+            return false;
+        }
+        execution["workspace_activity_observed_at"] = json!(now_timestamp());
+        true
+    })?;
+    record.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_execution",
+            "cannot attach workspace activity to an inactive provider execution",
+            Some(key),
+            None,
+        )
+    })
 }
 
 // The ambient `has_active_provider_execution()` shim that used to sit here is gone;

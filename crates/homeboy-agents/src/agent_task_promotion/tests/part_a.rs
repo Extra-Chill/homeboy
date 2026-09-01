@@ -618,26 +618,32 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
         ..Default::default()
     };
 
-    let report = promote_with_provider(
-        AgentTaskPromotionOptions {
-            source,
-            source_run_id: Some("run-no-artifact".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: Some(repo.clone()),
-            base_ref: Some("main".to_string()),
-            task_base_sha: Some(base),
-            candidate_ref: None,
-            to_worktree: "repo@promoted".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_command: None,
-            provider_invocation: None,
-        },
-        &mut provider,
-    )
-    .expect("committed changes are promoted without a patch artifact");
+    let options = |base_ref: &str| AgentTaskPromotionOptions {
+        source: source.clone(),
+        source_run_id: Some("run-no-artifact".to_string()),
+        source_path: Some(source_path.clone()),
+        source_worktree_path: Some(repo.clone()),
+        base_ref: Some(base_ref.to_string()),
+        task_base_sha: Some(base.clone()),
+        candidate_ref: None,
+        to_worktree: repo.display().to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions::default(),
+        provider_command: None,
+        provider_invocation: None,
+    };
+
+    let error = promote_with_provider(options("trunk"), &mut provider)
+        .expect_err("invalid base rejects committed changes before apply");
+    assert!(error
+        .message
+        .contains("declared base `trunk` was not found"));
+    assert!(provider.apply_calls.is_empty());
+
+    let report = promote_with_provider(options("main"), &mut provider)
+        .expect("committed changes are promoted without a patch artifact");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.patch_artifact.id, "committed-changes");
@@ -1046,16 +1052,6 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
         );
         git(&worktree_path, &["push", "-u", "origin", "main"]);
 
-        // Register the target as a Homeboy-managed worktree so promotion can
-        // resolve its path before applying (the pre-apply base validation gate).
-        worktree::adopt(WorktreeAdoptOptions {
-            handle: "repo@base-9400".to_string(),
-            path: worktree_path.display().to_string(),
-            kind: None,
-            provenance: None,
-        })
-        .expect("adopt target worktree");
-
         let (source_path, source) = write_patch_source(&temp);
         let options = |base: &str| AgentTaskPromotionOptions {
             source: source.clone(),
@@ -1065,7 +1061,9 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
             base_ref: Some(base.to_string()),
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "repo@base-9400".to_string(),
+            // Direct worktree paths must be preflighted too. Previously only
+            // configured provider handles resolved before apply.
+            to_worktree: worktree_path.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,

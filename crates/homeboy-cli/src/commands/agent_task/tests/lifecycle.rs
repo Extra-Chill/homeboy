@@ -1200,6 +1200,11 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
                 artifact_id: None,
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: true,
             },
             executor.clone(),
@@ -1306,6 +1311,11 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             artifact_id: Some("retained-patch".to_string()),
             timeout_ms: None,
             review_form_timeout_ms: None,
+            backend: None,
+            selector: None,
+            model: None,
+            allow_provider_rotation: false,
+            provider_rotations: None,
             full: false,
         })
         .expect("preflight reports provenance rejection");
@@ -1461,6 +1471,11 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
             artifact_id: None,
             timeout_ms: None,
             review_form_timeout_ms: None,
+            backend: None,
+            selector: None,
+            model: None,
+            allow_provider_rotation: false,
+            provider_rotations: None,
             full: false,
         })
         .expect("preflight evaluates pre-execution retry");
@@ -1606,6 +1621,11 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
                 run: true,
                 force: false,
                 idempotency_key: Some("historical-retry-1".to_string()),
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
             },
             executor.clone(),
             |_| Ok(None),
@@ -1771,6 +1791,11 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 artifact_id: None,
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: true,
             },
             executor.clone(),
@@ -1836,6 +1861,11 @@ fn cook_continue_reconciles_a_delayed_runner_attempt_then_advances_its_terminal_
                 artifact_id: None,
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: false,
             },
             executor.clone(),
@@ -2070,6 +2100,11 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 artifact_id: None,
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: true,
             },
             executor.clone(),
@@ -2089,6 +2124,11 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 artifact_id: Some("mime-shaped".to_string()),
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: true,
             },
             executor.clone(),
@@ -2108,6 +2148,11 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 artifact_id: Some("mime-shaped".to_string()),
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: true,
             })
             .expect("preflight rejects the same invalid artifact as promotion");
@@ -2139,6 +2184,11 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 artifact_id: Some("selected".to_string()),
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: true,
             })
             .expect("preflight admits deterministic checks for the retained candidate");
@@ -2276,6 +2326,11 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
                 artifact_id: Some("selected".to_string()),
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: true,
             },
             executor.clone(),
@@ -4208,8 +4263,10 @@ fn execution_states_distinguish_patch_noop_provider_failure_and_gate_failure() {
     );
     assert_eq!(patch["provider"][0]["state"], "succeeded");
     assert_eq!(patch["candidate"]["state"], "patch_available");
-    assert_eq!(patch["gate"]["state"], "passed");
+    assert_eq!(patch["gate"]["state"], "not_run");
     assert_eq!(patch["promotion"]["state"], "applied");
+    assert_eq!(patch["promotion"]["patch_promoted"], false);
+    assert_eq!(patch["promotion"]["verified"], false);
 
     let missing = execution_states(
         fixture_execution_outcome(
@@ -4325,7 +4382,7 @@ fn execution_states_prefer_adopted_normalized_gate_outcome_over_stale_attempt_fa
 }
 
 #[test]
-fn execution_states_keep_promoted_candidate_after_a_failed_provider_attempt() {
+fn execution_states_keep_retained_candidate_after_a_failed_provider_attempt() {
     let states = super::super::status::execution_states_from_aggregate(
         &aggregate_for_execution_outcome(fixture_execution_outcome(
             AgentTaskOutcomeStatus::Failed,
@@ -4344,8 +4401,50 @@ fn execution_states_keep_promoted_candidate_after_a_failed_provider_attempt() {
     );
 
     assert_eq!(states["provider"][0]["state"], "failed");
-    assert_eq!(states["candidate"]["state"], "promoted");
+    assert_eq!(states["candidate"]["state"], "apply_ready");
     assert_eq!(states["promotion"]["state"], "applied");
+    assert_eq!(states["promotion"]["patch_promoted"], false);
+    assert_eq!(states["promotion"]["verified"], false);
+    assert_eq!(states["promotion"]["target"]["state"], "not_applied");
+}
+
+#[test]
+fn execution_states_distinguish_target_application_from_verification() {
+    let aggregate = aggregate_for_execution_outcome(fixture_execution_outcome(
+        AgentTaskOutcomeStatus::Succeeded,
+        None,
+        Vec::new(),
+        Value::Null,
+    ));
+    let target_applied = super::super::status::execution_states_from_aggregate(
+        &aggregate,
+        &json!({ "metadata": { "latest_promotion": {
+            "status": "verification_pending",
+            "to_worktree": "fixture@target",
+            "target": { "worktree": "fixture@target" },
+            "patch_artifact": { "id": "patch" },
+            "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
+        } } }),
+    );
+    assert_eq!(target_applied["promotion"]["patch_promoted"], true);
+    assert_eq!(target_applied["promotion"]["verified"], false);
+    assert_eq!(
+        target_applied["promotion"]["verification_phase"],
+        "post_apply"
+    );
+
+    let verified = super::super::status::execution_states_from_aggregate(
+        &aggregate,
+        &json!({ "metadata": { "latest_promotion": {
+            "status": "applied",
+            "to_worktree": "fixture@target",
+            "target": { "worktree": "fixture@target" },
+            "patch_artifact": { "id": "patch" },
+            "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
+        } } }),
+    );
+    assert_eq!(verified["promotion"]["patch_promoted"], true);
+    assert_eq!(verified["promotion"]["verified"], true);
 }
 
 fn execution_states(outcome: AgentTaskOutcome, promotion_status: &str) -> Value {
@@ -5018,6 +5117,11 @@ fn retry_command_submits_new_queued_run() {
             run: false,
             force: false,
             idempotency_key: Some("retry-cli-1".to_string()),
+            backend: None,
+            selector: None,
+            model: None,
+            allow_provider_rotation: false,
+            provider_rotations: None,
         })
         .expect("retry queued");
         let action_acknowledgement = value["action_acknowledgement"].clone();
@@ -5033,6 +5137,11 @@ fn retry_command_submits_new_queued_run() {
             run: false,
             force: false,
             idempotency_key: Some("retry-cli-1".to_string()),
+            backend: None,
+            selector: None,
+            model: None,
+            allow_provider_rotation: false,
+            provider_rotations: None,
         })
         .expect("replayed retry")
         .0;
@@ -5115,6 +5224,11 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
                 run: true,
                 force: false,
                 idempotency_key: Some("cook-retry-run-1".to_string()),
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
             },
             executor.clone(),
             |_| Ok(Some(Arc::new(RetryRunDispatcher))),
@@ -5206,6 +5320,11 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                             artifact_id: None,
                             timeout_ms: None,
                             review_form_timeout_ms: None,
+                            backend: None,
+                            selector: None,
+                            model: None,
+                            allow_provider_rotation: false,
+                            provider_rotations: None,
                             full: false,
                         },
                         Arc::new(CountingCookExecutor::default()),

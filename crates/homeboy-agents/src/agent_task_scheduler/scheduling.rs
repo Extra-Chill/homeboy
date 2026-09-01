@@ -1302,6 +1302,9 @@ impl AgentTaskScheduleSupport {
                         | AgentTaskFailureClassification::Stalled
                         | AgentTaskFailureClassification::RateLimited
                         | AgentTaskFailureClassification::ProviderAccountBlocked
+                        | AgentTaskFailureClassification::ProviderQuotaExhausted
+                        | AgentTaskFailureClassification::ProviderBillingBlocked
+                        | AgentTaskFailureClassification::ProviderCredentialsExhausted
                 )
             )
     }
@@ -1734,6 +1737,12 @@ impl AgentTaskScheduleSupport {
             && outcome.failure_classification != Some(AgentTaskFailureClassification::PolicyDenied)
             && outcome.failure_classification
                 != Some(AgentTaskFailureClassification::ProviderAccountBlocked)
+            && outcome.failure_classification
+                != Some(AgentTaskFailureClassification::ProviderQuotaExhausted)
+            && outcome.failure_classification
+                != Some(AgentTaskFailureClassification::ProviderBillingBlocked)
+            && outcome.failure_classification
+                != Some(AgentTaskFailureClassification::ProviderCredentialsExhausted)
             && (retryable_failure_classifications.is_empty()
                 || outcome
                     .failure_classification

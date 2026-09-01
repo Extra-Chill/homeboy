@@ -1,17 +1,17 @@
 use homeboy_core::extension;
 use std::fmt::Write;
 
+use crate::release::context::ReleaseExtension;
 use crate::release::types::{ReleaseState, ReleaseStepResult};
 use homeboy_core::component::GithubConfig;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::{self};
-use homeboy_extension_contract::ExtensionManifest;
 
 use super::{build_release_payload, step_failed, step_skipped, step_success};
 
 /// Invoke the `release.publish` action on the named extension.
 pub(crate) fn run_publish(
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     state: &ReleaseState,
     component_id: &str,
     component_local_path: &str,
@@ -31,7 +31,7 @@ pub(crate) fn run_publish(
     })?;
 
     let action_id = "release.publish";
-    let has_action = extension.actions.iter().any(|a| a.id == action_id);
+    let has_action = extension.provides_action(action_id);
     if !has_action {
         return Err(Error::validation_invalid_argument(
             "release.publish",
@@ -434,6 +434,7 @@ fn publish_failure_message(target: &str, response: &serde_json::Value) -> String
 #[cfg(test)]
 mod tests {
     use super::{publish_step_result, run_publish};
+    use crate::release::context::ReleaseExtension;
     use crate::release::types::ReleaseState;
     use crate::release::types::ReleaseStepStatus;
     use homeboy_core::component::{GithubConfig, GithubHostConfig};
@@ -506,7 +507,7 @@ mod tests {
                 .expect("save publish extension");
 
             let result = run_publish(
-                &[publish],
+                &[ReleaseExtension::from_manifest(&publish)],
                 &ReleaseState::default(),
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),
@@ -553,7 +554,7 @@ mod tests {
             };
 
             let result = run_publish(
-                &[publish],
+                &[ReleaseExtension::from_manifest(&publish)],
                 &ReleaseState::default(),
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),

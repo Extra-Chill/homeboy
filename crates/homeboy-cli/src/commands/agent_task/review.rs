@@ -481,14 +481,16 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             .as_ref()
             .map(|reference| reference.artifact_id.clone()),
     )?;
-    let (raw, source_path) = read_promotion_source(source_spec)?;
-    let source_run_id = match agent_task_lifecycle::reconcile_status(source_spec) {
-        Ok(record) => Some(record.run_id),
-        Err(_) => match source_path.as_deref() {
-            Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
-            None => None,
-        },
-    };
+    let (mut raw, mut source_path) = read_promotion_source(source_spec)?;
+    let source_run_id = match source_path.as_deref() {
+        Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
+        None => None,
+    }
+    .or_else(|| {
+        agent_task_lifecycle::reconcile_status(source_spec)
+            .ok()
+            .map(|record| record.run_id)
+    });
     if source_run_id.is_none() && args.idempotency_key.is_some() {
         return Err(Error::validation_invalid_argument(
             "idempotency_key",
@@ -525,6 +527,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             task_id.as_deref(),
             artifact_id.as_deref(),
         )?;
+        (raw, source_path) = read_promotion_source(run_id)?;
     }
     let promotion_request = agent_task_service::AgentTaskPromotionRequest {
         source: raw,
@@ -2831,21 +2834,18 @@ fn declared_backend_readiness(
 }
 
 fn live_dispatch_readiness(
-    provider: Option<&AgentTaskExecutorProvider>,
-    validation_requested: bool,
+    dispatchability: Option<
+        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    >,
 ) -> &'static str {
-    if !validation_requested {
-        return "not_requested";
-    }
-    provider
-        .filter(|provider| provider.readiness_invocation.is_some())
-        .map(|_| "validated")
-        .unwrap_or("unverified")
+    dispatchability
+        .map(|verdict| verdict.readiness.live_inference.state)
+        .unwrap_or("inference_unverified")
 }
 
 fn readiness_validation_projection(
     identity: Option<&(String, String)>,
-    provider: Option<&AgentTaskExecutorProvider>,
+    _provider: Option<&AgentTaskExecutorProvider>,
     route: Option<&ProviderRoute>,
     dispatchability: Option<
         &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
@@ -2878,14 +2878,19 @@ fn readiness_validation_projection(
         ),
     };
     serde_json::json!({
-        "validated": validation_requested && identity.is_some(),
+        // Identity resolution proves which provider was inspected, not that it
+        // accepted inference. Reserve this for a successful bounded probe.
+        "validated": validation_requested && dispatchability.is_some_and(|verdict| verdict.readiness.live_inference.ready),
         "effective_backend": effective_backend,
         "effective_provider_id": effective_provider_id,
         "effective_model": effective_model,
-        // Catalog discovery proves static configuration only. A live dispatch
-        // probe is opt-in because providers own its request.
+        // Structural dispatchability is distinct from a bounded provider-native
+        // inference probe. Never promote a declared-but-unrun probe to live
+        // validation.
         "static_configuration": "declared",
-        "live_dispatch": live_dispatch_readiness(provider, validation_requested),
+        "structural_dispatchability": dispatchability.map(|verdict| &verdict.readiness.structural_dispatchability),
+        "live_inference": dispatchability.map(|verdict| &verdict.readiness.live_inference),
+        "live_dispatch": live_dispatch_readiness(dispatchability),
         "route_state": route.map(ProviderRoute::state),
         "next_command": provider_next_command(route, dispatchability),
         "reason": match route { Some(ProviderRoute::Blocked { reason, .. }) => Some(reason), _ => None },
@@ -3312,14 +3317,20 @@ fn review_next_actions(
 }
 
 fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> Value {
-    let patch_promoted = report.status.patch_promoted();
+    // Typed reports are only constructed after the target mutation. The status
+    // remains a compatibility field; expose verification independently.
+    let target_applied = report.status.patch_promoted();
+    let verified = matches!(report.status, AgentTaskPromotionStatus::Applied);
     let mut next_actions = Vec::new();
     if report.status.gate_failed() {
         next_actions.push(
             "patch promoted but deterministic gates failed; use gate feedback before finalizing"
                 .to_string(),
         );
-    } else if patch_promoted {
+    } else if target_applied && verified {
+        next_actions
+            .push("patch promoted and deterministic gates verified; finalize a PR".to_string());
+    } else if target_applied {
         next_actions.push(
             "patch promoted into the target worktree; verify, then finalize a PR".to_string(),
         );
@@ -3332,7 +3343,11 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> V
         "schema": "homeboy/agent-task-promotion-handoff/v1",
         "states": {
             "patch_artifact_produced": true,
-            "patch_promoted": patch_promoted,
+            "candidate_retained": true,
+            "target_applied": target_applied,
+            "patch_promoted": target_applied,
+            "verified": verified,
+            "finalized": false,
             "pr_opened": false
         },
         "boundary": report.status.handoff_boundary(),
@@ -3390,7 +3405,11 @@ fn finalization_handoff(status: &str, pr_url: Option<&str>, run_id: Option<&str>
         "schema": "homeboy/agent-task-finalization-handoff/v1",
         "states": {
             "patch_artifact_produced": true,
+            "candidate_retained": true,
+            "target_applied": true,
             "patch_promoted": true,
+            "verified": pr_opened,
+            "finalized": pr_opened,
             "pr_opened": pr_opened,
             "publication_mutated": !publication_validated && pr_opened
         },
@@ -3613,7 +3632,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_review_preserves_one_promoted_candidate_fingerprint() {
+    fn compact_review_preserves_one_target_applied_candidate_fingerprint() {
         let patch = tempfile::NamedTempFile::new().expect("patch");
         std::fs::write(patch.path(), "x".repeat(7_635)).expect("write patch");
         let value = compact_review(
@@ -3632,6 +3651,7 @@ mod tests {
                                 "path": patch.path(),
                             },
                             "changed_files": ["a.rs", "b.rs", "c.rs"],
+                            "provenance": { "post_apply": true, "candidate": { "head": "candidate-head" } },
                             "deterministic_gates": [{
                                 "name": "cargo test",
                                 "status": "succeeded",
@@ -3896,6 +3916,47 @@ mod tests {
             assert_eq!(
                 output["readiness_validation"]["effective_model"],
                 "openai/gpt-5.6-terra"
+            );
+        });
+    }
+
+    #[test]
+    fn providers_reports_account_block_as_structural_not_live_readiness() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut provider = provider("blocked.provider", "blocked");
+            provider.cli.profiles = serde_json::from_value(serde_json::json!([
+                { "name": "blocked", "model": "blocked-model" }
+            ]))
+            .expect("provider profile");
+            provider.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"account\",\"retryable\":false,\"remediation\":\"restore account quota or billing access\",\"reason\":\"account spending limit is exhausted\",\"cache_key\":\"blocked-account\",\"identity\":{\"account\":\"blocked\"}}'"]
+                }))
+                .expect("account-blocked readiness invocation"),
+            );
+            let mut args = providers_args();
+            args.backend = Some("blocked".to_string());
+            args.selector = Some("blocked.provider".to_string());
+            args.model = Some("blocked-model".to_string());
+            args.validate_readiness = true;
+
+            let (output, status) = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect("account-blocked provider report");
+
+            assert_eq!(status, 0);
+            assert_eq!(output["dispatchability"]["state"], "account_unavailable");
+            assert_eq!(
+                output["readiness_validation"]["structural_dispatchability"]["ready"],
+                true
+            );
+            assert_eq!(
+                output["readiness_validation"]["live_dispatch"],
+                "unavailable"
+            );
+            assert_eq!(output["readiness_validation"]["validated"], false);
+            assert_eq!(
+                output["readiness_validation"]["live_inference"]["evidence"]["classification"],
+                "account"
             );
         });
     }
@@ -4600,28 +4661,6 @@ mod tests {
     }
 
     #[test]
-    fn live_dispatch_readiness_uses_the_resolved_provider_only() {
-        let mut probed: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "probed", "backend": "test", "readiness_invocation": { "argv": ["true"] }
-        }))
-        .expect("probed provider");
-        let unprobed: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "unprobed", "backend": "test"
-        }))
-        .expect("unprobed provider");
-
-        assert_eq!(live_dispatch_readiness(Some(&probed), true), "validated");
-        assert_eq!(live_dispatch_readiness(Some(&unprobed), true), "unverified");
-        assert_eq!(live_dispatch_readiness(None, true), "unverified");
-        assert_eq!(
-            live_dispatch_readiness(Some(&probed), false),
-            "not_requested"
-        );
-        probed.readiness_invocation = None;
-        assert_eq!(live_dispatch_readiness(Some(&probed), true), "unverified");
-    }
-
-    #[test]
     fn readiness_validation_reports_effective_identity_not_raw_arguments() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "resolved.provider", "backend": "resolved-backend",
@@ -4644,7 +4683,7 @@ mod tests {
 
         assert_eq!(projection["effective_backend"], "resolved-backend");
         assert_eq!(projection["effective_provider_id"], "resolved.provider");
-        assert_eq!(projection["live_dispatch"], "validated");
+        assert_eq!(projection["live_dispatch"], "inference_unverified");
         // A single-backend query is not a sweep: it reports no per-backend
         // readiness rather than an empty one (#12569).
         assert!(projection["backends"].is_null());
@@ -4689,8 +4728,14 @@ mod tests {
             .expect("provider envelope")
             .0;
 
-        assert_eq!(output["dispatchability"]["state"], "ready");
-        assert_eq!(output["operator_summary"]["state"], "ready");
+        assert_eq!(
+            output["dispatchability"]["state"],
+            "structurally_dispatchable"
+        );
+        assert_eq!(
+            output["readiness_validation"]["live_dispatch"],
+            "structurally_dispatchable"
+        );
     }
 
     #[test]

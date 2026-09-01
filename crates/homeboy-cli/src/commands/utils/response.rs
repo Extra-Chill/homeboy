@@ -647,7 +647,17 @@ fn envelope_for_data(
         operation: identity.operation.clone(),
         success,
         exit_code,
-        status: status_for_result(Some(&data), exit_code),
+        status: if exit_code == 0
+            && matches!(
+                (identity.command.as_str(), identity.operation.as_deref()),
+                ("agent-task", Some("fanout resume"))
+            ) {
+            // Resume can successfully reconcile a batch whose durable subject
+            // remains failed; retain that subject outcome below instead.
+            "succeeded".to_string()
+        } else {
+            status_for_result(Some(&data), exit_code)
+        },
         subject_state,
         run,
         refs,
@@ -673,6 +683,10 @@ fn subject_state_for_identity(identity: &CommandIdentity, data: &Value) -> Optio
     match (identity.command.as_str(), identity.operation.as_deref()) {
         ("agent-task", Some("status")) => data
             .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        ("agent-task", Some("fanout resume")) => data
+            .get("status")
             .and_then(Value::as_str)
             .map(str::to_string),
         _ => None,

@@ -1035,6 +1035,56 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn permanent_provider_capacity_rejections_rotate_within_budget_and_keep_terminal_evidence() {
+        for classification in [
+            AgentTaskFailureClassification::ProviderQuotaExhausted,
+            AgentTaskFailureClassification::ProviderBillingBlocked,
+            AgentTaskFailureClassification::ProviderCredentialsExhausted,
+        ] {
+            let executor = RotationScriptedExecutor::new(vec![
+                (AgentTaskOutcomeStatus::ProviderError, Some(classification)),
+                (AgentTaskOutcomeStatus::ProviderError, Some(classification)),
+            ]);
+            let calls = Arc::clone(&executor.calls);
+            let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+            let mut plan = plan_with_tasks(1);
+            plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+            plan.options.execution_budget = AgentTaskExecutionBudget {
+                version: AgentTaskExecutionBudget::VERSION,
+                deadline_unix_ms: None,
+                max_provider_executions: 3,
+                max_same_provider_retries: 1,
+                max_provider_rotations: 1,
+            };
+
+            let aggregate = scheduler.run(plan);
+            let outcome = &aggregate.outcomes[0];
+
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "{classification:?}");
+            assert_eq!(
+                outcome.metadata["execution_budget"]["same_provider_retries_used"], 0,
+                "{classification:?} must not retry the rejected route"
+            );
+            assert_eq!(
+                outcome.metadata["execution_budget"]["provider_rotations_used"],
+                1
+            );
+            let attempts = outcome.metadata["provider_rotation"]["attempts"]
+                .as_array()
+                .expect("terminal rotation evidence");
+            assert_eq!(attempts.len(), 2);
+            assert!(attempts.iter().all(|attempt| {
+                attempt["failure_classification"]
+                    == serde_json::to_value(classification).expect("classification serializes")
+            }));
+            assert!(outcome.diagnostics.iter().any(|diagnostic| {
+                diagnostic.class == "agent_task.provider_rotation_exhausted"
+                    && diagnostic.message.contains("fallback-backend-a")
+            }));
+        }
+    }
+
+    #[test]
     fn readiness_skips_blocked_and_capped_routes_before_the_first_provider_execution() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let scheduler = AgentTaskScheduler::new(Arc::new(ReadinessRoutingExecutor {

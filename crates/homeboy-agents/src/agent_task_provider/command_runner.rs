@@ -11,7 +11,9 @@ use super::runner_readiness::{
 use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sources};
 use super::*;
 use crate::agent_task::ResolvedAgentTaskRuntimeTool;
-use crate::agent_task_executor_evidence::link_latest_executor_evidence;
+use crate::agent_task_executor_evidence::{
+    classify_structured_runtime_failure, link_latest_executor_evidence,
+};
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment, AgentTaskProcessSupervisor,
 };
@@ -144,6 +146,11 @@ pub(super) fn run_materialized_provider_command_with_credentials(
             credential_env,
         );
         classify_provider_policy_denial(request, &mut outcome);
+        classify_structured_runtime_failure(
+            &mut outcome,
+            &provider.backend,
+            &request.artifacts_path,
+        );
         classify_transient_provider_outcome(&mut outcome);
 
         if let Some(failure) = immediate_provider_failure(provider, &outcome, started.elapsed()) {
@@ -1131,6 +1138,13 @@ fn run_materialized_provider_command_once_contained(
             stderr_runtime_capture
                 .as_ref()
                 .map(|capture| capture.uri.clone()),
+            Some(format!(
+                "file://{}",
+                request
+                    .artifacts_path
+                    .join("provider-progress.jsonl")
+                    .display()
+            )),
         );
     }
     let stdout_reader = child.stdout.take().map(|stdout| {
@@ -1180,6 +1194,7 @@ fn run_materialized_provider_command_once_contained(
                 let elapsed = started.elapsed();
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let mut progressed = false;
+                let mut workspace_progressed = false;
                 let current_runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
                 if runtime_progress_advanced(&runtime_progress, &current_runtime_progress) {
                     progressed = true;
@@ -1199,6 +1214,7 @@ fn run_materialized_provider_command_once_contained(
                             &current_workspace_progress,
                         ) {
                             progressed = true;
+                            workspace_progressed = true;
                             workspace_progress_events = workspace_progress_events.saturating_add(1);
                         }
                         workspace_progress = current_workspace_progress;
@@ -1206,6 +1222,15 @@ fn run_materialized_provider_command_once_contained(
                 }
                 if progressed {
                     last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+                }
+                if workspace_progressed {
+                    if let Some(run_id) = run_id {
+                        let _ = crate::agent_task_lifecycle::record_provider_execution_workspace_activity(
+                            run_id,
+                            &request.request.task_id,
+                            attempt,
+                        );
+                    }
                 }
                 if elapsed >= process_timeout {
                     break (None, false, true);

@@ -1021,17 +1021,15 @@ fn promote_with_provider_and_checkpoint_internal(
     // no patch applied and no durable post-apply state recorded, so the same
     // artifact/target can be retried with a corrected base (#9400).
     let pre_apply_verified_base = if !options.dry_run {
-        match resolve_promotion_target_path(&options.to_worktree, None, Some(&safety_baseline))? {
-            Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
-            // No provider-owned pre-apply target path resolves; fall back to
-            // validating against the applied worktree below.
-            None => None,
-        }
+        capture_declared_base_before_apply(
+            &options.to_worktree,
+            None,
+            Some(&safety_baseline),
+            options.base_ref.as_deref(),
+        )?
     } else {
         None
     };
-    // A declared base with no resolvable pre-apply target path still needs
-    // validation after apply; an empty/absent base has nothing to verify.
     let base_verified_before_apply = pre_apply_verified_base.is_some()
         || options
             .base_ref
@@ -1794,14 +1792,12 @@ fn promote_committed_changes(
     // boundary as artifact promotion: no apply or checkpoint may precede a
     // failed declared base lookup.
     let pre_apply_verified_base = if !options.dry_run {
-        match resolve_promotion_target_path(
+        capture_declared_base_before_apply(
             &options.to_worktree,
             trusted_unpushed_candidate_destination.as_ref(),
             None,
-        )? {
-            Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
-            None => None,
-        }
+            options.base_ref.as_deref(),
+        )?
     } else {
         None
     };
@@ -2622,9 +2618,6 @@ fn promotion_source(
     }
 }
 
-/// Resolve a provider-owned target before the patch is applied, so the declared
-/// base can be validated against it without mutating the working tree (#9400).
-/// Genuinely unmanaged destinations retain the post-apply validation fallback.
 fn candidate_patch_safety_baseline(
     patch: &str,
     artifact: &AgentTaskArtifact,
@@ -2642,13 +2635,17 @@ fn candidate_patch_safety_baseline(
     })
 }
 
+/// Resolve the target before applying a patch so a declared base can be
+/// validated without mutating the working tree (#9400).
 fn resolve_promotion_target_path(
     to_worktree: &str,
     trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
     safety_baseline: Option<&Value>,
 ) -> Result<Option<PathBuf>> {
+    // Direct paths do not need provider resolution, but must participate in
+    // the same pre-apply declared-base contract as provider-owned targets.
     if Path::new(to_worktree).is_dir() {
-        return Ok(None);
+        return Ok(Some(PathBuf::from(to_worktree)));
     }
     let trusted_unpushed_destination = trusted_unpushed_candidate_destination.map(|trusted| {
         homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
@@ -2668,6 +2665,33 @@ fn resolve_promotion_target_path(
         Err(error) if error.details["worktree_provider_lookup"] == "not_found" => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// A declared base is part of the pre-mutation promotion contract. Do not let
+/// an opaque provider apply before Homeboy can authenticate that contract.
+fn capture_declared_base_before_apply(
+    to_worktree: &str,
+    trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
+    safety_baseline: Option<&Value>,
+    base_ref: Option<&str>,
+) -> Result<Option<AgentTaskPromotionVerifiedBase>> {
+    if base_ref.is_none_or(|base| base.trim().is_empty()) {
+        return Ok(None);
+    }
+    let target_path = resolve_promotion_target_path(
+        to_worktree,
+        trusted_unpushed_candidate_destination,
+        safety_baseline,
+    )?
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "base_ref",
+            "declared base requires a resolvable target worktree before promotion apply",
+            Some(to_worktree.to_string()),
+            None,
+        )
+    })?;
+    capture_declared_base(&target_path, base_ref)
 }
 
 pub(crate) fn capture_declared_base(

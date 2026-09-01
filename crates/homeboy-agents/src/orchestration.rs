@@ -5,21 +5,24 @@
 //! projection. Construct with an explicit lookup — the service does not
 //! resolve ambient stores or providers itself.
 
+use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::ControlPlaneRetryParameters;
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
     ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneBlocker,
     ControlPlaneCancelParameters, ControlPlaneCapabilities, ControlPlaneError,
-    ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation, ControlPlaneOperation,
-    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource, ControlPlaneRun,
-    ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary, ExecutionId,
-    ProviderSessionId, RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness, ControlPlaneLocation,
+    ControlPlaneOperation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResource,
+    ControlPlaneRun, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
+    ExecutionId, ProviderSessionId, RunId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
     CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
     CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
     CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
+use serde_json::Value;
+use std::path::Path;
 
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, claim_operation_with_intent_in_store,
@@ -861,12 +864,20 @@ pub fn project_record(
     resource.runtime = runtime(record);
     resource.provider = assigned_provider(record);
     resource.heartbeat_at = heartbeat_at(record);
+    resource.created_at = record.submitted_at.clone();
+    resource.updated_at = record.updated_at.clone();
+    resource.liveness = live_provider_liveness(record, plan, Utc::now());
+    if let Some(observed_at) = resource
+        .liveness
+        .as_ref()
+        .and_then(|liveness| liveness.last_observed_progress_at.as_deref())
+    {
+        resource.updated_at = newest_timestamp(resource.updated_at.as_deref(), Some(observed_at));
+    }
     resource.candidate = candidate(record);
     resource.gates = gates(record);
     resource.publication = publication(record);
     resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
-    resource.created_at = record.submitted_at.clone();
-    resource.updated_at = record.updated_at.clone();
     if resource.state.is_terminal() {
         resource.finished_at = record.updated_at.clone();
     }
@@ -963,6 +974,9 @@ fn execution(record: &AgentTaskRunRecord) -> Result<Option<ExecutionId>, Control
 }
 
 fn phase(record: &AgentTaskRunRecord) -> Option<String> {
+    if has_running_provider_execution(record) {
+        return Some("provider_execution".to_string());
+    }
     record
         .metadata
         .pointer("/cook_progress/phase")
@@ -976,6 +990,122 @@ fn phase(record: &AgentTaskRunRecord) -> Option<String> {
                 .map(|adoption| bounded(&adoption.phase, STATE_BOUND))
                 .filter(|value| !value.is_empty())
         })
+}
+
+fn has_running_provider_execution(record: &AgentTaskRunRecord) -> bool {
+    record.state == AgentTaskRunState::Running
+        && record.metadata["provider_executions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|execution| execution["state"].as_str() == Some("running"))
+}
+
+/// Read metadata for the finite stream references recorded at provider launch.
+/// No provider content is opened and no artifact directory is enumerated.
+fn live_provider_liveness(
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+    now: DateTime<Utc>,
+) -> Option<ControlPlaneLiveness> {
+    if record.state != AgentTaskRunState::Running {
+        return None;
+    }
+    let executions = record.metadata["provider_executions"].as_array()?;
+    let execution = executions
+        .iter()
+        .rev()
+        .find(|execution| execution["state"].as_str() == Some("running"))?;
+    let window_seconds = execution
+        .get("task_id")
+        .and_then(Value::as_str)
+        .and_then(|task_id| {
+            plan.and_then(|plan| {
+                plan.tasks
+                    .iter()
+                    .find(|task| task.task_id == task_id)
+                    .and_then(|task| task.limits.liveness_timeout_ms)
+            })
+        })
+        .map(|milliseconds| milliseconds.saturating_add(999) / 1_000)
+        .unwrap_or_else(|| {
+            crate::agent_task_timeout::effective_provider_liveness_timeout_ms(None)
+                .saturating_add(999)
+                / 1_000
+        });
+    let mut observations = Vec::new();
+    for (source, fields) in [
+        ("structured_progress", ["structured_progress"].as_slice()),
+        ("runtime_output", ["stdout", "stderr"].as_slice()),
+    ] {
+        for field in fields {
+            if let Some(observed_at) = execution
+                .pointer(&format!("/runtime_evidence/{field}"))
+                .and_then(Value::as_str)
+                .and_then(observed_file_timestamp)
+            {
+                observations.push((source, observed_at));
+            }
+        }
+    }
+    if let Some(observed_at) = execution
+        .get("workspace_activity_observed_at")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+    {
+        observations.push(("workspace_activity", observed_at));
+    }
+    let started_at = execution
+        .get("started_at")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp);
+    let latest = observations
+        .into_iter()
+        .max_by_key(|(_, observed_at)| *observed_at);
+    let (source, observed_at) = match latest {
+        Some((source, observed_at)) => (Some(source.to_string()), Some(observed_at)),
+        None => (None, started_at),
+    };
+    let age_seconds = observed_at
+        .map(|observed_at| now.signed_duration_since(observed_at).num_seconds().max(0) as u64)
+        .unwrap_or(u64::MAX);
+    Some(ControlPlaneLiveness {
+        state: if age_seconds <= window_seconds {
+            "active"
+        } else {
+            "silent"
+        }
+        .to_string(),
+        source,
+        last_observed_progress_at: observed_at.map(|observed_at| observed_at.to_rfc3339()),
+        age_seconds,
+        window_seconds,
+    })
+}
+
+fn observed_file_timestamp(uri: &str) -> Option<DateTime<Utc>> {
+    let path = uri.strip_prefix("file://")?;
+    let metadata = std::fs::metadata(Path::new(path)).ok()?;
+    let modified = metadata.modified().ok()?;
+    Some(DateTime::<Utc>::from(modified))
+}
+
+fn parse_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn newest_timestamp(existing: Option<&str>, observed: Option<&str>) -> Option<String> {
+    match (
+        existing.and_then(parse_timestamp),
+        observed.and_then(parse_timestamp),
+    ) {
+        (Some(existing), Some(observed)) => Some(existing.max(observed).to_rfc3339()),
+        (Some(existing), None) => Some(existing.to_rfc3339()),
+        (None, Some(observed)) => Some(observed.to_rfc3339()),
+        (None, None) => None,
+    }
 }
 
 fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
@@ -1304,8 +1434,8 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::{
-        event_page, project_record, LifecycleStoreLookup, OrchestrationService, RunLookup,
-        RunSnapshot,
+        event_page, live_provider_liveness, observed_file_timestamp, phase, project_record,
+        LifecycleStoreLookup, OrchestrationService, RunLookup, RunSnapshot,
     };
     use crate::agent_task_lifecycle::{
         AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -1415,6 +1545,118 @@ mod tests {
             artifacts: Vec::new(),
             evidence: Vec::new(),
         }
+    }
+
+    #[test]
+    fn live_provider_liveness_projects_newer_structured_progress_without_reading_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_output = temp.path().join("provider-runtime-stdout.log");
+        let structured_progress = temp.path().join("provider-progress.jsonl");
+        std::fs::write(&runtime_output, "runtime output").expect("runtime output");
+        std::fs::write(&structured_progress, "provider-secret-content").expect("progress");
+        let runtime_output_at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let structured_progress_at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_005);
+        std::fs::File::open(&runtime_output)
+            .expect("open runtime output")
+            .set_times(std::fs::FileTimes::new().set_modified(runtime_output_at))
+            .expect("set runtime output timestamp");
+        std::fs::File::open(&structured_progress)
+            .expect("open structured progress")
+            .set_times(std::fs::FileTimes::new().set_modified(structured_progress_at))
+            .expect("set structured progress timestamp");
+        let observed_at =
+            observed_file_timestamp(&format!("file://{}", structured_progress.display()))
+                .expect("structured progress timestamp");
+        let mut record = record(AGENT_TASK_RUN);
+        record.state = AgentTaskRunState::Running;
+        record.updated_at = Some("1970-01-01T00:00:01Z".to_string());
+        record.metadata["provider_executions"] = json!([{
+            "task_id": "review",
+            "state": "running",
+            "started_at": "2020-01-01T00:00:00Z",
+            "runtime_evidence": {
+                "stdout": format!("file://{}", runtime_output.display()),
+                "structured_progress": format!("file://{}", structured_progress.display()),
+            },
+        }]);
+
+        let liveness =
+            live_provider_liveness(&record, None, observed_at + chrono::Duration::seconds(5))
+                .expect("running provider liveness");
+
+        assert_eq!(liveness.state, "active");
+        assert_eq!(liveness.source.as_deref(), Some("structured_progress"));
+        assert_eq!(
+            liveness.last_observed_progress_at.as_deref(),
+            Some(observed_at.to_rfc3339().as_str())
+        );
+        assert_eq!(liveness.age_seconds, 5);
+        assert_eq!(phase(&record).as_deref(), Some("provider_execution"));
+        assert!(!serde_json::to_string(&liveness)
+            .expect("liveness JSON")
+            .contains("provider-secret-content"));
+
+        let resource = project_record(&record, None).expect("project running record");
+        assert_eq!(
+            resource.updated_at.as_deref(),
+            Some(observed_at.to_rfc3339().as_str())
+        );
+    }
+
+    #[test]
+    fn silent_provider_becomes_silent_after_its_liveness_window() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.state = AgentTaskRunState::Running;
+        record.metadata["provider_executions"] = json!([{
+            "task_id": "review",
+            "state": "running",
+            "started_at": "2020-01-01T00:00:00Z",
+        }]);
+
+        let liveness = live_provider_liveness(
+            &record,
+            None,
+            chrono::DateTime::parse_from_rfc3339("2020-01-02T00:00:00Z")
+                .expect("timestamp")
+                .with_timezone(&chrono::Utc),
+        )
+        .expect("running provider liveness");
+
+        assert_eq!(liveness.state, "silent");
+        assert_eq!(liveness.source, None);
+        assert_eq!(
+            liveness.last_observed_progress_at.as_deref(),
+            Some("2020-01-01T00:00:00+00:00")
+        );
+        assert!(liveness.age_seconds > liveness.window_seconds);
+    }
+
+    #[test]
+    fn live_provider_liveness_uses_durable_workspace_activity() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.state = AgentTaskRunState::Running;
+        record.metadata["provider_executions"] = json!([{
+            "task_id": "review",
+            "state": "running",
+            "started_at": "2020-01-01T00:00:00Z",
+            "workspace_activity_observed_at": "2020-01-01T00:00:05Z",
+        }]);
+
+        let liveness = live_provider_liveness(
+            &record,
+            None,
+            chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:10Z")
+                .expect("timestamp")
+                .with_timezone(&chrono::Utc),
+        )
+        .expect("running provider liveness");
+
+        assert_eq!(liveness.state, "active");
+        assert_eq!(liveness.source.as_deref(), Some("workspace_activity"));
+        assert_eq!(
+            liveness.last_observed_progress_at.as_deref(),
+            Some("2020-01-01T00:00:05+00:00")
+        );
     }
 
     #[test]

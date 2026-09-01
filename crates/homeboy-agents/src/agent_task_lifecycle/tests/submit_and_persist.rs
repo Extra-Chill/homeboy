@@ -2780,6 +2780,7 @@ fn cancelled_local_provider_retains_runtime_evidence_in_terminal_logs() {
         1,
         Some(format!("file://{}", stdout.display())),
         None,
+        None,
     )
     .expect("runtime evidence recorded before cancellation");
 

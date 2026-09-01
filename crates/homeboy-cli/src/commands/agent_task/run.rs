@@ -2848,6 +2848,22 @@ fn apply_local_continuation_decision(
     Ok(())
 }
 
+fn cook_provider_route_override(
+    backend: Option<String>,
+    selector: Option<String>,
+    model: Option<String>,
+    allow_provider_rotation: bool,
+    provider_rotations: Option<u32>,
+) -> homeboy::agents::agent_task_service::CookProviderRouteOverride {
+    homeboy::agents::agent_task_service::CookProviderRouteOverride {
+        backend,
+        selector,
+        model,
+        allow_provider_rotation: allow_provider_rotation.then_some(true),
+        provider_rotations,
+    }
+}
+
 /// `retry --run` owns a fresh queued replacement attempt. It may dispatch that
 /// attempt through the immutable Cook recipe; ordinary `cook-continue` remains
 /// observation-only until the attempt becomes terminal.
@@ -2870,6 +2886,41 @@ where
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
+    let route_override = cook_provider_route_override(
+        args.backend.clone(),
+        args.selector.clone(),
+        args.model.clone(),
+        args.allow_provider_rotation,
+        args.provider_rotations,
+    );
+    if !route_override.is_empty() {
+        if !args.rearm || !record.state.is_terminal() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "provider-route",
+                "Cook provider-route overrides require --rearm on a terminal attempt",
+                Some(run_id),
+                None,
+            ));
+        }
+        let retry = agent_task_service::retry_with_provider_route_override(
+            &record.run_id,
+            None,
+            false,
+            false,
+            route_override,
+        )?;
+        let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
+        if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
+            return dispatch_queued_cook_retry(
+                &recipe,
+                &retry.record.run_id,
+                args.full,
+                executor,
+                reconstruct_dispatcher,
+            );
+        }
+        return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
+    }
     let review_form_only = recipe
         .attempts
         .iter()
@@ -6326,7 +6377,7 @@ fn resolve_cook_execution_budget(
     // A concrete route is a caller contract, not merely a preference. Keep the
     // configured policy in the plan for provenance, but give it no budget until
     // the caller explicitly opts back into cross-route fallback.
-    let explicit_route = args.dispatch.backend.is_some() && args.dispatch.model.is_some();
+    let explicit_route = args.dispatch.model.is_some();
     let rotation_opted_in = args.allow_provider_rotation
         || core
             .provider_rotations
@@ -9221,6 +9272,46 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
+    let route_override = cook_provider_route_override(
+        args.backend.clone(),
+        args.selector.clone(),
+        args.model.clone(),
+        args.allow_provider_rotation,
+        args.provider_rotations,
+    );
+    if !route_override.is_empty() {
+        let retry = agent_task_service::retry_with_provider_route_override(
+            &args.run_id,
+            args.new_run_id.as_deref(),
+            args.run,
+            args.force,
+            route_override,
+        )?;
+        if args.run && retry.run && retry.record.metadata["cook_id"].is_string() {
+            return continue_cook_with_queued_execution(
+                CookContinueArgs {
+                    cook_or_attempt_id: retry.record.run_id,
+                    preflight: false,
+                    rearm: false,
+                    artifact_id: None,
+                    timeout_ms: None,
+                    review_form_timeout_ms: None,
+                    backend: None,
+                    selector: None,
+                    model: None,
+                    allow_provider_rotation: false,
+                    provider_rotations: None,
+                    full: false,
+                },
+                executor,
+                reconstruct_dispatcher,
+                true,
+            );
+        }
+        let mut value = serde_json::to_value(retry.record).unwrap_or(Value::Null);
+        value["provider_route_override"] = json!(true);
+        return Ok((value, 0));
+    }
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
@@ -9274,6 +9365,11 @@ where
                     artifact_id: None,
                     timeout_ms: None,
                     review_form_timeout_ms: None,
+                    backend: None,
+                    selector: None,
+                    model: None,
+                    allow_provider_rotation: false,
+                    provider_rotations: None,
                     full: false,
                 },
                 executor,
@@ -9647,6 +9743,11 @@ mod tests {
                 artifact_id: None,
                 timeout_ms: None,
                 review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
                 full: false,
             })
             .expect("preflight returns a machine-readable rejection");

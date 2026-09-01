@@ -556,16 +556,16 @@ fn batch_resume_locked(
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     reconcile_fanout_pr_states(&args.batch_id, true)?;
-    let exit_code = result.exit_code;
     let batch = batch::read_batch_record(&args.batch_id)?;
     let portfolio = run_portfolio(&batch)?;
     // Portfolio publication can add durable PR evidence. Reconcile it before a
     // RemoveOnSuccess provider is allowed to destroy the source workspace.
     reconcile_fanout_pr_states(&args.batch_id, true)?;
     finalize_resumed_provider_worktrees(&args.batch_id, Some(&result.value))?;
+    let subject_exit_code = result.exit_code;
     Ok(batch_resume_result(
         result.value,
-        exit_code,
+        subject_exit_code,
         &args.batch_id,
         Some(portfolio),
         placement,
@@ -893,7 +893,14 @@ fn reconcile_portfolio(
     let observations = batch_record
         .child_runs
         .iter()
-        .map(|child| portfolio_observation(&child.task_id, &child.run_id, false))
+        .map(|child| {
+            portfolio_observation(
+                &child.task_id,
+                &child.run_id,
+                false,
+                batch_record.metadata["declared_trackers"][&child.task_id].as_str(),
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let dependencies = durable_graph_dependencies(batch_record)?;
     let status = portfolio.reconcile(observations, &dependencies);
@@ -1025,7 +1032,12 @@ impl supervisor::FanoutPortfolioAdapter for CookFanoutPortfolioAdapter {
         &mut self,
         child: &supervisor::AgentTaskFanoutPortfolioChild,
     ) -> Result<supervisor::AgentTaskFanoutPortfolioObservation> {
-        portfolio_observation(&child.child_id, &child.run_id, true)
+        portfolio_observation(
+            &child.child_id,
+            &child.run_id,
+            true,
+            Some(&child.tracker_ref),
+        )
     }
 
     fn continue_provider(
@@ -1220,6 +1232,7 @@ fn portfolio_observation(
     child_id: &str,
     run_id: &str,
     reconcile: bool,
+    declared_tracker: Option<&str>,
 ) -> Result<homeboy::agents::agent_tasks::fanout_supervisor::AgentTaskFanoutPortfolioObservation> {
     use homeboy::agents::agent_tasks::fanout_supervisor as supervisor;
     let record = if reconcile {
@@ -1240,12 +1253,24 @@ fn portfolio_observation(
         Some(_) => supervisor::AgentTaskFanoutProviderState::Failed,
         None => supervisor::AgentTaskFanoutProviderState::Pending,
     };
+    // Provider interruption can occur before promotion writes its provenance.
+    // The recipe is already durable at provider dispatch, so retain its declared
+    // worktree and tracker identity for the recovery projection.
+    let recipe = agent_task_service::load_recipe_for_attempt(run_id)
+        .ok()
+        .flatten();
     let promotion = record
         .as_ref()
         .and_then(|record| record.metadata.get("latest_promotion"));
     let path = promotion
         .and_then(|value| value.pointer("/provenance/worktree_path"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .or_else(|| {
+            recipe
+                .as_ref()
+                .and_then(|recipe| recipe.finalization.get("to_worktree"))
+                .and_then(Value::as_str)
+        });
     let declared_base = promotion
         .and_then(|value| value.pointer("/verified_base/base"))
         .and_then(Value::as_str);
@@ -1290,9 +1315,9 @@ fn portfolio_observation(
         .and_then(Value::as_str)
         .is_some_and(|after_sha| head_sha.as_deref() == Some(after_sha));
     let (tracker, pr, remote_head_sha, findings) = match path {
-        Some(path) => github_observation(path, record.as_ref(), finalization)?,
+        Some(path) => github_observation(path, record.as_ref(), finalization, declared_tracker)?,
         None => (
-            tracker_state_without_observation(record.as_ref()),
+            tracker_state_without_observation(record.as_ref(), recipe.as_ref(), declared_tracker),
             supervisor::AgentTaskFanoutPrState::Unknown,
             None,
             Vec::new(),
@@ -1333,15 +1358,19 @@ fn github_observation(
     path: &str,
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     finalization: Option<&Value>,
+    declared_tracker: Option<&str>,
 ) -> Result<(
     supervisor::AgentTaskFanoutTrackerState,
     supervisor::AgentTaskFanoutPrState,
     Option<String>,
     Vec<supervisor::AgentTaskFanoutReviewFinding>,
 )> {
-    let tracker = match record.and_then(|record| declared_tracker_ref(&record.metadata)) {
+    let tracker = match record
+        .and_then(|record| declared_tracker_ref(&record.metadata))
+        .or(declared_tracker.filter(|reference| is_tracker_url(reference)))
+    {
         Some(task_url) => match IssueRef::parse(task_url) {
-            Ok(issue) => homeboy::core::git::issue_find(
+            Ok(issue) => match homeboy::core::git::issue_find(
                 None,
                 homeboy::core::git::IssueFindOptions {
                     state: homeboy::core::git::IssueState::All,
@@ -1349,9 +1378,8 @@ fn github_observation(
                     path: Some(path.to_string()),
                     ..Default::default()
                 },
-            )
-            .map(|result| {
-                result
+            ) {
+                Ok(result) => result
                     .items
                     .iter()
                     .find(|item| item.number.to_string() == issue.number)
@@ -1364,11 +1392,14 @@ fn github_observation(
                                 supervisor::AgentTaskFanoutTrackerState::Closed
                             }
                         },
-                    )
-            }),
+                    ),
+                // A declared tracker is still durable evidence when the host
+                // cannot be observed from a recovered provider worktree.
+                Err(_) => supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved,
+            },
             // Tracker identity is generic; this adapter only observes GitHub.
-            Err(_) => Ok(supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved),
-        }?,
+            Err(_) => supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved,
+        },
         None => supervisor::AgentTaskFanoutTrackerState::Unknown,
     };
     let head = finalization
@@ -1427,13 +1458,27 @@ fn declared_tracker_ref(metadata: &Value) -> Option<&str> {
     metadata
         .pointer("/cook_recipe/source_refs/0")
         .and_then(Value::as_str)
-        .filter(|reference| reference.starts_with("https://") || reference.starts_with("http://"))
+        .filter(|reference| is_tracker_url(reference))
+}
+
+fn is_tracker_url(reference: &str) -> bool {
+    reference.starts_with("https://") || reference.starts_with("http://")
 }
 
 fn tracker_state_without_observation(
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    recipe: Option<&homeboy::agents::agent_task_service::AgentTaskCookRecipe>,
+    declared_tracker: Option<&str>,
 ) -> supervisor::AgentTaskFanoutTrackerState {
-    if record.is_some_and(|record| declared_tracker_ref(&record.metadata).is_some()) {
+    if record.is_some_and(|record| declared_tracker_ref(&record.metadata).is_some())
+        || recipe.is_some_and(|recipe| {
+            recipe
+                .source_refs
+                .first()
+                .is_some_and(|reference| is_tracker_url(reference))
+        })
+        || declared_tracker.is_some_and(is_tracker_url)
+    {
         supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved
     } else {
         supervisor::AgentTaskFanoutTrackerState::Unknown
@@ -1493,7 +1538,7 @@ fn git_candidate_state(
 
 fn batch_resume_result(
     report: agent_task_service::AgentTaskCookBatchReport,
-    exit_code: i32,
+    subject_exit_code: i32,
     batch_id: &str,
     portfolio: Option<supervisor::AgentTaskFanoutPortfolioRunReport>,
     placement: Placement,
@@ -1503,6 +1548,7 @@ fn batch_resume_result(
             "schema": "homeboy/agent-task-cook-batch-resume/v1",
             "batch_id": report.batch_id,
             "status": report.status,
+            "exit_code": subject_exit_code,
             "summary": {
                 "total": report.total,
                 "queued": report.queued,
@@ -1520,7 +1566,9 @@ fn batch_resume_result(
                 "resume": fanout_command(placement, "resume", batch_id),
             },
         }),
-        exit_code,
+        // The operation successfully reconciled the requested batch. Its
+        // failed subject outcome remains explicit in the payload above.
+        0,
     )
 }
 
@@ -13097,6 +13145,7 @@ esac
             worktree.to_str().unwrap(),
             None,
             Some(&json!({ "head": "fanout/child", "base": "main" })),
+            None,
         );
         match previous_path {
             Some(path) => std::env::set_var("PATH", path),
