@@ -546,9 +546,15 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             evidence.usage_caps.record(capacity_key.clone(), reset_at);
         }
         {
-            if outcome.failure_classification
-                == Some(AgentTaskFailureClassification::ProviderAccountBlocked)
-            {
+            if matches!(
+                outcome.failure_classification,
+                Some(
+                    AgentTaskFailureClassification::ProviderAccountBlocked
+                        | AgentTaskFailureClassification::ProviderQuotaExhausted
+                        | AgentTaskFailureClassification::ProviderBillingBlocked
+                        | AgentTaskFailureClassification::ProviderCredentialsExhausted
+                )
+            ) {
                 let now = chrono::Utc::now();
                 evidence
                     .account_blocks

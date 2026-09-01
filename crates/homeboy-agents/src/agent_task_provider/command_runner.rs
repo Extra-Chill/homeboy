@@ -11,7 +11,9 @@ use super::runner_readiness::{
 use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sources};
 use super::*;
 use crate::agent_task::ResolvedAgentTaskRuntimeTool;
-use crate::agent_task_executor_evidence::link_latest_executor_evidence;
+use crate::agent_task_executor_evidence::{
+    classify_structured_runtime_failure, link_latest_executor_evidence,
+};
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment, AgentTaskProcessSupervisor,
 };
@@ -144,6 +146,11 @@ pub(super) fn run_materialized_provider_command_with_credentials(
             credential_env,
         );
         classify_provider_policy_denial(request, &mut outcome);
+        classify_structured_runtime_failure(
+            &mut outcome,
+            &provider.backend,
+            &request.artifacts_path,
+        );
         classify_transient_provider_outcome(&mut outcome);
 
         if let Some(failure) = immediate_provider_failure(provider, &outcome, started.elapsed()) {

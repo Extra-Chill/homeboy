@@ -711,12 +711,12 @@ fn opencode_account_block_maps_to_rotatable_provider_classification() {
 
     assert_eq!(
         outcome.failure_classification,
-        Some(AgentTaskFailureClassification::ProviderAccountBlocked)
+        Some(AgentTaskFailureClassification::ProviderBillingBlocked)
     );
     assert!(outcome
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.class == "provider.account_blocked"));
+        .any(|diagnostic| diagnostic.class == "provider.capacity_rejected"));
 }
 
 #[test]
