@@ -20,5 +20,7 @@ mod product_identity_test;
 mod promotion_provider_stdin;
 #[path = "cli_binary/refactor_transform_test.rs"]
 mod refactor_transform_test;
+#[path = "cli_binary/review_dirty_preflight.rs"]
+mod review_dirty_preflight;
 #[path = "cli_binary/rig_local_artifact_registration.rs"]
 mod rig_local_artifact_registration;

@@ -509,6 +509,10 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         return Ok((output, 0));
     }
 
+    // The test phase restores its checkout, so establish the whole plan is
+    // eligible before dependency hydration or any detector can begin.
+    homeboy_core::extension::test::ensure_clean_review_checkout(Path::new(&source_path))?;
+
     let review_observation = Some(observation::start(observation::ReviewObservationStart {
         component_id: &component.id,
         component_label: &component_label,
