@@ -11,7 +11,8 @@ const {
 	resolveExecutable,
 } = require('../../lib/cli-runtime-readiness');
 
-const OPENCODE_READINESS_TIMEOUT_MS = 5_000;
+const OPENCODE_READINESS_TIMEOUT_MS = 15_000;
+const OPENCODE_READINESS_MAX_TIMEOUT_MS = 30_000;
 const OPENCODE_READINESS_MAX_OUTPUT_BYTES = 16 * 1024;
 const OPENCODE_AUTH_FAILURE_PATTERN = /\b(?:auth(?:entication)?|credential|login|token|unauthori[sz]ed|forbidden|account)\b/i;
 const OPENCODE_QUOTA_PATTERN = /\b(?:quota|rate limit|usage limit|spending limit|limit exhausted|too many requests|\b429\b)\b/i;
@@ -102,7 +103,10 @@ function parseArgs(value) {
 function runProbe(probe, executable, args, command, env, config) {
 	const result = probe(executable, [...args, ...command], {
 		encoding: 'utf8',
-		timeout: boundedTimeout(config.readiness_timeout_ms || OPENCODE_READINESS_TIMEOUT_MS),
+		timeout: boundedTimeout(
+			config.readiness_timeout_ms || OPENCODE_READINESS_TIMEOUT_MS,
+			OPENCODE_READINESS_MAX_TIMEOUT_MS,
+		),
 		maxBuffer: OPENCODE_READINESS_MAX_OUTPUT_BYTES,
 		env,
 	});
@@ -221,5 +225,6 @@ function objectValue(value) {
 module.exports = {
 	OPENCODE_READINESS_MAX_OUTPUT_BYTES,
 	OPENCODE_READINESS_TIMEOUT_MS,
+	OPENCODE_READINESS_MAX_TIMEOUT_MS,
 	openCodeRuntimeReadiness,
 };

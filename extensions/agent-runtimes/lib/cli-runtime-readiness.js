@@ -137,10 +137,14 @@ function environmentIdentity(env, names) {
 	return crypto.createHash('sha256').update(JSON.stringify(entries)).digest('hex');
 }
 
-function boundedTimeout(value) {
+function boundedTimeout(value, maxTimeoutMs = MAX_TIMEOUT_MS) {
 	const timeout = Number(value);
+	const maximum = Number(maxTimeoutMs);
+	const boundedMaximum = Number.isFinite(maximum) && maximum > 0
+		? Math.floor(maximum)
+		: MAX_TIMEOUT_MS;
 	return Number.isFinite(timeout) && timeout > 0
-		? Math.min(Math.floor(timeout), MAX_TIMEOUT_MS)
+		? Math.min(Math.floor(timeout), boundedMaximum)
 		: DEFAULT_TIMEOUT_MS;
 }
 

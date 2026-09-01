@@ -22,11 +22,11 @@ function env(extra = {}) {
 	return { PATH: process.env.PATH, HOME: root, OPENAI_API_KEY: 'secret-do-not-leak', ...extra };
 }
 
-function probe(responses) {
+function probe(responses, expectedTimeout = 15_000) {
 	let index = 0;
 	return (command, args, options) => {
 		assert.equal(command, executable);
-		assert.equal(options.timeout, 5_000);
+		assert.equal(options.timeout, expectedTimeout);
 		assert.equal(options.maxBuffer, 16 * 1024);
 		const response = responses[index++];
 		assert.deepEqual(args.slice(-response.args.length), response.args);
@@ -51,6 +51,11 @@ try {
 	assert.equal(ready.identity.model, 'gpt-5.6-terra');
 	assert.equal(ready.identity.version, '1.18.25');
 	assert.equal(JSON.stringify(ready).includes('secret-do-not-leak'), false);
+	const clampedTimeout = openCodeRuntimeReadiness(request({ readiness_timeout_ms: 60_000 }), {
+		env: env(),
+		spawnSync: probe(readyResponses(), 30_000),
+	});
+	assert.equal(clampedTimeout.ready, true);
 	const changedModel = openCodeRuntimeReadiness(request({ model: 'openai/gpt-5.6-terra-fast' }), { env: env(), spawnSync: probe([
 		...readyResponses().slice(0, 2),
 		{ args: ['models', 'openai'], result: { status: 0, stdout: 'openai/gpt-5.6-terra-fast\n', stderr: '' } },
