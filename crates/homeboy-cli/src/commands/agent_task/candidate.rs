@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum CandidateState {
     Finalized,
-    Promoted,
+    ApplyReady,
     PatchAvailable,
     NoChangesProduced,
     Empty,
@@ -26,7 +26,7 @@ impl CandidateState {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Finalized => "finalized",
-            Self::Promoted => "promoted",
+            Self::ApplyReady => "apply_ready",
             Self::PatchAvailable => "patch_available",
             Self::NoChangesProduced => "no_changes_produced",
             Self::Empty => "empty",
@@ -41,7 +41,7 @@ impl CandidateState {
     pub(crate) fn is_available(self) -> bool {
         matches!(
             self,
-            Self::Finalized | Self::Promoted | Self::PatchAvailable
+            Self::Finalized | Self::ApplyReady | Self::PatchAvailable
         )
     }
 }
@@ -53,7 +53,7 @@ const MAX_CHANGED_FILES_ARTIFACT_BYTES: u64 = 1024 * 1024;
 const MAX_CHANGED_FILES_PATHS: usize = 4096;
 
 /// The canonical terminal result for a Cook's candidate evidence. Evidence is
-/// monotonic: a finalized PR, promoted/adopted candidate, or durable patch
+/// monotonic: a finalized PR, retained/apply-ready candidate, or durable patch
 /// remains authoritative even when a later provider attempt is empty or fails.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CandidateResult {
@@ -69,7 +69,9 @@ pub(crate) struct CandidateResult {
     pub(crate) changed_files_unknown_patches: usize,
     pub(crate) provider_executions: Option<usize>,
     pub(crate) finalized: bool,
-    pub(crate) promoted: bool,
+    pub(crate) retained: bool,
+    pub(crate) target_applied: bool,
+    pub(crate) verified: bool,
     pub(crate) attempts_omitted: usize,
     pub(crate) outcomes_omitted: usize,
     pub(crate) artifacts_omitted: usize,
@@ -80,8 +82,8 @@ impl CandidateResult {
     pub(crate) fn state(self) -> CandidateState {
         if self.finalized {
             CandidateState::Finalized
-        } else if self.promoted {
-            CandidateState::Promoted
+        } else if self.retained {
+            CandidateState::ApplyReady
         } else if self.available > 0 {
             CandidateState::PatchAvailable
         } else if self.is_degraded() {
@@ -110,7 +112,7 @@ impl CandidateResult {
 
     fn record(&mut self, state: CandidateState, size: Option<u64>, changed_files: Option<usize>) {
         match state {
-            CandidateState::Finalized | CandidateState::Promoted => {
+            CandidateState::Finalized | CandidateState::ApplyReady => {
                 unreachable!("terminal facts are recorded directly")
             }
             CandidateState::PatchAvailable => {
@@ -231,11 +233,16 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
         && counts.conflicting == 0
         && counts.retained_only == 0
         && aggregate_outcomes_are_no_op(payload);
+    let promotion =
+        latest_promotion(payload).or_else(|| payload.get("record").and_then(latest_promotion));
     counts.finalized =
         has_finalized_pr(payload) || payload.get("record").is_some_and(has_finalized_pr);
-    counts.promoted = !counts.finalized
-        && (has_promoted_candidate(payload)
-            || payload.get("record").is_some_and(has_promoted_candidate));
+    counts.retained = has_retained_candidate(payload)
+        || payload.get("record").is_some_and(has_retained_candidate)
+        || successful_adoption(payload)
+        || payload.get("record").is_some_and(successful_adoption);
+    counts.target_applied = promotion.is_some_and(promotion_target_applied);
+    counts.verified = counts.target_applied && promotion.is_some_and(promotion_verified);
     counts
 }
 
@@ -248,6 +255,12 @@ pub(crate) fn canonical_candidate_projection(result: CandidateResult) -> Value {
         "changed_files": result.changed_files,
         "changed_files_unknown_patches": result.changed_files_unknown_patches,
         "provider_executions": result.provider_executions,
+        "lifecycle": {
+            "retained": result.retained,
+            "target_applied": result.target_applied,
+            "verified": result.verified,
+            "finalized": result.finalized,
+        },
         "counts": {
             "patch_available": result.available,
             "empty": result.empty,
@@ -272,7 +285,9 @@ fn candidate_result_from_projection(value: &Value) -> Option<CandidateResult> {
     }
     let state = match value.get("state").and_then(Value::as_str)? {
         "finalized" => CandidateState::Finalized,
-        "promoted" => CandidateState::Promoted,
+        // `promoted` was emitted by the original candidate projection before
+        // target application became an independent lifecycle dimension.
+        "promoted" | "apply_ready" => CandidateState::ApplyReady,
         "patch_available" => CandidateState::PatchAvailable,
         "no_changes_produced" => CandidateState::NoChangesProduced,
         "empty" => CandidateState::Empty,
@@ -323,8 +338,22 @@ fn candidate_result_from_projection(value: &Value) -> Option<CandidateResult> {
             .get("provider_executions")
             .and_then(Value::as_u64)
             .and_then(|count| usize::try_from(count).ok()),
-        finalized: state == CandidateState::Finalized,
-        promoted: state == CandidateState::Promoted,
+        finalized: value
+            .pointer("/lifecycle/finalized")
+            .and_then(Value::as_bool)
+            .unwrap_or(state == CandidateState::Finalized),
+        retained: value
+            .pointer("/lifecycle/retained")
+            .and_then(Value::as_bool)
+            .unwrap_or(state == CandidateState::ApplyReady),
+        target_applied: value
+            .pointer("/lifecycle/target_applied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        verified: value
+            .pointer("/lifecycle/verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         attempts_omitted: omitted("attempts_omitted"),
         outcomes_omitted: omitted("outcomes_omitted"),
         artifacts_omitted: omitted("artifacts_omitted"),
@@ -616,9 +645,14 @@ fn outcome_artifact_count(outcome: &Value) -> usize {
         .map_or(0, Vec::len)
 }
 
-fn has_promoted_candidate(payload: &Value) -> bool {
-    promotion_has_candidate(payload.get("latest_promotion"))
-        || promotion_has_candidate(payload.pointer("/metadata/latest_promotion"))
+fn latest_promotion(payload: &Value) -> Option<&Value> {
+    payload
+        .get("latest_promotion")
+        .or_else(|| payload.pointer("/metadata/latest_promotion"))
+}
+
+fn has_retained_candidate(payload: &Value) -> bool {
+    promotion_has_candidate(latest_promotion(payload))
         || payload
             .get("attempts")
             .and_then(Value::as_array)
@@ -628,7 +662,6 @@ fn has_promoted_candidate(payload: &Value) -> bool {
                     .take(MAX_ATTEMPTS_SCANNED)
                     .any(|attempt| promotion_has_candidate(attempt.get("promotion")))
             })
-        || successful_adoption(payload)
 }
 
 fn successful_adoption(payload: &Value) -> bool {
@@ -682,6 +715,38 @@ fn promotion_has_candidate(promotion: Option<&Value>) -> bool {
         .or_else(|| promotion.get("patch_artifact_id").and_then(Value::as_str))
         .or_else(|| promotion.get("artifact_id").and_then(Value::as_str))
         .is_some_and(|id| !id.trim().is_empty()))
+}
+
+/// A promotion status alone is not proof that the target changed: retained
+/// candidates use the same tracker before `agent-task promote` mutates a target.
+pub(crate) fn promotion_target_applied(promotion: &Value) -> bool {
+    matches!(
+        promotion.get("status").and_then(Value::as_str),
+        Some("verification_pending" | "applied" | "gate_failed")
+    ) && promotion
+        .pointer("/provenance/post_apply")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && promotion
+            .pointer("/patch_artifact/id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+        && promotion
+            .pointer("/target/worktree")
+            .or_else(|| promotion.get("to_worktree"))
+            .and_then(Value::as_str)
+            .is_some_and(|target| !target.trim().is_empty())
+        && promotion
+            .pointer("/provenance/candidate")
+            .is_some_and(|candidate| !candidate.is_null())
+}
+
+pub(crate) fn promotion_verified(promotion: &Value) -> bool {
+    promotion_target_applied(promotion)
+        && matches!(
+            promotion.get("status").and_then(Value::as_str),
+            Some("applied")
+        )
 }
 
 fn aggregate_outcomes_are_no_op(payload: &Value) -> bool {
@@ -900,19 +965,19 @@ mod tests {
                 CandidateState::Finalized,
             ),
             (
-                "adoption",
+                "retained adoption",
                 json!({ "candidate_adoption": { "candidate_sha": "abc123", "state": "completed", "result": { "status": "review_ready" } } }),
-                CandidateState::Promoted,
+                CandidateState::ApplyReady,
             ),
             (
-                "failed final attempt",
+                "retained candidate after a failed final attempt",
                 json!({
                     "attempts": [
                         { "promotion": { "status": "applied", "patch_artifact": { "id": "candidate" } } },
                         { "aggregate": { "outcomes": [{ "status": "failed", "artifacts": [] }] } }
                     ]
                 }),
-                CandidateState::Promoted,
+                CandidateState::ApplyReady,
             ),
         ];
 
@@ -930,6 +995,44 @@ mod tests {
             classify_candidates(&no_candidate).state(),
             CandidateState::Empty
         );
+    }
+
+    #[test]
+    fn candidate_lifecycle_requires_post_apply_evidence_before_target_or_gate_claims() {
+        let retained = classify_candidates(&json!({
+            "metadata": { "latest_promotion": {
+                "status": "verification_pending",
+                "patch_artifact": { "id": "patch" },
+                "target": { "worktree": "fixture@target" }
+            } }
+        }));
+        assert_eq!(retained.state(), CandidateState::ApplyReady);
+        assert!(retained.retained);
+        assert!(!retained.target_applied);
+        assert!(!retained.verified);
+
+        let target_applied = classify_candidates(&json!({
+            "metadata": { "latest_promotion": {
+                "status": "verification_pending",
+                "patch_artifact": { "id": "patch" },
+                "target": { "worktree": "fixture@target" },
+                "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
+            } }
+        }));
+        assert!(target_applied.retained);
+        assert!(target_applied.target_applied);
+        assert!(!target_applied.verified);
+
+        let verified = classify_candidates(&json!({
+            "metadata": { "latest_promotion": {
+                "status": "applied",
+                "patch_artifact": { "id": "patch" },
+                "target": { "worktree": "fixture@target" },
+                "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
+            } }
+        }));
+        assert!(verified.target_applied);
+        assert!(verified.verified);
     }
 
     #[test]
@@ -1061,12 +1164,12 @@ mod tests {
 
     #[test]
     fn review_envelope_reads_terminal_facts_from_its_record() {
-        let promoted = classify_candidates(&json!({
+        let retained = classify_candidates(&json!({
             "record": { "metadata": { "latest_promotion": {
                 "status": "applied", "patch_artifact": { "id": "patch" }
             }}}
         }));
-        assert_eq!(promoted.state(), CandidateState::Promoted);
+        assert_eq!(retained.state(), CandidateState::ApplyReady);
 
         let finalized = classify_candidates(&json!({
             "record": { "metadata": { "cook_finalization": {
@@ -1080,6 +1183,6 @@ mod tests {
                 "state": "completed", "result": { "status": "review_ready" }
             }}
         }));
-        assert_eq!(adopted.state(), CandidateState::Promoted);
+        assert_eq!(adopted.state(), CandidateState::ApplyReady);
     }
 }
