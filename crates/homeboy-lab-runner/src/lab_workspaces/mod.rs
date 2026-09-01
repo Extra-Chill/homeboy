@@ -768,6 +768,28 @@ pub(super) fn agent_task_plan_extra_workspaces(
         Ok(value) => value,
         Err(_) => return Ok(workspaces),
     };
+    // A derived Cook baseline can be the primary Lab source while its plan
+    // still targets the issue worktree it was derived from. Materialize that
+    // target separately so committed harvest selects its own provenance.
+    for task in value
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = task
+            .pointer("/workspace/root")
+            .and_then(serde_json::Value::as_str)
+        {
+            add_candidate_extra_workspace(
+                path,
+                "agent_task_plan_workspace",
+                &source_canon,
+                &mut seen,
+                &mut workspaces,
+            )?;
+        }
+    }
     for candidate in component_contract_candidate_paths(&value) {
         add_candidate_extra_workspace(
             &candidate,
