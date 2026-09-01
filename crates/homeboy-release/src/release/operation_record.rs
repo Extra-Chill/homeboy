@@ -27,6 +27,8 @@ pub struct OperationRecord {
     #[serde(default)]
     pub finalization_lease_started_ms: Option<u128>,
     pub attempt_count: u32,
+    #[serde(default)]
+    pub mutation_attempted: bool,
     pub continuation_evidence: Vec<String>,
     #[serde(default)]
     pub attributes: serde_json::Map<String, Value>,
@@ -118,7 +120,9 @@ impl OperationRecordStore {
     /// Claims finalization before an external provider call. A live lease is
     /// never stolen; only a bounded stale lease can be retried.
     pub(crate) fn claim_finalization(&self, owner_run_ref: &str) -> Result<FinalizationClaim> {
-        const STALE_LEASE_MS: u128 = 5 * 60 * 1000;
+        // Configured provider mutation timeouts may be as high as fifteen
+        // minutes. Never steal a lease while that mutation can still be live.
+        const STALE_LEASE_MS: u128 = 16 * 60 * 1000;
         let now = now_ms();
         let candidate_lease = uuid::Uuid::new_v4().to_string();
         self.update(owner_run_ref, |record| {
@@ -166,6 +170,7 @@ impl OperationRecordStore {
         &self,
         owner_run_ref: &str,
         lease: &str,
+        receipt: Value,
     ) -> Result<OperationRecord> {
         self.update(owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| {
@@ -177,15 +182,50 @@ impl OperationRecordStore {
                 )
             })?;
             if record.finalization_lease.as_deref() != Some(lease) {
-                return Ok(record);
+                return Err(Error::validation_invalid_argument(
+                    "finalization_lease",
+                    "finalization lease no longer matches durable authority",
+                    Some(owner_run_ref.to_string()),
+                    None,
+                ));
             }
             record.finalization_status = "completed".to_string();
             record.lifecycle_state = "finalized".to_string();
             record.finalization_lease = None;
             record.finalization_lease_started_ms = None;
             record
+                .attributes
+                .insert("finalization_receipt".to_string(), receipt);
+            record
                 .continuation_evidence
                 .push("provider finalization completed".to_string());
+            Ok(record)
+        })
+    }
+
+    pub(crate) fn mark_mutation_attempted(
+        &self,
+        owner_run_ref: &str,
+        lease: &str,
+    ) -> Result<OperationRecord> {
+        self.update(owner_run_ref, |record| {
+            let mut record = record.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "owner_run_ref",
+                    "operation record does not exist",
+                    Some(owner_run_ref.to_string()),
+                    None,
+                )
+            })?;
+            if record.finalization_lease.as_deref() != Some(lease) {
+                return Err(Error::validation_invalid_argument(
+                    "finalization_lease",
+                    "finalization lease no longer matches durable authority",
+                    Some(owner_run_ref.to_string()),
+                    None,
+                ));
+            }
+            record.mutation_attempted = true;
             Ok(record)
         })
     }
@@ -289,8 +329,7 @@ fn record_path_in_roots(data_root: &Path, owner_run_ref: &str) -> PathBuf {
 
 fn lock_in_roots(data_root: &Path) -> Result<std::fs::File> {
     let dir = store_dir_in_roots(data_root);
-    fs::create_dir_all(&dir)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(dir.display().to_string())))?;
+    homeboy_core::engine::local_files::create_dir_all_durably(&dir)?;
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -371,6 +410,7 @@ mod tests {
             finalization_lease: None,
             finalization_lease_started_ms: None,
             attempt_count: 0,
+            mutation_attempted: false,
             continuation_evidence: vec!["created".to_string()],
             attributes: serde_json::Map::new(),
         }
@@ -430,7 +470,11 @@ mod tests {
                         // This is the provider-effect boundary: only a claimant may cross it.
                         effects.fetch_add(1, Ordering::SeqCst);
                         store
-                            .complete_finalization(&owner, &lease)
+                            .complete_finalization(
+                                &owner,
+                                &lease,
+                                serde_json::json!({"test": true}),
+                            )
                             .expect("complete");
                     }
                 })

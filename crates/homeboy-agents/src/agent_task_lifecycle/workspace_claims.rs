@@ -2,7 +2,7 @@
 
 use super::runner_continuation::with_runner_continuation;
 use super::*;
-use homeboy_core::engine::local_files::write_json_file_owner_only;
+use homeboy_core::engine::local_files::{remove_file_durably, write_json_file_owner_only};
 use homeboy_core::workspace_claim::{
     WorkspaceClaim, WorkspaceClaimBinding, WorkspaceClaimStore, WorkspaceIdentity,
     WorkspaceOwnerLease, MAX_WORKSPACE_CLAIM_TTL_MS,
@@ -869,9 +869,7 @@ fn retry_pending_composite_workspace_cleanup(
         };
         match release_composite_workspace_claim(&mut claim)? {
             CompositeWorkspaceClaimRelease::Released => {
-                fs::remove_file(path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some("pending composite cleanup".into()))
-                })?;
+                remove_file_durably(&path, "pending composite cleanup")?;
                 Ok(CompositeWorkspaceCleanupStatus::Released)
             }
             CompositeWorkspaceClaimRelease::Partial { failures } => {
@@ -964,14 +962,7 @@ fn write_composite_acquisition_intent(intent: &CompositeAcquisitionIntent) -> Re
 
 fn remove_composite_acquisition_intent(workspace: &WorkspaceIdentity) -> Result<()> {
     let path = composite_acquisition_intent_path(workspace)?;
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some(path.display().to_string()),
-        )),
-    }
+    remove_file_durably(&path, &path.display().to_string())
 }
 
 fn composite_acquisition_intent_for_workspace(
@@ -1146,8 +1137,7 @@ fn quarantine_pending_composite_cleanup(
     };
     let quarantine_path = path.with_file_name(format!("{recovery_id}.quarantine.json"));
     write_json_file_owner_only(&quarantine_path, &quarantine)?;
-    fs::remove_file(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+    remove_file_durably(path, &path.display().to_string())
 }
 
 fn quarantined_composite_cleanup_for_workspace(

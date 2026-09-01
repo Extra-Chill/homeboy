@@ -8,10 +8,10 @@ use homeboy_core::git;
 use homeboy_core::worktree_provider::{
     self, worktree_provision_idempotency_key as worktree_provider_idempotency_key,
     WorktreeCleanupPolicy as WorktreeProviderCleanupPolicy, WorktreeFinalizationLookup,
-    WorktreeProviderIdentity, WorktreeProvisionDestination,
+    WorktreeOwnership, WorktreeProviderIdentity, WorktreeProvisionDestination,
     WorktreeProvisionIntent as WorktreeProviderCreateIntent,
-    WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent,
-    WorktreeTerminalDisposition as WorktreeProviderTerminalDisposition,
+    WorktreeProvisionLifecycle as WorktreeProviderLifecycleIntent, WorktreeProvisionLookup,
+    WorktreeTerminalDisposition as WorktreeProviderTerminalDisposition, WorktreeWorkspaceKind,
 };
 use uuid::Uuid;
 
@@ -75,6 +75,36 @@ impl ReleaseWorkspace {
             head: branch,
             task_url: None,
         };
+        // Publish ownership before provider planning or mutation so selection
+        // failures and ensure crashes retain one durable reconciliation handle.
+        store.create(&OperationRecord {
+            owner_run_ref: lifecycle.owner_run_ref.clone(),
+            operation: "provider_workspace".to_string(),
+            subject: component.id.clone(),
+            provider: "unselected".to_string(),
+            handle: intent.handle.clone(),
+            path: None,
+            source_sha: source_sha.clone(),
+            cleanup_policy: "remove_on_success".to_string(),
+            lifecycle_state: "planning".to_string(),
+            terminal_disposition: None,
+            finalization_status: "pending".to_string(),
+            finalization_lease: None,
+            finalization_lease_started_ms: None,
+            attempt_count: 0,
+            mutation_attempted: false,
+            continuation_evidence: vec![
+                "release workspace ownership persisted before provider selection".to_string(),
+            ],
+            attributes: serde_json::Map::from_iter([(
+                "provision_intent".to_string(),
+                serde_json::json!({
+                    "repo": intent.repo.clone(), "base": intent.base.clone(), "head": intent.head.clone(),
+                    "task_url": intent.task_url.clone(),
+                    "idempotency_key": worktree_provider_idempotency_key(&intent),
+                }),
+            )]),
+        })?;
         let planned =
             worktree_provider::plan_worktree_provision_from_config(&intent, &lifecycle, &config)?;
         let destination = match planned {
@@ -88,32 +118,23 @@ impl ReleaseWorkspace {
         let selected_provider_id = provider_evidence_id(&selected_provider);
         // Publish ownership before invoking the provider. A crash during ensure
         // is therefore recoverable through the same idempotency owner reference.
-        store.create(&OperationRecord {
-            owner_run_ref: lifecycle.owner_run_ref.clone(),
-            operation: "provider_workspace".to_string(),
-            subject: component.id.clone(),
-            provider: selected_provider_id.clone(),
-            handle: intent.handle.clone(),
-            path: None,
-            source_sha: source_sha.clone(),
-            cleanup_policy: "remove_on_success".to_string(),
-            lifecycle_state: "provisioning".to_string(),
-            terminal_disposition: None,
-            finalization_status: "pending".to_string(),
-            finalization_lease: None,
-            finalization_lease_started_ms: None,
-            attempt_count: 0,
-            continuation_evidence: vec![
-                "release workspace ownership persisted before provider ensure".to_string(),
-            ],
-            attributes: serde_json::Map::from_iter([(
+        store.update(&lifecycle.owner_run_ref, |record| {
+            let mut record = record.ok_or_else(|| missing_record(&lifecycle.owner_run_ref))?;
+            record.provider = selected_provider_id.clone();
+            record.handle = intent.handle.clone();
+            record.lifecycle_state = "provisioning".to_string();
+            record.attributes.insert(
                 "provision_intent".to_string(),
                 serde_json::json!({
                     "repo": intent.repo.clone(), "base": intent.base.clone(), "head": intent.head.clone(),
                     "task_url": intent.task_url.clone(),
                     "idempotency_key": worktree_provider_idempotency_key(&intent),
                 }),
-            )]),
+            );
+            record
+                .continuation_evidence
+                .push("provider selected before ensure".to_string());
+            Ok(record)
         })?;
         let provision = worktree_provider::ensure_worktree_provision_from_config(
             &intent,
@@ -210,7 +231,15 @@ impl ReleaseWorkspace {
                     Some("provider-owned workspace has no durable owner record".to_string());
                 return self.output.clone();
             };
-            let _ = self.store.update(owner, |record| {
+            if disposition == WorktreeProviderTerminalDisposition::Succeeded && !release_pushed {
+                self.output.final_disposition = Some("finalization_pending".to_string());
+                self.output.finalization_error = Some(
+                    "successful workspace cleanup requires durable publication evidence"
+                        .to_string(),
+                );
+                return self.output.clone();
+            }
+            if let Err(error) = self.store.update(owner, |record| {
                 let mut record = record.ok_or_else(|| missing_record(owner))?;
                 record.terminal_disposition = Some(disposition.as_str().to_string());
                 record.attributes.insert(
@@ -218,7 +247,11 @@ impl ReleaseWorkspace {
                     serde_json::Value::Bool(release_pushed),
                 );
                 Ok(record)
-            });
+            }) {
+                self.output.final_disposition = Some("finalization_pending".to_string());
+                self.output.finalization_error = Some(error.to_string());
+                return self.output.clone();
+            }
             match finalize_record(&self.store, owner, resolution, lifecycle, disposition) {
                 Ok(_) => {
                     self.owned = None;
@@ -263,7 +296,7 @@ pub(super) fn reconcile_pending(
     selector: Option<&str>,
 ) -> Result<Option<OperationRecord>> {
     let store = OperationRecordStore::in_roots(roots);
-    let record = match selector {
+    let mut record = match selector {
         Some(owner) => match store.load(owner)? {
             Some(record) => record,
             None => return Ok(None),
@@ -282,7 +315,15 @@ pub(super) fn reconcile_pending(
     // provider lookup so a removed provider or workspace cannot revive legacy
     // Git recovery behavior.
     if record.finalization_status == "completed" {
-        return Ok(Some(record));
+        if release_finalization_receipt_matches_record(&record) {
+            return Ok(Some(record));
+        }
+        return Err(Error::validation_invalid_argument(
+            "owner_run_ref",
+            "completed provider finalization record lacks an exact durable receipt",
+            Some(record.owner_run_ref),
+            None,
+        ));
     }
     let intent = record
         .attributes
@@ -311,7 +352,7 @@ pub(super) fn reconcile_pending(
         owner_run_ref: record.owner_run_ref.clone(),
         cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
     };
-    let create_intent = WorktreeProviderCreateIntent {
+    let mut create_intent = WorktreeProviderCreateIntent {
         handle: record.handle.clone(),
         repo: intent.repo,
         base: intent.base,
@@ -319,6 +360,27 @@ pub(super) fn reconcile_pending(
         task_url: intent.task_url,
     };
     let config = defaults::load_config();
+    if record.provider == "unselected" {
+        let planned = worktree_provider::plan_worktree_provision_from_config(
+            &create_intent,
+            &lifecycle,
+            &config,
+        )?;
+        let destination = match planned {
+            homeboy_core::worktree_provider::WorktreeProvisionPlan::Admitted(destination)
+            | homeboy_core::worktree_provider::WorktreeProvisionPlan::Planned(destination) => {
+                destination
+            }
+        };
+        record = store.update(&record.owner_run_ref, |current| {
+            let mut current = current.ok_or_else(|| missing_record(&record.owner_run_ref))?;
+            current.provider = provider_evidence_id(&destination.ownership.provider);
+            current.handle = destination.ownership.handle.clone();
+            current.lifecycle_state = "provisioning".to_string();
+            Ok(current)
+        })?;
+        create_intent.handle = record.handle.clone();
+    }
     // A crash may happen before ensure or after it returns but before the record
     // update. Re-running ensure with the persisted key closes both windows.
     let selected_provider = provider_identity_from_evidence(&record.provider);
@@ -348,12 +410,38 @@ pub(super) fn reconcile_pending(
         })?;
         provision.destination
     } else {
-        worktree_provider::admit_worktree_provision_from_config(
+        match worktree_provider::admit_worktree_provision_from_config(
             &record.handle,
             Some(&selected_provider),
             &config,
-        )?
-        .into_admitted(&record.handle)?
+        )? {
+            WorktreeProvisionLookup::Admitted(destination) => destination,
+            WorktreeProvisionLookup::NotFound if record.mutation_attempted => {
+                WorktreeProvisionDestination {
+                    ownership: WorktreeOwnership {
+                        provider: selected_provider.clone(),
+                        handle: record.handle.clone(),
+                        path: record.path.clone().unwrap_or_default(),
+                        kind: match selected_provider {
+                            WorktreeProviderIdentity::Native => WorktreeWorkspaceKind::TaskWorktree,
+                            WorktreeProviderIdentity::Configured(_) => {
+                                WorktreeWorkspaceKind::Configured
+                            }
+                        },
+                        branch: Some(create_intent.head.clone()),
+                        task_url: create_intent.task_url.clone(),
+                        provenance: None,
+                    },
+                    exact_identity: None,
+                }
+            }
+            WorktreeProvisionLookup::NotFound => {
+                return Err(worktree_provider::worktree_finalization_not_found_error(
+                    &record.handle,
+                    &config,
+                ));
+            }
+        }
     };
     if destination.ownership.provider != selected_provider
         || record
@@ -383,6 +471,13 @@ pub(super) fn reconcile_pending(
         Some("timed_out") => WorktreeProviderTerminalDisposition::TimedOut,
         _ => WorktreeProviderTerminalDisposition::Interrupted,
     };
+    if record.terminal_disposition.as_deref() != Some(disposition.as_str()) {
+        store.update(&record.owner_run_ref, |current| {
+            let mut current = current.ok_or_else(|| missing_record(&record.owner_run_ref))?;
+            current.terminal_disposition = Some(disposition.as_str().to_string());
+            Ok(current)
+        })?;
+    }
     finalize_record(
         &store,
         &record.owner_run_ref,
@@ -435,8 +530,22 @@ fn finalize_record(
     lifecycle: &WorktreeProviderLifecycleIntent,
     disposition: WorktreeProviderTerminalDisposition,
 ) -> Result<OperationRecord> {
+    let replaying = store
+        .load(owner)?
+        .is_some_and(|record| record.mutation_attempted);
     match store.claim_finalization(owner)? {
-        FinalizationClaim::AlreadyCompleted(record) => Ok(record),
+        FinalizationClaim::AlreadyCompleted(record) => {
+            if release_finalization_receipt_matches(&record, destination, lifecycle, disposition) {
+                Ok(record)
+            } else {
+                Err(Error::validation_invalid_argument(
+                    "release.workspace",
+                    "completed provider finalization receipt does not exactly match the request",
+                    Some(owner.to_string()),
+                    None,
+                ))
+            }
+        }
         FinalizationClaim::InProgress(record) => Err(Error::validation_invalid_argument(
             "owner_run_ref",
             "provider workspace finalization is already in progress",
@@ -446,15 +555,49 @@ fn finalize_record(
                     .to_string(),
             ]),
         )),
-        FinalizationClaim::Claimed { lease, record: _ } => {
-            match worktree_provider::finalize_worktree_from_config(
+        FinalizationClaim::Claimed { lease, record } => {
+            let provider = provider_identity_from_evidence(&record.provider);
+            if provider != destination.ownership.provider
+                || record.handle != destination.ownership.handle
+                || record.owner_run_ref != lifecycle.owner_run_ref
+                || record.terminal_disposition.as_deref() != Some(disposition.as_str())
+            {
+                let error = Error::validation_invalid_argument(
+                    "release.workspace",
+                    "provider finalization claim does not exactly match durable lifecycle intent",
+                    Some(owner.to_string()),
+                    None,
+                );
+                let _ = store.fail_finalization(owner, &lease, error.to_string());
+                return Err(error);
+            }
+            let idempotency_key =
+                homeboy_core::worktree_providers::worktree_provider_finalization_idempotency_key(
+                    lifecycle,
+                );
+            let receipt = |recovered_from_not_found: bool| {
+                serde_json::json!({
+                    "schema": "homeboy/release-provider-worktree-finalization/v1",
+                    "provider_id": record.provider,
+                    "handle": destination.ownership.handle,
+                    "owner_run_ref": lifecycle.owner_run_ref,
+                    "purpose": lifecycle.purpose,
+                    "cleanup_policy": lifecycle.cleanup_policy.as_str(),
+                    "disposition": disposition.as_str(),
+                    "idempotency_key": idempotency_key,
+                    "recovered_from_not_found": recovered_from_not_found,
+                })
+            };
+            match worktree_provider::finalize_worktree_with_provider_and_effect_fence_from_config(
                 &destination.ownership.handle,
+                &provider,
                 lifecycle,
                 disposition,
                 &defaults::load_config(),
+                || store.mark_mutation_attempted(owner, &lease).map(|_| ()),
             ) {
                 Ok(WorktreeFinalizationLookup::Finalized(_)) => {
-                    store.complete_finalization(owner, &lease)
+                    store.complete_finalization(owner, &lease, receipt(false))
                 }
                 Ok(WorktreeFinalizationLookup::Unsupported) => {
                     let error = Error::validation_invalid_argument(
@@ -465,6 +608,11 @@ fn finalize_record(
                     );
                     let _ = store.fail_finalization(owner, &lease, error.to_string());
                     Err(error)
+                }
+                Ok(WorktreeFinalizationLookup::NotFound) if replaying => {
+                    // The durable lease predates the provider mutation. A
+                    // destructive finalizer may disappear before receipt write.
+                    store.complete_finalization(owner, &lease, receipt(true))
                 }
                 Ok(WorktreeFinalizationLookup::NotFound) => {
                     let error = worktree_provider::worktree_finalization_not_found_error(
@@ -481,6 +629,52 @@ fn finalize_record(
             }
         }
     }
+}
+
+fn release_finalization_receipt_matches(
+    record: &OperationRecord,
+    destination: &WorktreeProvisionDestination,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    disposition: WorktreeProviderTerminalDisposition,
+) -> bool {
+    if record.provider != provider_evidence_id(&destination.ownership.provider)
+        || record.handle != destination.ownership.handle
+        || record.owner_run_ref != lifecycle.owner_run_ref
+        || record.cleanup_policy != lifecycle.cleanup_policy.as_str()
+        || record.terminal_disposition.as_deref() != Some(disposition.as_str())
+    {
+        return false;
+    }
+    release_finalization_receipt_matches_record(record)
+}
+
+fn release_finalization_receipt_matches_record(record: &OperationRecord) -> bool {
+    if record.provider == "unselected" || record.cleanup_policy != "remove_on_success" {
+        return false;
+    }
+    let Some(receipt) = record.attributes.get("finalization_receipt") else {
+        return false;
+    };
+    let Some(disposition) = record.terminal_disposition.as_deref() else {
+        return false;
+    };
+    let lifecycle = WorktreeProviderLifecycleIntent {
+        purpose: "release_staging".to_string(),
+        owner_run_ref: record.owner_run_ref.clone(),
+        cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+    };
+    receipt["schema"] == "homeboy/release-provider-worktree-finalization/v1"
+        && receipt["provider_id"] == record.provider
+        && receipt["handle"] == record.handle
+        && receipt["owner_run_ref"] == record.owner_run_ref
+        && receipt["purpose"] == "release_staging"
+        && receipt["cleanup_policy"] == record.cleanup_policy
+        && receipt["disposition"] == disposition
+        && receipt["recovered_from_not_found"].as_bool().is_some()
+        && receipt["idempotency_key"]
+            == homeboy_core::worktree_providers::worktree_provider_finalization_idempotency_key(
+                &lifecycle,
+            )
 }
 
 fn in_place_eligible(component: &Component, head_release: bool) -> bool {
@@ -868,6 +1062,11 @@ mod tests {
     #[test]
     fn completed_recovery_never_looks_up_a_removed_provider_or_workspace() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            let lifecycle = WorktreeProviderLifecycleIntent {
+                purpose: "release_staging".to_string(),
+                owner_run_ref: "release/completed".to_string(),
+                cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+            };
             let record = OperationRecord {
                 owner_run_ref: "release/completed".to_string(),
                 operation: "provider_workspace".to_string(),
@@ -883,8 +1082,22 @@ mod tests {
                 finalization_lease: None,
                 finalization_lease_started_ms: None,
                 attempt_count: 1,
+                mutation_attempted: true,
                 continuation_evidence: Vec::new(),
-                attributes: serde_json::Map::new(),
+                attributes: serde_json::Map::from_iter([(
+                    "finalization_receipt".to_string(),
+                    serde_json::json!({
+                        "schema": "homeboy/release-provider-worktree-finalization/v1",
+                        "provider_id": "removed-provider",
+                        "handle": "deleted-workspace",
+                        "owner_run_ref": lifecycle.owner_run_ref,
+                        "purpose": lifecycle.purpose,
+                        "cleanup_policy": lifecycle.cleanup_policy.as_str(),
+                        "disposition": "succeeded",
+                        "idempotency_key": homeboy_core::worktree_providers::worktree_provider_finalization_idempotency_key(&lifecycle),
+                        "recovered_from_not_found": false,
+                    }),
+                )]),
             };
             test_store()
                 .create(&record)
@@ -922,6 +1135,7 @@ mod tests {
                         finalization_lease: None,
                         finalization_lease_started_ms: None,
                         attempt_count: 0,
+                        mutation_attempted: false,
                         continuation_evidence: Vec::new(),
                         attributes: serde_json::Map::new(),
                     })
@@ -961,6 +1175,7 @@ mod tests {
                     finalization_lease: None,
                     finalization_lease_started_ms: None,
                     attempt_count: 0,
+                    mutation_attempted: false,
                     continuation_evidence: Vec::new(),
                     attributes: serde_json::Map::new(),
                 })
@@ -1081,7 +1296,7 @@ mod tests {
             save_config(&config).expect("save provider config");
             let owner = "release/pre-ensure";
             test_store().create(&OperationRecord {
-                owner_run_ref: owner.to_string(), operation: "provider_workspace".to_string(), subject: "component".to_string(), provider: "fixture".to_string(), handle: "release-fixture".to_string(), path: None, source_sha: "abc".to_string(), cleanup_policy: "remove_on_success".to_string(), lifecycle_state: "provisioning".to_string(), terminal_disposition: None, finalization_status: "pending".to_string(), finalization_lease: None, finalization_lease_started_ms: None, attempt_count: 0, continuation_evidence: Vec::new(),
+                owner_run_ref: owner.to_string(), operation: "provider_workspace".to_string(), subject: "component".to_string(), provider: "fixture".to_string(), handle: "release-fixture".to_string(), path: None, source_sha: "abc".to_string(), cleanup_policy: "remove_on_success".to_string(), lifecycle_state: "provisioning".to_string(), terminal_disposition: None, finalization_status: "pending".to_string(), finalization_lease: None, finalization_lease_started_ms: None, attempt_count: 0, mutation_attempted: false, continuation_evidence: Vec::new(),
                 attributes: serde_json::Map::from_iter([("provision_intent".to_string(), serde_json::json!({ "repo": "repo", "base": "main", "head": "abc", "task_url": null, "idempotency_key": "release-fixture:repo:main:abc" }))]),
             }).expect("persist pre-ensure record");
 

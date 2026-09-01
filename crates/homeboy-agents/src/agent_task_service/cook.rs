@@ -2877,7 +2877,7 @@ pub fn run_cook_batch_with_control(
                         // reported, never silently dropped, so `total` and the
                         // per-child ordering are the same shape callers already
                         // join their own metadata onto.
-                        let cell = match claim_disposition(&batch_id, &cook, control) {
+                        let mut cell = match claim_disposition(&batch_id, &cook, control) {
                             ClaimDisposition::Run => {
                                 let result = (|| {
                                     let store = CookRecipeStore::from_current_data_root()?;
@@ -2925,11 +2925,20 @@ pub fn run_cook_batch_with_control(
                         // children. A replay that skips an unrecoverable child
                         // must still terminalize its batch slot.
                         if control.publish_child_terminalization {
-                            let _ = crate::agent_task_batch::record_child_finalization(
+                            if let Err(error) = crate::agent_task_batch::record_child_finalization(
                                 &batch_id,
                                 &cell.initial_run_id,
                                 child_finalization_value(&cell),
-                            );
+                            ) {
+                                // Cleanup cannot consume a successful outcome
+                                // until its batch checkpoint is durable.
+                                if cell.exit_code == 0 {
+                                    cell.status = "publication_persistence_failed".to_string();
+                                    cell.exit_code = 1;
+                                    cell.result = None;
+                                    cell.error = Some(AgentTaskCookCellError::from_error(&error));
+                                }
+                            }
                         }
                         let _ = tx.send((index, cell));
                     })

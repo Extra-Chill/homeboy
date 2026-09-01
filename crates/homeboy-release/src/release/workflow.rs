@@ -90,6 +90,7 @@ pub fn run_command_with_workspace(
             finalization_lease: None,
             finalization_lease_started_ms: None,
             attempt_count: 1,
+            mutation_attempted: false,
             continuation_evidence: readiness.evidence_refs.clone(),
             attributes: serde_json::Map::from_iter([(
                 "readiness".to_string(),
@@ -1357,6 +1358,7 @@ mod tests {
                     finalization_lease: None,
                     finalization_lease_started_ms: None,
                     attempt_count: 1,
+                    mutation_attempted: false,
                     continuation_evidence: Vec::new(),
                     attributes: Default::default(),
                 })
