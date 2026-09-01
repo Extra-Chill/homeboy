@@ -629,11 +629,11 @@ fn run_package_action_with_retry(
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     for attempt in 1..=PACKAGE_ACTION_MAX_ATTEMPTS {
-        match extension::invoke::execute_action(
+        match extension::invoke::action_api::invoke_action(
             extension_id,
             "release.package",
             None,
-            None,
+            &[],
             Some(payload),
         ) {
             Ok(response) => {
@@ -747,11 +747,11 @@ pub(crate) fn run_extension_release_preflight(
     }
 
     let payload = build_release_payload(state, component_id, component_local_path, None, None);
-    let response = match extension::invoke::execute_action(
+    let response = match extension::invoke::action_api::invoke_action(
         extension_id,
         action_id,
         None,
-        None,
+        &[],
         Some(&payload),
     ) {
         Ok(response) => response,
@@ -904,9 +904,7 @@ pub(super) fn store_artifacts_from_output(
     // dependency install inside the build script can fail intermittently, and
     // the real error must be visible in the structured error payload.
     if !success {
-        return Err(package_command_failure_error(
-            exit_code, stdout, stderr, response,
-        ));
+        return Err(package_command_failure_error(exit_code, stdout, stderr));
     }
 
     if stdout.trim().is_empty() {
@@ -1024,12 +1022,7 @@ fn safe_artifact_file_name(value: &str) -> String {
 /// Package/build tools commonly write progress to stdout and errors to stderr.
 /// Including both streams ensures the operator can diagnose the real failure
 /// instead of seeing truncated output.  Issue #3238.
-fn package_command_failure_error(
-    exit_code: i64,
-    stdout: &str,
-    stderr: &str,
-    response: &serde_json::Value,
-) -> Error {
+fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> Error {
     let stderr_trimmed = stderr.trim();
     let stdout_trimmed = stdout.trim();
     let has_stderr = !stderr_trimmed.is_empty();
@@ -1061,8 +1054,6 @@ fn package_command_failure_error(
         detail,
         serde_json::json!({
             "exit_code": exit_code,
-            "command": response.get("command").and_then(serde_json::Value::as_str),
-            "cwd": response.get("cwd").and_then(serde_json::Value::as_str),
             "relevant_error_lines": relevant_package_error_lines(stdout, stderr),
             "stdout": stdout_trimmed,
             "stderr": stderr_trimmed,

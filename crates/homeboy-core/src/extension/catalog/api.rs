@@ -14,12 +14,14 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiReadinessDescriptor, ExtensionApiReadinessMode, ExtensionApiReadinessRequest,
     ExtensionApiReadinessResponse, ExtensionApiReadinessState, ExtensionApiReadinessStatus,
     ExtensionApiResolveRequest, ExtensionApiResolveResponse, ExtensionApiRuntimeRequirement,
-    ExtensionApiVersion, AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX, COMPILER_WARNINGS_CAPABILITY_ID,
-    COMPILER_WARNINGS_INPUT_SCHEMA, COMPILER_WARNINGS_OUTPUT_SCHEMA,
-    COMPILER_WARNING_FIXES_CAPABILITY_ID, COMPILER_WARNING_FIXES_INPUT_SCHEMA,
-    COMPILER_WARNING_FIXES_OUTPUT_SCHEMA, DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX,
-    ENVIRONMENT_CAPABILITY_ID, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
-    EXTENSION_API_CATALOG_RESPONSE_SCHEMA, EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA,
+    ExtensionApiVersion, ACTION_CAPABILITY_PREFIX, AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX,
+    COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNINGS_INPUT_SCHEMA,
+    COMPILER_WARNINGS_OUTPUT_SCHEMA, COMPILER_WARNING_FIXES_CAPABILITY_ID,
+    COMPILER_WARNING_FIXES_INPUT_SCHEMA, COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
+    DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, ENVIRONMENT_CAPABILITY_ID,
+    EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA, EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA,
+    EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_CATALOG_RESPONSE_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_RESPONSE_SCHEMA, EXTENSION_API_DESCRIPTOR_SCHEMA,
     EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA,
     EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA,
@@ -73,12 +75,13 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
     {
         capabilities.push(capability_descriptor("execute"));
     }
-    capabilities.extend(
-        extension
-            .actions
-            .iter()
-            .map(|action| capability_descriptor(&format!("action.{}", action.id))),
-    );
+    capabilities.extend(extension.actions.iter().map(|action| {
+        schema_capability_descriptor(
+            &format!("{ACTION_CAPABILITY_PREFIX}{}", action.id),
+            EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA,
+            EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA,
+        )
+    }));
     capabilities.extend(extension.deployment_providers.iter().map(|provider| {
         schema_capability_descriptor(
             &format!("{DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX}{}", provider.id),

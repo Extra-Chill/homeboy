@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 mod action;
+pub mod action_api;
 mod api;
 mod context;
 pub(crate) mod deadline_process;
@@ -36,7 +37,6 @@ use homeboy_extension_contract::manifest_action_config::RuntimeConfig;
 use homeboy_extension_contract::runner_contract::RunnerStepFilter;
 use homeboy_extension_contract::ExtensionManifest;
 
-pub use action::execute_action;
 pub use api::invoke_api;
 pub use context::ResolvedExtensionInvocationContext;
 pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
@@ -69,7 +69,6 @@ pub struct ExtensionRunResult {
 pub(crate) struct ExtensionExecutionResult {
     pub output: CapturedOutput,
     pub exit_code: i32,
-    pub success: bool,
 }
 
 pub(crate) struct ExtensionExecutionOutcome {
@@ -277,7 +276,27 @@ pub fn run_action(
     project_id: Option<&str>,
     data: Option<&str>,
 ) -> Result<serde_json::Value> {
-    execute_action(extension_id, action_id, project_id, data, None)
+    use homeboy_extension_contract::api::v1::{
+        ExtensionApiActionInvokeRequest, EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA,
+        EXTENSION_API_V1,
+    };
+
+    let selected = data
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| Error::internal_json(error.to_string(), Some("parse action data".into())))?
+        .unwrap_or_default();
+    action_api::response_value(action_api::invoke_action_api(
+        &ExtensionApiActionInvokeRequest {
+            schema: EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: extension_id.to_string(),
+            action_id: action_id.to_string(),
+            project_id: project_id.map(str::to_string),
+            selected,
+            payload: None,
+        },
+    ))
 }
 
 fn extension_runtime(extension: &ExtensionManifest) -> Result<&RuntimeConfig> {

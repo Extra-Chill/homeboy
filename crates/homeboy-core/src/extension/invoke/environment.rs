@@ -167,7 +167,6 @@ pub(crate) fn execute_extension_command(
             Ok(ExtensionExecutionResult {
                 output: CapturedOutput::default(),
                 exit_code,
-                success: exit_code == 0,
             })
         }
         ExtensionExecutionMode::Captured => {
@@ -175,7 +174,6 @@ pub(crate) fn execute_extension_command(
             Ok(ExtensionExecutionResult {
                 output: CapturedOutput::new(cmd_output.stdout, cmd_output.stderr),
                 exit_code: cmd_output.exit_code,
-                success: cmd_output.success,
             })
         }
     }
