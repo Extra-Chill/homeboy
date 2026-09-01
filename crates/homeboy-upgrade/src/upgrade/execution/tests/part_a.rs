@@ -526,10 +526,113 @@ fn installer_setsid_descendant_fixture() {
             std::thread::sleep(Duration::from_millis(20));
         }
     } else {
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(
+            std::env::var("HOMEBOY_INSTALLER_MUTATION_DELAY_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(250),
+        ));
     }
     std::fs::write(target, b"stale").expect("escaped descendant mutation");
     std::thread::sleep(Duration::from_secs(30));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "subprocess fixture for a rapidly reparented installer descendant"]
+fn installer_fast_double_fork_fixture() {
+    use std::ffi::CString;
+
+    let target = std::env::var("HOMEBOY_INSTALLER_TARGET").expect("target");
+    let pid_file = std::env::var("HOMEBOY_INSTALLER_PID_FILE").expect("pid file");
+    let script = CString::new(format!(
+        "printf '%s' $$ > {}; sleep 0.25; printf stale > {}; sleep 30",
+        quote_path(&pid_file),
+        quote_path(&target),
+    ))
+    .expect("fixture script");
+    let shell = c"/bin/sh";
+    let shell_name = c"sh";
+    let command_flag = c"-c";
+
+    let intermediate = unsafe { libc::fork() };
+    assert_ne!(intermediate, -1, "fork intermediate");
+    if intermediate == 0 {
+        let daemon = unsafe { libc::fork() };
+        if daemon < 0 {
+            unsafe { libc::_exit(2) };
+        }
+        if daemon > 0 {
+            unsafe { libc::_exit(0) };
+        }
+        if unsafe { libc::setsid() } == -1 {
+            unsafe { libc::_exit(3) };
+        }
+        let max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+        for fd in 0..if max > 0 { max as i32 } else { 1024 } {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+        unsafe {
+            libc::execl(
+                shell.as_ptr(),
+                shell_name.as_ptr(),
+                command_flag.as_ptr(),
+                script.as_ptr(),
+                std::ptr::null::<libc::c_char>(),
+            );
+            libc::_exit(4);
+        }
+    }
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(intermediate, &mut status, 0) },
+        intermediate,
+        "reap intermediate"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn installer_completion_contains_fast_double_fork_after_inherited_descriptors_close() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let target = workspace.path().join("homeboy");
+    let pid_file = workspace.path().join("daemon.pid");
+    std::fs::write(&target, b"original").expect("write target");
+    let test_binary = std::env::current_exe().expect("test executable");
+    let shell = format!(
+        "{} --ignored --exact upgrade::execution::tests::part_a::installer_fast_double_fork_fixture --nocapture",
+        quote_path(&test_binary.display().to_string()),
+    );
+
+    let output = supervise_installer_shell_command(
+        &shell,
+        Duration::from_secs(2),
+        "fast double-fork installer",
+        |_| Ok(()),
+        |command| {
+            command
+                .env("HOMEBOY_INSTALLER_TARGET", &target)
+                .env("HOMEBOY_INSTALLER_PID_FILE", &pid_file);
+        },
+    )
+    .expect("root completion contains reparented descendant");
+    assert!(output.status.success());
+    std::thread::sleep(Duration::from_millis(350));
+    assert_eq!(
+        std::fs::read(&target).expect("read target"),
+        b"original",
+        "descriptor-closing daemon mutated after root completion"
+    );
+    let daemon_pid = std::fs::read_to_string(&pid_file)
+        .expect("daemon pid")
+        .parse::<u32>()
+        .expect("numeric daemon pid");
+    assert!(
+        !homeboy_core::process::pid_is_running(daemon_pid),
+        "successor could start while descriptor-closing daemon remained runnable"
+    );
 }
 
 #[cfg(unix)]
@@ -558,6 +661,29 @@ fn installer_timeout_kills_setsid_descendant_before_delayed_mutation() {
         std::fs::read(&target).expect("read target"),
         b"original",
         "setsid descendant mutated after installer cleanup"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn source_timeout_kills_setsid_descendant_before_staged_validation() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let target = workspace.path().join("built-candidate");
+    std::fs::write(&target, b"original").expect("write staged target");
+    let test_binary = std::env::current_exe().expect("test executable");
+    let command = format!(
+        "HOMEBOY_INSTALLER_TARGET={} HOMEBOY_INSTALLER_MUTATION_DELAY_MS=1000 {} --ignored --exact upgrade::execution::tests::part_a::installer_setsid_descendant_fixture --nocapture & wait",
+        quote_path(&target.display().to_string()),
+        quote_path(&test_binary.display().to_string()),
+    );
+
+    run_source_upgrade_command(&command, workspace.path(), Duration::from_millis(250), None)
+        .expect_err("source command with escaped descendant times out");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        std::fs::read(&target).expect("read staged target"),
+        b"original",
+        "source descendant mutated after guarded cleanup"
     );
 }
 

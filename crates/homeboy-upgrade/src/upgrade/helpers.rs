@@ -23,7 +23,7 @@ use super::release_catalog::{self, InstallableSelection, ReleaseEntry, SelectedR
 use super::services;
 use super::types::*;
 use super::update_check::RuntimeCompatibility;
-use super::validation::check_for_updates;
+use super::validation::{check_for_updates, selects_an_installable_release};
 
 const CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
@@ -303,7 +303,7 @@ fn run_controller_upgrade_with_operation(
     // selected candidate, so it must not prevent building or staging it.
     if !matches!(
         install_method,
-        InstallMethod::Binary | InstallMethod::Source
+        InstallMethod::Binary | InstallMethod::Secondary | InstallMethod::Source
     ) {
         operation.set_phase_durable("running_candidate_admission")?;
         ensure_controller_upgrade_admission()?;
@@ -363,7 +363,7 @@ fn run_controller_upgrade_with_operation(
     // Resolve the binary candidate and validate installed extension sources
     // before the no-op branch can refresh extensions without swapping the
     // controller. This keeps every extension mutation behind the same gate.
-    let selected_release = if install_method == InstallMethod::Binary {
+    let selected_release = if selects_an_installable_release(install_method) {
         Some(resolve_binary_release(pinned_version)?)
     } else {
         None
@@ -395,9 +395,11 @@ fn run_controller_upgrade_with_operation(
         runner_method_override,
         source_upgrade_path.as_deref(),
     );
-    let extension_preflight = (!skip_extensions)
-        .then(|| preflight_extensions_for_upgrade(&candidate_version))
-        .unwrap_or_default();
+    let extension_preflight = if skip_extensions {
+        Vec::new()
+    } else {
+        preflight_extensions_for_upgrade(&candidate_version)
+    };
     if !extension_preflight.is_empty() {
         return Ok(extension_preflight_failure_result(
             install_method,
@@ -650,9 +652,11 @@ fn run_controller_upgrade_with_operation(
             .expect("controller upgrades require a durable operation"),
     )?;
     controller_mutation_lease.assert_generation()?;
-    let extension_revalidation = (!skip_extensions)
-        .then(|| preflight_extensions_for_upgrade(&candidate_version))
-        .unwrap_or_default();
+    let extension_revalidation = if skip_extensions {
+        Vec::new()
+    } else {
+        preflight_extensions_for_upgrade(&candidate_version)
+    };
     if !extension_revalidation.is_empty() {
         let result = extension_preflight_failure_result(
             install_method,
@@ -683,11 +687,7 @@ fn run_controller_upgrade_with_operation(
             }
         },
         || {
-            if matches!(
-                install_method,
-                InstallMethod::Homebrew | InstallMethod::Secondary
-            ) && !deliberate
-            {
+            if matches!(install_method, InstallMethod::Homebrew) && !deliberate {
                 let completion = reconcile_controller_identity(
                     observed_installed_controller_identity()?,
                     previous_build_identity.as_deref(),
@@ -1347,7 +1347,7 @@ fn validate_pinned_version(pinned_version: Option<&str>, method: InstallMethod) 
     let Some(requested) = pinned_version else {
         return Ok(());
     };
-    if method == InstallMethod::Binary {
+    if matches!(method, InstallMethod::Binary | InstallMethod::Secondary) {
         return Ok(());
     }
 
@@ -2706,14 +2706,17 @@ pub(crate) fn source_promotion_decision(
         return SourceUpgradeDecision::IdentityUnavailable;
     }
 
-    Command::new("git")
+    if Command::new("git")
         .arg("-C")
         .arg(source_path)
         .args(["merge-base", "--is-ancestor", active_commit, "HEAD"])
         .status()
         .is_ok_and(|status| status.success())
-        .then_some(SourceUpgradeDecision::DifferentIdentity)
-        .unwrap_or(SourceUpgradeDecision::OlderVersion)
+    {
+        SourceUpgradeDecision::DifferentIdentity
+    } else {
+        SourceUpgradeDecision::OlderVersion
+    }
 }
 
 fn source_upgrade_decision_for_identity(
@@ -4688,13 +4691,10 @@ mod pinned_release_tests {
     #[test]
     fn a_pin_is_refused_for_install_methods_that_download_no_release_asset() {
         assert!(validate_pinned_version(Some("v0.332.0"), InstallMethod::Binary).is_ok());
+        assert!(validate_pinned_version(Some("v0.332.0"), InstallMethod::Secondary).is_ok());
         assert!(validate_pinned_version(None, InstallMethod::Source).is_ok());
 
-        for method in [
-            InstallMethod::Source,
-            InstallMethod::Homebrew,
-            InstallMethod::Secondary,
-        ] {
+        for method in [InstallMethod::Source, InstallMethod::Homebrew] {
             let error = validate_pinned_version(Some("v0.332.0"), method)
                 .expect_err("a pin is meaningless without a release download");
             assert!(
@@ -4729,11 +4729,7 @@ mod pinned_release_tests {
 
     #[test]
     fn an_explicit_incompatible_method_with_a_pin_fails_closed() {
-        for method in [
-            InstallMethod::Source,
-            InstallMethod::Homebrew,
-            InstallMethod::Secondary,
-        ] {
+        for method in [InstallMethod::Source, InstallMethod::Homebrew] {
             let (resolved, inferred) =
                 resolve_install_method(Some(method), Some("v0.332.0"), || {
                     panic!("explicit methods must not trigger detection")

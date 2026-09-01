@@ -4,7 +4,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_engine_primitives::command::{
-    terminate_process_tree_and_reap, terminate_remaining_process_group,
+    supports_process_tree_isolation, terminate_process_tree_and_reap,
     wait_with_bounded_output_supervised_guarded, ControllerChildGuard,
     SupervisedCommandTermination,
 };
@@ -178,6 +178,7 @@ fn upgrade_failure_detail(stderr: &[u8], stdout: &[u8]) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_upgrade(
     method: InstallMethod,
     source_path: Option<&Path>,
@@ -195,24 +196,23 @@ pub(crate) fn execute_upgrade(
     // The binary installer replaces `command -v homeboy`. Capture that path
     // before its shell runs so verification proves the intended PATH target was
     // replaced rather than merely finding some other Homeboy afterward.
-    let binary_destination = (method == InstallMethod::Binary)
-        .then(active_binary_path)
-        .transpose()?;
-    if method == InstallMethod::Binary {
+    let release_binary = matches!(method, InstallMethod::Binary | InstallMethod::Secondary);
+    let binary_destination = release_binary.then(active_binary_path).transpose()?;
+    if release_binary {
         promotion_lease
             .ok_or_else(|| {
                 Error::internal_unexpected(
-                    "binary replacement eligibility must be revalidated under promotion ownership",
+                    "release replacement eligibility must be revalidated under promotion ownership",
                 )
             })?
             .assert_generation()?;
         validate_binary_replacement_eligibility(
             deliberate_replacement,
-            selected_binary_version.expect("binary upgrades select a release"),
+            selected_binary_version.expect("release upgrades select a release"),
             installed_target_build_identity_from_disk(
                 binary_destination
                     .as_deref()
-                    .expect("binary upgrades capture a destination"),
+                    .expect("release upgrades capture a destination"),
             )?,
         )?;
     }
@@ -220,11 +220,11 @@ pub(crate) fn execute_upgrade(
         phase("running_candidate_admission")?;
         phase("installing_controller")?;
     }
-    let binary_checkpoint = if method == InstallMethod::Binary {
+    let binary_checkpoint = if release_binary {
         let checkpoint = ReplacementCheckpoint::pending(
             binary_destination
                 .as_deref()
-                .expect("binary upgrades capture a destination"),
+                .expect("release upgrades capture a destination"),
             selected_binary_version,
             None,
             None,
@@ -234,6 +234,22 @@ pub(crate) fn execute_upgrade(
     } else {
         None
     };
+    let release_stage = release_binary
+        .then(|| {
+            tempfile::Builder::new()
+                .prefix("homeboy-release-stage-")
+                .tempdir()
+                .map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some("create release staging directory".to_string()),
+                    )
+                })
+        })
+        .transpose()?;
+    let staged_release_binary = release_stage
+        .as_ref()
+        .map(|stage| stage.path().join("homeboy"));
     let output = match method {
         InstallMethod::Homebrew => {
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
@@ -245,17 +261,41 @@ pub(crate) fn execute_upgrade(
                 |_| {},
             )?
         }
-        InstallMethod::Secondary => {
-            // Legacy cargo-installed binaries are replaced with the release
-            // asset now that Homeboy's private workspace is not on crates.io.
+        InstallMethod::Secondary | InstallMethod::Binary => {
+            // Legacy cargo-installed binaries use the same pinned release asset,
+            // replacement checkpoints, and read-back contract as binary installs.
             let cmd = &defaults.install_methods.binary.upgrade_command;
-            run_installer_shell_command(
+            match run_installer_shell_command(
                 cmd,
                 promotion_lease,
                 INSTALLER_UPGRADE_TIMEOUT,
                 "run release binary upgrade",
-                |_| {},
-            )?
+                |command| {
+                    command.env(
+                        "HOMEBOY_INSTALL_PATH",
+                        staged_release_binary
+                            .as_deref()
+                            .expect("release upgrades have an isolated stage"),
+                    );
+                    if let Some(release) = selected_release {
+                        command.env(RELEASE_TAG_ENV, &release.tag);
+                        command.env(RELEASE_VERSION_ENV, &release.version);
+                    }
+                },
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    if let Some(checkpoint) = binary_checkpoint.as_ref() {
+                        replacement_checkpoint(
+                            &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+                        )?;
+                    }
+                    return Err(Error::internal_io(
+                        error.to_string(),
+                        Some("run release binary upgrade".to_string()),
+                    ));
+                }
+            }
         }
         InstallMethod::Source => {
             if env::var_os(REENTRANCY_GUARD_ENV).is_some() {
@@ -310,38 +350,6 @@ pub(crate) fn execute_upgrade(
                 replacement_checkpoint,
             );
         }
-        InstallMethod::Binary => {
-            let cmd = &defaults.install_methods.binary.upgrade_command;
-            // Pin the installer to the release this upgrade selected. Without
-            // the pin the installer always resolves `latest/download`, so a
-            // newest release missing this target's asset is unreachable past —
-            // there is no older release the operator can be moved to (#11750).
-            match run_installer_shell_command(
-                cmd,
-                promotion_lease,
-                INSTALLER_UPGRADE_TIMEOUT,
-                "run binary upgrade",
-                |command| {
-                    if let Some(release) = selected_release {
-                        command.env(RELEASE_TAG_ENV, &release.tag);
-                        command.env(RELEASE_VERSION_ENV, &release.version);
-                    }
-                },
-            ) {
-                Ok(output) => output,
-                Err(error) => {
-                    if let Some(checkpoint) = binary_checkpoint.as_ref() {
-                        replacement_checkpoint(
-                            &checkpoint.with_state(replacement_observed_state(checkpoint)?),
-                        )?;
-                    }
-                    return Err(Error::internal_io(
-                        error.to_string(),
-                        Some("run binary upgrade".to_string()),
-                    ));
-                }
-            }
-        }
         InstallMethod::Unknown => {
             return Err(Error::validation_invalid_argument(
                 "install_method",
@@ -368,16 +376,63 @@ pub(crate) fn execute_upgrade(
         ));
     }
 
-    if method == InstallMethod::Binary {
+    if release_binary {
         let checkpoint = binary_checkpoint
             .as_ref()
-            .expect("binary replacement has a pending checkpoint");
+            .expect("release replacement has a pending checkpoint");
+        let staged = staged_release_binary
+            .as_deref()
+            .expect("release upgrades have an isolated stage");
+        let selected_version =
+            selected_binary_version.expect("release upgrades select a release version");
+        let staged_identity = active_binary_info_at(staged)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "release installer did not produce a verifiable staged candidate at {}",
+                staged.display()
+            ))
+        })?;
+        if staged_identity.version.as_deref() != Some(selected_version) {
+            replacement_checkpoint(
+                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+            )?;
+            return Err(binary_swap_failure(
+                selected_version,
+                Some(staged),
+                Some(&staged_identity),
+            ));
+        }
+        run_verified_target_admission(
+            staged,
+            selected_version,
+            &candidate_legacy_identity(
+                binary_destination
+                    .as_deref()
+                    .expect("release upgrades capture a destination"),
+            )?,
+            &selected_release
+                .expect("release upgrades select a release")
+                .tag,
+        )?;
+        promotion_lease
+            .expect("release replacement requires promotion ownership")
+            .assert_generation()?;
+        if let Err(error) = install_source_built_binary(
+            staged,
+            binary_destination
+                .as_deref()
+                .expect("release upgrades capture a destination"),
+        ) {
+            replacement_checkpoint(
+                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+            )?;
+            return Err(error);
+        }
         if !replacement_was_applied(checkpoint)? {
             replacement_checkpoint(
                 &checkpoint.with_state(replacement_observed_state(checkpoint)?),
             )?;
             return Err(binary_swap_failure(
-                selected_binary_version.expect("binary upgrades select a release version"),
+                selected_version,
                 binary_destination.as_deref(),
                 active_binary_info_at(&checkpoint.target)?.as_ref(),
             ));
@@ -397,7 +452,7 @@ pub(crate) fn execute_upgrade(
     let (success, active_binary) = if let Some(selected_version) = selected_binary_version {
         let destination = binary_destination
             .as_deref()
-            .expect("binary upgrades capture a PATH destination");
+            .expect("release upgrades capture a PATH destination");
         verify_binary_upgrade_with_retry(
             destination,
             selected_version,
@@ -423,9 +478,9 @@ pub(crate) fn execute_upgrade(
         .as_ref()
         .and_then(|info| info.build_identity.clone());
 
-    if method == InstallMethod::Binary && !success {
+    if release_binary && !success {
         return Err(binary_swap_failure(
-            selected_binary_version.expect("binary upgrades select a release version"),
+            selected_binary_version.expect("release upgrades select a release version"),
             binary_destination.as_deref(),
             active_binary.as_ref(),
         ));
@@ -469,6 +524,11 @@ fn supervise_installer_shell_command<A>(
     authorize_before_spawn: impl FnOnce(&mut Command) -> Result<A>,
     configure: impl FnOnce(&mut Command),
 ) -> Result<std::process::Output> {
+    if !supports_process_tree_isolation() {
+        return Err(Error::internal_unexpected(
+            "installer supervision requires native process-tree containment on this platform",
+        ));
+    }
     let mut start_gate = InstallerStartGate::new()
         .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
     let mut command = start_gate.command(script);
@@ -528,7 +588,7 @@ fn supervise_installer_shell_command<A>(
         Err(error) => {
             return Err(append_cleanup_failure_context(
                 Error::internal_io(error.to_string(), Some(context.to_string())),
-                terminate_process_tree_and_reap(&mut child).err(),
+                guard.terminate_and_reap_bounded(&mut child).err(),
             ));
         }
     };
@@ -839,9 +899,11 @@ fn run_verified_target_admission(
         "controller_upgrade",
         format!(
             "verified source candidate refused controller replacement{}",
-            (!detail.is_empty())
-                .then(|| format!(": {detail}"))
-                .unwrap_or_default()
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         ),
         None,
         None,
@@ -873,6 +935,7 @@ fn binary_swap_failure(
     .with_hint("Retry explicitly after correcting the active destination: homeboy upgrade --force --method binary")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_source_upgrade(
     workspace_root: PathBuf,
     built_binary: PathBuf,
@@ -1016,6 +1079,11 @@ fn run_source_upgrade_command(
     timeout: Duration,
     cargo_target: Option<(&Path, &str)>,
 ) -> Result<()> {
+    if !supports_process_tree_isolation() {
+        return Err(Error::internal_unexpected(
+            "source upgrade supervision requires native process-tree containment on this platform",
+        ));
+    }
     upgrade_phase("building source workspace");
     let mut child_command = Command::new("sh");
     child_command
@@ -1029,7 +1097,7 @@ fn run_source_upgrade_command(
             .env("CARGO_TARGET_DIR", cargo_target_dir)
             .env("HOMEBOY_CARGO_TARGET_RESOLUTION", resolution);
     }
-    let guard = ControllerChildGuard::prepare(&mut child_command).map_err(|error| {
+    let mut guard = ControllerChildGuard::prepare(&mut child_command).map_err(|error| {
         Error::internal_io(error.to_string(), Some("run source upgrade".to_string()))
     })?;
     let mut child = child_command
@@ -1045,44 +1113,38 @@ fn run_source_upgrade_command(
             terminate_process_tree_and_reap(&mut child).err(),
         ));
     }
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let cleanup = terminate_remaining_process_group(child.id());
-                if status.success() {
-                    return cleanup.map_err(|error| {
-                        Error::internal_io(
-                            error.to_string(),
-                            Some("run source upgrade".to_string()),
-                        )
-                    });
-                }
-                return Err(append_cleanup_failure_context(
-                    source_upgrade_command_failure(status, cargo_target.map(|(path, _)| path)),
-                    cleanup.err(),
-                ));
-            }
-            Ok(None) if start.elapsed() >= timeout => {
-                let primary = Error::internal_io(
-                    format!("source upgrade timed out after {}s", timeout.as_secs()),
-                    Some("run source upgrade".to_string()),
-                );
-                return Err(append_cleanup_failure_context(
-                    primary,
-                    terminate_process_tree_and_reap(&mut child).err(),
-                ));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(e) => {
-                let primary =
-                    Error::internal_io(e.to_string(), Some("wait for source upgrade".to_string()));
-                return Err(append_cleanup_failure_context(
-                    primary,
-                    terminate_process_tree_and_reap(&mut child).err(),
-                ));
-            }
+    let supervised = wait_with_bounded_output_supervised_guarded(
+        &mut child,
+        &mut guard,
+        0,
+        timeout,
+        INSTALLER_SUPERVISION_POLL_INTERVAL,
+        || false,
+        |_, _| Ok(()),
+    );
+    let supervised = match supervised {
+        Ok(supervised) => supervised,
+        Err(error) => {
+            return Err(append_cleanup_failure_context(
+                Error::internal_io(error.to_string(), Some("run source upgrade".to_string())),
+                guard.terminate_and_reap_bounded(&mut child).err(),
+            ));
         }
+    };
+    match supervised.termination {
+        SupervisedCommandTermination::Completed if supervised.output.status.success() => Ok(()),
+        SupervisedCommandTermination::Completed => Err(source_upgrade_command_failure(
+            supervised.output.status,
+            cargo_target.map(|(path, _)| path),
+        )),
+        SupervisedCommandTermination::TimedOut => Err(Error::internal_io(
+            format!("source upgrade timed out after {}s", timeout.as_secs()),
+            Some("run source upgrade".to_string()),
+        )),
+        termination => Err(Error::internal_io(
+            format!("source upgrade terminated before completion: {termination:?}"),
+            Some("run source upgrade".to_string()),
+        )),
     }
 }
 
@@ -1691,7 +1753,9 @@ fn upgrade_failure_error(
         Some("execute upgrade".to_string()),
     );
 
-    if method == InstallMethod::Binary && error_detail.contains("404") {
+    if matches!(method, InstallMethod::Binary | InstallMethod::Secondary)
+        && error_detail.contains("404")
+    {
         error = error.with_hint("No release asset was found for this Homeboy version.");
 
         if let Some(release) = selected_release {

@@ -935,21 +935,36 @@ pub(crate) fn freeze_prior_pending_replacements(current_operation_id: &str) -> R
         metadata["outcome"] = json!("controller_replacement_interrupted");
         metadata["superseded_by_operation_id"] = json!(current_operation_id);
         metadata["terminal_intent_id"] = json!(format!("upgrade-superseded:{}", run.id));
-        store
-            .finish_running_run_if_metadata(
-                &run.id,
-                RunStatus::Error,
-                metadata,
-                &expected_metadata,
-            )?
-            .ok_or_else(|| {
-                Error::internal_unexpected(format!(
-                    "prior upgrade operation changed while freezing replacement evidence: {}",
-                    run.id
-                ))
-            })?;
+        let frozen = store.finish_running_run_if_metadata(
+            &run.id,
+            RunStatus::Error,
+            metadata,
+            &expected_metadata,
+        )?;
+        accept_freeze_cas_result(&store, &run.id, frozen)?;
     }
     Ok(())
+}
+
+fn accept_freeze_cas_result(
+    store: &ObservationStore,
+    run_id: &str,
+    frozen: Option<RunRecord>,
+) -> Result<()> {
+    if frozen.is_some() {
+        return Ok(());
+    }
+    let current = store.get_run(run_id)?.ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "prior upgrade operation disappeared while freezing replacement evidence: {run_id}"
+        ))
+    })?;
+    if current.status != RunStatus::Running.as_str() {
+        return Ok(());
+    }
+    Err(Error::internal_unexpected(format!(
+        "prior upgrade operation changed while freezing replacement evidence: {run_id}"
+    )))
 }
 
 fn component_from_metadata(metadata: &Value, key: &str) -> Option<UpgradeComponentStatus> {
@@ -1541,6 +1556,39 @@ mod tests {
 
         assert_eq!(metadata["phase"], "completed");
         assert_eq!(metadata["controller"]["status"], "updated");
+    }
+
+    #[test]
+    fn freeze_cas_loss_accepts_a_concurrently_terminal_predecessor() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            let store = ObservationStore::open_initialized().expect("open store");
+            let running = store
+                .get_run(&id)
+                .expect("read predecessor")
+                .expect("predecessor exists");
+            store
+                .finish_running_run_if_metadata(
+                    &id,
+                    RunStatus::Pass,
+                    running.metadata_json.clone(),
+                    &running.metadata_json,
+                )
+                .expect("terminal winner")
+                .expect("winner updates predecessor");
+
+            accept_freeze_cas_result(&store, &id, None)
+                .expect("stale freeze accepts the terminal winner");
+            assert_eq!(
+                store
+                    .get_run(&id)
+                    .expect("reread predecessor")
+                    .expect("predecessor remains")
+                    .status,
+                RunStatus::Pass.as_str()
+            );
+        });
     }
 
     #[cfg(unix)]

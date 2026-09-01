@@ -19,12 +19,15 @@ const MAX_OBSERVED_LINE_BYTES: usize = 64 * 1024;
 const PROCESS_TREE_TERM_GRACE: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const PROCESS_TREE_KILL_GRACE: Duration = Duration::from_secs(2);
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const PROCESS_TREE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CAPTURE_JOIN_GRACE: Duration = Duration::from_secs(2);
+const PROCESS_TREE_CLEANUP_DEADLINE: Duration = Duration::from_secs(4);
 
 #[cfg(target_os = "linux")]
 static CHILD_SUBREAPER_ENABLED: std::sync::OnceLock<io::Result<()>> = std::sync::OnceLock::new();
+#[cfg(target_os = "linux")]
+static CHILD_GUARD_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 pub type StreamChunkObserver = Arc<dyn Fn(&[u8], bool) + Send + Sync + 'static>;
@@ -48,7 +51,7 @@ pub fn parent_stream_passthrough() -> StreamChunkObserver {
 /// tree. Callers that require fail-closed child identity persistence must check
 /// this before spawning.
 pub const fn supports_process_tree_isolation() -> bool {
-    cfg!(unix)
+    cfg!(any(unix, windows))
 }
 
 /// Whether a PID still names a process that can execute work.
@@ -96,6 +99,12 @@ pub struct ControllerChildGuard {
     controller_liveness_fd: RawFd,
     #[cfg(unix)]
     owned_processes: Mutex<Vec<UnixProcessIdentity>>,
+    #[cfg(target_os = "linux")]
+    controller_pid: u32,
+    #[cfg(target_os = "linux")]
+    guard_pid: Mutex<Option<u32>>,
+    #[cfg(target_os = "linux")]
+    guard_id: u64,
     #[cfg(windows)]
     job: Mutex<windows_sys::Win32::Foundation::HANDLE>,
 }
@@ -106,6 +115,10 @@ impl ControllerChildGuard {
     pub fn prepare(command: &mut Command) -> io::Result<Self> {
         #[cfg(unix)]
         {
+            #[cfg(target_os = "linux")]
+            let guard_id = CHILD_GUARD_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(target_os = "linux")]
+            command.env("HOMEBOY_CHILD_GUARD_ID", guard_id.to_string());
             let mut fds = [-1; 2];
             if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
                 return Err(io::Error::last_os_error());
@@ -124,6 +137,12 @@ impl ControllerChildGuard {
                 controller_liveness_read_fd: fds[0],
                 controller_liveness_fd: fds[1],
                 owned_processes: Mutex::new(Vec::new()),
+                #[cfg(target_os = "linux")]
+                controller_pid: std::process::id(),
+                #[cfg(target_os = "linux")]
+                guard_pid: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                guard_id,
             })
         }
 
@@ -150,7 +169,17 @@ impl ControllerChildGuard {
                     self.controller_liveness_fd,
                     child.id(),
                 ),
-                _ => Ok(()),
+                _guard_pid => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        *self
+                            .guard_pid
+                            .lock()
+                            .map_err(|_| io::Error::other("guard PID lock poisoned"))? =
+                            Some(_guard_pid as u32);
+                    }
+                    Ok(())
+                }
             }
         }
 
@@ -167,31 +196,67 @@ impl ControllerChildGuard {
         }
     }
 
-    fn terminate_and_reap(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+    fn terminate_and_reap(
+        &mut self,
+        child: &mut Child,
+        deadline: std::time::Instant,
+    ) -> io::Result<ExitStatus> {
         #[cfg(unix)]
-        return terminate_owned_processes_and_reap(child, &self.owned_processes);
+        {
+            let _ = deadline;
+            self.observe_owned_processes(child.id())?;
+            terminate_owned_processes_and_reap(child, &self.owned_processes)
+        }
 
         #[cfg(windows)]
-        self.close_windows_job(true)?;
-        #[cfg(not(unix))]
+        {
+            self.close_windows_job(true, deadline)?;
+            return reap_child_until(child, deadline);
+        }
+        #[cfg(not(any(unix, windows)))]
         terminate_process_tree_and_reap(child)
     }
 
-    fn close_after_root_exit(&mut self, root_pid: u32) -> io::Result<()> {
+    /// Synchronously clean up after a supervision infrastructure error before
+    /// the caller releases mutation ownership.
+    pub fn terminate_and_reap_bounded(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+        let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
+        match self.terminate_and_reap(child, deadline) {
+            Ok(status) => Ok(status),
+            Err(primary) => {
+                #[cfg(unix)]
+                let _ = signal_process_group(child.id(), libc::SIGKILL);
+                let _ = child.kill();
+                reap_child_until(child, deadline).map_err(|fallback| {
+                    io::Error::other(format!(
+                        "{primary}; direct process-group fallback also failed: {fallback}"
+                    ))
+                })
+            }
+        }
+    }
+
+    fn close_after_root_exit(
+        &mut self,
+        root_pid: u32,
+        deadline: std::time::Instant,
+    ) -> io::Result<()> {
         #[cfg(unix)]
         {
+            let _ = deadline;
+            self.observe_owned_processes(root_pid)?;
             // A short-lived root can spawn and exit between identity snapshots.
             // Its ordinary descendants remain in the isolated process group;
             // drain that group before handling tracked session escapees.
             terminate_remaining_process_group(root_pid)?;
-            return terminate_owned_processes_after_root_exit(root_pid, &self.owned_processes);
+            terminate_owned_processes_after_root_exit(root_pid, &self.owned_processes)
         }
 
         #[cfg(not(unix))]
         {
             let _ = root_pid;
             #[cfg(windows)]
-            return self.close_windows_job(true);
+            return self.close_windows_job(true, deadline);
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -208,14 +273,32 @@ impl ControllerChildGuard {
             .owned_processes
             .lock()
             .map_err(|_| io::Error::other("owned process identity lock poisoned"))?;
-        extend_owned_processes(&mut owned, root_pid, &snapshot);
+        #[cfg(target_os = "linux")]
+        let adopted = Some((
+            self.controller_pid,
+            *self
+                .guard_pid
+                .lock()
+                .map_err(|_| io::Error::other("guard PID lock poisoned"))?,
+            self.guard_id,
+        ));
+        #[cfg(not(target_os = "linux"))]
+        let adopted = None;
+        extend_owned_processes(&mut owned, root_pid, &snapshot, adopted);
         Ok(())
     }
 
     #[cfg(windows)]
-    fn close_windows_job(&mut self, terminate: bool) -> io::Result<()> {
+    fn close_windows_job(
+        &mut self,
+        terminate: bool,
+        deadline: std::time::Instant,
+    ) -> io::Result<()> {
         use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicAccountingInformation, QueryInformationJobObject, TerminateJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        };
 
         let mut job = self
             .job
@@ -224,16 +307,43 @@ impl ControllerChildGuard {
         if job.is_null() {
             return Ok(());
         }
-        let termination_error = if terminate && unsafe { TerminateJobObject(*job, 1) } == 0 {
-            Some(io::Error::last_os_error())
-        } else {
-            None
-        };
+        let termination_error = (terminate && unsafe { TerminateJobObject(*job, 1) } == 0)
+            .then(io::Error::last_os_error);
+        let mut drain_error = None;
+        if termination_error.is_none() {
+            loop {
+                let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+                let queried = unsafe {
+                    QueryInformationJobObject(
+                        *job,
+                        JobObjectBasicAccountingInformation,
+                        (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                        std::mem::size_of_val(&accounting) as u32,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if queried == 0 {
+                    drain_error = Some(io::Error::last_os_error());
+                    break;
+                }
+                if accounting.ActiveProcesses == 0 {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    drain_error = Some(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Windows process job remained active at cleanup deadline",
+                    ));
+                    break;
+                }
+                thread::sleep(PROCESS_TREE_POLL_INTERVAL);
+            }
+        }
         unsafe {
             CloseHandle(*job);
         }
         *job = std::ptr::null_mut();
-        termination_error.map_or(Ok(()), Err)
+        termination_error.or(drain_error).map_or(Ok(()), Err)
     }
 }
 
@@ -768,24 +878,32 @@ pub fn wait_with_bounded_output_supervised_guarded(
     });
     let started = std::time::Instant::now();
     let mut last_heartbeat = started.checked_sub(heartbeat_interval).unwrap_or(started);
-    let (status, termination) = loop {
+    let supervision: io::Result<_> = loop {
         #[cfg(unix)]
-        guard.observe_owned_processes(child.id())?;
-        if let Some(status) = child.try_wait()? {
-            guard.close_after_root_exit(child.id())?;
-            break (status, SupervisedCommandTermination::Completed);
+        if let Err(error) = guard.observe_owned_processes(child.id()) {
+            break Err(error);
+        }
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => break Err(error),
+        };
+        if let Some(status) = status {
+            let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
+            break guard
+                .close_after_root_exit(child.id(), deadline)
+                .map(|()| (status, SupervisedCommandTermination::Completed, deadline));
         }
         if is_cancelled() {
-            break (
-                guard.terminate_and_reap(child)?,
-                SupervisedCommandTermination::Cancelled,
-            );
+            let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
+            break guard
+                .terminate_and_reap(child, deadline)
+                .map(|status| (status, SupervisedCommandTermination::Cancelled, deadline));
         }
         if started.elapsed() >= timeout {
-            break (
-                guard.terminate_and_reap(child)?,
-                SupervisedCommandTermination::TimedOut,
-            );
+            let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
+            break guard
+                .terminate_and_reap(child, deadline)
+                .map(|status| (status, SupervisedCommandTermination::TimedOut, deadline));
         }
         if last_heartbeat.elapsed() >= heartbeat_interval {
             let heartbeat = live_output
@@ -793,19 +911,37 @@ pub fn wait_with_bounded_output_supervised_guarded(
                 .map(|tail| tail.heartbeat(started.elapsed()))
                 .unwrap_or_default();
             if let Err(error) = on_heartbeat(heartbeat.elapsed, &heartbeat.output_tail) {
-                return match guard.terminate_and_reap(child) {
-                    Ok(_) => Err(error),
-                    Err(cleanup_error) => Err(io::Error::other(format!(
+                let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
+                break Err(match guard.terminate_and_reap(child, deadline) {
+                    Ok(_) => error,
+                    Err(cleanup_error) => io::Error::other(format!(
                         "{error}; failed to terminate guarded child after heartbeat failure: {cleanup_error}"
-                    ))),
-                };
+                    )),
+                });
             }
             last_heartbeat = std::time::Instant::now();
         }
         thread::sleep(Duration::from_millis(50));
     };
-    let stdout = join_capture_bounded(stdout_handle, CAPTURE_JOIN_GRACE)?;
-    let stderr = join_capture_bounded(stderr_handle, CAPTURE_JOIN_GRACE)?;
+    let (status, termination, cleanup_deadline) = match supervision {
+        Ok(supervision) => supervision,
+        Err(primary) => {
+            let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
+            let cleanup = guard.terminate_and_reap_bounded(child).err();
+            let capture = join_capture_pair(stdout_handle, stderr_handle, deadline).err();
+            return Err(io::Error::other(format!(
+                "{primary}{}{}",
+                cleanup
+                    .map(|error| format!("; guarded cleanup failed: {error}"))
+                    .unwrap_or_default(),
+                capture
+                    .map(|error| format!("; output cleanup failed: {error}"))
+                    .unwrap_or_default(),
+            )));
+        }
+    };
+    let capture_deadline = cleanup_deadline.min(std::time::Instant::now() + CAPTURE_JOIN_GRACE);
+    let (stdout, stderr) = join_capture_pair(stdout_handle, stderr_handle, capture_deadline)?;
     Ok(SupervisedCommandOutput {
         output: BoundedCommandOutput {
             status,
@@ -818,6 +954,22 @@ pub fn wait_with_bounded_output_supervised_guarded(
         },
         termination,
     })
+}
+
+fn join_capture_pair(
+    stdout: Option<thread::JoinHandle<io::Result<BoundedStreamCapture>>>,
+    stderr: Option<thread::JoinHandle<io::Result<BoundedStreamCapture>>>,
+    deadline: std::time::Instant,
+) -> io::Result<(BoundedStreamCapture, BoundedStreamCapture)> {
+    let stdout = join_capture_bounded(stdout, deadline);
+    let stderr = join_capture_bounded(stderr, deadline);
+    match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
+        (Err(stdout), Err(stderr)) => Err(io::Error::other(format!(
+            "stdout capture cleanup failed: {stdout}; stderr capture cleanup failed: {stderr}"
+        ))),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 
 /// Supervise a command with wall-clock and optional structured-progress
@@ -847,6 +999,7 @@ pub fn wait_with_bounded_output_supervised_with_progress(
 
 /// Supervise a command with optional structured progress and an immediate
 /// bounded-output stream tee.
+#[allow(clippy::too_many_arguments)]
 pub fn wait_with_bounded_output_supervised_with_progress_and_passthrough(
     child: &mut Child,
     byte_limit: usize,
@@ -1190,6 +1343,7 @@ fn extend_owned_processes(
     owned: &mut Vec<UnixProcessIdentity>,
     root_pid: u32,
     snapshot: &[UnixProcessIdentity],
+    adopted: Option<(u32, Option<u32>, u64)>,
 ) {
     if owned.is_empty() {
         if let Some(root) = snapshot.iter().find(|process| process.pid == root_pid) {
@@ -1202,7 +1356,13 @@ fn extend_owned_processes(
             if owned.iter().any(|known| known.pid == process.pid) {
                 continue;
             }
-            if owned.iter().any(|known| known.pid == process.parent_pid) {
+            let adopted_descendant =
+                adopted.is_some_and(|(controller_pid, guard_pid, guard_id)| {
+                    process.parent_pid == controller_pid
+                        && Some(process.pid) != guard_pid
+                        && process_has_guard_id(process.pid, guard_id)
+                });
+            if adopted_descendant || owned.iter().any(|known| known.pid == process.parent_pid) {
                 owned.push(process.clone());
                 changed = true;
             }
@@ -1211,6 +1371,23 @@ fn extend_owned_processes(
             break;
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_has_guard_id(pid: u32, guard_id: u64) -> bool {
+    let expected = format!("HOMEBOY_CHILD_GUARD_ID={guard_id}");
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .ok()
+        .is_some_and(|environment| {
+            environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == expected.as_bytes())
+        })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_has_guard_id(_pid: u32, _guard_id: u64) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -1233,7 +1410,7 @@ fn signal_owned_processes(
     signal: libc::c_int,
 ) -> io::Result<Vec<u32>> {
     let snapshot = unix_process_snapshot()?;
-    extend_owned_processes(owned, root_pid, &snapshot);
+    extend_owned_processes(owned, root_pid, &snapshot, None);
     let pids = live_owned_pids(owned, &snapshot);
     signal_pids(&pids, signal);
     Ok(pids)
@@ -1323,7 +1500,7 @@ fn wait_for_owned_process_exit(
     let deadline = std::time::Instant::now() + grace;
     loop {
         let snapshot = unix_process_snapshot()?;
-        extend_owned_processes(owned, root_pid, &snapshot);
+        extend_owned_processes(owned, root_pid, &snapshot, None);
         signal_pids(&live_owned_pids(owned, &snapshot), signal);
         if status.is_none() {
             *status = child.try_wait()?;
@@ -1349,7 +1526,7 @@ fn wait_for_owned_process_exit_without_child(
     let deadline = std::time::Instant::now() + grace;
     loop {
         let snapshot = unix_process_snapshot()?;
-        extend_owned_processes(owned, root_pid, &snapshot);
+        extend_owned_processes(owned, root_pid, &snapshot, None);
         signal_pids(&live_owned_pids(owned, &snapshot), signal);
         reap_exited_process_group_children(root_pid);
         if live_owned_pids(owned, &snapshot).is_empty() {
@@ -1712,7 +1889,28 @@ pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStat
                 return Err(error);
             }
         }
-        child.wait()
+        reap_child_until(
+            child,
+            std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE,
+        )
+    }
+}
+
+fn reap_child_until(child: &mut Child, deadline: std::time::Instant) -> io::Result<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "child {} was not reaped before cleanup deadline",
+                    child.id()
+                ),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -1760,7 +1958,7 @@ fn join_capture(
 
 fn join_capture_bounded(
     handle: Option<thread::JoinHandle<io::Result<BoundedStreamCapture>>>,
-    timeout: Duration,
+    deadline: std::time::Instant,
 ) -> io::Result<BoundedStreamCapture> {
     let Some(handle) = handle else {
         return Ok(BoundedStreamCapture {
@@ -1768,28 +1966,23 @@ fn join_capture_bounded(
             metadata: CaptureMetadata::default(),
         });
     };
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let result = handle
-            .join()
-            .map_err(|_| io::Error::other("capture thread panicked"))
-            .and_then(|result| result);
-        let _ = sender.send(result);
-    });
-    receiver
-        .recv_timeout(timeout)
-        .map_err(|error| match error {
-            std::sync::mpsc::RecvTimeoutError::Timeout => io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "capture reader did not close within {}ms",
-                    timeout.as_millis()
-                ),
-            ),
-            std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                io::Error::other("capture join channel disconnected")
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            #[cfg(windows)]
+            unsafe {
+                use std::os::windows::io::AsRawHandle;
+                windows_sys::Win32::System::IO::CancelSynchronousIo(handle.as_raw_handle().cast());
             }
-        })?
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "capture reader did not close before cleanup deadline",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    handle
+        .join()
+        .map_err(|_| io::Error::other("capture thread panicked"))?
 }
 
 fn capture_tail(mut stream: impl Read, byte_limit: usize) -> io::Result<BoundedStreamCapture> {
