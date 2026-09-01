@@ -1135,6 +1135,7 @@ mod tests {
                         finalization_lease: None,
                         finalization_lease_started_ms: None,
                         attempt_count: 0,
+                        mutation_attempted: false,
                         continuation_evidence: Vec::new(),
                         attributes: serde_json::Map::new(),
                     })

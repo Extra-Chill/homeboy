@@ -609,6 +609,73 @@ fn finalization_is_owner_bound_idempotent_conflict_safe_and_never_cleans_up() {
 }
 
 #[test]
+fn default_ownerless_create_remains_eligible_for_safe_cleanup() {
+    crate::test_support::with_isolated_home(|home| {
+        let (_, options) = registered_create_fixture(home.path(), "ownerless-cleanup");
+        let created = create(options).expect("create ownerless task worktree");
+        let path = PathBuf::from(&created.record.worktree_path);
+        assert_eq!(created.record.run_id, None);
+        assert_eq!(created.record.terminal_disposition, None);
+        assert_eq!(created.record.cleanup_policy, CleanupPolicy::RemoveWhenSafe);
+
+        let output = cleanup(WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        })
+        .expect("clean up ownerless task worktree");
+
+        assert_eq!(output.counts.removed, 1);
+        assert_eq!(output.counts.skipped, 0);
+        assert!(!path.exists());
+    });
+}
+
+#[test]
+fn owned_remove_when_safe_worktree_requires_succeeded_terminal_finalization() {
+    let data_root = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "owned-nonterminal-cleanup");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "owned-nonterminal-cleanup",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    let store = data_root.path().join("task-worktrees");
+    let mut record = fixture_record(source.path(), &worktree);
+    record.run_id = Some("lifecycle-owner".to_string());
+    write_record(&store, &record).unwrap();
+
+    for terminal_disposition in [None, Some("failed".to_string())] {
+        record.terminal_disposition = terminal_disposition;
+        write_record(&store, &record).unwrap();
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: true,
+                dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            },
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(output.counts.removed, 0);
+        assert_eq!(output.counts.skipped, 1);
+        assert!(output.skipped[0].reasons.iter().any(|reason| {
+            reason.contains("explicit succeeded finalization from lifecycle owner")
+        }));
+        assert!(worktree.exists());
+    }
+}
+
+#[test]
 fn owned_worktree_survives_push_and_pr_boundary_until_finalization_and_cwd_exit() {
     crate::test_support::with_isolated_home(|home| {
         let developer = home.path().join("Developer");

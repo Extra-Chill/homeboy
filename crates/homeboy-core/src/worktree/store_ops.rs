@@ -297,14 +297,13 @@ fn cleanup_skip_reasons(
     live_owner_count: usize,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
-    if record.terminal_disposition.as_deref() != Some("succeeded") || record.run_id.is_none() {
-        reasons.push(record.run_id.as_deref().map_or_else(
-            || "cleanup requires explicit succeeded lifecycle finalization".to_string(),
-            |owner| {
-                format!(
-                    "cleanup requires explicit succeeded finalization from lifecycle owner `{owner}`"
-                )
-            },
+    if let Some(owner) = record
+        .run_id
+        .as_deref()
+        .filter(|_| record.terminal_disposition.as_deref() != Some("succeeded"))
+    {
+        reasons.push(format!(
+            "cleanup requires explicit succeeded finalization from lifecycle owner `{owner}`"
         ));
     }
     if safety.primary_checkout {
