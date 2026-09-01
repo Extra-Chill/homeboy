@@ -118,8 +118,31 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
     if let Err(error) = validate_plan_structure(&plan) {
         return invalid_plan_report(plan_id, AgentTaskPlanValidationKind::InvalidInput, error);
     }
-    let mut plan = plan;
+    let plan = plan;
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        &plan,
+        &catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let classifications = error.details["route_evidence"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|route| route["classification"].as_str())
+                .collect::<Vec<_>>();
+            let kind = if classifications.contains(&"capability") {
+                AgentTaskPlanValidationKind::UnavailableCapability
+            } else if classifications.contains(&"capacity") {
+                AgentTaskPlanValidationKind::TemporaryCapacity
+            } else {
+                AgentTaskPlanValidationKind::MissingReadiness
+            };
+            return invalid_plan_report(plan_id, kind, error);
+        }
+    };
     if let Err(error) = validate_plan_provider_capabilities(&plan, &catalog) {
         return invalid_plan_report(
             plan_id,
@@ -127,7 +150,6 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
             error,
         );
     }
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
     for (kind, result) in [
         (
             AgentTaskPlanValidationKind::UnavailableCapability,
@@ -153,21 +175,6 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
             return invalid_plan_report(plan_id, kind, error);
         }
     }
-    if let Err(error) =
-        crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-            &plan,
-            catalog.providers(),
-            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-        )
-    {
-        let kind = if error.retryable == Some(true) {
-            AgentTaskPlanValidationKind::TemporaryCapacity
-        } else {
-            AgentTaskPlanValidationKind::MissingReadiness
-        };
-        return invalid_plan_report(plan_id, kind, error);
-    }
-
     AgentTaskPlanValidationReport {
         schema: AGENT_TASK_PLAN_VALIDATION_SCHEMA.to_string(),
         valid: true,
@@ -660,6 +667,16 @@ pub fn run_submitted_with_timeout(
     timeout_ms: Option<u64>,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    run_submitted_with_timeout_and_catalog(run_id, timeout_ms, executor, &catalog)
+}
+
+pub(crate) fn run_submitted_with_timeout_and_catalog(
+    run_id: String,
+    timeout_ms: Option<u64>,
+    executor: SharedAgentTaskExecutor,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
     }
@@ -676,7 +693,32 @@ pub fn run_submitted_with_timeout(
     if let Some(timeout_ms) = timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
-    prepare_plan_for_execution(&mut plan, Some(&run_id))?;
+    if let Err(error) = preflight_plan_provider_eligibility_with_catalog(&mut plan, catalog) {
+        agent_task_lifecycle::record_pre_execution_failure(
+            &run_id,
+            &plan,
+            "admit_plan_provider_dispatchability",
+            &error,
+        )?;
+        return Err(error);
+    }
+    // Admission chooses a concrete provider route and advances its durable
+    // cursor. Persist that exact plan before Running so execution never derives
+    // a second route from the submitted rotation chain.
+    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+    if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
+        agent_task_lifecycle::record_pre_execution_failure(
+            &run_id,
+            &plan,
+            "prepare_plan_for_execution",
+            &error,
+        )?;
+        return Err(error);
+    }
+    // Preparation enriches the admitted plan with its materialized workspace
+    // and runner-secret contract. Persist that final form before Running so the
+    // scheduler executes exactly the durable plan reviewers can inspect.
+    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
     let harvest_context =
         match crate::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
             Ok(context) => context,
@@ -742,7 +784,7 @@ pub fn run_next_with_cook_dispatcher(
         scoped_run_ids,
         |record, plan| {
             validate_queued_cook_identity(record)?;
-            preflight_queued_plan_provider_eligibility(plan)
+            preflight_plan_provider_eligibility(plan)
         },
     )
 }
@@ -755,7 +797,7 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
     scoped_run_ids: Option<&HashSet<String>>,
-    queue_preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+    queue_preflight: impl Fn(&AgentTaskRunRecord, &mut AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskRunNextResult> {
     let mut skipped = Vec::new();
     let mut inspected = 0;
@@ -2384,7 +2426,7 @@ fn prepare_plan_workspaces(plan: &mut AgentTaskPlan, run_id: Option<&str>) -> Re
     Ok(())
 }
 
-fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
+pub(crate) fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
     let mut secret_env_plan = SecretEnvPlan::from_secret_env_names(
         plan.tasks
             .iter()
@@ -2422,22 +2464,42 @@ fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
 /// Queue admission validates provider eligibility and credential provenance
 /// before a record is claimed Running. Workspace preparation remains after the
 /// claim because it creates controller-owned filesystem state.
-fn preflight_queued_plan_provider_eligibility(plan: &AgentTaskPlan) -> Result<()> {
-    let mut plan = plan.clone();
+fn preflight_plan_provider_eligibility(plan: &mut AgentTaskPlan) -> Result<()> {
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
-    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
-    catalog.validate_selected_models(&plan)?;
-    catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
-    preflight_plan_secret_env(&plan)?;
+    preflight_plan_provider_eligibility_with_catalog(plan, &catalog)
+}
+
+fn preflight_plan_provider_eligibility_with_catalog(
+    plan: &mut AgentTaskPlan,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> Result<()> {
+    let catalog_owns_every_route = plan.tasks.iter().all(|task| {
+        crate::agent_task_provider::is_fixture_backend(&task.executor.backend)
+            || crate::agent_task_gate_executor::is_repo_local_gate_request(task)
+            || catalog
+                .providers()
+                .iter()
+                .any(|provider| provider.backend == task.executor.backend)
+    });
+    if !catalog_owns_every_route {
+        return preflight_plan_secret_env(plan);
+    }
+    let admitted = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        plan,
+        catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )?;
+    // Admission owns live route selection. These are the remaining static and
+    // material checks for the selected route, not a second route derivation.
+    catalog.validate_selected_models(&admitted)?;
+    catalog.enforce_runtime_preflight_checks_for_plan(&admitted)?;
+    preflight_plan_secret_env(&admitted)?;
     crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-        &plan,
+        &admitted,
         catalog.providers(),
     )?;
-    crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
-        &plan,
-        catalog.providers(),
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-    )
+    *plan = admitted;
+    Ok(())
 }
 
 fn run_plan_with_scheduler(

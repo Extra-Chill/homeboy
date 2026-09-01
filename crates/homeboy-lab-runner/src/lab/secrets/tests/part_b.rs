@@ -527,6 +527,76 @@ fn hydrate_agent_task_secret_env_resolves_provider_default_run_plan_secrets_on_c
 }
 
 #[test]
+fn hydrate_agent_task_secret_env_uses_the_bound_fallback_source_on_conflict() {
+    let _access_token_env = RemovedEnvVar::new("EXAMPLE_PROVIDER_ACCESS_TOKEN");
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let primary_auth = temp.path().join("primary-auth.json");
+        let fallback_auth = temp.path().join("fallback-auth.json");
+        std::fs::write(
+            &primary_auth,
+            r#"{"tokens":{"access_token":"primary-token"}}"#,
+        )
+        .expect("write primary auth");
+        std::fs::write(
+            &fallback_auth,
+            r#"{"tokens":{"access_token":"fallback-token"}}"#,
+        )
+        .expect("write fallback auth");
+        let mut primary =
+            fixture_provider_with_example_defaults_at(&primary_auth.display().to_string());
+        primary.id = "sample-runtime.primary".to_string();
+        let mut fallback =
+            fixture_provider_with_example_defaults_at(&fallback_auth.display().to_string());
+        fallback.id = "sample-runtime.fallback".to_string();
+        let plan_path = temp.path().join("plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "bound-fallback-secret-plan",
+                "tasks": [{
+                    "schema": "homeboy/agent-task-request/v1",
+                    "task_id": "provider-task",
+                    "executor": {
+                        "backend": "sample-runtime",
+                        "selector": "sample-runtime.fallback",
+                        "config": { "provider": "example-oauth" }
+                    },
+                    "instructions": "Use the admitted fallback.",
+                    "metadata": {
+                        "provider_readiness_routing": { "next_rotation_index": 2 }
+                    }
+                }],
+                "options": {
+                    "rotation": {
+                        "entries": [
+                            { "selector": "sample-runtime.primary" },
+                            { "selector": "sample-runtime.fallback" }
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write bound plan");
+        let mut env = HashMap::new();
+
+        hydrate_agent_task_secret_env_with_providers(
+            &run_plan_args(&plan_path),
+            &mut env,
+            &[primary, fallback],
+        )
+        .expect("bound fallback source resolves on controller");
+
+        assert_eq!(
+            env.get("EXAMPLE_PROVIDER_ACCESS_TOKEN").map(String::as_str),
+            Some("fallback-token")
+        );
+    });
+}
+
+#[test]
 fn preflight_agent_task_runner_secret_env_fails_missing_runner_ref() {
     let temp = tempfile::tempdir().expect("tempdir");
     let plan_path = temp.path().join("plan.json");

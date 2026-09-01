@@ -2705,35 +2705,57 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
         &dispatch.tasks,
         dispatch.core.tasks_json.as_deref(),
     )?;
+    let initial_route =
+        agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
+            dispatch.clone(),
+            catalog,
+        )?;
     let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
-    // Route/model/credential/immediate-failure failures are knowable before
-    // workspace preparation. The plan pass below rechecks with its effective
-    // executor config and reuses this caller-owned cache.
-    crate::agent_task_provider::preflight_provider_dispatchability_without_runtime_with_config(
-        catalog,
-        &request.backend,
-        request.selector.as_deref(),
-        request.model.as_deref(),
-        &serde_json::Value::Object(Default::default()),
-        readiness_cache,
-    )?;
+    // Preserve the early static rejection for a single route. Rotation plans
+    // are checked as complete effective plans below so an unavailable primary
+    // cannot hide a valid fallback.
+    if initial_route
+        .rotation
+        .as_ref()
+        .is_none_or(|rotation| rotation.entries.is_empty())
+    {
+        crate::agent_task_provider::preflight_provider_dispatchability_without_runtime_with_config(
+            catalog,
+            &initial_route.backend,
+            initial_route.selector.as_deref(),
+            initial_route.model.as_deref(),
+            &serde_json::Value::Object(Default::default()),
+            readiness_cache,
+        )?;
+    }
     options.identity.initial_plan =
         crate::agent_task_dispatch_plan::build_dispatch_plan_with_provider_requirements(
             &request,
             |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
         )?;
-    catalog.validate_selected_models(&options.identity.initial_plan)?;
-    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-        &options.identity.initial_plan,
-        catalog.providers(),
-    )?;
-    // The shared verdict uses the plan's effective executor configuration and
-    // caller-owned cache before Cook can consume a provider execution budget.
-    crate::agent_task_provider::preflight_plan_provider_dispatchability_with_providers(
+    // The shared verdict considers the ordered rotation routes with their
+    // effective model/config before Cook can consume a provider execution.
+    // Persist the selected route and forward cursor without reducing the durable
+    // rotation policy. Deterministic exhaustion still fails compilation;
+    // retryable exhaustion reaches runtime with the fresh, unbound plan.
+    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
         &options.identity.initial_plan,
         catalog,
         readiness_cache,
-    )?;
+    ) {
+        Ok(selected_plan) => {
+            catalog.validate_selected_models(&selected_plan)?;
+            catalog.enforce_runtime_preflight_checks_for_plan(&selected_plan)?;
+            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
+                &selected_plan,
+                catalog.providers(),
+            )?;
+            super::execution::preflight_plan_secret_env(&selected_plan)?;
+            options.identity.initial_plan = selected_plan;
+        }
+        Err(error) if error.retryable == Some(true) => {}
+        Err(error) => return Err(error),
+    }
     // Finalization disclosure is derived from the compiled provider invocation,
     // not a pre-resolution CLI value. The plan is persisted in the recipe and
     // remains authoritative across continuation.
@@ -5826,6 +5848,9 @@ fn run_cook_spine(
                 let effective_baseline = initial_baseline
                     .as_ref()
                     .or(re_materialized_baseline.as_ref());
+                // Live admission belongs to the scheduler on the execution
+                // host. Keep the complete route policy intact so local
+                // persistence and external transports retain restart authority.
                 let mut dispatch_plan = plan.clone();
                 if let Some(snapshot) = base_snapshot {
                     agent_task_lifecycle::record_metadata_value_in_store(

@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use homeboy_engine_primitives::content_hash;
 use serde_json::{json, Value};
@@ -7,8 +9,8 @@ use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
 use super::command_runner::{
-    run_provider_readiness_invocation, validate_provider_immediate_failure_patterns,
-    ProviderReadinessInvocationResult,
+    run_provider_readiness_invocation_with_env_and_timeout,
+    validate_provider_immediate_failure_patterns, ProviderReadinessInvocationResult,
 };
 use super::resolution::select_provider;
 use super::AgentTaskExecutorProvider;
@@ -16,9 +18,261 @@ use super::AgentTaskExecutorProvider;
 /// Process-local cache for one compiled batch. The provider owns the durable
 /// cache key; Homeboy also indexes the request identity so siblings do not need
 /// to launch a probe merely to learn that key.
-#[derive(Default)]
+#[derive(Debug, Clone)]
 pub struct ProviderRuntimeReadinessCache {
-    by_request: BTreeMap<String, ProviderReadinessInvocationResult>,
+    shared: Arc<ProviderRuntimeReadinessCacheShared>,
+}
+
+#[derive(Debug)]
+struct ProviderRuntimeReadinessCacheShared {
+    state: Mutex<ProviderRuntimeReadinessCacheState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct ProviderRuntimeReadinessCacheState {
+    by_request: BTreeMap<String, CachedProviderRuntimeReadiness>,
+    waiters: BTreeMap<String, usize>,
+    next_generation: u64,
+}
+
+#[derive(Debug)]
+enum CachedProviderRuntimeReadiness {
+    InFlight,
+    Complete {
+        result: std::result::Result<ProviderReadinessInvocationResult, String>,
+        cached_at: Instant,
+        generation: u64,
+    },
+}
+
+fn release_cache_waiter(state: &mut ProviderRuntimeReadinessCacheState, request_key: &str) {
+    let Some(waiters) = state.waiters.get_mut(request_key) else {
+        return;
+    };
+    *waiters = waiters.saturating_sub(1);
+    if *waiters == 0 {
+        state.waiters.remove(request_key);
+    }
+}
+
+impl Default for ProviderRuntimeReadinessCache {
+    fn default() -> Self {
+        Self {
+            shared: Arc::new(ProviderRuntimeReadinessCacheShared {
+                state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ProviderRuntimeReadinessCache {
+    pub(crate) fn expire_all(&self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for cached in state.by_request.values_mut() {
+            if let CachedProviderRuntimeReadiness::Complete { cached_at, .. } = cached {
+                *cached_at =
+                    Instant::now() - PROVIDER_RUNTIME_READINESS_READY_TTL - Duration::from_secs(1);
+            }
+        }
+    }
+}
+
+const PROVIDER_RUNTIME_READINESS_READY_TTL: Duration = Duration::from_secs(30);
+const PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL: Duration = Duration::from_secs(5);
+const PROVIDER_RUNTIME_READINESS_ERROR_TTL: Duration = Duration::from_secs(2);
+const PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS: usize = 2;
+const MAX_CONCURRENT_PROVIDER_READINESS_PROBES: usize = 4;
+
+#[derive(Debug)]
+struct ProviderReadinessProbeGate {
+    active: Mutex<usize>,
+    changed: Condvar,
+}
+
+#[derive(Debug)]
+struct ProviderReadinessProbePermit(&'static ProviderReadinessProbeGate);
+
+impl Drop for ProviderReadinessProbePermit {
+    fn drop(&mut self) {
+        let mut active = self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        self.0.changed.notify_one();
+    }
+}
+
+fn acquire_probe_permit(
+    deadline: Instant,
+    timeout_ms: u64,
+) -> std::result::Result<ProviderReadinessProbePermit, String> {
+    static GATE: OnceLock<ProviderReadinessProbeGate> = OnceLock::new();
+    let gate = GATE.get_or_init(|| ProviderReadinessProbeGate {
+        active: Mutex::new(0),
+        changed: Condvar::new(),
+    });
+    acquire_probe_permit_from_gate(gate, deadline, timeout_ms)
+}
+
+fn acquire_probe_permit_from_gate(
+    gate: &'static ProviderReadinessProbeGate,
+    deadline: Instant,
+    timeout_ms: u64,
+) -> std::result::Result<ProviderReadinessProbePermit, String> {
+    let mut active = gate
+        .active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *active >= MAX_CONCURRENT_PROVIDER_READINESS_PROBES {
+        let Some(wait) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(format!(
+                "provider readiness invocation timed out after {timeout_ms} ms while waiting for a probe permit"
+            ));
+        };
+        let (next, timeout) = gate
+            .changed
+            .wait_timeout(active, wait)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active = next;
+        if timeout.timed_out() && *active >= MAX_CONCURRENT_PROVIDER_READINESS_PROBES {
+            return Err(format!(
+                "provider readiness invocation timed out after {timeout_ms} ms while waiting for a probe permit"
+            ));
+        }
+    }
+    *active += 1;
+    Ok(ProviderReadinessProbePermit(gate))
+}
+
+fn run_readiness_probe_with_gate(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    gate: Option<&'static ProviderReadinessProbeGate>,
+    probe_deadline: Instant,
+    probe_timeout_ms: u64,
+) -> std::result::Result<ProviderReadinessInvocationResult, String> {
+    let _permit = match gate {
+        Some(gate) => acquire_probe_permit_from_gate(gate, probe_deadline, probe_timeout_ms)?,
+        None => acquire_probe_permit(probe_deadline, probe_timeout_ms)?,
+    };
+    let mut result = Err("provider readiness invocation did not run".to_string());
+    for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
+        let Some(remaining) = probe_deadline.checked_duration_since(Instant::now()) else {
+            result = Err(format!(
+                "provider '{}' readiness invocation timed out after {} ms",
+                provider.id, probe_timeout_ms
+            ));
+            break;
+        };
+        result = run_provider_readiness_invocation_with_env_and_timeout(
+            provider,
+            config,
+            credential_env,
+            remaining,
+        );
+        let should_retry = match &result {
+            Err(_) => true,
+            Ok(verdict) => {
+                !verdict.ready && verdict.retryable && verdict.classification == "transient_failure"
+            }
+        };
+        if !should_retry {
+            break;
+        }
+    }
+    result
+}
+
+fn remaining_deadline_duration(deadline_unix_ms: Option<u64>) -> Option<Duration> {
+    match crate::agent_task_timeout::remaining_execution_deadline_ms(deadline_unix_ms) {
+        Some(0) => None,
+        Some(remaining) => Some(Duration::from_millis(remaining)),
+        None => Some(Duration::from_secs(24 * 60 * 60)),
+    }
+}
+
+fn readiness_deadline_error(boundary: &str, deadline_unix_ms: Option<u64>) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "execution_deadline_unix_ms",
+        format!("agent-task execution deadline expired during provider readiness {boundary}"),
+        deadline_unix_ms.map(|value| value.to_string()),
+        None,
+    )
+    .with_retryable(false);
+    error.details["classification"] = json!("timeout");
+    error.details["zero_provider_executions"] = json!(true);
+    error.details["deadline_unix_ms"] = json!(deadline_unix_ms);
+    error
+}
+
+fn ensure_readiness_deadline(boundary: &str, deadline_unix_ms: Option<u64>) -> Result<()> {
+    if remaining_deadline_duration(deadline_unix_ms).is_none() {
+        Err(readiness_deadline_error(boundary, deadline_unix_ms))
+    } else {
+        Ok(())
+    }
+}
+
+fn map_readiness_result(
+    provider: &AgentTaskExecutorProvider,
+    result: std::result::Result<ProviderReadinessInvocationResult, String>,
+) -> Result<ProviderReadinessInvocationResult> {
+    result.map_err(|message| readiness_invocation_error(provider, message))
+}
+
+fn readiness_invocation_error(provider: &AgentTaskExecutorProvider, message: String) -> Error {
+    Error::validation_invalid_argument(
+        "provider_runtime_readiness",
+        format!(
+            "provider '{}' readiness invocation failed: {}",
+            provider.id,
+            homeboy_core::redaction::redact_string(&message)
+        ),
+        Some(provider.backend.clone()),
+        None,
+    )
+    .with_retryable(true)
+}
+
+fn publish_readiness_result(
+    shared: &ProviderRuntimeReadinessCacheShared,
+    request_key: String,
+    result: std::result::Result<ProviderReadinessInvocationResult, String>,
+) {
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let generation = state.next_generation;
+    state.next_generation = state.next_generation.wrapping_add(1);
+    state.by_request.insert(
+        request_key,
+        CachedProviderRuntimeReadiness::Complete {
+            result,
+            cached_at: Instant::now(),
+            generation,
+        },
+    );
+    shared.changed.notify_all();
+}
+
+fn discard_readiness_result(shared: &ProviderRuntimeReadinessCacheShared, request_key: &str) {
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.by_request.remove(request_key);
+    shared.changed.notify_all();
 }
 
 pub fn preflight_plan_provider_runtime_readiness_with_providers(
@@ -59,7 +313,17 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
             )
         })?;
         let config = effective_provider_config(&task.executor.config, task.executor.model());
-        let verdict = readiness_verdict(provider, &config, cache)?;
+        let credential_env = super::secrets::provider_request_credential_env(task, provider)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "provider_runtime_readiness",
+                    error.message,
+                    Some(provider.backend.clone()),
+                    None,
+                )
+            })?;
+        let verdict =
+            readiness_verdict_with_credentials(provider, &config, &credential_env, cache)?;
         if !verdict.ready {
             return Err(readiness_error(provider, &config, &verdict));
         }
@@ -89,29 +353,218 @@ pub(crate) fn unverified_provider_auth_error(provider: &AgentTaskExecutorProvide
     )
 }
 
+#[cfg(test)]
 pub(crate) fn readiness_verdict(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> Result<ProviderReadinessInvocationResult> {
-    let request_key = readiness_request_key(provider, config)?;
-    if let Some(verdict) = cache.by_request.get(&request_key) {
-        return Ok(verdict.clone());
-    }
-    let verdict = run_provider_readiness_invocation(provider, config).map_err(|message| {
-        Error::validation_invalid_argument(
-            "provider_runtime_readiness",
-            format!(
-                "provider '{}' readiness invocation failed: {message}",
-                provider.id
-            ),
-            Some(provider.backend.clone()),
-            None,
+    readiness_verdict_with_credentials(provider, config, &[], cache)
+}
+
+pub(crate) fn readiness_verdict_with_credentials(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    cache: &mut ProviderRuntimeReadinessCache,
+) -> Result<ProviderReadinessInvocationResult> {
+    readiness_verdict_with_credentials_and_deadline(provider, config, credential_env, cache, None)
+}
+
+pub(crate) fn readiness_verdict_with_credentials_and_deadline(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    cache: &mut ProviderRuntimeReadinessCache,
+    deadline_unix_ms: Option<u64>,
+) -> Result<ProviderReadinessInvocationResult> {
+    ensure_readiness_deadline("probe", deadline_unix_ms)?;
+    let base_key = readiness_request_key(provider, config)?;
+    ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
+    let credential_identity = credential_env
+        .iter()
+        .map(|(name, value)| (name, content_hash::sha256_hex(value.as_bytes())))
+        .collect::<Vec<_>>();
+    let request_key = content_hash::sha256_hex(
+        &serde_json::to_vec(&(base_key, credential_identity))
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    );
+    ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
+    let mut registered_waiter = false;
+    loop {
+        let mut state = cache
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(error) = ensure_readiness_deadline("cache_lock", deadline_unix_ms) {
+            if registered_waiter {
+                release_cache_waiter(&mut state, &request_key);
+                cache.shared.changed.notify_all();
+            }
+            return Err(error);
+        }
+        match state.by_request.get(&request_key) {
+            Some(CachedProviderRuntimeReadiness::InFlight) => {
+                if !registered_waiter {
+                    *state.waiters.entry(request_key.clone()).or_default() += 1;
+                    registered_waiter = true;
+                }
+                let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
+                    release_cache_waiter(&mut state, &request_key);
+                    return Err(readiness_deadline_error("cache_wait", deadline_unix_ms));
+                };
+                let (mut state, timeout) = cache
+                    .shared
+                    .changed
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if timeout.timed_out() {
+                    release_cache_waiter(&mut state, &request_key);
+                    return Err(readiness_deadline_error("cache_wait", deadline_unix_ms));
+                }
+                drop(state);
+                continue;
+            }
+            Some(CachedProviderRuntimeReadiness::Complete {
+                result, cached_at, ..
+            }) => {
+                let ttl = match result {
+                    Ok(verdict) if verdict.ready => PROVIDER_RUNTIME_READINESS_READY_TTL,
+                    Ok(_) => PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL,
+                    Err(_) => PROVIDER_RUNTIME_READINESS_ERROR_TTL,
+                };
+                if cached_at.elapsed() <= ttl {
+                    if let Err(error) = ensure_readiness_deadline("cached_result", deadline_unix_ms)
+                    {
+                        if registered_waiter {
+                            release_cache_waiter(&mut state, &request_key);
+                            cache.shared.changed.notify_all();
+                        }
+                        return Err(error);
+                    }
+                    let result = result.clone();
+                    if registered_waiter {
+                        release_cache_waiter(&mut state, &request_key);
+                        cache.shared.changed.notify_all();
+                    }
+                    return map_readiness_result(provider, result);
+                }
+                if registered_waiter {
+                    release_cache_waiter(&mut state, &request_key);
+                    registered_waiter = false;
+                    cache.shared.changed.notify_all();
+                }
+                state.by_request.remove(&request_key);
+            }
+            None => {}
+        }
+        if state.by_request.len() >= 64 {
+            if let Some(oldest) = state
+                .by_request
+                .iter()
+                .filter_map(|(key, cached)| match cached {
+                    CachedProviderRuntimeReadiness::Complete { generation, .. }
+                        if state.waiters.get(key).copied().unwrap_or_default() == 0 =>
+                    {
+                        Some((key, generation))
+                    }
+                    CachedProviderRuntimeReadiness::Complete { .. }
+                    | CachedProviderRuntimeReadiness::InFlight => None,
+                })
+                .min_by_key(|(_, generation)| *generation)
+                .map(|(key, _)| key.clone())
+            {
+                state.by_request.remove(&oldest);
+            } else {
+                let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
+                    return Err(readiness_deadline_error("cache_capacity", deadline_unix_ms));
+                };
+                let (state, timeout) = cache
+                    .shared
+                    .changed
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                drop(state);
+                if timeout.timed_out() {
+                    return Err(readiness_deadline_error("cache_capacity", deadline_unix_ms));
+                }
+                continue;
+            }
+        }
+        state.by_request.insert(
+            request_key.clone(),
+            CachedProviderRuntimeReadiness::InFlight,
+        );
+        if let Err(error) = ensure_readiness_deadline("probe_publication", deadline_unix_ms) {
+            state.by_request.remove(&request_key);
+            cache.shared.changed.notify_all();
+            return Err(error);
+        }
+        let provider = provider.clone();
+        let config = config.clone();
+        let credential_env = credential_env.to_vec();
+        let probe_timeout = provider
+            .readiness_invocation
+            .as_ref()
+            .map(|invocation| Duration::from_millis(invocation.timeout_ms))
+            .unwrap_or(Duration::from_secs(20));
+        // The worker owns a permit and a child process, so it must share the
+        // caller's absolute deadline rather than merely letting the caller stop
+        // waiting while the work continues in the background.
+        let invocation_deadline = Instant::now() + probe_timeout;
+        let execution_deadline = remaining_deadline_duration(deadline_unix_ms)
+            .map(|remaining| Instant::now() + remaining);
+        let deadline_limited =
+            execution_deadline.is_some_and(|deadline| deadline < invocation_deadline);
+        let probe_deadline = execution_deadline
+            .map(|deadline| invocation_deadline.min(deadline))
+            .unwrap_or(invocation_deadline);
+        let probe_timeout_ms = u64::try_from(
+            probe_deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis(),
         )
-        .with_retryable(true)
-    })?;
-    cache.by_request.insert(request_key, verdict.clone());
-    Ok(verdict)
+        .unwrap_or(u64::MAX);
+        let shared = Arc::clone(&cache.shared);
+        let probe_request_key = request_key.clone();
+        drop(state);
+        let spawn_result = std::thread::Builder::new()
+            .name("provider-readiness-probe".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_readiness_probe_with_gate(
+                        &provider,
+                        &config,
+                        &credential_env,
+                        None,
+                        probe_deadline,
+                        probe_timeout_ms,
+                    )
+                }))
+                .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
+
+                if deadline_limited
+                    && result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|error| error.contains("timed out"))
+                {
+                    // The result is about one caller's exhausted deadline,
+                    // not this provider's reusable readiness state.
+                    discard_readiness_result(&shared, &probe_request_key);
+                } else {
+                    publish_readiness_result(&shared, probe_request_key, result);
+                }
+            });
+        if let Err(error) = spawn_result {
+            publish_readiness_result(
+                &cache.shared,
+                request_key.clone(),
+                Err(format!("failed to start provider readiness probe: {error}")),
+            );
+        }
+    }
 }
 
 pub(crate) fn effective_provider_config(config: &Value, model: Option<&str>) -> Value {
@@ -124,7 +577,10 @@ pub(crate) fn effective_provider_config(config: &Value, model: Option<&str>) -> 
     Value::Object(config)
 }
 
-fn readiness_request_key(provider: &AgentTaskExecutorProvider, config: &Value) -> Result<String> {
+pub(crate) fn readiness_request_key(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+) -> Result<String> {
     let mut environment = provider
         .readiness_invocation
         .as_ref()
@@ -135,6 +591,7 @@ fn readiness_request_key(provider: &AgentTaskExecutorProvider, config: &Value) -
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect::<Vec<_>>();
+    environment.extend(super::credential_readiness::provider_required_secret_env_names(provider));
     environment.extend(["PATH".to_string(), "HOME".to_string()]);
     environment.sort();
     environment.dedup();
@@ -164,31 +621,38 @@ fn readiness_error(
     config: &Value,
     verdict: &ProviderReadinessInvocationResult,
 ) -> Error {
-    let classification = if verdict.classification.is_empty() {
-        "unknown".to_string()
-    } else {
-        verdict.classification.clone()
+    let classification = match verdict.classification.as_str() {
+        "ready"
+        | "deterministic_incompatibility"
+        | "auth_failure"
+        | "account"
+        | "capacity"
+        | "unavailable"
+        | "transient_failure" => verdict.classification.as_str(),
+        _ => "unknown",
     };
     let reason = if verdict.reason.is_empty() {
         "provider-owned readiness check failed".to_string()
     } else {
         homeboy_core::redaction::redact_string(&verdict.reason)
     };
-    let mut hints = vec![json!({
+    let evidence = json!({
         "kind": "provider_runtime_readiness_failed",
         "provider_id": provider.id,
         "backend": provider.backend,
         "classification": classification,
         "retryable": verdict.retryable,
-        "cache_key": verdict.cache_key,
-        "identity": verdict.identity,
+        "cache_identity": content_hash::sha256_hex(verdict.cache_key.as_bytes()),
+        "provider_identity": content_hash::sha256_hex(
+            &serde_json::to_vec(&verdict.identity).unwrap_or_default()
+        ),
         "effective_model": config.get("model"),
-    })
-    .to_string()];
+    });
+    let mut hints = Vec::new();
     if !verdict.remediation.trim().is_empty() {
         hints.push(homeboy_core::redaction::redact_string(&verdict.remediation));
     }
-    Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "provider_runtime_readiness",
         format!(
             "agent-task backend '{}' is not ready for its selected runtime/model: {} ({reason})",
@@ -197,7 +661,9 @@ fn readiness_error(
         Some(provider.backend.clone()),
         Some(hints),
     )
-    .with_retryable(verdict.retryable)
+    .with_retryable(verdict.retryable);
+    error.details["runtime_readiness_evidence"] = evidence;
+    error
 }
 
 #[cfg(test)]
@@ -279,6 +745,30 @@ mod tests {
     }
 
     #[test]
+    fn retryable_non_transient_verdicts_are_not_immediately_retried() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("retryable-auth.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'auth_failure',retryable:true,remediation:'switch account',reason:'rejected',cache_key:'account',identity:{account:'test'}}));",
+        )
+        .expect("readiness script");
+        let provider = provider(&script, &count);
+
+        let verdict = readiness_verdict(
+            &provider,
+            &json!({ "model": "test" }),
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("readiness result");
+
+        assert_eq!(verdict.classification, "auth_failure");
+        assert!(verdict.retryable);
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+    }
+
+    #[test]
     fn shared_cache_deduplicates_a_fanout_runtime_probe() {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
@@ -344,5 +834,493 @@ mod tests {
             "{error}"
         );
         assert!(error.message.contains("readiness_invocation"), "{error}");
+    }
+
+    #[test]
+    fn negative_runtime_evidence_expires_and_reprobes_recovered_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let recovered = root.path().join("recovered");
+        let script = root.path().join("recovering-readiness.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2],recovered=process.argv[3];fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1));const ready=fs.existsSync(recovered);process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:'repair credentials',reason:ready?'':'credentials rejected',cache_key:'account',identity:{account:'test'}}));",
+        )
+        .expect("readiness script");
+        let mut provider = provider(&script, &count);
+        provider
+            .readiness_invocation
+            .as_mut()
+            .expect("readiness invocation")
+            .command
+            .argv
+            .push(recovered.display().to_string());
+        let mut cache = ProviderRuntimeReadinessCache::default();
+        let config = json!({ "model": "recovering" });
+
+        assert!(
+            !readiness_verdict(&provider, &config, &mut cache)
+                .expect("initial verdict")
+                .ready
+        );
+        std::fs::write(&recovered, "ready").expect("recover credentials");
+        assert!(
+            !readiness_verdict(&provider, &config, &mut cache)
+                .expect("bounded cached verdict")
+                .ready
+        );
+        for cached in cache
+            .shared
+            .state
+            .lock()
+            .expect("readiness cache")
+            .by_request
+            .values_mut()
+        {
+            if let CachedProviderRuntimeReadiness::Complete { cached_at, .. } = cached {
+                *cached_at = Instant::now()
+                    - PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL
+                    - Duration::from_secs(1);
+            }
+        }
+        assert!(
+            readiness_verdict(&provider, &config, &mut cache)
+                .expect("recovered verdict")
+                .ready
+        );
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+    }
+
+    #[test]
+    fn concurrent_exact_key_probes_singleflight() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("singleflight.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100);process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}}));",
+        )
+        .expect("readiness script");
+        let provider = provider(&script, &count);
+        let cache = ProviderRuntimeReadinessCache::default();
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let provider = provider.clone();
+                let mut cache = cache.clone();
+                scope.spawn(move || {
+                    assert!(
+                        readiness_verdict(&provider, &json!({"model":"same"}), &mut cache)
+                            .expect("readiness")
+                            .ready
+                    );
+                });
+            }
+        });
+        assert_eq!(
+            std::fs::read_to_string(&count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn short_deadline_waiter_does_not_poison_long_deadline_singleflight() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("different-deadlines.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),200);",
+        )
+        .expect("readiness script");
+        let provider = provider(&script, &count);
+        let cache = ProviderRuntimeReadinessCache::default();
+        let long_provider = provider.clone();
+        let mut long_cache = cache.clone();
+        let long = std::thread::spawn(move || {
+            readiness_verdict_with_credentials_and_deadline(
+                &long_provider,
+                &json!({"model":"same"}),
+                &[],
+                &mut long_cache,
+                Some(crate::agent_task_timeout::now_unix_ms() + 2_000),
+            )
+        });
+        let started = Instant::now() + Duration::from_secs(5);
+        loop {
+            let in_flight = cache
+                .shared
+                .state
+                .lock()
+                .expect("readiness cache")
+                .by_request
+                .values()
+                .any(|entry| matches!(entry, CachedProviderRuntimeReadiness::InFlight));
+            if in_flight {
+                break;
+            }
+            assert!(
+                !long.is_finished(),
+                "long probe finished before publication"
+            );
+            assert!(Instant::now() < started, "long probe did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 25;
+        let error = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"same"}),
+            &[],
+            &mut cache.clone(),
+            Some(short_deadline),
+        )
+        .expect_err("short waiter must time out locally");
+        assert_eq!(error.details["classification"], "timeout");
+        assert_eq!(error.details["deadline_unix_ms"], short_deadline);
+        assert!(
+            long.join()
+                .expect("long waiter")
+                .expect("long readiness")
+                .ready
+        );
+
+        let mut cache = cache;
+        assert!(
+            readiness_verdict(&provider, &json!({"model":"same"}), &mut cache)
+                .expect("published long result")
+                .ready
+        );
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn expired_probe_owner_releases_singleflight_for_a_long_deadline_retry() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("owner-different-deadlines.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),200);",
+        )
+        .expect("readiness script");
+        let provider = provider(&script, &count);
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 25;
+        let error = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"same"}),
+            &[],
+            &mut cache,
+            Some(short_deadline),
+        )
+        .expect_err("short probe owner must time out locally");
+        assert_eq!(error.details["classification"], "timeout");
+        assert_eq!(error.details["deadline_unix_ms"], short_deadline);
+
+        let verdict = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"same"}),
+            &[],
+            &mut cache,
+            Some(crate::agent_task_timeout::now_unix_ms() + 2_000),
+        )
+        .expect("long waiter starts a fresh readiness probe");
+        assert!(verdict.ready);
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn distinct_readiness_keys_probe_concurrently() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("unused-count");
+        let script = root.path().join("concurrent.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const root=process.argv[3],model=req.effective_config.model,other=model==='a'?'b':'a';fs.writeFileSync(root+'/started-'+model,'');while(!fs.existsSync(root+'/started-'+other)){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:model,identity:{model}}));",
+        )
+        .expect("readiness script");
+        let mut provider = provider(&script, &count);
+        provider
+            .readiness_invocation
+            .as_mut()
+            .expect("readiness invocation")
+            .command
+            .argv
+            .push(root.path().display().to_string());
+        let cache = ProviderRuntimeReadinessCache::default();
+        std::thread::scope(|scope| {
+            for model in ["a", "b"] {
+                let provider = provider.clone();
+                let mut cache = cache.clone();
+                scope.spawn(move || {
+                    assert!(
+                        readiness_verdict(&provider, &json!({"model":model}), &mut cache)
+                            .expect("readiness")
+                            .ready
+                    );
+                });
+            }
+        });
+        assert!(root.path().join("started-a").exists());
+        assert!(root.path().join("started-b").exists());
+    }
+
+    #[test]
+    fn concurrent_distinct_keys_keep_pending_cache_entries_bounded() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let release = root.path().join("release");
+        let probes = root.path().join("probes");
+        let script = root.path().join("bounded.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const release=process.argv[2];fs.appendFileSync(process.argv[3],req.effective_config.model+'\\n');const finish=()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:req.effective_config.model,identity:{model:req.effective_config.model}}));if(fs.existsSync(release)){finish()}else{const timer=setInterval(()=>{if(fs.existsSync(release)){clearInterval(timer);finish()}},10)}",
+        )
+        .expect("readiness script");
+        let mut provider = provider(&script, &release);
+        provider
+            .readiness_invocation
+            .as_mut()
+            .expect("readiness invocation")
+            .command
+            .argv
+            .push(probes.display().to_string());
+        let cache = ProviderRuntimeReadinessCache::default();
+        std::thread::scope(|scope| {
+            for index in (0..65).chain(std::iter::once(0)) {
+                let provider = provider.clone();
+                let mut cache = cache.clone();
+                scope.spawn(move || {
+                    assert!(
+                        readiness_verdict(
+                            &provider,
+                            &json!({"model": format!("model-{index}")}),
+                            &mut cache,
+                        )
+                        .expect("readiness")
+                        .ready
+                    );
+                });
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let entries = cache
+                    .shared
+                    .state
+                    .lock()
+                    .expect("readiness cache")
+                    .by_request
+                    .len();
+                assert!(entries <= 64);
+                if entries == 64 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "pending probes did not fill cache"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::write(&release, "release").expect("release probes");
+        });
+        assert!(
+            cache
+                .shared
+                .state
+                .lock()
+                .expect("readiness cache")
+                .by_request
+                .len()
+                <= 64
+        );
+        assert_eq!(
+            std::fs::read_to_string(probes)
+                .expect("probe log")
+                .lines()
+                .filter(|model| *model == "model-0")
+                .count(),
+            1,
+            "same-key waiters must retain singleflight while distinct keys saturate the cache"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_errors_are_cached_briefly() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("failure.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');process.exit(1);",
+        )
+        .expect("readiness script");
+        let provider = provider(&script, &count);
+        let mut cache = ProviderRuntimeReadinessCache::default();
+        for _ in 0..2 {
+            assert!(readiness_verdict(&provider, &json!({"model":"error"}), &mut cache).is_err());
+        }
+        assert_eq!(
+            std::fs::read_to_string(&count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS
+        );
+        std::fs::write(
+            &script,
+            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'recovered',identity:{account:'recovered'}}));",
+        )
+        .expect("recover probe");
+        cache.expire_all();
+        assert!(
+            readiness_verdict(&provider, &json!({"model":"error"}), &mut cache)
+                .expect("recovered probe")
+                .ready
+        );
+        assert_eq!(
+            std::fs::read_to_string(&count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS + 1
+        );
+    }
+
+    #[test]
+    fn readiness_timeout_is_shared_across_retries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("retry-deadline.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];const n=fs.existsSync(count)?Number(fs.readFileSync(count,'utf8'))+1:1;fs.writeFileSync(count,String(n));if(n===1){process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'transient_failure',retryable:true,remediation:'retry',reason:'transient',cache_key:'retry',identity:{}}))}else{setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'ready',identity:{}})),5000)}",
+        )
+        .expect("readiness script");
+        let mut provider = provider(&script, &count);
+        provider
+            .readiness_invocation
+            .as_mut()
+            .expect("readiness invocation")
+            .timeout_ms = 2_000;
+        let gate = Box::leak(Box::new(ProviderReadinessProbeGate {
+            active: Mutex::new(0),
+            changed: Condvar::new(),
+        }));
+        let error = run_readiness_probe_with_gate(
+            &provider,
+            &json!({"model":"retry-deadline"}),
+            &[],
+            Some(gate),
+            Instant::now() + Duration::from_millis(2_000),
+            2_000,
+        )
+        .expect_err("the retry shares the first attempt's total deadline");
+
+        assert!(error.contains("timed out after"), "{error}");
+        assert!(error.contains(" ms"), "{error}");
+        let retry_timeout_ms = error
+            .split("timed out after ")
+            .nth(1)
+            .and_then(|value| value.split(" ms").next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("millisecond retry timeout");
+        assert!(retry_timeout_ms < 2_000, "{error}");
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+    }
+
+    #[test]
+    fn readiness_permit_wait_uses_the_total_probe_deadline() {
+        let gate = Box::leak(Box::new(ProviderReadinessProbeGate {
+            active: Mutex::new(0),
+            changed: Condvar::new(),
+        }));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let permits = (0..MAX_CONCURRENT_PROVIDER_READINESS_PROBES)
+            .map(|_| {
+                acquire_probe_permit_from_gate(gate, deadline, 1_000)
+                    .expect("fill readiness permits")
+            })
+            .collect::<Vec<_>>();
+
+        let error =
+            acquire_probe_permit_from_gate(gate, Instant::now() + Duration::from_millis(25), 25)
+                .expect_err("saturated readiness queue must be bounded");
+
+        assert!(error.contains("timed out after 25 ms"), "{error}");
+        drop(permits);
+    }
+
+    #[test]
+    fn expired_execution_deadline_returns_typed_timeout_without_a_probe() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let provider = provider(&readiness_script(root.path()), &count);
+
+        let error = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"ready"}),
+            &[],
+            &mut ProviderRuntimeReadinessCache::default(),
+            Some(crate::agent_task_timeout::now_unix_ms().saturating_sub(1)),
+        )
+        .expect_err("expired deadline stops before probing");
+
+        assert_eq!(error.details["classification"], "timeout");
+        assert_eq!(error.details["zero_provider_executions"], true);
+        assert!(!count.exists());
+    }
+
+    #[test]
+    fn readiness_command_timeout_is_capped_to_the_absolute_deadline() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pid_file = root.path().join("pid");
+        let script = root.path().join("slow.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');fs.writeFileSync(process.argv[2],String(process.pid));setTimeout(()=>process.stdout.write('{}'),5000);",
+        )
+        .expect("slow readiness script");
+        let provider = provider(&script, &pid_file);
+        let started = Instant::now();
+
+        let error = readiness_verdict_with_credentials_and_deadline(
+            &provider,
+            &json!({"model":"slow"}),
+            &[],
+            &mut ProviderRuntimeReadinessCache::default(),
+            Some(crate::agent_task_timeout::now_unix_ms() + 100),
+        )
+        .expect_err("absolute deadline interrupts readiness");
+
+        assert_eq!(error.details["classification"], "timeout");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("probe recorded its pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric probe pid");
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        while homeboy_core::process::pid_is_running(pid) {
+            assert!(
+                Instant::now() < cleanup_deadline,
+                "readiness probe {pid} survived its absolute deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

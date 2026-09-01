@@ -13,12 +13,13 @@ use super::*;
 use crate::agent_task::ResolvedAgentTaskRuntimeTool;
 use crate::agent_task_executor_evidence::link_latest_executor_evidence;
 use crate::agent_task_process_containment::{
-    contained_group_recovery_commands, AgentTaskProcessContainment,
+    contained_group_recovery_commands, AgentTaskProcessContainment, AgentTaskProcessSupervisor,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -37,6 +38,9 @@ const WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS: u64 = 200;
 const WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS: u64 = 5_000;
 pub const PROVIDER_READINESS_RESULT_SCHEMA: &str =
     "homeboy/agent-task-provider-readiness-result/v1";
+const PROVIDER_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
+const PROVIDER_READINESS_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+const PROVIDER_READINESS_IO_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProviderCommandEnvError {
@@ -112,10 +116,20 @@ impl ProviderOutputCapture {
 /// escalating backoff. Permanent failures (auth, validation, malformed input,
 /// capability gaps) fail fast on the first attempt. Each retry is surfaced in
 /// the returned outcome diagnostics so the behaviour is visible in run output.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn run_materialized_provider_command(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
     execution: &AgentTaskExecutionContext,
+) -> AgentTaskOutcome {
+    run_materialized_provider_command_with_credentials(request, provider, execution, None)
+}
+
+pub(super) fn run_materialized_provider_command_with_credentials(
+    request: &AgentTaskExecutorRequest,
+    provider: &AgentTaskExecutorProvider,
+    execution: &AgentTaskExecutionContext,
+    credential_env: Option<&[(String, String)]>,
 ) -> AgentTaskOutcome {
     let mut retry_attempt = 1;
     // This state belongs to one invocation's retry sequence. It cannot couple
@@ -123,7 +137,12 @@ pub(super) fn run_materialized_provider_command(
     let mut prior_immediate_failure = None;
     loop {
         let started = Instant::now();
-        let mut outcome = run_materialized_provider_command_once(request, provider, execution);
+        let mut outcome = run_materialized_provider_command_once_with_credentials(
+            request,
+            provider,
+            execution,
+            credential_env,
+        );
         classify_provider_policy_denial(request, &mut outcome);
         classify_transient_provider_outcome(&mut outcome);
 
@@ -177,7 +196,31 @@ pub(super) fn run_materialized_provider_command(
         let backoff_ms =
             PROVIDER_TRANSIENT_BASE_BACKOFF_MS.saturating_mul(1u64 << (retry_attempt - 1));
         if backoff_ms > 0 {
-            std::thread::sleep(Duration::from_millis(backoff_ms));
+            let remaining = crate::agent_task_timeout::remaining_execution_deadline_ms(
+                request.limits.execution_deadline_unix_ms,
+            );
+            if remaining == Some(0) {
+                return execution_deadline_outcome(
+                    request,
+                    provider,
+                    &render_provider_command_display(provider),
+                    "provider_retry_backoff",
+                );
+            }
+            std::thread::sleep(Duration::from_millis(
+                remaining.map_or(backoff_ms, |remaining| remaining.min(backoff_ms)),
+            ));
+            if crate::agent_task_timeout::remaining_execution_deadline_ms(
+                request.limits.execution_deadline_unix_ms,
+            ) == Some(0)
+            {
+                return execution_deadline_outcome(
+                    request,
+                    provider,
+                    &render_provider_command_display(provider),
+                    "provider_retry_backoff",
+                );
+            }
         }
         retry_attempt += 1;
     }
@@ -618,8 +661,8 @@ pub(super) struct ProviderContainmentReport {
 }
 
 impl ProviderContainmentReport {
-    fn record(&mut self, containment: &AgentTaskProcessContainment, result: Result<(), String>) {
-        self.leader_pid = containment.leader_pid();
+    fn record(&mut self, supervisor: &AgentTaskProcessSupervisor, result: Result<(), String>) {
+        self.leader_pid = supervisor.leader_pid();
         if let Err(error) = result {
             self.cleanup_errors.push(error);
         }
@@ -653,10 +696,20 @@ impl ProviderContainmentReport {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn run_materialized_provider_command_once(
     request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
     execution: &AgentTaskExecutionContext,
+) -> AgentTaskOutcome {
+    run_materialized_provider_command_once_with_credentials(request, provider, execution, None)
+}
+
+fn run_materialized_provider_command_once_with_credentials(
+    request: &AgentTaskExecutorRequest,
+    provider: &AgentTaskExecutorProvider,
+    execution: &AgentTaskExecutionContext,
+    credential_env: Option<&[(String, String)]>,
 ) -> AgentTaskOutcome {
     let mut containment_report = ProviderContainmentReport::default();
     let mut outcome = run_materialized_provider_command_once_contained(
@@ -664,6 +717,7 @@ pub(super) fn run_materialized_provider_command_once(
         provider,
         &mut containment_report,
         execution,
+        credential_env,
     );
     containment_report.annotate(&mut outcome);
     if let Err(error) = retain_failed_workspace_artifacts(&mut outcome, request) {
@@ -683,6 +737,7 @@ fn run_materialized_provider_command_once_contained(
     provider: &AgentTaskExecutorProvider,
     containment_report: &mut ProviderContainmentReport,
     execution: &AgentTaskExecutionContext,
+    credential_env: Option<&[(String, String)]>,
 ) -> AgentTaskOutcome {
     let run_id = execution.run_id.as_deref();
     let attempt = execution.attempt;
@@ -799,7 +854,7 @@ fn run_materialized_provider_command_once_contained(
             )
         }
     };
-    let mut env = match provider_command_env(request, provider) {
+    let mut env = match provider_command_env_with_credentials(request, provider, credential_env) {
         Ok(env) => env,
         Err(ProviderCommandEnvError::Secret(error)) => {
             return failure_outcome(
@@ -973,7 +1028,7 @@ fn run_materialized_provider_command_once_contained(
     // process itself — reaps the descendants instead of only the direct child
     // (#11477). Fail closed: an uncontainable provider is one whose orphans
     // nothing can reap.
-    let mut containment = match AgentTaskProcessContainment::prepare(&mut command_builder) {
+    let containment = match AgentTaskProcessContainment::prepare(&mut command_builder) {
         Ok(containment) => containment,
         Err(error) => {
             return failure_outcome(
@@ -990,7 +1045,7 @@ fn run_materialized_provider_command_once_contained(
         }
     };
 
-    let mut child = match command_builder.spawn() {
+    let child = match command_builder.spawn() {
         Ok(child) => child,
         Err(error) => {
             return failure_outcome(
@@ -1004,6 +1059,22 @@ fn run_materialized_provider_command_once_contained(
         }
     };
 
+    let mut child = match containment.supervise(child) {
+        Ok(child) => child,
+        Err(error) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::Provider,
+                "agent_task.provider_containment_failed",
+                format!(
+                    "Homeboy could not guard the process tree of provider '{}': {error}",
+                    provider.id
+                ),
+                json!({ "provider": provider.id, "command": command, "phase": "attach" }),
+            );
+        }
+    };
     if let Some(run_id) = run_id {
         // Failure to record this diagnostic identity must not interrupt provider
         // execution. The reservation remains the execution authority.
@@ -1023,23 +1094,6 @@ fn run_materialized_provider_command_once_contained(
                 child.id(),
             );
         }
-    }
-
-    if let Err(error) = containment.attach(&child) {
-        let attach_error = error.to_string();
-        let cleanup = containment.terminate_live(&mut child);
-        containment_report.record(&containment, cleanup);
-        return failure_outcome(
-            request,
-            AgentTaskOutcomeStatus::ProviderError,
-            AgentTaskFailureClassification::Provider,
-            "agent_task.provider_containment_failed",
-            format!(
-                "Homeboy could not guard the process tree of provider '{}': {attach_error}",
-                provider.id
-            ),
-            json!({ "provider": provider.id, "command": command, "phase": "attach" }),
-        );
     }
 
     let started = Instant::now();
@@ -1189,18 +1243,18 @@ fn run_materialized_provider_command_once_contained(
     // itself failed. The child is then still unreaped and still running, so it
     // needs the live termination path rather than a leader-exited reap.
     let containment_cleanup = if killed_for_liveness || timed_out || status.is_none() {
-        containment.terminate_live(&mut child)
+        child.terminate_live()
     } else {
-        containment.reap_after_exit()
+        child.reap_after_exit()
     };
     let cancellation_acknowledged = containment_cleanup.is_ok();
-    containment_report.record(&containment, containment_cleanup);
+    containment_report.record(&child, containment_cleanup);
 
-    if let Some(handle) = stdout_reader {
-        let _ = handle.join();
+    if let Some(reader) = stdout_reader {
+        reader.finish(Duration::from_millis(100));
     }
-    if let Some(handle) = stderr_reader {
-        let _ = handle.join();
+    if let Some(reader) = stderr_reader {
+        reader.finish(Duration::from_millis(100));
     }
 
     let stdout_capture = stdout_capture.lock().expect("stdout capture");
@@ -1687,6 +1741,7 @@ fn test_execution_context(run_id: Option<&str>) -> AgentTaskExecutionContext {
         attempt: 1,
         cancellation: crate::agent_task_scheduler::AgentTaskCancellationToken::default(),
         lifecycle_store: None,
+        provider_capacity_key: None,
     }
 }
 
@@ -1718,38 +1773,22 @@ fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest
     }
 }
 
-fn spawn_output_reader<R>(
-    mut reader: R,
-    buffer: Arc<Mutex<Vec<u8>>>,
-    last_progress_ms: Arc<AtomicU64>,
-    started: Instant,
-    capture: Option<std::fs::File>,
-) -> std::thread::JoinHandle<()>
-where
-    R: Read + Send + 'static,
-{
-    std::thread::spawn(move || {
-        let mut capture = capture;
-        let mut captured = 0;
-        let mut chunk = [0; 4096];
-        while let Ok(read) = reader.read(&mut chunk) {
-            if read == 0 {
-                break;
+struct ProviderOutputReader {
+    handle: Option<std::thread::JoinHandle<()>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl ProviderOutputReader {
+    fn finish(mut self, timeout: Duration) {
+        if self.done.recv_timeout(timeout).is_ok() {
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
             }
-            buffer.lock().expect("output buffer").extend(&chunk[..read]);
-            if let Some(file) = capture.as_mut() {
-                let remaining = EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES.saturating_sub(captured);
-                let written = remaining.min(read);
-                if written > 0 && file.write_all(&chunk[..written]).is_ok() {
-                    captured += written;
-                }
-            }
-            last_progress_ms.store(
-                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                Ordering::SeqCst,
-            );
         }
-    })
+        // A failed process-group cleanup can leave an inherited output pipe
+        // open indefinitely. Dropping the handle keeps provider deadline
+        // cleanup bounded; the containment guard continues retrying the group.
+    }
 }
 
 fn spawn_provider_output_reader<R>(
@@ -1758,11 +1797,12 @@ fn spawn_provider_output_reader<R>(
     last_progress_ms: Arc<AtomicU64>,
     started: Instant,
     runtime_capture: Option<std::fs::File>,
-) -> std::thread::JoinHandle<()>
+) -> ProviderOutputReader
 where
     R: Read + Send + 'static,
 {
-    std::thread::spawn(move || {
+    let (done_tx, done) = std::sync::mpsc::sync_channel(1);
+    let handle = std::thread::spawn(move || {
         let mut runtime_capture = runtime_capture;
         let mut runtime_captured = 0;
         let mut chunk = [0; 4096];
@@ -1785,7 +1825,12 @@ where
             }
             last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
         }
-    })
+        let _ = done_tx.send(());
+    });
+    ProviderOutputReader {
+        handle: Some(handle),
+        done,
+    }
 }
 
 /// Size every file the provider owns under its artifacts directory.
@@ -2513,6 +2558,28 @@ pub fn run_provider_readiness_invocation(
     provider: &AgentTaskExecutorProvider,
     effective_config: &Value,
 ) -> Result<ProviderReadinessInvocationResult, String> {
+    run_provider_readiness_invocation_with_env(provider, effective_config, &[])
+}
+
+pub(crate) fn run_provider_readiness_invocation_with_env(
+    provider: &AgentTaskExecutorProvider,
+    effective_config: &Value,
+    credential_env: &[(String, String)],
+) -> Result<ProviderReadinessInvocationResult, String> {
+    run_provider_readiness_invocation_with_env_and_timeout(
+        provider,
+        effective_config,
+        credential_env,
+        PROVIDER_READINESS_TIMEOUT,
+    )
+}
+
+pub(super) fn run_provider_readiness_invocation_with_env_and_timeout(
+    provider: &AgentTaskExecutorProvider,
+    effective_config: &Value,
+    credential_env: &[(String, String)],
+    timeout: Duration,
+) -> Result<ProviderReadinessInvocationResult, String> {
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
         return Ok(ProviderReadinessInvocationResult {
             ready: true,
@@ -2527,15 +2594,18 @@ pub fn run_provider_readiness_invocation(
     run_provider_readiness_invocation_with_timeout(
         provider,
         effective_config,
-        Duration::from_millis(invocation.timeout_ms),
+        credential_env,
+        timeout.min(Duration::from_millis(invocation.timeout_ms)),
     )
 }
 
 fn run_provider_readiness_invocation_with_timeout(
     provider: &AgentTaskExecutorProvider,
     effective_config: &Value,
+    credential_env: &[(String, String)],
     timeout: Duration,
 ) -> Result<ProviderReadinessInvocationResult, String> {
+    let started = Instant::now();
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
         unreachable!("readiness invocation timeout requires an invocation")
     };
@@ -2558,7 +2628,7 @@ fn run_provider_readiness_invocation_with_timeout(
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     // Runtime readiness receives no ambient credentials. Providers explicitly
     // declare the small environment surface their bounded probe needs.
     let allowlist = invocation
@@ -2579,70 +2649,113 @@ fn run_provider_readiness_invocation_with_timeout(
         }
     }
     command.envs(allowlist);
+    // Request-scoped resolved values override ambient allowlisted credentials.
+    // They are inherited only by this contained probe and are never serialized.
+    command.envs(
+        credential_env
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
     // A readiness invocation is still provider-owned code that can spawn
     // tooling of its own; contain it so a timed-out probe cannot strand a
     // subtree (#11477).
-    let mut containment = AgentTaskProcessContainment::prepare(&mut command)
+    let containment = AgentTaskProcessContainment::prepare(&mut command)
         .map_err(|error| format!("failed to contain provider readiness invocation: {error}"))?;
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| format!("failed to spawn provider readiness invocation: {error}"))?;
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
-        return Err(format!(
-            "failed to guard provider readiness invocation: {error}"
-        ));
-    }
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&input)
-            .map_err(|error| format!("failed to write provider readiness request: {error}"))?;
-    }
-
-    let stdout_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let last_progress = Arc::new(AtomicU64::new(0));
-    let started = Instant::now();
-    let stdout_reader = child.stdout.take().map(|stdout| {
-        spawn_output_reader(
-            stdout,
-            Arc::clone(&stdout_buffer),
-            last_progress,
-            started,
-            None,
-        )
+    let mut child = containment
+        .supervise(child)
+        .map_err(|error| format!("failed to guard provider readiness invocation: {error}"))?;
+    let (stdin_sender, stdin_receiver) = mpsc::sync_channel(1);
+    let stdin_writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin_sender.send(stdin.write_all(&input));
+        })
     });
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let _ = containment.terminate_live(&mut child);
-                if let Some(reader) = stdout_reader {
-                    let _ = reader.join();
+    let stdout_reader = child.stdout.take().map(spawn_readiness_output_reader);
+    let stderr_reader = child.stderr.take().map(spawn_readiness_output_reader);
+    let mut stdin_complete = stdin_writer.is_none();
+    let terminal = loop {
+        if !stdin_complete {
+            match stdin_receiver.try_recv() {
+                Ok(Ok(())) => stdin_complete = true,
+                Ok(Err(error)) => {
+                    break Err(format!(
+                        "failed to write provider readiness request: {error}"
+                    ))
                 }
-                return Err(format!(
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break Err("provider readiness stdin writer stopped unexpectedly".to_string())
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if started.elapsed() <= timeout {
+                    break Ok(status);
+                }
+                break Err(format!(
                     "provider '{}' readiness invocation timed out after {} ms",
                     provider.id,
                     timeout.as_millis()
                 ));
             }
-            Err(error) => {
-                return Err(format!(
-                    "failed to wait for provider readiness result: {error}"
+            Ok(None) if started.elapsed() >= timeout => {
+                break Err(format!(
+                    "provider '{}' readiness invocation timed out after {} ms",
+                    provider.id,
+                    timeout.as_millis()
                 ));
+            }
+            Ok(None) => {
+                std::thread::sleep(
+                    Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
+                );
+            }
+            Err(error) => {
+                break Err(format!(
+                    "failed to wait for provider readiness result: {error}"
+                ))
             }
         }
     };
-    // Reap before joining: a descendant still holding the inherited stdout
-    // pipe would otherwise keep the capture reader from seeing EOF.
-    let _ = containment.reap_after_exit();
-    if let Some(reader) = stdout_reader {
-        let _ = reader.join();
+
+    // Cleanup precedes capture collection: descendants may inherit these pipes.
+    // Capture is received with a deadline as a second line of defence, so even
+    // an OS-level cleanup failure cannot strand readiness forever.
+    let cleanup = if terminal.is_ok() {
+        child.reap_after_exit()
+    } else {
+        child.terminate_live()
+    };
+    let capture_timeout = || {
+        timeout
+            .saturating_sub(started.elapsed())
+            .min(PROVIDER_READINESS_IO_DRAIN_TIMEOUT)
+    };
+    let stdout = receive_readiness_output(stdout_reader, capture_timeout());
+    let stderr = receive_readiness_output(stderr_reader, capture_timeout());
+    drop(stdin_writer);
+
+    if let Err(error) = cleanup {
+        return Err(match terminal {
+            Ok(_) => format!("failed to clean up provider readiness invocation: {error}"),
+            Err(terminal_error) => format!("{terminal_error}; cleanup failed: {error}"),
+        });
+    }
+    let status = terminal?;
+    let stdout = stdout?;
+    let stderr = stderr?;
+    if stdout.truncated || stderr.truncated {
+        return Err(format!(
+            "provider '{}' readiness invocation output exceeded {} bytes per stream",
+            provider.id, PROVIDER_READINESS_OUTPUT_LIMIT_BYTES
+        ));
     }
     if !status.success() {
         return Err(format!(
@@ -2651,8 +2764,7 @@ fn run_provider_readiness_invocation_with_timeout(
             status.code().unwrap_or(-1)
         ));
     }
-    let stdout = stdout_buffer.lock().expect("stdout buffer").clone();
-    let result_value: Value = serde_json::from_slice(&stdout).map_err(|_| {
+    let result_value: Value = serde_json::from_slice(&stdout.bytes).map_err(|_| {
         format!(
             "provider '{}' readiness invocation returned malformed JSON",
             provider.id
@@ -2665,12 +2777,115 @@ fn run_provider_readiness_invocation_with_timeout(
             provider.id
         ));
     }
-    serde_json::from_value(result_value).map_err(|_| {
-        format!(
-            "provider '{}' readiness invocation returned an invalid result",
-            provider.id
-        )
-    })
+    let mut result: ProviderReadinessInvocationResult = serde_json::from_value(result_value)
+        .map_err(|_| {
+            format!(
+                "provider '{}' readiness invocation returned an invalid result",
+                provider.id
+            )
+        })?;
+    redact_readiness_credentials(&mut result, credential_env);
+    Ok(result)
+}
+
+struct ReadinessOutputCapture {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn spawn_readiness_output_reader<R>(
+    mut reader: R,
+) -> mpsc::Receiver<std::io::Result<ReadinessOutputCapture>>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut truncated = false;
+        let mut chunk = [0; 8192];
+        let result = loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break Ok(ReadinessOutputCapture { bytes, truncated }),
+                Ok(read) => {
+                    let available =
+                        PROVIDER_READINESS_OUTPUT_LIMIT_BYTES.saturating_sub(bytes.len());
+                    bytes.extend_from_slice(&chunk[..read.min(available)]);
+                    truncated |= read > available;
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn receive_readiness_output(
+    receiver: Option<mpsc::Receiver<std::io::Result<ReadinessOutputCapture>>>,
+    timeout: Duration,
+) -> Result<ReadinessOutputCapture, String> {
+    let Some(receiver) = receiver else {
+        return Ok(ReadinessOutputCapture {
+            bytes: Vec::new(),
+            truncated: false,
+        });
+    };
+    receiver
+        .recv_timeout(timeout)
+        .map_err(|_| "provider readiness output pipe did not close after cleanup".to_string())?
+        .map_err(|error| format!("failed to read provider readiness output: {error}"))
+}
+
+fn redact_readiness_credentials(
+    result: &mut ProviderReadinessInvocationResult,
+    credential_env: &[(String, String)],
+) {
+    let credentials = credential_env
+        .iter()
+        .filter_map(|(_, value)| {
+            (!value.is_empty()).then(|| {
+                (
+                    value.as_str(),
+                    format!(
+                        "[REDACTED:{}]",
+                        homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes())
+                    ),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    for (credential, _) in &credentials {
+        result.classification = result.classification.replace(credential, "[REDACTED]");
+        result.reason = result.reason.replace(credential, "[REDACTED]");
+        result.remediation = result.remediation.replace(credential, "[REDACTED]");
+    }
+    for (credential, hashed) in &credentials {
+        result.cache_key = result.cache_key.replace(credential, hashed);
+        redact_json_credential(&mut result.identity, credential, hashed);
+    }
+}
+
+fn redact_json_credential(value: &mut Value, credential: &str, replacement: &str) {
+    match value {
+        Value::String(text) => *text = text.replace(credential, replacement),
+        Value::Array(items) => {
+            for item in items {
+                redact_json_credential(item, credential, replacement);
+            }
+        }
+        Value::Object(entries) => {
+            let prior = std::mem::take(entries);
+            for (key, mut item) in prior {
+                redact_json_credential(&mut item, credential, replacement);
+                entries.insert(key.replace(credential, replacement), item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) if value.to_string() == credential => {
+            *value = Value::String(replacement.to_string());
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 #[cfg(test)]
@@ -2679,7 +2894,7 @@ pub(crate) fn run_provider_readiness_invocation_with_test_timeout(
     effective_config: &Value,
     timeout: Duration,
 ) -> Result<ProviderReadinessInvocationResult, String> {
-    run_provider_readiness_invocation_with_timeout(provider, effective_config, timeout)
+    run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout)
 }
 
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
@@ -2818,7 +3033,7 @@ pub fn probe_provider_executor_resolves(
     // The probe loads the provider's full require graph, which can itself
     // spawn helpers. Contain it so a timed-out probe leaves nothing behind
     // (#11477).
-    let mut containment = match AgentTaskProcessContainment::prepare(&mut command_builder) {
+    let containment = match AgentTaskProcessContainment::prepare(&mut command_builder) {
         Ok(containment) => containment,
         Err(error) => {
             return ProviderExecutorResolution::Unresolved {
@@ -2828,7 +3043,7 @@ pub fn probe_provider_executor_resolves(
         }
     };
 
-    let mut child = match command_builder.spawn() {
+    let child = match command_builder.spawn() {
         Ok(child) => child,
         Err(error) => {
             return ProviderExecutorResolution::Unresolved {
@@ -2838,13 +3053,27 @@ pub fn probe_provider_executor_resolves(
         }
     };
 
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
-        return ProviderExecutorResolution::Unresolved {
-            command: command.clone(),
-            detail: format!("failed to guard executor probe: {error}"),
-        };
-    }
+    let mut child = match containment.supervise(child) {
+        Ok(child) => child,
+        Err(error) => {
+            return ProviderExecutorResolution::Unresolved {
+                command: command.clone(),
+                detail: format!("failed to guard executor probe: {error}"),
+            };
+        }
+    };
+
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = std::io::Read::by_ref(&mut stderr)
+                .take(64 * 1024)
+                .read_to_end(&mut buffer);
+            let _ = send.send(buffer);
+        });
+        receive
+    });
 
     let started = Instant::now();
     let status = loop {
@@ -2852,7 +3081,7 @@ pub fn probe_provider_executor_resolves(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if started.elapsed() >= EXECUTOR_RESOLUTION_PROBE_TIMEOUT {
-                    let _ = containment.terminate_live(&mut child);
+                    let _ = child.terminate_live();
                     return ProviderExecutorResolution::Unresolved {
                         command,
                         detail: "executor resolution probe timed out".to_string(),
@@ -2871,20 +3100,15 @@ pub fn probe_provider_executor_resolves(
 
     // Reap before draining stderr: a surviving descendant holding the
     // inherited pipe would block `read_to_end` indefinitely.
-    let _ = containment.reap_after_exit();
+    let _ = child.reap_after_exit();
 
     if status.success() {
         return ProviderExecutorResolution::Resolved;
     }
 
-    let stderr = child
-        .stderr
-        .take()
-        .map(|mut stderr| {
-            let mut buffer = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stderr, &mut buffer);
-            String::from_utf8_lossy(&buffer).trim().to_string()
-        })
+    let stderr = stderr_reader
+        .and_then(|reader| reader.recv_timeout(Duration::from_millis(100)).ok())
+        .map(|buffer| String::from_utf8_lossy(&buffer).trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
             "executor exited non-zero while loading its module require graph".to_string()
@@ -2903,9 +3127,18 @@ fn first_stderr_lines(stderr: &str, max: usize) -> String {
     stderr.lines().take(max).collect::<Vec<_>>().join("\n")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn provider_command_env(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
+) -> Result<Vec<(String, String)>, ProviderCommandEnvError> {
+    provider_command_env_with_credentials(request, provider, None)
+}
+
+fn provider_command_env_with_credentials(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    credential_env: Option<&[(String, String)]>,
 ) -> Result<Vec<(String, String)>, ProviderCommandEnvError> {
     // Both runtime path env vars resolve to the provider runtime_path, falling
     // back to the extension_path when the runtime is not separately declared.
@@ -2961,13 +3194,33 @@ pub(super) fn provider_command_env(
         ("HOMEBOY_AGENT_RUNTIME_PATH".to_string(), runtime_path),
     ];
     env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
-    env.extend(
-        resolve_secret_env_with_fallbacks(
-            &secret_env_plan.secret_env_names(),
-            &provider_secret_sources(provider, Some(request)),
-        )
-        .map_err(ProviderCommandEnvError::Secret)?,
-    );
+    if let Some(credential_env) = credential_env {
+        env.extend(credential_env.iter().cloned());
+        let bound_names = credential_env
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let remaining_names = secret_env_plan
+            .secret_env_names()
+            .into_iter()
+            .filter(|name| !bound_names.contains(name.as_str()))
+            .collect::<Vec<_>>();
+        env.extend(
+            resolve_secret_env_with_fallbacks(
+                &remaining_names,
+                &provider_secret_sources(provider, Some(request)),
+            )
+            .map_err(ProviderCommandEnvError::Secret)?,
+        );
+    } else {
+        env.extend(
+            resolve_secret_env_with_fallbacks(
+                &secret_env_plan.secret_env_names(),
+                &provider_secret_sources(provider, Some(request)),
+            )
+            .map_err(ProviderCommandEnvError::Secret)?,
+        );
+    }
     // Enforce the executor git-mutation boundary: strip git push credentials so a
     // provider cannot push a candidate to a real remote from its isolated attempt
     // checkout before Homeboy's verification/promotion/finalization. Homeboy
@@ -3147,5 +3400,154 @@ process.exit(2);
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod readiness_process_tests {
+    use super::*;
+
+    fn readiness_provider(script: &str, extra_args: &[String]) -> AgentTaskExecutorProvider {
+        let mut argv = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+        argv.extend_from_slice(extra_args);
+        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "test.readiness.provider",
+            "backend": "test",
+            "invocation": { "argv": ["ignored"] },
+        }))
+        .expect("provider parses");
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv,
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
+        provider
+    }
+
+    fn wait_until_not_running(pid: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if !homeboy_core::engine::command::process_is_running(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn recorded_pid(path: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::read_to_string(path)
+            .expect("descendant pid recorded")
+            .trim()
+            .parse()
+            .expect("numeric descendant pid")
+    }
+
+    #[test]
+    fn readiness_rejects_noisy_stdout_and_stderr_with_bounded_capture() {
+        let provider = readiness_provider(
+            "cat >/dev/null; dd if=/dev/zero bs=70000 count=1 2>/dev/null; dd if=/dev/zero bs=70000 count=1 1>&2 2>/dev/null",
+            &[],
+        );
+
+        let error = run_provider_readiness_invocation_with_env_and_timeout(
+            &provider,
+            &Value::Null,
+            &[],
+            Duration::from_secs(5),
+        )
+        .expect_err("oversized readiness output is rejected");
+
+        assert!(
+            error.contains("output exceeded 65536 bytes per stream"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn readiness_does_not_wait_for_a_descendant_held_output_pipe() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let provider = readiness_provider(
+            "cat >/dev/null; sleep 30 & echo $! > \"$1\"; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":null}'",
+            &["readiness-test".to_string(), pid_file.display().to_string()],
+        );
+        let started = Instant::now();
+
+        let result = run_provider_readiness_invocation_with_env_and_timeout(
+            &provider,
+            &Value::Null,
+            &[],
+            Duration::from_secs(5),
+        )
+        .expect("readiness result returns after descendant cleanup");
+
+        assert!(result.ready);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let pid = recorded_pid(&pid_file);
+        assert!(
+            wait_until_not_running(pid),
+            "descendant {pid} survived cleanup"
+        );
+    }
+
+    #[test]
+    fn failed_readiness_stdin_terminates_and_reaps_the_process_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let provider = readiness_provider(
+            "sleep 30 & echo $! > \"$1\"; exec 0<&-; sleep 1",
+            &["readiness-test".to_string(), pid_file.display().to_string()],
+        );
+        let config = json!({ "large": "x".repeat(2 * 1024 * 1024) });
+
+        let error = run_provider_readiness_invocation_with_env_and_timeout(
+            &provider,
+            &config,
+            &[],
+            Duration::from_secs(5),
+        )
+        .expect_err("closed readiness stdin fails");
+
+        assert!(
+            error.contains("failed to write provider readiness request"),
+            "{error}"
+        );
+        let pid = recorded_pid(&pid_file);
+        assert!(
+            wait_until_not_running(pid),
+            "descendant {pid} survived failed stdin cleanup"
+        );
+    }
+
+    #[test]
+    fn readiness_timeout_terminates_and_reaps_the_process_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let provider = readiness_provider(
+            "cat >/dev/null; sleep 30 & echo $! > \"$1\"; wait",
+            &["readiness-test".to_string(), pid_file.display().to_string()],
+        );
+
+        let error = run_provider_readiness_invocation_with_env_and_timeout(
+            &provider,
+            &Value::Null,
+            &[],
+            Duration::from_millis(100),
+        )
+        .expect_err("readiness invocation times out");
+
+        assert!(error.contains("timed out"), "{error}");
+        let pid = recorded_pid(&pid_file);
+        assert!(
+            wait_until_not_running(pid),
+            "descendant {pid} survived timeout cleanup"
+        );
     }
 }

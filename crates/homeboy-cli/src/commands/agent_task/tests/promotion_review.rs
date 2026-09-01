@@ -503,12 +503,8 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         })
         .expect("Cook evidence reads the selected candidate plan");
 
-        for value in [
-            &status_value,
-            &review_value,
-            &diagnose_value,
-            &evidence_value,
-        ] {
+        assert_eq!(status_value["run"], candidate_run_id);
+        for value in [&review_value, &diagnose_value, &evidence_value] {
             assert_eq!(value["run_id"], candidate_run_id);
             assert_eq!(
                 value["candidate_selection"]["latest_attempt_run_id"],
