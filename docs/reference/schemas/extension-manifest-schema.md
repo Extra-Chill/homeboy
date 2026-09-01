@@ -15,6 +15,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
   "scripts": {},
   "audit": {},
   "deploy": {},
+  "deployment_providers": [],
   "executable": {},
   "platform": {},
   "structured_sidecars": {},
@@ -46,6 +47,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 - **`scripts`** (object): Scripts that implement extension capabilities (fingerprint, refactor)
 - **`audit`** (object): Audit capability config, including docs, test mapping, and typed detector rules
 - **`deploy`** (object): Deploy lifecycle — verifications, overrides, version patterns
+- **`deployment_providers`** (array): Generic extension-owned deployment provider descriptors invoked through Extension API v1
 - **`executable`** (object): Standalone tool runtime and inputs
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
@@ -169,6 +171,38 @@ Deploy configuration declares extension-owned deploy behavior. The `deploy` obje
 - **`skip_permissions_fix`** (boolean): Skip the normal post-install permissions fix for this target.
 
 `deploy.overrides` remains the lower-level escape hatch for extensions that need a fully custom install command. Archive-shaped plugin or theme installs should prefer `deploy.archive_install` so target basename validation and header verification stay on the shared core path.
+
+## Deployment Provider Declarations
+
+`deployment_providers` declares generic provider implementations. Homeboy
+projects each entry as `deployment-provider.<id>` through Extension API v1;
+consumers never receive the command template or extension installation path.
+
+```json
+{
+  "deployment_providers": [{
+    "id": "example.deploy",
+    "command": "sh {{extension_path}}/deploy.sh apply {{payload.contract}}",
+    "dry_run_command": "sh {{extension_path}}/deploy.sh check {{payload.contract}}",
+    "layered_input": {
+      "schema": "homeboy/deployment-provider-payload/v1",
+      "target_required": true,
+      "result_schema": "example/deployment-result/v1"
+    }
+  }]
+}
+```
+
+- **`id`** (string): Provider identity within the owning extension.
+- **`command`** (string): Private mutating command template.
+- **`dry_run_command`** (string): Optional private non-mutating validation command.
+- **`layered_input.schema`** (string): Versioned provider input schema. Homeboy currently accepts `homeboy/deployment-provider-payload/v1`.
+- **`layered_input.target_required`** (boolean): Requires project-owned provider target input.
+- **`layered_input.result_schema`** (string): Optional structured evidence schema. Output that does not match this schema is represented as opaque.
+
+Duplicate provider IDs within one extension are unresolvable. Malformed provider
+descriptors invalidate the manifest with a named field error rather than being
+silently omitted.
 
 ## Structured Sidecar Declarations
 

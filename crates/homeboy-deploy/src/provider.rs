@@ -4,12 +4,21 @@ use std::path::{Path, PathBuf};
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::project::Project;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiDeploymentProviderDiagnostic, ExtensionApiDeploymentProviderDiagnosticKind,
+    ExtensionApiDeploymentProviderInventoryRequest, ExtensionApiDeploymentProviderInvokeRequest,
+    ExtensionApiDeploymentProviderResolveRequest,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_INVENTORY_REQUEST_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA,
+    EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
 
 use super::lifecycle::DeployObservation;
 use super::route::DeployTarget;
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 
 pub(super) struct PreparedProviderDeployment {
+    provider_api: homeboy_core::extension::deployment_api::DeploymentProviderApi,
     components: Vec<PreparedProviderComponent>,
     unresolvable: Vec<UnresolvableComponent>,
 }
@@ -20,7 +29,6 @@ struct PreparedProviderComponent {
     extension: String,
     provider: String,
     input: PreparedProviderInput,
-    result_schema: Option<String>,
     explicit_route: bool,
     dry_run: bool,
 }
@@ -100,11 +108,20 @@ pub(super) fn prepare_if_configured(
         ));
     }
     if provider_count == components.len() {
+        let provider_api = homeboy_core::extension::deployment_api::DeploymentProviderApi::discover(
+            &ExtensionApiDeploymentProviderInventoryRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_INVENTORY_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+            },
+        );
         let components = components
             .iter()
-            .map(|component| prepare_component(project_id, project, component, config))
+            .map(|component| {
+                prepare_component(project_id, project, component, config, &provider_api)
+            })
             .collect::<Result<Vec<_>>>()?;
         return Ok(Some(PreparedProviderDeployment {
+            provider_api,
             components,
             unresolvable,
         }));
@@ -176,6 +193,7 @@ fn prepare_component(
     project: &Project,
     component: &Component,
     config: &DeployConfig,
+    provider_api: &homeboy_core::extension::deployment_api::DeploymentProviderApi,
 ) -> Result<PreparedProviderComponent> {
     let project_attachment = project
         .components
@@ -206,14 +224,30 @@ fn prepare_component(
             }),
         )
     })?;
-    let layered = homeboy_core::extension::catalog::deployment_provider_layered_input(
-        &attachment.extension,
-        &attachment.provider,
-    )?;
+    let provider_response =
+        provider_api.resolve_api(&ExtensionApiDeploymentProviderResolveRequest {
+            schema: EXTENSION_API_DEPLOYMENT_PROVIDER_RESOLVE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: attachment.extension.clone(),
+            provider_id: attachment.provider.clone(),
+        });
+    if let Some(failure) = provider_response.failure {
+        return Err(deployment_provider_operation_error(failure.message));
+    }
+    if let Some(diagnostic) = provider_response.diagnostic {
+        return Err(deployment_provider_diagnostic_error(diagnostic));
+    }
+    let provider = provider_response.provider.ok_or_else(|| {
+        deployment_provider_operation_error("Deployment provider resolution returned no result")
+    })?;
+    let layered = provider
+        .input_schema
+        .as_ref()
+        .map(|schema| (schema, provider.target_required));
     let target_input = project_attachment.deployment_provider_input.as_ref();
     let layered = match layered {
         Some(layered)
-            if layered.schema == homeboy_extension_contract::DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA =>
+            if layered.0 == homeboy_extension_contract::DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA =>
         {
             Some(layered)
         }
@@ -235,11 +269,7 @@ fn prepare_component(
             None,
         ));
     }
-    if layered
-        .as_ref()
-        .is_some_and(|layered| layered.target_required)
-        && target_input.is_none()
-    {
+    if layered.as_ref().is_some_and(|layered| layered.1) && target_input.is_none() {
         // A dual-deliverable component still has a deployable server artifact
         // here, so the remedy is two-sided: configure the provider target, or
         // say which deliverable this deploy meant (#12853).
@@ -268,9 +298,6 @@ fn prepare_component(
 
     validate_repository_policy(component, layered.is_some(), attachment)?;
 
-    let result_schema = layered
-        .as_ref()
-        .and_then(|layered| layered.result_schema.clone());
     let dry_run = config.dry_run || config.check;
     let input = if layered.is_some() {
         PreparedProviderInput::Layered(layered_payload(
@@ -293,7 +320,6 @@ fn prepare_component(
         extension: attachment.extension.clone(),
         provider: attachment.provider.clone(),
         input,
-        result_schema,
         explicit_route: config.target == Some(DeployTarget::Provider),
         dry_run,
     })
@@ -303,12 +329,21 @@ pub(super) fn apply_prepared(
     prepared: PreparedProviderDeployment,
     mut observation: Option<&mut DeployObservation>,
 ) -> Result<DeployOrchestrationResult> {
-    let skipped = prepared.unresolvable.len() as u32;
-    let mut results = Vec::with_capacity(prepared.components.len() + prepared.unresolvable.len());
-    for component in prepared.components {
-        results.push(apply_component(component, observation.as_deref_mut())?);
+    let PreparedProviderDeployment {
+        provider_api,
+        components,
+        unresolvable,
+    } = prepared;
+    let skipped = unresolvable.len() as u32;
+    let mut results = Vec::with_capacity(components.len() + unresolvable.len());
+    for component in components {
+        results.push(apply_component(
+            &provider_api,
+            component,
+            observation.as_deref_mut(),
+        )?);
     }
-    results.extend(unresolvable_results(&prepared.unresolvable));
+    results.extend(unresolvable_results(&unresolvable));
     let failed = results
         .iter()
         .filter(|result| result.status == "failed")
@@ -327,6 +362,7 @@ pub(super) fn apply_prepared(
 }
 
 fn apply_component(
+    provider_api: &homeboy_core::extension::deployment_api::DeploymentProviderApi,
     prepared: PreparedProviderComponent,
     mut observation: Option<&mut DeployObservation>,
 ) -> Result<ComponentDeployResult> {
@@ -336,7 +372,6 @@ fn apply_component(
         extension,
         provider,
         input,
-        result_schema,
         explicit_route,
         dry_run,
     } = prepared;
@@ -349,30 +384,35 @@ fn apply_component(
         PreparedProviderInput::Layered(payload) => (payload.path(), true),
         PreparedProviderInput::Repository(contract) => (contract.as_path(), false),
     };
-    let run = homeboy_core::extension::invoke::run_deployment_provider(
-        &extension,
-        &provider,
-        &project_id,
-        &component.id,
-        &component.local_path,
-        input,
-        dry_run,
-    )?;
+    let response = provider_api.invoke_api(
+        &ExtensionApiDeploymentProviderInvokeRequest {
+            schema: EXTENSION_API_DEPLOYMENT_PROVIDER_INVOKE_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: extension,
+            provider_id: provider,
+            project_id,
+            component_id: component.id.clone(),
+            dry_run,
+        },
+        homeboy_core::extension::deployment_api::DeploymentProviderInvocationContext {
+            component_path: Path::new(&component.local_path),
+            input_path: input,
+        },
+    );
+    if let Some(failure) = response.failure {
+        return Err(deployment_provider_operation_error(failure.message));
+    }
+    if let Some(diagnostic) = response.diagnostic {
+        return Err(deployment_provider_diagnostic_error(diagnostic));
+    }
+    let run = response.result.ok_or_else(|| {
+        deployment_provider_operation_error("Deployment provider invocation returned no result")
+    })?;
     if !dry_run {
         if let Some(observation) = observation {
             observation.phase("verify", true)?;
         }
     }
-    let evidence = run.output.unwrap_or_default();
-    let output = format!("{}{}", evidence.stdout, evidence.stderr);
-    // Layered input can contain target secrets. Provider output is therefore not
-    // promoted into deploy evidence or errors on that path.
-    let provider_result = match (is_layered, result_schema.as_deref()) {
-        (true, Some(schema)) => layered_provider_evidence(&evidence.stdout, schema),
-        (true, None) => serde_json::json!({ "status": "opaque" }),
-        (false, _) => serde_json::from_str::<serde_json::Value>(&evidence.stdout)
-            .unwrap_or_else(|_| serde_json::json!({ "status": "unstructured", "output": output })),
-    };
     let status = if run.exit_code == 0 {
         if dry_run {
             "validated"
@@ -394,31 +434,29 @@ fn apply_component(
         result.local_path = None;
     }
     result.deploy_exit_code = Some(run.exit_code);
-    result.error = (run.exit_code != 0).then(|| {
-        if is_layered {
-            "Deployment provider failed".to_string()
-        } else {
-            output
-        }
-    });
-    result.deployment_provider = Some(provider_result);
+    result.error = run.error;
+    result.deployment_provider = Some(run.evidence);
     Ok(result)
 }
 
-fn layered_provider_evidence(stdout: &str, expected_schema: &str) -> serde_json::Value {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
-        return serde_json::json!({ "status": "opaque" });
+fn deployment_provider_operation_error(message: impl Into<String>) -> Error {
+    Error::validation_invalid_argument("deployment_provider.provider", message.into(), None, None)
+}
+
+fn deployment_provider_diagnostic_error(
+    diagnostic: ExtensionApiDeploymentProviderDiagnostic,
+) -> Error {
+    let field = match diagnostic.kind {
+        ExtensionApiDeploymentProviderDiagnosticKind::DryRunUnsupported => {
+            "deployment_provider.dry_run_command"
+        }
+        ExtensionApiDeploymentProviderDiagnosticKind::NotReady => "deployment_provider.extension",
+        ExtensionApiDeploymentProviderDiagnosticKind::InvalidInput => {
+            "deployment_provider.contract"
+        }
+        _ => "deployment_provider.provider",
     };
-    if value
-        .as_object()
-        .and_then(|object| object.get("schema"))
-        .and_then(serde_json::Value::as_str)
-        == Some(expected_schema)
-    {
-        value
-    } else {
-        serde_json::json!({ "status": "opaque" })
-    }
+    Error::validation_invalid_argument(field, diagnostic.message, None, None)
 }
 
 /// What `layered_payload` was doing when a step failed.
@@ -573,9 +611,8 @@ fn repository_contract(component: &Component, contract: &str) -> Result<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::{
-        layered_payload, layered_provider_evidence, repository_contract, run_if_configured,
-        validate_repository_policy, CREATE_INPUT_CONTEXT, ENCODE_POLICY_CONTEXT,
-        FLUSH_INPUT_CONTEXT, WRITE_INPUT_CONTEXT,
+        layered_payload, repository_contract, run_if_configured, validate_repository_policy,
+        CREATE_INPUT_CONTEXT, ENCODE_POLICY_CONTEXT, FLUSH_INPUT_CONTEXT, WRITE_INPUT_CONTEXT,
     };
     use crate::route::DeployTarget;
     use crate::DeployConfig;
@@ -686,26 +723,6 @@ mod tests {
             &attachment(None, Some(serde_json::json!({})))
         )
         .is_err());
-    }
-
-    #[test]
-    fn layered_evidence_requires_the_declared_object_schema() {
-        let accepted = layered_provider_evidence(
-            r#"{"schema":"fixture/result/v1","status":"ok"}"#,
-            "fixture/result/v1",
-        );
-        assert_eq!(accepted["status"], "ok");
-
-        for rejected in [
-            r#"{"schema":"fixture/result/v2","target":"private-target","path":"/private/payload"}"#,
-            r#"not json /private/payload private-target"#,
-            r#"["fixture/result/v1"]"#,
-        ] {
-            let evidence = layered_provider_evidence(rejected, "fixture/result/v1");
-            assert_eq!(evidence, serde_json::json!({ "status": "opaque" }));
-            assert!(!evidence.to_string().contains("private-target"));
-            assert!(!evidence.to_string().contains("/private/payload"));
-        }
     }
 
     #[test]
