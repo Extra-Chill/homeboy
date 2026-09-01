@@ -1,6 +1,7 @@
 use super::hints::{github_release_applies, push_publish_vs_github_release_hints};
 use super::preflight::build_preflight_steps;
 use super::release::build_release_steps_with_reconciliation;
+use crate::release::context::ReleaseExtension;
 use crate::release::scope::ReleaseScope;
 use crate::release::types::{
     ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions,
@@ -16,7 +17,7 @@ use homeboy_extension_contract::ExtensionManifest;
 #[allow(clippy::too_many_arguments)]
 fn build_release_steps(
     component: &Component,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     current_version: &str,
     new_version: &str,
     changelog_plan: &ReleaseChangelogPlan,
@@ -165,7 +166,11 @@ fn release_plan_adds_extension_declared_release_preflight() {
     .expect("extension manifest");
     extension.id = "registry".to_string();
 
-    let steps = build_preflight_steps(&options, None, &[extension]);
+    let steps = build_preflight_steps(
+        &options,
+        None,
+        &[ReleaseExtension::from_manifest(&extension)],
+    );
     let token = steps
         .iter()
         .find(|step| step.id == "preflight.extension.registry.publish_token")
@@ -558,7 +563,7 @@ fn release_plan_records_dry_run_lower_bump_preview() {
 #[test]
 fn test_build_release_steps() {
     let component = fixture_component();
-    let extension = serde_json::from_value(serde_json::json!({
+    let extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Fixture",
         "version": "1.0.0",
         "actions": [
@@ -581,7 +586,7 @@ fn test_build_release_steps() {
 
     let steps = build_release_steps(
         &component,
-        &[extension],
+        &[ReleaseExtension::from_manifest(&extension)],
         "1.0.0",
         "1.0.1",
         &fixture_changelog_plan(),
@@ -664,7 +669,7 @@ fn release_plan_runs_package_preflight_before_mutating_release_steps() {
 
         let steps = build_release_steps(
             &component,
-            &[extension],
+            &[ReleaseExtension::from_manifest(&extension)],
             "1.0.0",
             "1.0.1",
             &fixture_changelog_plan(),
@@ -1132,7 +1137,7 @@ fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
 
     let steps = build_release_steps(
         &component,
-        &[extension],
+        &[ReleaseExtension::from_manifest(&extension)],
         "1.0.1",
         "1.0.1",
         &fixture_changelog_plan(),
@@ -1245,7 +1250,7 @@ fn head_release_skip_publish_still_uploads_existing_artifacts() {
 
     let steps = build_release_steps(
         &component,
-        &[extension],
+        &[ReleaseExtension::from_manifest(&extension)],
         "1.0.1",
         "1.0.1",
         &fixture_changelog_plan(),
@@ -1278,8 +1283,6 @@ fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
             ScopedExtensionConfig::default(),
         )]));
         let extension = release_extension("wordpress", &["release.package"]);
-        homeboy_core::extension::catalog::save_manifest(&extension)
-            .expect("install extension manifest");
         let mut warnings = Vec::new();
         let mut hints = Vec::new();
         let release_scope =
@@ -1440,7 +1443,7 @@ fn fixture_changelog_plan() -> ReleaseChangelogPlan {
     }
 }
 
-fn release_extension(id: &str, actions: &[&str]) -> ExtensionManifest {
+fn release_extension(id: &str, actions: &[&str]) -> ReleaseExtension {
     let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": id,
         "version": "1.0.0",
@@ -1453,7 +1456,7 @@ fn release_extension(id: &str, actions: &[&str]) -> ExtensionManifest {
     }))
     .expect("extension manifest");
     extension.id = id.to_string();
-    extension
+    ReleaseExtension::from_manifest(&extension)
 }
 
 fn semver_recommendation(

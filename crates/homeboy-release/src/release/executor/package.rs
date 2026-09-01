@@ -4,11 +4,12 @@
 //!
 //! Split out of `executor.rs` to keep packaging/payload logic together.
 
+use crate::release::context::ReleaseExtension;
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
 use homeboy_core::{self};
-use homeboy_extension_contract::{ExtensionCapability, ExtensionManifest};
+use homeboy_extension_contract::ExtensionCapability;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -49,7 +50,7 @@ pub(crate) struct PackageRequest<'a> {
 /// Those children read their own environment by design and must keep doing so.
 pub(crate) fn run_package(
     roots: &homeboy_core::paths::PathRoots,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     state: &mut ReleaseState,
     component: &Component,
     component_id: &str,
@@ -63,9 +64,9 @@ pub(crate) fn run_package(
     } = request;
     let cleanup_before = package_cleanup_snapshot(component)?;
     let result = (|| {
-        let package_extensions: Vec<&ExtensionManifest> = extensions
+        let package_extensions: Vec<&ReleaseExtension> = extensions
             .iter()
-            .filter(|m| m.actions.iter().any(|a| a.id == "release.package"))
+            .filter(|extension| extension.provides_action("release.package"))
             .collect();
 
         let component_build =
@@ -691,7 +692,7 @@ fn run_package_action_with_retry(
 /// Invoke an extension-declared release preflight action.
 pub(crate) fn run_extension_release_preflight(
     step: &homeboy_core::plan::PlanStep,
-    extensions: &[ExtensionManifest],
+    extensions: &[ReleaseExtension],
     state: &ReleaseState,
     component_id: &str,
     component_local_path: &str,
@@ -726,11 +727,7 @@ pub(crate) fn run_extension_release_preflight(
         );
     };
 
-    if !extension
-        .actions
-        .iter()
-        .any(|action| action.id == action_id)
-    {
+    if !extension.provides_action(action_id) {
         return step_failed(
             &step.id,
             &step.kind,
