@@ -453,7 +453,7 @@ pub fn resolve_project_ssh_with_base_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_isolated_home;
+    use crate::test_support::{with_isolated_home, write_component_registration};
 
     fn manifest(id: &str, markers: serde_json::Value) -> ExtensionManifest {
         let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
@@ -509,20 +509,6 @@ mod tests {
         );
 
         assert_eq!(suggestions, vec!["node-like", "typescript-like"]);
-    }
-
-    fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
-        let dir = home.join(".config/homeboy/components");
-        std::fs::create_dir_all(&dir).expect("components dir");
-        std::fs::write(
-            dir.join(format!("{id}.json")),
-            serde_json::json!({
-                "local_path": local_path,
-                "remote_path": format!("wp-content/plugins/{id}")
-            })
-            .to_string(),
-        )
-        .expect("component registration");
     }
 
     fn write_project(home: &Path, id: &str, component_ids: &[&str]) {

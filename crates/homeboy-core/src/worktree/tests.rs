@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::write_component_registration;
 
 /// A caller reading a "missing handle" error needs the handle creation would
 /// actually produce, so the slug rule has to be reachable outside this module.
@@ -351,20 +352,6 @@ fn merged_task_branch_with_stale_upstream(source: &Path, worktree: &Path) {
         .status()
         .unwrap()
         .success());
-}
-
-fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
-    let dir = home.join(".config/homeboy/components");
-    fs::create_dir_all(&dir).expect("components dir");
-    fs::write(
-        dir.join(format!("{id}.json")),
-        serde_json::json!({
-            "local_path": local_path,
-            "remote_path": format!("wp-content/plugins/{id}")
-        })
-        .to_string(),
-    )
-    .expect("component registration");
 }
 
 fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateOptions) {
