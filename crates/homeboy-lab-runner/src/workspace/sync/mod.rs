@@ -190,6 +190,7 @@ pub fn sync_workspace_in_roots(
                     &local_path,
                     &remote_path,
                     &excludes,
+                    &options.git_fetch_refs,
                 ) {
                     Ok(provenance) => {
                         materialization_plan.controller_git_bundle = provenance;
