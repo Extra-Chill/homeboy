@@ -762,7 +762,7 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
         Option<std::sync::Arc<dyn super::cook::AgentTaskCookAttemptDispatcher>>,
     >,
     scoped_run_ids: Option<&HashSet<String>>,
-    queue_preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+    queue_preflight: impl Fn(&AgentTaskRunRecord, &mut AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskRunNextResult> {
     let mut skipped = Vec::new();
     let mut inspected = 0;
@@ -2429,10 +2429,34 @@ pub(crate) fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
 /// Queue admission validates provider eligibility and credential provenance
 /// before a record is claimed Running. Workspace preparation remains after the
 /// claim because it creates controller-owned filesystem state.
-fn preflight_queued_plan_provider_eligibility(_plan: &AgentTaskPlan) -> Result<()> {
-    // Queue admission must not turn a short-lived negative probe into a durable
-    // exclusion or skip. The scheduler evaluates the full chain after claim and
-    // can therefore emit a terminal aggregate with zero execution usage.
+fn preflight_queued_plan_provider_eligibility(plan: &mut AgentTaskPlan) -> Result<()> {
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    let catalog_owns_every_route = plan.tasks.iter().all(|task| {
+        crate::agent_task_provider::is_fixture_backend(&task.executor.backend)
+            || crate::agent_task_gate_executor::is_repo_local_gate_request(task)
+            || catalog
+                .providers()
+                .iter()
+                .any(|provider| provider.backend == task.executor.backend)
+    });
+    if !catalog_owns_every_route {
+        return preflight_plan_secret_env(plan);
+    }
+    let admitted = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        plan,
+        &catalog,
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+    )?;
+    // Admission owns live route selection. These are the remaining static and
+    // material checks for the selected route, not a second route derivation.
+    catalog.validate_selected_models(&admitted)?;
+    catalog.enforce_runtime_preflight_checks_for_plan(&admitted)?;
+    preflight_plan_secret_env(&admitted)?;
+    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
+        &admitted,
+        catalog.providers(),
+    )?;
+    *plan = admitted;
     Ok(())
 }
 

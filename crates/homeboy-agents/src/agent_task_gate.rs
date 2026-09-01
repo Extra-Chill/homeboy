@@ -1519,7 +1519,11 @@ mod baseline_tests {
             temp.path(),
             1,
             &format!(
-                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & echo $! > '{}'; wait",
+                // `Command::spawn` returns before the controller can attach
+                // its death guard. Start the descendant after that bounded
+                // handoff so this fixture exercises controller death with an
+                // armed containment guard rather than the spawn handoff race.
+                "sleep 1; sh -c 'trap \"\" TERM; while :; do sleep 1; done' & echo $! > '{}'; wait",
                 pid_file.display()
             ),
             AgentTaskGateVisibility::Visible,

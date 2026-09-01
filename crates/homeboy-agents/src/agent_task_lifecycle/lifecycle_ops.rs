@@ -4373,7 +4373,7 @@ pub fn claim_next_eligible_queued_run_in_store(
 /// closure is the caller's own, so it is passed through untouched.
 pub fn claim_next_eligible_queued_run_with_preflight_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
-    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+    preflight: impl Fn(&AgentTaskRunRecord, &mut AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskQueuedRunClaim> {
     claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
         lifecycle_store,
@@ -4387,7 +4387,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_in_store(
 pub fn claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     include: impl Fn(&AgentTaskRunRecord) -> bool,
-    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+    preflight: impl Fn(&AgentTaskRunRecord, &mut AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskQueuedRunClaim> {
     claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_store(
         lifecycle_store,
@@ -4402,7 +4402,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
 pub(crate) fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
     include: impl Fn(&AgentTaskRunRecord) -> bool,
     limit: usize,
-    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+    preflight: impl Fn(&AgentTaskRunRecord, &mut AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskQueuedRunClaim> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_store(
@@ -4433,7 +4433,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
     lifecycle_store: &AgentTaskLifecycleStore,
     include: impl Fn(&AgentTaskRunRecord) -> bool,
     limit: usize,
-    preflight: impl Fn(&AgentTaskRunRecord, &AgentTaskPlan) -> Result<()>,
+    preflight: impl Fn(&AgentTaskRunRecord, &mut AgentTaskPlan) -> Result<()>,
 ) -> Result<AgentTaskQueuedRunClaim> {
     let mut queued: Vec<AgentTaskRunRecord> = lifecycle_store
         .read_records()?
@@ -4463,7 +4463,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
             });
         }
         inspected += 1;
-        let plan = match validate_controller_runtime_in_store(lifecycle_store, &record.run_id)
+        let mut plan = match validate_controller_runtime_in_store(lifecycle_store, &record.run_id)
             .and_then(|_| load_controller_plan_in_store(lifecycle_store, &record.run_id))
         {
             Ok(plan) => plan,
@@ -4473,11 +4473,15 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
                 continue;
             }
         };
-        if let Err(error) = preflight(&record, &plan) {
+        if let Err(error) = preflight(&record, &mut plan) {
             quarantine_queued_run_in_store(lifecycle_store, &record, Some(&plan), &error)?;
             skipped.push(queue_skip(&record, Some(&plan), &error));
             continue;
         }
+        // The queue admission is allowed to bind a route. Persist that exact
+        // plan before claiming it so execution cannot reload and re-derive a
+        // different provider or credential contract.
+        persist_controller_plan_in_store(lifecycle_store, &record.run_id, &plan)?;
         match mark_running_in_store(lifecycle_store, &record.run_id) {
             Ok(claimed) => {
                 return Ok(AgentTaskQueuedRunClaim {

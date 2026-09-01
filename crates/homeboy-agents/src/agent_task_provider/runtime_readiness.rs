@@ -266,6 +266,15 @@ fn publish_readiness_result(
     shared.changed.notify_all();
 }
 
+fn discard_readiness_result(shared: &ProviderRuntimeReadinessCacheShared, request_key: &str) {
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.by_request.remove(request_key);
+    shared.changed.notify_all();
+}
+
 pub fn preflight_plan_provider_runtime_readiness_with_providers(
     plan: &AgentTaskPlan,
     providers: &[AgentTaskExecutorProvider],
@@ -500,8 +509,23 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
             .as_ref()
             .map(|invocation| Duration::from_millis(invocation.timeout_ms))
             .unwrap_or(Duration::from_secs(20));
-        let probe_timeout_ms = u64::try_from(probe_timeout.as_millis()).unwrap_or(u64::MAX);
-        let probe_deadline = Instant::now() + probe_timeout;
+        // The worker owns a permit and a child process, so it must share the
+        // caller's absolute deadline rather than merely letting the caller stop
+        // waiting while the work continues in the background.
+        let invocation_deadline = Instant::now() + probe_timeout;
+        let execution_deadline = remaining_deadline_duration(deadline_unix_ms)
+            .map(|remaining| Instant::now() + remaining);
+        let deadline_limited =
+            execution_deadline.is_some_and(|deadline| deadline < invocation_deadline);
+        let probe_deadline = execution_deadline
+            .map(|deadline| invocation_deadline.min(deadline))
+            .unwrap_or(invocation_deadline);
+        let probe_timeout_ms = u64::try_from(
+            probe_deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
         let shared = Arc::clone(&cache.shared);
         let probe_request_key = request_key.clone();
         drop(state);
@@ -520,7 +544,18 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
                 }))
                 .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
 
-                publish_readiness_result(&shared, probe_request_key, result);
+                if deadline_limited
+                    && result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|error| error.contains("timed out"))
+                {
+                    // The result is about one caller's exhausted deadline,
+                    // not this provider's reusable readiness state.
+                    discard_readiness_result(&shared, &probe_request_key);
+                } else {
+                    publish_readiness_result(&shared, probe_request_key, result);
+                }
             });
         if let Err(error) = spawn_result {
             publish_readiness_result(
@@ -968,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn short_deadline_probe_owner_does_not_poison_long_deadline_singleflight() {
+    fn expired_probe_owner_releases_singleflight_for_a_long_deadline_retry() {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let script = root.path().join("owner-different-deadlines.js");
@@ -999,14 +1034,14 @@ mod tests {
             &mut cache,
             Some(crate::agent_task_timeout::now_unix_ms() + 2_000),
         )
-        .expect("long waiter receives shared result");
+        .expect("long waiter starts a fresh readiness probe");
         assert!(verdict.ready);
         assert_eq!(
             std::fs::read_to_string(count)
                 .expect("probe count")
                 .lines()
                 .count(),
-            1
+            2
         );
     }
 
@@ -1253,11 +1288,14 @@ mod tests {
     #[test]
     fn readiness_command_timeout_is_capped_to_the_absolute_deadline() {
         let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
+        let pid_file = root.path().join("pid");
         let script = root.path().join("slow.js");
-        std::fs::write(&script, "setTimeout(()=>process.stdout.write('{}'),5000);")
-            .expect("slow readiness script");
-        let provider = provider(&script, &count);
+        std::fs::write(
+            &script,
+            "const fs=require('fs');fs.writeFileSync(process.argv[2],String(process.pid));setTimeout(()=>process.stdout.write('{}'),5000);",
+        )
+        .expect("slow readiness script");
+        let provider = provider(&script, &pid_file);
         let started = Instant::now();
 
         let error = readiness_verdict_with_credentials_and_deadline(
@@ -1271,5 +1309,18 @@ mod tests {
 
         assert_eq!(error.details["classification"], "timeout");
         assert!(started.elapsed() < Duration::from_secs(2));
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("probe recorded its pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric probe pid");
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        while homeboy_core::process::pid_is_running(pid) {
+            assert!(
+                Instant::now() < cleanup_deadline,
+                "readiness probe {pid} survived its absolute deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
