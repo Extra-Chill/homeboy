@@ -1147,7 +1147,7 @@ pub fn retry(
     run: bool,
     force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
-    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, |plan| {
+    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, None, |plan| {
         if plan.metadata.get("generic_lab_command_replay").is_some() {
             return Err(Error::validation_invalid_argument(
                 "generic_lab_command_replay",
@@ -1167,7 +1167,7 @@ pub fn retry_with_timeout_override(
     run_id: &str,
     timeout_ms: u64,
 ) -> Result<AgentTaskRetryServiceResult> {
-    retry_with_preflight_and_timeout(run_id, None, false, false, Some(timeout_ms), |plan| {
+    retry_with_preflight_and_timeout(run_id, None, false, false, Some(timeout_ms), None, |plan| {
         if plan.metadata.get("generic_lab_command_replay").is_some() {
             return Err(Error::validation_invalid_argument(
                 "generic_lab_command_replay",
@@ -1178,6 +1178,58 @@ pub fn retry_with_timeout_override(
         }
         Ok(())
     })
+}
+
+/// An explicit, operator-authorized provider-route change for a new Cook
+/// attempt. The original recipe remains the authority for every non-route input.
+#[derive(Debug, Clone, Default)]
+pub struct CookProviderRouteOverride {
+    pub backend: Option<String>,
+    pub selector: Option<String>,
+    pub model: Option<String>,
+    pub allow_provider_rotation: Option<bool>,
+    pub provider_rotations: Option<u32>,
+}
+
+impl CookProviderRouteOverride {
+    pub fn is_empty(&self) -> bool {
+        self.backend.is_none()
+            && self.selector.is_none()
+            && self.model.is_none()
+            && self.allow_provider_rotation.is_none()
+            && self.provider_rotations.is_none()
+    }
+}
+
+pub fn retry_with_provider_route_override(
+    run_id: &str,
+    new_run_id: Option<&str>,
+    run: bool,
+    force: bool,
+    route_override: CookProviderRouteOverride,
+) -> Result<AgentTaskRetryServiceResult> {
+    if route_override.is_empty() {
+        return retry(run_id, new_run_id, run, force);
+    }
+    retry_with_preflight_and_timeout(
+        run_id,
+        new_run_id,
+        run,
+        force,
+        None,
+        Some(&route_override),
+        |plan| {
+            if plan.metadata.get("generic_lab_command_replay").is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "generic_lab_command_replay",
+                    "generic Lab replay requires controller workspace preflight",
+                    Some(plan.plan_id.clone()),
+                    None,
+                ));
+            }
+            Ok(())
+        },
+    )
 }
 
 pub(super) fn deferred_cleanup_receipt_is_terminal(
@@ -1223,7 +1275,7 @@ pub fn retry_with_preflight<F>(
 where
     F: Fn(&AgentTaskPlan) -> Result<()>,
 {
-    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, preflight)
+    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, None, preflight)
 }
 
 fn retry_with_preflight_and_timeout<F>(
@@ -1232,6 +1284,7 @@ fn retry_with_preflight_and_timeout<F>(
     run: bool,
     force: bool,
     timeout_override_ms: Option<u64>,
+    route_override: Option<&CookProviderRouteOverride>,
     preflight: F,
 ) -> Result<AgentTaskRetryServiceResult>
 where
@@ -1255,8 +1308,19 @@ where
         let Some(mut cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
             return Ok(None);
         };
+        if route_override.is_some() && cook_retry.recipe_replacement {
+            return Err(Error::validation_invalid_argument(
+                "provider-route",
+                "provider-route override cannot alter an already persisted Cook retry recipe entry",
+                Some(source.run_id.clone()),
+                None,
+            ));
+        }
         if let Some(timeout_ms) = timeout_override_ms {
             apply_cook_timeout_override(&lifecycle_store, &source, &mut cook_retry, timeout_ms)?;
+        }
+        if let Some(route_override) = route_override {
+            apply_cook_provider_route_override(&source, &mut cook_retry.plan, route_override)?;
         }
         if !cook_retry.recipe_replacement {
             return Ok(None);
@@ -1316,8 +1380,19 @@ where
         });
     }
     let mut cook_retry = retry_admission_in_store(&lifecycle_store, &source, false)?;
+    if route_override.is_some() && cook_retry.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "provider-route",
+            "provider-route overrides require a retryable durable Cook attempt",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
     if let (Some(cook_retry), Some(timeout_ms)) = (&mut cook_retry, timeout_override_ms) {
         apply_cook_timeout_override(&lifecycle_store, &source, cook_retry, timeout_ms)?;
+    }
+    if let (Some(cook_retry), Some(route_override)) = (&mut cook_retry, route_override) {
+        apply_cook_provider_route_override(&source, &mut cook_retry.plan, route_override)?;
     }
     let record = match cook_retry {
         Some(cook_retry) => {
@@ -1392,10 +1467,11 @@ where
                     &cook_retry.plan,
                 )?;
                 if cook_retry.replaces_source_attempt {
-                    super::record_recipe_attempt_replacement(
+                    super::record_recipe_attempt_replacement_with_plan(
                         &cook_retry.cook_id,
                         &source.run_id,
                         &retry_run_id,
+                        &cook_retry.plan,
                     )?;
                 } else {
                     super::record_recipe_attempt(
@@ -1666,6 +1742,167 @@ fn apply_cook_timeout_override(
         remaining_rotations,
         review_form_only,
     )?;
+    Ok(())
+}
+
+fn apply_cook_provider_route_override(
+    source: &agent_task_lifecycle::AgentTaskRunRecord,
+    plan: &mut AgentTaskPlan,
+    override_: &CookProviderRouteOverride,
+) -> Result<()> {
+    if override_.is_empty() {
+        return Ok(());
+    }
+    if !plan.metadata.is_null() && !plan.metadata.is_object() {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata",
+            "durable Cook plan metadata must be an object before recording a provider-route override",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    if plan.metadata["cook_provider_route_overrides"] != Value::Null
+        && !plan.metadata["cook_provider_route_overrides"].is_array()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata.cook_provider_route_overrides",
+            "durable Cook provider-route override history must be an array",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    if plan.metadata["cook_retry_policy"] != Value::Null
+        && !plan.metadata["cook_retry_policy"].is_object()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata.cook_retry_policy",
+            "durable Cook retry policy must be an object before recording a provider-route override",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    if plan.metadata["cook_retry_policy"]["route"] != Value::Null
+        && !plan.metadata["cook_retry_policy"]["route"].is_object()
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_plan.metadata.cook_retry_policy.route",
+            "durable Cook retry route policy must be an object before recording a provider-route override",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    let requested = json!({
+        "backend": override_.backend,
+        "selector": override_.selector,
+        "model": override_.model,
+        "allow_provider_rotation": override_.allow_provider_rotation,
+        "provider_rotations": override_.provider_rotations,
+    });
+    if let Some(existing) = plan.metadata["cook_provider_route_overrides"]
+        .as_array()
+        .and_then(|overrides| {
+            overrides
+                .iter()
+                .rev()
+                .find(|entry| entry["source_run_id"] == source.run_id)
+        })
+    {
+        if existing["requested"] == requested {
+            return Ok(());
+        }
+        return Err(Error::validation_invalid_argument(
+            "provider-route",
+            "this Cook retry already has a different durable provider-route override",
+            Some(source.run_id.clone()),
+            None,
+        ));
+    }
+    let (old_route, new_route) = {
+        let task = plan.tasks.first_mut().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider-route",
+                "durable Cook attempt has no provider task to reroute",
+                Some(source.run_id.clone()),
+                None,
+            )
+        })?;
+        let old_route = json!({
+            "backend": task.executor.backend,
+            "selector": task.executor.selector,
+            "model": task.executor.model,
+        });
+        if let Some(backend) = &override_.backend {
+            task.executor.backend = backend.clone();
+        }
+        if let Some(selector) = &override_.selector {
+            task.executor.selector = Some(selector.clone());
+        }
+        if let Some(model) = &override_.model {
+            task.executor.model = Some(model.clone());
+        }
+        if let Some(selection) = task.executor.runtime_selection.as_mut() {
+            if override_.backend.is_some() {
+                selection.executor_backend = override_.backend.clone();
+            }
+            if override_.selector.is_some() {
+                selection.executor_provider_id = override_.selector.clone();
+            }
+            if override_.model.is_some() {
+                selection.model = override_.model.clone();
+            }
+        }
+        let new_route = json!({
+            "backend": task.executor.backend,
+            "selector": task.executor.selector,
+            "model": task.executor.model,
+        });
+        (old_route, new_route)
+    };
+
+    let rotation_opted_in = override_.allow_provider_rotation == Some(true)
+        || override_
+            .provider_rotations
+            .is_some_and(|rotations| rotations > 0);
+    let pin_route = override_.model.is_some() && !rotation_opted_in;
+    if pin_route {
+        plan.options.execution_budget.max_provider_rotations = 0;
+    } else if let Some(rotations) = override_.provider_rotations {
+        plan.options.execution_budget.max_provider_rotations = rotations;
+    } else if override_.allow_provider_rotation == Some(true) {
+        plan.options.execution_budget.max_provider_rotations =
+            plan.options.rotation.as_ref().map_or(0, |rotation| {
+                rotation.entries.len().try_into().unwrap_or(u32::MAX)
+            });
+    }
+    if plan.metadata.is_null() {
+        plan.metadata = json!({});
+    }
+    plan.metadata["cook_retry_policy"]["route"]["effective"] = new_route.clone();
+    plan.metadata["cook_retry_policy"]["route"]["fallback"] = json!({
+        "mode": if plan.options.execution_budget.max_provider_rotations == 0 { "pinned" } else { "rotatable" },
+        "enabled": plan.options.execution_budget.max_provider_rotations > 0,
+        "opted_in": rotation_opted_in,
+    });
+    plan.metadata
+        .as_object_mut()
+        .expect("Cook plan metadata is an object")
+        .entry("cook_provider_route_overrides")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .expect("Cook provider route override history is an array")
+        .push(json!({
+            "schema": "homeboy/agent-task-cook-provider-route-override/v1",
+            "source_run_id": source.run_id,
+            "requested": requested,
+            "old_route": old_route,
+            "new_route": new_route,
+            "rotation": {
+                "allow_provider_rotation": override_.allow_provider_rotation,
+                "max_provider_rotations": plan.options.execution_budget.max_provider_rotations,
+            },
+            "authority": "operator provider-route override",
+        }));
+    plan.rebuild_homeboy_plan();
     Ok(())
 }
 

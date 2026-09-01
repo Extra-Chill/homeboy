@@ -9946,6 +9946,114 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
 }
 
 #[test]
+fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-provider-route-override";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+        options.retry_policy.max_attempts = 2;
+        options.identity.initial_plan.tasks[0].executor.selector = Some("old-selector".to_string());
+        options.identity.initial_plan.tasks[0].executor.model = Some("old-model".to_string());
+        options.identity.initial_plan.tasks[0].instructions = "preserved prompt".to_string();
+        options.identity.initial_plan.tasks[0].workspace.root =
+            Some("preserved-worktree".to_string());
+        options.gates.verify = vec!["preserved-gate".to_string()];
+        options.finalization.title = "preserved notification".to_string();
+        options.ai_disclosure.ai_model = Some("preserved disclosure".to_string());
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        let original = super::super::load_recipe(cook_id).expect("read original recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize source attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            "provider_execution",
+            &Error::internal_unexpected("provider route blocked").with_retryable(true),
+        )
+        .expect("terminalize retryable source attempt");
+
+        let override_ = crate::agent_task_service::CookProviderRouteOverride {
+            backend: Some("replacement-backend".to_string()),
+            selector: Some("replacement-selector".to_string()),
+            model: Some("replacement-model".to_string()),
+            allow_provider_rotation: None,
+            provider_rotations: None,
+        };
+        let retry = crate::agent_task_service::retry_with_provider_route_override(
+            &options.identity.initial_run_id,
+            None,
+            false,
+            false,
+            override_.clone(),
+        )
+        .expect("reserve route override retry");
+        let replay = crate::agent_task_service::retry_with_provider_route_override(
+            &options.identity.initial_run_id,
+            None,
+            false,
+            false,
+            override_,
+        )
+        .expect("replay the same route override");
+        assert_eq!(replay.record.run_id, retry.record.run_id);
+
+        let recipe = super::super::load_recipe(cook_id).expect("read updated recipe");
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.gate_policy, original.gate_policy);
+        assert_eq!(recipe.promotion_transport, original.promotion_transport);
+        assert_eq!(recipe.finalization, original.finalization);
+        let overridden = &recipe.attempts[1].plan;
+        assert_eq!(overridden.tasks[0].instructions, "preserved prompt");
+        assert_eq!(
+            overridden.tasks[0].workspace.root.as_deref(),
+            Some("preserved-worktree")
+        );
+        assert_eq!(overridden.tasks[0].executor.backend, "replacement-backend");
+        assert_eq!(
+            overridden.tasks[0].executor.selector.as_deref(),
+            Some("replacement-selector")
+        );
+        assert_eq!(
+            overridden.tasks[0].executor.model.as_deref(),
+            Some("replacement-model")
+        );
+        assert_eq!(
+            overridden.options.execution_budget.max_provider_rotations,
+            0
+        );
+        assert_eq!(
+            overridden.metadata["cook_provider_route_overrides"],
+            serde_json::json!([{
+                "schema": "homeboy/agent-task-cook-provider-route-override/v1",
+                "source_run_id": options.identity.initial_run_id,
+                "requested": {
+                    "backend": "replacement-backend",
+                    "selector": "replacement-selector",
+                    "model": "replacement-model",
+                    "allow_provider_rotation": null,
+                    "provider_rotations": null,
+                },
+                "old_route": {
+                    "backend": "fixture",
+                    "selector": "old-selector",
+                    "model": "old-model",
+                },
+                "new_route": {
+                    "backend": "replacement-backend",
+                    "selector": "replacement-selector",
+                    "model": "replacement-model",
+                },
+                "rotation": {
+                    "allow_provider_rotation": null,
+                    "max_provider_rotations": 0,
+                },
+                "authority": "operator provider-route override",
+            }])
+        );
+    });
+}
+
+#[test]
 fn cancelled_provider_child_retry_stays_attached_to_its_cook() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-cancelled-provider-retry";
