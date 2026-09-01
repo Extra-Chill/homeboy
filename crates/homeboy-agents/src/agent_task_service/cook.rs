@@ -3095,6 +3095,26 @@ fn observed_child_cell(
     }
 }
 
+/// Preserve durable failure evidence from a prior coordinator rather than
+/// requiring its recipe to be reconstructed just to report a terminal result.
+fn observed_batch_child_cell(
+    child: &crate::agent_task_batch::AgentTaskBatchChildRun,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> AgentTaskCookBatchCellReport {
+    let status = persisted_terminal_cook_status(record).unwrap_or_else(|| match record.state {
+        agent_task_lifecycle::AgentTaskRunState::Cancelled => CookStatus::Cancelled,
+        _ => CookStatus::Failed,
+    });
+    AgentTaskCookBatchCellReport {
+        cook_id: child.task_id.clone(),
+        initial_run_id: child.run_id.clone(),
+        status: status.as_str().to_string(),
+        exit_code: i32::from(!status.is_success_exit()),
+        result: None,
+        error: None,
+    }
+}
+
 /// Resume a persisted cook batch after its original synchronous coordinator
 /// exited or timed out. Each child's durable recipe fully reconstructs its cook
 /// options, so re-running [`run_cook`] idempotently harvests every terminal
@@ -3169,22 +3189,36 @@ where
         ));
     }
 
-    let ready = crate::agent_task_batch::fanout_ready_child_run_ids(batch_id)?;
+    let blocked = crate::agent_task_batch::fanout_blocked_child_run_ids(batch_id)?;
     let total = batch.child_runs.len();
     let mut cells = Vec::with_capacity(total);
     for child in &batch.child_runs {
-        if ready
+        if blocked
             .as_ref()
-            .is_some_and(|ready| !ready.contains(&child.run_id))
+            .is_some_and(|blocked| blocked.contains(&child.run_id))
         {
             cells.push(AgentTaskCookBatchCellReport {
                 cook_id: child.task_id.clone(),
                 initial_run_id: child.run_id.clone(),
                 status: "blocked_by_dependency".to_string(),
-                exit_code: 0,
+                exit_code: 1,
                 result: None,
-                error: None,
+                error: Some(AgentTaskCookCellError::declared(
+                    "agent_task.blocked_by_dependency",
+                    "child is blocked by an unresolved dependency",
+                    false,
+                )),
             });
+            continue;
+        }
+        if let Some(record) = durably_terminal_child_record(&child.run_id).filter(|record| {
+            matches!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Failed
+                    | agent_task_lifecycle::AgentTaskRunState::Cancelled
+            )
+        }) {
+            cells.push(observed_batch_child_cell(child, &record));
             continue;
         }
         // Roster `run_id` is the canonical durable attempt, including transport
