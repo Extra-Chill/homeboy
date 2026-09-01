@@ -9,8 +9,9 @@ use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{component, Error, Result};
 
 use super::lab_workspaces_deps::{
-    accepted_extra_lab_workspaces, add_candidate_extra_workspace, bare_module_imports,
-    canonical_existing_dir, component_contract_candidate_paths, containing_checkout_or_parent,
+    accepted_extra_lab_workspaces, add_candidate_extra_workspace,
+    add_candidate_extra_workspace_with_git_fetch_refs, bare_module_imports, canonical_existing_dir,
+    component_contract_candidate_paths, containing_checkout_or_parent,
     discovered_validation_dependency_workspaces, provider_config_candidate_paths,
     provider_config_source_cli_files,
 };
@@ -76,6 +77,7 @@ pub(super) struct ExtraLabWorkspace {
     pub(super) role: String,
     pub(super) path: PathBuf,
     pub(super) snapshot_includes: Vec<String>,
+    pub(super) git_fetch_refs: Vec<String>,
     pub(super) allow_dirty_lab_workspace: bool,
     pub(super) source_provenance: Option<serde_json::Value>,
 }
@@ -184,7 +186,7 @@ pub(super) fn sync_extra_lab_workspaces(
                 mode: extra_workspace_sync_mode(&local_path),
                 controller_routed_git: false,
                 changed_since_base: None,
-                git_fetch_refs: Vec::new(),
+                git_fetch_refs: extra.git_fetch_refs.clone(),
                 snapshot_includes: extra.snapshot_includes.clone(),
                 allow_dirty_lab_workspace: extra.allow_dirty_lab_workspace,
                 run_isolation_token: None,
@@ -447,6 +449,7 @@ pub(super) fn parse_runtime_overlays(
                 role,
                 path,
                 snapshot_includes: spec.snapshot_includes,
+                git_fetch_refs: Vec::new(),
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             },
@@ -752,6 +755,7 @@ pub(super) fn agent_task_plan_extra_workspaces(
                         role: "agent_task_plan".to_string(),
                         path: canon,
                         snapshot_includes: Vec::new(),
+                        git_fetch_refs: Vec::new(),
                         allow_dirty_lab_workspace: false,
                         source_provenance: None,
                     });
@@ -781,12 +785,28 @@ pub(super) fn agent_task_plan_extra_workspaces(
             .pointer("/workspace/root")
             .and_then(serde_json::Value::as_str)
         {
-            add_candidate_extra_workspace(
+            let git_fetch_refs = task
+                .pointer("/metadata/cook_workspace_base_snapshot")
+                .filter(|snapshot| {
+                    snapshot.get("schema").and_then(serde_json::Value::as_str)
+                        == Some("homeboy/cook-workspace-base-snapshot/v1")
+                        && snapshot.get("mode").and_then(serde_json::Value::as_str)
+                            == Some("isolated_attempt_snapshot")
+                })
+                .and_then(|snapshot| snapshot.get("resolved_base"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|base| {
+                    base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .map(|base| vec![base.to_string()])
+                .unwrap_or_default();
+            add_candidate_extra_workspace_with_git_fetch_refs(
                 path,
                 "agent_task_plan_workspace",
                 &source_canon,
                 &mut seen,
                 &mut workspaces,
+                &git_fetch_refs,
             )?;
         }
     }
@@ -1205,6 +1225,7 @@ fn add_candidate_workspace_ref_extra_workspace(
         role: "path_setting_workspace_ref".to_string(),
         path: canon,
         snapshot_includes: Vec::new(),
+        git_fetch_refs: Vec::new(),
         allow_dirty_lab_workspace: false,
         source_provenance: Some(serde_json::json!({
             "source_provenance": "workspace_ref",

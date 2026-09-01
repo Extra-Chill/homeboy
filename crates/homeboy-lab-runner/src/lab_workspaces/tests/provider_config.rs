@@ -595,7 +595,14 @@ fn agent_task_run_plan_workspace_gets_its_own_materialized_provenance() {
                 "task_id": "issue-14145",
                 "instructions": "fix provenance",
                 "executor": { "backend": "test" },
-                "workspace": { "root": issue_worktree }
+                "workspace": { "root": issue_worktree },
+                "metadata": {
+                    "cook_workspace_base_snapshot": {
+                        "schema": "homeboy/cook-workspace-base-snapshot/v1",
+                        "mode": "isolated_attempt_snapshot",
+                        "resolved_base": "0123456789abcdef0123456789abcdef01234567"
+                    }
+                }
             }]
         })
         .to_string(),
@@ -613,6 +620,10 @@ fn agent_task_run_plan_workspace_gets_its_own_materialized_provenance() {
 
     assert_eq!(workspaces.len(), 1);
     assert_eq!(workspaces[0].role, "agent_task_plan_workspace");
+    assert_eq!(
+        workspaces[0].git_fetch_refs,
+        ["0123456789abcdef0123456789abcdef01234567"]
+    );
     assert_eq!(
         workspaces[0].path,
         issue_worktree.canonicalize().expect("issue worktree")
@@ -1163,6 +1174,7 @@ fn workspace_ref_provenance_is_recorded_on_mapping_entry() {
         role: "path_setting_workspace_ref".to_string(),
         path: PathBuf::from("/local/repo@cook"),
         snapshot_includes: Vec::new(),
+        git_fetch_refs: Vec::new(),
         allow_dirty_lab_workspace: false,
         source_provenance: Some(serde_json::json!({
             "source_provenance": "workspace_ref",

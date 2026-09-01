@@ -306,6 +306,72 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
 }
 
 #[test]
+fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source workspace");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        git(source.path(), &["init", "--quiet", "-b", "main"]);
+        git(source.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "test@homeboy.invalid"],
+        );
+        fs::write(source.path().join("file.txt"), "destination\n").expect("destination file");
+        git(source.path(), &["add", "file.txt"]);
+        git(source.path(), &["commit", "--quiet", "-m", "destination"]);
+        let destination =
+            git_output(source.path(), &["rev-parse", "HEAD"]).expect("destination revision");
+        fs::write(source.path().join("file.txt"), "pinned base\n").expect("base file");
+        git(source.path(), &["commit", "-am", "pinned base", "--quiet"]);
+        let pinned_base =
+            git_output(source.path(), &["rev-parse", "HEAD"]).expect("pinned base revision");
+        git(source.path(), &["checkout", "--quiet", &destination]);
+
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-pinned-cook-base","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (synced, _) = sync_workspace(
+            "lab-pinned-cook-base",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: vec![pinned_base.clone()],
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        )
+        .expect("materialize behind Cook destination with pinned base");
+
+        let remote = Path::new(&synced.remote_path);
+        assert_eq!(
+            git_output(remote, &["rev-parse", "HEAD"]).expect("runner HEAD"),
+            destination
+        );
+        assert_eq!(
+            git_output(
+                remote,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("{pinned_base}^{{commit}}")
+                ]
+            )
+            .expect("runner pinned base"),
+            pinned_base
+        );
+    });
+}
+
+#[test]
 fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source repository");
