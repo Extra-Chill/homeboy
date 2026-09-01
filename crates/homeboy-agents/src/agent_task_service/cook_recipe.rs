@@ -20,12 +20,13 @@ use crate::agent_task_service::cook::{
     CookProviderTransport, CookRequest, CookRetryPolicy, CookWorkspace,
 };
 use homeboy_core::command_invocation::CommandInvocation;
+use homeboy_core::process::{ProcessIdentityState, ProcessStartIdentity};
 use homeboy_core::{paths, Error, Result};
 
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
 const CONTINUATION_REARM_INTENTION_SCHEMA: &str =
-    "homeboy/agent-task-cook-continuation-rearm-intention/v2";
+    "homeboy/agent-task-cook-continuation-rearm-intention/v3";
 // Base capture reaches the network while holding this lock. It must always
 // surface a wedged peer rather than inherit an operator-configured unbounded
 // config-lock wait.
@@ -427,7 +428,8 @@ struct CookContinuationRearmIntention {
     cook_id: String,
     run_id: String,
     owner_pid: u32,
-    claim_identity: u32,
+    owner_start_identity: ProcessStartIdentity,
+    claim_identity: String,
     phase: CookContinuationRearmPhase,
     private_claim_name: String,
     published_claim_name: String,
@@ -1916,7 +1918,7 @@ pub fn preflight_continuation_claim_in_store(
             else {
                 continue;
             };
-            let pid = pid_text.parse::<u32>().ok();
+            let pid = continuation_claim_owner_pid(pid_text);
             let continuation = read_claimed_continuation(&path, "durable continuation")?;
             validate_continuation(&continuation)?;
             if continuation.key != key {
@@ -1927,7 +1929,32 @@ pub fn preflight_continuation_claim_in_store(
                     None,
                 ));
             }
-            state = if pid.is_none_or(homeboy_core::process::pid_is_running) {
+            let intention_path = continuation_rearm_intention_path(&path);
+            let recoverable_journal = if intention_path.is_file() {
+                let intention: CookContinuationRearmIntention =
+                    serde_json::from_slice(&fs::read(&intention_path).map_err(|error| {
+                        Error::internal_io(
+                            error.to_string(),
+                            Some(intention_path.display().to_string()),
+                        )
+                    })?)
+                    .map_err(|error| {
+                        Error::validation_invalid_argument(
+                            "cook_continuation.rearm_intention",
+                            format!("malformed durable continuation rearm intention: {error}"),
+                            Some(intention_path.display().to_string()),
+                            None,
+                        )
+                    })?;
+                validate_rearm_intention_identity(&intention, &key, &hash, &intention_path)?;
+                rearm_owner_allows_recovery(&intention)?
+                    && intention.phase == CookContinuationRearmPhase::RestorationRequired
+            } else {
+                false
+            };
+            state = if recoverable_journal {
+                CookContinuationState::Failed
+            } else if pid.is_none_or(homeboy_core::process::pid_is_running) {
                 CookContinuationState::Claimed
             } else if recovery {
                 CookContinuationState::Failed
@@ -2040,7 +2067,8 @@ fn claim_continuation_for_recovery_in_store_with(
     }
 
     let failed = root.join(format!("{hash}.failed"));
-    let rearming = root.join(format!("{hash}.rearming.{}", std::process::id()));
+    let claim_identity = format!("{}-{}", std::process::id(), Uuid::new_v4());
+    let rearming = root.join(format!("{hash}.rearming.{claim_identity}"));
     match fs::rename(&failed, &rearming) {
         Ok(()) => {
             if let Err(error) = sync_private_claim(&root) {
@@ -2182,6 +2210,8 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
     mut persist_phase: impl FnMut(&Path, &CookContinuationRearmIntention) -> Result<()>,
     mut checkpoint: impl FnMut(CookContinuationRearmCheckpoint) -> Result<()>,
 ) -> Result<Option<ClaimedCookContinuation>> {
+    let owner_pid = std::process::id();
+    let owner_start_identity = current_process_start_identity(owner_pid)?;
     let Some(claim) = claim_continuation_for_recovery_in_store(store, cook_id, run_id)? else {
         return Ok(None);
     };
@@ -2212,15 +2242,19 @@ fn claim_continuation_for_recovery_and_clear_failure_with(
         }
     };
     let intention_path = continuation_rearm_intention_path(&claim.path);
-    let claimed = continuation_base_path(&claim.path)
-        .with_extension(format!("claimed.{}", std::process::id()));
+    let claim_identity = continuation_claim_identity(&claim.path).ok_or_else(|| {
+        Error::internal_unexpected("recovery claim is missing its durable claim identity")
+    })?;
+    let claimed =
+        continuation_base_path(&claim.path).with_extension(format!("claimed.{claim_identity}"));
     let mut intention = CookContinuationRearmIntention {
         schema: CONTINUATION_REARM_INTENTION_SCHEMA.to_string(),
         key: claim.continuation.key.clone(),
         cook_id: cook_id.to_string(),
         run_id: run_id.to_string(),
-        owner_pid: std::process::id(),
-        claim_identity: std::process::id(),
+        owner_pid,
+        owner_start_identity,
+        claim_identity,
         phase: CookContinuationRearmPhase::RestorationRequired,
         private_claim_name: claim
             .path
@@ -2335,8 +2369,10 @@ fn compensate_rearm_failure(
         .recovery_rollback
         .as_ref()
         .expect("recovery claims retain rollback state");
-    let claimed = continuation_base_path(&claim.path)
-        .with_extension(format!("claimed.{}", std::process::id()));
+    let claimed = continuation_base_path(&claim.path).with_extension(format!(
+        "claimed.{}",
+        continuation_claim_identity(&claim.path).expect("recovery claim has identity")
+    ));
     let rollback_path = if claimed.exists() {
         &claimed
     } else {
@@ -2393,14 +2429,88 @@ fn persist_rearm_intention(path: &Path, intention: &CookContinuationRearmIntenti
 }
 
 fn remove_rearm_intention(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => sync_directory(path.parent().expect("rearm intention has parent")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    remove_rearm_intention_with(path, |path| fs::remove_file(path), sync_directory)
+}
+
+fn remove_rearm_intention_with(
+    path: &Path,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+    sync_parent: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    match remove(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => Err(Error::internal_io(
             error.to_string(),
             Some(path.display().to_string()),
+        ))?,
+    }
+    sync_parent(path.parent().expect("rearm intention has parent"))
+}
+
+fn current_process_start_identity(pid: u32) -> Result<ProcessStartIdentity> {
+    homeboy_core::process::process_start_identity(pid)
+        .map_err(|error| Error::internal_io(error, None))?
+        .ok_or_else(|| Error::internal_unexpected("current process start identity is unavailable"))
+}
+
+fn rearm_owner_allows_recovery(intention: &CookContinuationRearmIntention) -> Result<bool> {
+    rearm_owner_allows_recovery_with(intention, |pid, identity| {
+        homeboy_core::process::process_identity_state_with_start_identity(pid, None, Some(identity))
+    })
+}
+
+fn rearm_owner_allows_recovery_with(
+    intention: &CookContinuationRearmIntention,
+    identity_state: impl FnOnce(u32, &ProcessStartIdentity) -> ProcessIdentityState,
+) -> Result<bool> {
+    match identity_state(intention.owner_pid, &intention.owner_start_identity) {
+        ProcessIdentityState::Live if intention.owner_pid == std::process::id() => Ok(true),
+        ProcessIdentityState::Live => Ok(false),
+        ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch => Ok(true),
+        ProcessIdentityState::Unverifiable => Err(Error::internal_unexpected(
+            "durable continuation rearm owner identity cannot be verified",
         )),
     }
+}
+
+fn validate_rearm_intention_identity(
+    intention: &CookContinuationRearmIntention,
+    key: &str,
+    hash: &str,
+    intention_path: &Path,
+) -> Result<()> {
+    if intention.schema != CONTINUATION_REARM_INTENTION_SCHEMA
+        || intention.key != key
+        || intention.key != format!("{}:{}", intention.cook_id, intention.run_id)
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation.rearm_intention",
+            "durable continuation rearm intention does not match its Cook attempt",
+            Some(intention_path.display().to_string()),
+            None,
+        ));
+    }
+    let Some((claim_pid, claim_nonce)) = intention.claim_identity.split_once('-') else {
+        return Err(invalid_rearm_claim_identity(intention_path));
+    };
+    if claim_pid.parse::<u32>().ok() != Some(intention.owner_pid)
+        || Uuid::parse_str(claim_nonce).is_err()
+        || intention.private_claim_name != format!("{hash}.rearming.{}", intention.claim_identity)
+        || intention.published_claim_name != format!("{hash}.claimed.{}", intention.claim_identity)
+    {
+        return Err(invalid_rearm_claim_identity(intention_path));
+    }
+    Ok(())
+}
+
+fn invalid_rearm_claim_identity(path: &Path) -> Error {
+    Error::validation_invalid_argument(
+        "cook_continuation.rearm_intention",
+        "durable continuation rearm intention has invalid claim identity",
+        Some(path.display().to_string()),
+        None,
+    )
 }
 
 fn recover_continuation_rearm_in_store(
@@ -2419,7 +2529,9 @@ fn recover_continuation_rearm_in_store(
     let _recovery_lock = lock_continuation_rearm_recovery(&root, &hash)?;
     let bytes = match fs::read(&intention_path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return remove_rearm_intention(&intention_path);
+        }
         Err(error) => {
             return Err(Error::internal_io(
                 error.to_string(),
@@ -2436,34 +2548,11 @@ fn recover_continuation_rearm_in_store(
                 None,
             )
         })?;
-    if intention.schema != CONTINUATION_REARM_INTENTION_SCHEMA
-        || intention.key != key
-        || intention.cook_id != cook_id
-        || intention.run_id != run_id
-    {
-        return Err(Error::validation_invalid_argument(
-            "cook_continuation.rearm_intention",
-            "durable continuation rearm intention does not match its Cook attempt",
-            Some(intention_path.display().to_string()),
-            None,
-        ));
-    }
-    if homeboy_core::process::pid_is_running(intention.owner_pid) {
+    validate_rearm_intention_identity(&intention, &key, &hash, &intention_path)?;
+    if !rearm_owner_allows_recovery(&intention)? {
         return Ok(());
     }
 
-    let expected_private_name = format!("{hash}.rearming.{}", intention.claim_identity);
-    let expected_published_name = format!("{hash}.claimed.{}", intention.claim_identity);
-    if intention.private_claim_name != expected_private_name
-        || intention.published_claim_name != expected_published_name
-    {
-        return Err(Error::validation_invalid_argument(
-            "cook_continuation.rearm_intention",
-            "durable continuation rearm intention has invalid claim identity",
-            Some(intention_path.display().to_string()),
-            None,
-        ));
-    }
     let private = root.join(&intention.private_claim_name);
     let published = root.join(&intention.published_claim_name);
     if intention.phase == CookContinuationRearmPhase::PublicationCommitted {
@@ -3297,6 +3386,17 @@ fn continuation_base_path(path: &std::path::Path) -> PathBuf {
     path.with_file_name(base)
 }
 
+fn continuation_claim_identity(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    name.split_once(".claimed.")
+        .or_else(|| name.split_once(".rearming."))
+        .map(|(_, identity)| identity.to_string())
+}
+
+fn continuation_claim_owner_pid(identity: &str) -> Option<u32> {
+    identity.split('-').next()?.parse().ok()
+}
+
 fn continuation_state_path(path: &std::path::Path, state: &str) -> PathBuf {
     continuation_base_path(path).with_extension(state)
 }
@@ -3329,17 +3429,17 @@ fn reclaim_dead_claims(root: &std::path::Path) -> Result<()> {
         let recovery = name.contains(".rearming.");
         let Some(pid) = name
             .rsplit_once(if recovery { ".rearming." } else { ".claimed." })
-            .map(|(_, pid)| pid)
-            .and_then(|value| value.parse::<u32>().ok())
+            .map(|(_, identity)| identity)
+            .and_then(continuation_claim_owner_pid)
         else {
             continue;
         };
+        if continuation_rearm_intention_path(&path).is_file() {
+            // The paired-store recovery path owns every journaled claim,
+            // including same-process retries and reused PIDs.
+            continue;
+        }
         if !homeboy_core::process::pid_is_running(pid) {
-            if continuation_rearm_intention_path(&path).is_file() {
-                // The paired-store recovery path must decide whether this
-                // journaled ownership is rolled back or committed.
-                continue;
-            }
             if recovery {
                 fs::rename(&path, continuation_state_path(&path, "failed")).map_err(|error| {
                     Error::internal_io(error.to_string(), Some(path.display().to_string()))
@@ -4598,10 +4698,11 @@ mod tests {
             fs::read_to_string(diagnostic).unwrap(),
             "original diagnostic"
         );
-        assert!(!store
-            .queue_root()
-            .join(format!("{hash}.rearming.{}", std::process::id()))
-            .exists());
+        assert!(!fs::read_dir(store.queue_root())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .any(|name| name.starts_with(&format!("{hash}.rearming."))));
         assert!(!store
             .queue_root()
             .join(format!("{hash}.rearm-intention.json"))
@@ -4662,10 +4763,11 @@ mod tests {
             continuation_state_in_store(&store, "cook", "run").unwrap(),
             CookContinuationState::Failed
         );
-        assert!(!store
-            .queue_root()
-            .join(format!("{hash}.claimed.{}", std::process::id()))
-            .exists());
+        assert!(!fs::read_dir(store.queue_root())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .any(|name| name.starts_with(&format!("{hash}.claimed."))));
     }
 
     #[test]
@@ -4754,8 +4856,10 @@ mod tests {
             },
             |diagnostic| {
                 observed_private_ownership.set(
-                    preflight_continuation_claim_in_store(&store, "cook", "run", true).is_err()
-                        && !failed.exists(),
+                    matches!(
+                        preflight_continuation_claim_in_store(&store, "cook", "run", true),
+                        Ok(CookContinuationState::Failed)
+                    ) && !failed.exists(),
                 );
                 restored.replace(Some(diagnostic));
                 Ok(())
@@ -4839,14 +4943,196 @@ mod tests {
             .message
             .contains("injected diagnostic compensation failure"));
         assert_eq!(fs::read(&failed).unwrap(), original);
-        assert!(!store
-            .queue_root()
-            .join(format!("{hash}.rearming.{}", std::process::id()))
-            .exists());
+        assert!(!fs::read_dir(store.queue_root())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .any(|name| name.starts_with(&format!("{hash}.rearming."))));
     }
 
     #[test]
-    fn crashed_rearm_before_publication_restores_exact_failed_state() {
+    fn rearm_intention_not_found_retry_syncs_unlink_before_crash() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let root = context.data_dir().join("rearm-intention-sync");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("fixture.rearm-intention.json");
+        fs::write(&path, b"fixture").unwrap();
+
+        let first = remove_rearm_intention_with(
+            &path,
+            |path| fs::remove_file(path),
+            |_| {
+                Err(Error::internal_io(
+                    "injected rearm intention directory sync failure",
+                    None,
+                ))
+            },
+        )
+        .expect_err("unlink must not be reported durable before directory sync");
+        assert_eq!(
+            rearm_error_summary(&first),
+            "injected rearm intention directory sync failure"
+        );
+        assert!(!path.exists());
+
+        let retry = remove_rearm_intention_with(
+            &path,
+            |path| fs::remove_file(path),
+            |parent| {
+                sync_directory(parent)?;
+                Err(Error::internal_io(
+                    "injected crash after retry directory sync",
+                    None,
+                ))
+            },
+        )
+        .expect_err("NotFound retry must reach the directory sync boundary");
+        assert_eq!(
+            rearm_error_summary(&retry),
+            "injected crash after retry directory sync"
+        );
+
+        remove_rearm_intention(&path).expect("restart retry durably confirms the unlink");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rearm_owner_identity_distinguishes_same_process_pid_reuse_and_live_owner() {
+        let owner_pid = std::process::id();
+        let owner_start_identity = current_process_start_identity(owner_pid).unwrap();
+        let mut intention = CookContinuationRearmIntention {
+            schema: CONTINUATION_REARM_INTENTION_SCHEMA.to_string(),
+            key: "cook:run".to_string(),
+            cook_id: "cook".to_string(),
+            run_id: "run".to_string(),
+            owner_pid,
+            owner_start_identity,
+            claim_identity: format!("{owner_pid}-{}", Uuid::new_v4()),
+            phase: CookContinuationRearmPhase::RestorationRequired,
+            private_claim_name: "private".to_string(),
+            published_claim_name: "published".to_string(),
+            original_bytes: Vec::new(),
+            diagnostic: None,
+        };
+
+        assert!(rearm_owner_allows_recovery_with(&intention, |_, _| {
+            ProcessIdentityState::Live
+        })
+        .unwrap());
+        assert!(rearm_owner_allows_recovery_with(&intention, |_, _| {
+            ProcessIdentityState::IdentityMismatch
+        })
+        .unwrap());
+
+        intention.owner_pid = owner_pid.saturating_add(1);
+        assert!(!rearm_owner_allows_recovery_with(&intention, |_, _| {
+            ProcessIdentityState::Live
+        })
+        .unwrap());
+        assert!(rearm_owner_allows_recovery_with(&intention, |_, _| {
+            ProcessIdentityState::Dead
+        })
+        .unwrap());
+        assert!(rearm_owner_allows_recovery_with(&intention, |_, _| {
+            ProcessIdentityState::Unverifiable
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn same_process_public_retry_recovers_uncompensated_rearm() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        let recipe = recipe();
+        store.persist_recipe(&recipe).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&recipe.attempts[0].plan, "run", |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .unwrap()
+            .fail("fixture failure")
+            .unwrap();
+        agent_task_lifecycle::record_cook_controller_failure_in_store(
+            &lifecycle_store,
+            "run",
+            &serde_json::json!({ "message": "original" }),
+        )
+        .unwrap();
+        let hash = content_hash::sha256_hex(b"cook:run");
+
+        claim_continuation_for_recovery_and_clear_failure_with(
+            &store,
+            "cook",
+            "run",
+            |path, intention| {
+                agent_task_lifecycle::prepare_cook_controller_failure_rearm_in_store(
+                    &lifecycle_store,
+                    "run",
+                    |diagnostic| {
+                        intention.diagnostic = diagnostic.cloned();
+                        persist_rearm_intention(path, intention)
+                    },
+                )
+            },
+            |diagnostic| {
+                agent_task_lifecycle::restore_cook_controller_failure_if_absent_in_store(
+                    &lifecycle_store,
+                    "run",
+                    &diagnostic,
+                )
+            },
+            atomic_write_and_sync,
+            |from, to| {
+                fs::rename(from, to).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(from.display().to_string()))
+                })?;
+                sync_directory(to.parent().unwrap())
+            },
+            persist_rearm_intention,
+            |checkpoint| {
+                if checkpoint == CookContinuationRearmCheckpoint::BeforeResetPersistence {
+                    Err(Error::internal_io("injected uncompensated failure", None))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("leave the current process's recovery journal uncompensated");
+
+        let claim = claim_continuation_for_recovery_and_clear_failure_in_store(
+            &store,
+            &lifecycle_store,
+            "cook",
+            "run",
+        )
+        .unwrap()
+        .expect("same process retry recovers and claims failed continuation");
+
+        assert!(claim
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("{hash}.claimed.{}-", std::process::id())));
+        assert!(!store
+            .queue_root()
+            .join(format!("{hash}.rearm-intention.json"))
+            .exists());
+        assert!(lifecycle_store
+            .read_record("run")
+            .unwrap()
+            .metadata
+            .get("cook_controller_failure")
+            .is_none());
+    }
+
+    #[test]
+    fn same_process_retry_recovers_uncompensated_rearm_before_publication() {
         for crash_at in [
             CookContinuationRearmCheckpoint::BeforeResetPersistence,
             CookContinuationRearmCheckpoint::AfterResetPersistence,
@@ -4915,8 +5201,6 @@ mod tests {
                 },
             )
             .expect_err("checkpoint interrupts without in-process compensation");
-            mark_rearm_intention_owner_dead(&store, &hash);
-
             recover_continuation_rearm_in_store(&store, &lifecycle_store, "cook", "run").unwrap();
 
             assert_eq!(fs::read(&failed).unwrap(), original, "{crash_at:?}");
@@ -4991,10 +5275,12 @@ mod tests {
             },
         )
         .expect_err("checkpoint interrupts after public claim commit");
-        mark_rearm_intention_owner_dead(&store, &hash);
-        let published_claim = store
+        let intention_path = store
             .queue_root()
-            .join(format!("{hash}.claimed.{}", std::process::id()));
+            .join(format!("{hash}.rearm-intention.json"));
+        let intention: CookContinuationRearmIntention =
+            serde_json::from_slice(&fs::read(&intention_path).unwrap()).unwrap();
+        let published_claim = store.queue_root().join(&intention.published_claim_name);
         assert_eq!(
             continuation_state_in_store(&store, "cook", "run").unwrap(),
             CookContinuationState::Claimed,
@@ -5121,7 +5407,7 @@ mod tests {
                 .is_none()
         );
 
-        mark_rearm_intention_owner_dead(&store, &hash);
+        mark_rearm_intention_owner_reused(&store, &hash);
         recover_continuation_rearm_in_store(&store, &lifecycle_store, "cook", "run").unwrap();
         assert_eq!(fs::read(&failed).unwrap(), original);
         assert_eq!(
@@ -5225,7 +5511,7 @@ mod tests {
         );
 
         fs::remove_dir(&failed).unwrap();
-        mark_rearm_intention_owner_dead(&store, &hash);
+        mark_rearm_intention_owner_reused(&store, &hash);
         recover_continuation_rearm_in_store(&store, &lifecycle_store, "cook", "run").unwrap();
 
         assert_eq!(fs::read(&failed).unwrap(), original);
@@ -5242,13 +5528,24 @@ mod tests {
         );
     }
 
-    fn mark_rearm_intention_owner_dead(store: &CookRecipeStore, hash: &str) {
+    fn mark_rearm_intention_owner_reused(store: &CookRecipeStore, hash: &str) {
         let path = store
             .queue_root()
             .join(format!("{hash}.rearm-intention.json"));
         let mut intention: CookContinuationRearmIntention =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        intention.owner_pid = u32::MAX;
+        intention.owner_start_identity = match intention.owner_start_identity {
+            ProcessStartIdentity::Linux { starttime_ticks } => ProcessStartIdentity::Linux {
+                starttime_ticks: starttime_ticks.saturating_add(1),
+            },
+            ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            } => ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds: start_microseconds.saturating_add(1),
+            },
+        };
         persist_rearm_intention(&path, &intention).unwrap();
     }
 
@@ -5548,9 +5845,11 @@ mod tests {
             .unwrap()
             .contains("malformed failed durable continuation"));
         assert!(!root.join(format!("{hash}.pending")).exists());
-        assert!(!root
-            .join(format!("{hash}.claimed.{}", std::process::id()))
-            .exists());
+        assert!(!fs::read_dir(&root)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .any(|name| name.starts_with(&format!("{hash}.claimed."))));
     }
 
     #[test]

@@ -3297,6 +3297,62 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 0,
             ));
         }
+        phases.push(serde_json::json!({
+            "phase": "continuation_claim",
+            "status": "passed",
+            "reason": "ok",
+            "state": format!("{continuation_state:?}"),
+            "rearm": args.rearm,
+        }));
+        let dispatcher = match crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
+            &recipe.promotion_transport["attempt_dispatch"],
+        ) {
+            Ok(dispatcher) => {
+                phases.push(
+                    serde_json::json!({ "phase": "transport", "status": "passed", "reason": "ok" }),
+                );
+                dispatcher
+            }
+            Err(error) => {
+                return Ok((
+                    cook_continuation_preflight_report(
+                        selected_run_id,
+                        args.artifact_id.as_deref(),
+                        args.rearm,
+                        candidate_fingerprint,
+                        phases,
+                        "transport",
+                        &error,
+                    ),
+                    1,
+                ));
+            }
+        };
+        let reconstruction =
+            if agent_task_service_direct::historical_terminal_continuation_is_eligible(
+                &recipe,
+                record.state,
+            ) {
+                agent_task_service::reconstruct_adoption_options_with_dispatcher(
+                    &recipe, dispatcher,
+                )
+            } else {
+                agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
+            };
+        if let Err(error) = reconstruction {
+            return Ok((
+                cook_continuation_preflight_report(
+                    selected_run_id,
+                    args.artifact_id.as_deref(),
+                    args.rearm,
+                    candidate_fingerprint,
+                    phases,
+                    "recipe",
+                    &error,
+                ),
+                1,
+            ));
+        }
         return Ok(cook_finalization_receipt_preflight_report(
             selected_run_id,
             &run_id,
