@@ -6,10 +6,10 @@ use super::super::apply::{
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
-    normalize_promotion_patch, preflight_patch_artifact_admission_in_observation_store,
-    promote_with_provider, promote_with_provider_and_checkpoint,
-    promote_with_provider_in_observation_store, resume_promoted_patch, select_patch_artifact,
-    validate_artifact_content,
+    canonical_recoverable_patch_artifacts_in_observation_store, normalize_promotion_patch,
+    preflight_patch_artifact_admission_in_observation_store, promote_with_provider,
+    promote_with_provider_and_checkpoint, promote_with_provider_in_observation_store,
+    resume_promoted_patch, select_patch_artifact, validate_artifact_content,
 };
 use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
 use super::*;
@@ -475,6 +475,115 @@ fn promote_recoverable_candidate_collapses_duplicate_digest_aliases() {
     assert_eq!(report.patch_artifact.id, "candidate-0");
     assert_eq!(report.patch_artifact.kind, "patch");
     assert_eq!(apply_calls, 1);
+}
+
+#[test]
+fn promote_recoverable_candidate_retains_patch_larger_than_256_kib() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = recoverable_patch_source(&temp, 1);
+    let patch = padded_patch(300 * 1024, 'x');
+    std::fs::write(temp.path().join("candidate-0.patch"), &patch).expect("write large patch");
+    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+    source["artifacts"][0]["size_bytes"] = Value::from(patch.len());
+    source["artifacts"][0]["sha256"] = Value::String(sha256_hex(&patch));
+    let source = source.to_string();
+    std::fs::write(&source_path, &source).expect("rewrite source");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("recoverable-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@recoverable".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("large patch remains promotable within the aggregate budget");
+
+    assert_eq!(report.patch_artifact.id, "candidate-0");
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(provider.applied_patch_contents, vec![patch]);
+}
+
+#[test]
+fn canonical_recoverable_candidates_reject_aggregate_byte_overflow() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source_path, source) = recoverable_patch_source(&temp, 2);
+        let first = padded_patch(600 * 1024, 'a');
+        let second = padded_patch(600 * 1024, 'b');
+        std::fs::write(temp.path().join("candidate-0.patch"), &first).expect("write first patch");
+        std::fs::write(temp.path().join("candidate-1.patch"), &second).expect("write second patch");
+        let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+        for (index, patch) in [&first, &second].into_iter().enumerate() {
+            source["artifacts"][index]["size_bytes"] = Value::from(patch.len());
+            source["artifacts"][index]["sha256"] = Value::String(sha256_hex(patch));
+        }
+        let outcome: AgentTaskOutcome = serde_json::from_value(source.clone()).expect("outcome");
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+
+        let canonical = canonical_recoverable_patch_artifacts_in_observation_store(
+            &outcome,
+            &AgentTaskPromotionOptions {
+                source: source.to_string(),
+                source_run_id: Some("recoverable-run".to_string()),
+                source_path: Some(source_path),
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "repo@recoverable".to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &store,
+        )
+        .expect("canonical selection remains bounded");
+
+        assert_eq!(
+            canonical
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["candidate-0"]
+        );
+        assert_eq!(canonical.omitted_patch_bytes, second.len() as u64);
+        assert_eq!(
+            canonical.unavailable,
+            vec![serde_json::json!({
+                "id": "candidate-1",
+                "reason": "canonical_patch_byte_budget_exceeded",
+                "size_bytes": second.len(),
+            })]
+        );
+    });
+}
+
+fn padded_patch(size: usize, fill: char) -> String {
+    assert!(size > VALID_PATCH.len() + 2);
+    format!(
+        "{VALID_PATCH}+{}\n",
+        fill.to_string().repeat(size - VALID_PATCH.len() - 2)
+    )
 }
 
 #[test]
