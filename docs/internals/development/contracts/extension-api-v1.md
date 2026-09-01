@@ -209,6 +209,31 @@ Deployment routing, repository policy validation, payload construction,
 observation phases, and component result aggregation remain deploy-subsystem
 policy over this operation.
 
+## Agent-Task Executor Registration
+
+`extension::agent_task_executor_api::AgentTaskExecutorApi` discovers
+`agent-task-executor.<id>` capabilities from installed extensions and returns one
+immutable registration inventory. Each entry exposes the executor id, backend,
+owning extension, owning runtime, declared capability tokens, whether a readiness
+probe is declared, its readiness budget, resolvability, and a typed diagnostic.
+
+Everything an executor needs in order to run stays private: argv, commands,
+extension and runtime paths, secret and environment declarations, materialization
+contracts, and provider-specific options never enter an inventory response.
+
+Entries are ordered by owning extension, runtime, and executor id. A declaration
+that cannot be parsed, an extension that is incompatible or invalid, and an
+executor id claimed by more than one source are each registered as an unusable
+entry that keeps its identity and states its diagnostic kind, rather than being
+dropped. A colliding id makes every claimant unusable so selection never depends
+on discovery order.
+
+Extension install, replace, and relink validate declared executors against this
+inventory, so the install-time gate and ordinary agent-task discovery cannot
+disagree about what an extension registers. Resolving a declaration into an
+executable provider, selection policy, workspace preparation, retries, and
+dispatch remain agent-task subsystem policy over this operation.
+
 ## External Check Detail Hydration
 
 `extension::external_check_detail_api` discovers

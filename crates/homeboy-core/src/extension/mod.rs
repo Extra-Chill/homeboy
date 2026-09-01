@@ -1,3 +1,4 @@
+pub mod agent_task_executor_api;
 pub mod audit_compiler_warning_provider;
 pub mod audit_fingerprint_script_provider;
 pub mod audit_grammar_source_provider;
