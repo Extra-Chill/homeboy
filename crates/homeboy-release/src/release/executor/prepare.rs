@@ -33,11 +33,11 @@ pub(crate) fn run_prepare(
     let mut responses = Vec::new();
 
     for extension in providers {
-        let response = extension::invoke::execute_action(
+        let response = extension::invoke::action_api::invoke_action(
             &extension.id,
             "release.prepare",
             None,
-            None,
+            &[],
             Some(&payload),
         )?;
         responses.push(serde_json::json!({

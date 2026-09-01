@@ -52,8 +52,13 @@ pub(crate) fn run_publish(
         None,
         extra_config.as_ref(),
     );
-    let response =
-        extension::invoke::execute_action(&extension.id, action_id, None, None, Some(&payload))?;
+    let response = extension::invoke::action_api::invoke_action(
+        &extension.id,
+        action_id,
+        None,
+        &[],
+        Some(&payload),
+    )?;
     let extension_data = serde_json::to_value(&response).map_err(|e| {
         Error::internal_json(e.to_string(), Some("extension action output".to_string()))
     })?;

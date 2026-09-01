@@ -29,6 +29,8 @@ The wire schemas are:
 - `homeboy/extension-api-readiness-response/v1`
 - `homeboy/extension-api-invoke-request/v1`
 - `homeboy/extension-api-invoke-response/v1`
+- `homeboy/extension-api-action-invoke-request/v1`
+- `homeboy/extension-api-action-invoke-response/v1`
 - `homeboy/extension-api-environment-resolve-request/v1`
 - `homeboy/extension-api-environment-resolve-response/v1`
 - `homeboy/extension-api-deployment-provider-inventory-request/v1`
@@ -155,6 +157,21 @@ fallback.
 This synchronous operation is intentionally limited to analysis. It does not
 perform durable mutation and therefore has no idempotency, cancellation,
 reconciliation, activity, or terminal-result lifecycle.
+
+## Action Invocation
+
+`extension::invoke::action_api::invoke_action_api` executes one manifest action
+after resolving its advertised `action.<id>` capability through v1. The typed
+request carries extension and action identity plus selected values, project
+identity, and the action payload. Core keeps the manifest, command, working
+directory, environment, settings, and interpolated payload private.
+
+Command-backed actions return bounded process evidence: exit code, stdout,
+stderr, and parsed stdout when it is JSON. API-backed actions return only the
+remote operation output. Neither response shape exposes command text, cwd,
+payload echoes, environment declarations, extension paths, or provider
+configuration. Release, rig lifecycle, and direct CLI action execution all use
+this operation rather than a parallel manifest-action executor.
 
 ## Environment Resolution
 

@@ -263,11 +263,11 @@ fn update_dependency(
         upstream,
     );
 
-    extension::invoke::execute_action(
+    extension::invoke::action_api::invoke_action(
         &extension_id,
         UPDATE_DEPENDENCY_ACTION,
         None,
-        None,
+        &[],
         Some(&payload),
     )
 }
