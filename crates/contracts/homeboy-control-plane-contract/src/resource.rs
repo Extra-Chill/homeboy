@@ -134,6 +134,8 @@ pub struct ControlPlaneRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<ControlPlaneLiveness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate: Option<ControlPlaneStateSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<ControlPlaneStateSummary>,
@@ -169,6 +171,7 @@ impl ControlPlaneRun {
             runtime: None,
             provider: None,
             heartbeat_at: None,
+            liveness: None,
             candidate: None,
             gates: Vec::new(),
             publication: None,
@@ -180,6 +183,20 @@ impl ControlPlaneRun {
             artifacts: Vec::new(),
         }
     }
+}
+
+/// Bounded live provider evidence. This intentionally carries timestamps and a
+/// source name only; provider output and filesystem paths remain out of status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneLiveness {
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_observed_progress_at: Option<String>,
+    pub age_seconds: u64,
+    pub window_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -332,9 +349,9 @@ mod tests {
     use super::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
         ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneBlocker,
-        ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLocation,
-        ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult, ControlPlaneRun,
-        ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
+        ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneLiveness,
+        ControlPlaneLocation, ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneResult,
+        ControlPlaneRun, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneStateSummary,
         CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA,
         CONTROL_PLANE_RUN_SCHEMA,
     };
@@ -374,6 +391,13 @@ mod tests {
             session: Some(ProviderSessionId::new("sess-1").expect("session")),
         });
         resource.heartbeat_at = Some("2026-01-01T00:00:30Z".to_string());
+        resource.liveness = Some(ControlPlaneLiveness {
+            state: "active".to_string(),
+            source: Some("structured_progress".to_string()),
+            last_observed_progress_at: Some("2026-01-01T00:00:45Z".to_string()),
+            age_seconds: 15,
+            window_seconds: 300,
+        });
         resource.candidate = Some(ControlPlaneStateSummary {
             id: Some("review".to_string()),
             state: "applied".to_string(),
@@ -431,6 +455,7 @@ mod tests {
         assert_eq!(value["runtime"]["build_identity"], "homeboy 0.1.0+test");
         assert_eq!(value["provider"]["id"], "claude");
         assert_eq!(value["heartbeat_at"], "2026-01-01T00:00:30Z");
+        assert_eq!(value["liveness"]["state"], "active");
         assert_eq!(value["candidate"]["state"], "applied");
         assert_eq!(value["gates"][0]["id"], "test");
         assert_eq!(value["publication"]["state"], "published");
