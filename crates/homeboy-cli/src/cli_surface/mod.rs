@@ -7,7 +7,7 @@ use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db,
     deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project, refactor,
     release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, stack,
-    status, trace, tunnel, upgrade, worktree,
+    status, topology, trace, tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -237,6 +237,8 @@ pub enum Commands {
     Worktree(worktree::WorktreeArgs),
     /// Manage private service tunnel declarations
     Tunnel(tunnel::TunnelArgs),
+    /// Inspect declared resource relationships without resolving effective configuration
+    Topology(topology::TopologyArgs),
     /// Inspect persisted observation runs, artifacts, and typed evidence projections
     Runs(runs::RunsArgs),
     /// Inspect the active Homeboy binary; `self identity` reports its local build identity

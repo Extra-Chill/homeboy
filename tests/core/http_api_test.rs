@@ -17,6 +17,9 @@ use homeboy_control_plane_contract::{
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
     CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
 };
+use homeboy_resource_topology_contract::{
+    ResourceTopologyResourceKind, ResourceTopologyResourceRef,
+};
 
 use crate::test_support::with_isolated_home;
 
@@ -87,6 +90,36 @@ fn routes_component_endpoints() {
             id: "homeboy".to_string()
         }
     );
+}
+
+#[test]
+fn topology_inspection_route_and_response_are_read_only() {
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/topology/fleet/production").expect("route"),
+        HttpEndpoint::ResourceTopology {
+            root: ResourceTopologyResourceRef {
+                kind: ResourceTopologyResourceKind::Fleet,
+                id: "production".to_string(),
+            },
+        }
+    );
+
+    with_isolated_home(|_| {
+        crate::fleet::save(&crate::fleet::Fleet::new("production".to_string(), vec![]))
+            .expect("fleet config");
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: "/topology/fleet/production".to_string(),
+            body: None,
+        })
+        .expect("topology response");
+
+        assert_eq!(response.endpoint, "resource_topology.show");
+        assert_eq!(
+            response.body["snapshot"]["schema"],
+            "homeboy/resource-topology-snapshot/v1"
+        );
+    });
 }
 
 #[test]
