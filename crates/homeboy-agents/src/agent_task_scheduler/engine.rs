@@ -360,7 +360,16 @@ impl AgentTaskScheduler {
             .tasks
             .drain(..)
             .map(|mut request| {
-                request.limits.execution_deadline_unix_ms = execution_deadline_unix_ms;
+                request.limits.execution_deadline_unix_ms = match (
+                    request.limits.execution_deadline_unix_ms,
+                    execution_deadline_unix_ms,
+                ) {
+                    (Some(task_deadline), Some(plan_deadline)) => {
+                        Some(task_deadline.min(plan_deadline))
+                    }
+                    (Some(task_deadline), None) => Some(task_deadline),
+                    (None, plan_deadline) => plan_deadline,
+                };
                 let rotation_policy = AgentTaskScheduleSupport::rotation_policy_for_request(
                     &request,
                     plan_rotation.as_ref(),
@@ -651,6 +660,8 @@ impl AgentTaskScheduler {
                     break;
                 };
                 let mut scheduled = queued.remove(next_index).expect("queued task");
+                let execution_deadline_unix_ms =
+                    scheduled.request.limits.execution_deadline_unix_ms;
                 if crate::agent_task_timeout::remaining_execution_deadline_ms(
                     execution_deadline_unix_ms,
                 ) == Some(0)
@@ -968,7 +979,7 @@ impl AgentTaskScheduler {
                     request.limits.max_runtime_ms,
                 );
                 let task_timeout_ms = crate::agent_task_timeout::remaining_execution_deadline_ms(
-                    execution_deadline_unix_ms,
+                    request.limits.execution_deadline_unix_ms,
                 )
                 .map(|remaining| task_timeout_ms.min(remaining))
                 .unwrap_or(task_timeout_ms);
@@ -977,7 +988,6 @@ impl AgentTaskScheduler {
                 // cancel the scheduler while the provider never sees the
                 // actual amount of time it has left to finish cleanly.
                 request.limits.timeout_ms = Some(task_timeout_ms);
-                request.limits.execution_deadline_unix_ms = execution_deadline_unix_ms;
                 let tx = tx.clone();
                 let attempt = scheduled.attempt;
                 let context = AgentTaskExecutionContext {

@@ -268,6 +268,32 @@ mod timeout_tests {
     }
 
     #[test]
+    fn task_execution_deadline_caps_the_plan_deadline() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(Arc::new(ConceptPacketExecutor {
+            observed: Arc::clone(&observed),
+            emit_concept_packet: false,
+        }));
+        let mut plan = plan_with_tasks(1);
+        let task_deadline = crate::agent_task_timeout::now_unix_ms().saturating_add(30_000);
+        plan.options.execution_budget.deadline_unix_ms = Some(task_deadline.saturating_add(30_000));
+        plan.tasks[0].limits.execution_deadline_unix_ms = Some(task_deadline);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Succeeded
+        );
+        assert_eq!(
+            observed.lock().expect("observed request")[0]
+                .limits
+                .execution_deadline_unix_ms,
+            Some(task_deadline)
+        );
+    }
+
+    #[test]
     fn timeout_with_completed_runtime_artifacts_is_discoverable_and_promotable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let artifact_root = temp.path().join("task-1-artifacts");

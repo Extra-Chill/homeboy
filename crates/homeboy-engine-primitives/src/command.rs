@@ -98,6 +98,10 @@ pub struct ControllerChildGuard {
     #[cfg(unix)]
     controller_liveness_fd: RawFd,
     #[cfg(unix)]
+    child_registration_read_fd: RawFd,
+    #[cfg(unix)]
+    child_registration_fd: RawFd,
+    #[cfg(unix)]
     owned_processes: Mutex<Vec<UnixProcessIdentity>>,
     #[cfg(target_os = "linux")]
     controller_pid: u32,
@@ -120,22 +124,38 @@ impl ControllerChildGuard {
             #[cfg(target_os = "linux")]
             command.env("HOMEBOY_CHILD_GUARD_ID", guard_id.to_string());
             let mut fds = [-1; 2];
+            let mut registration_fds = [-1; 2];
             if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
                 return Err(io::Error::last_os_error());
             }
-            for fd in fds {
+            if unsafe { libc::pipe(registration_fds.as_mut_ptr()) } != 0 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(error);
+            }
+            for fd in fds.into_iter().chain(registration_fds) {
                 if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
                     unsafe {
                         libc::close(fds[0]);
                         libc::close(fds[1]);
+                        libc::close(registration_fds[0]);
+                        libc::close(registration_fds[1]);
                     }
                     return Err(io::Error::last_os_error());
                 }
             }
-            isolate_process_tree(command);
-            Ok(Self {
+            // The child reports its PID from pre_exec, after it became its own
+            // process-group leader but before it can execute workload code.
+            // That lets the already-running guard cover spawn-to-attach.
+            configure_isolated_process_tree(command, registration_fds[1]);
+            let guard = Self {
                 controller_liveness_read_fd: fds[0],
                 controller_liveness_fd: fds[1],
+                child_registration_read_fd: registration_fds[0],
+                child_registration_fd: registration_fds[1],
                 owned_processes: Mutex::new(Vec::new()),
                 #[cfg(target_os = "linux")]
                 controller_pid: std::process::id(),
@@ -143,7 +163,29 @@ impl ControllerChildGuard {
                 guard_pid: Mutex::new(None),
                 #[cfg(target_os = "linux")]
                 guard_id,
-            })
+            };
+            match unsafe { libc::fork() } {
+                -1 => Err(io::Error::last_os_error()),
+                0 => controller_death_guard_loop(
+                    guard.controller_liveness_read_fd,
+                    guard.controller_liveness_fd,
+                    guard.child_registration_read_fd,
+                    guard.child_registration_fd,
+                ),
+                guard_pid => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        *guard
+                            .guard_pid
+                            .lock()
+                            .map_err(|_| io::Error::other("guard PID lock poisoned"))? =
+                            Some(guard_pid as u32);
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = guard_pid;
+                    Ok(guard)
+                }
+            }
         }
 
         #[cfg(not(unix))]
@@ -156,31 +198,13 @@ impl ControllerChildGuard {
         }
     }
 
-    /// Start the guard after the command is spawned so it cannot inherit the
-    /// standard library's private spawn error pipe.
+    /// Record the child after spawn. The guard already runs from `prepare`, so
+    /// controller death during this handoff cannot leave workload descendants.
     pub fn attach(&self, child: &Child) -> io::Result<()> {
         #[cfg(unix)]
         {
             self.observe_owned_processes(child.id())?;
-            match unsafe { libc::fork() } {
-                -1 => Err(io::Error::last_os_error()),
-                0 => controller_death_guard_loop(
-                    self.controller_liveness_read_fd,
-                    self.controller_liveness_fd,
-                    child.id(),
-                ),
-                _guard_pid => {
-                    #[cfg(target_os = "linux")]
-                    {
-                        *self
-                            .guard_pid
-                            .lock()
-                            .map_err(|_| io::Error::other("guard PID lock poisoned"))? =
-                            Some(_guard_pid as u32);
-                    }
-                    Ok(())
-                }
-            }
+            Ok(())
         }
 
         #[cfg(not(unix))]
@@ -353,6 +377,8 @@ impl Drop for ControllerChildGuard {
         unsafe {
             libc::close(self.controller_liveness_read_fd);
             libc::close(self.controller_liveness_fd);
+            libc::close(self.child_registration_read_fd);
+            libc::close(self.child_registration_fd);
         }
         #[cfg(windows)]
         if let Ok(mut job) = self.job.lock() {
@@ -372,11 +398,11 @@ impl Drop for ControllerChildGuard {
 /// walks a bounded descriptor range rather than allocating to enumerate
 /// `/proc/self/fd`.
 #[cfg(unix)]
-fn close_inherited_descriptors_except(keep: RawFd) {
+fn close_inherited_descriptors_except(keep: &[RawFd]) {
     let max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
     let max = if max > 0 { max as RawFd } else { 1024 };
     for fd in 3..max {
-        if fd != keep {
+        if !keep.contains(&fd) {
             unsafe {
                 libc::close(fd);
             }
@@ -387,13 +413,13 @@ fn close_inherited_descriptors_except(keep: RawFd) {
     let devnull = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
     if devnull >= 0 {
         for fd in 0..3 {
-            if fd != keep {
+            if !keep.contains(&fd) {
                 unsafe {
                     libc::dup2(devnull, fd);
                 }
             }
         }
-        if devnull > 2 && devnull != keep {
+        if devnull > 2 && !keep.contains(&devnull) {
             unsafe {
                 libc::close(devnull);
             }
@@ -402,18 +428,42 @@ fn close_inherited_descriptors_except(keep: RawFd) {
 }
 
 #[cfg(unix)]
-fn controller_death_guard_loop(read_fd: RawFd, write_fd: RawFd, process_group: u32) -> ! {
+fn controller_death_guard_loop(
+    read_fd: RawFd,
+    write_fd: RawFd,
+    registration_read_fd: RawFd,
+    registration_fd: RawFd,
+) -> ! {
     unsafe {
         libc::close(write_fd);
+        libc::close(registration_fd);
     }
-    // `attach` forks after the child is spawned, so this guard inherits every
-    // descriptor the controller held at that moment — including the write end
-    // of the child's stdin pipe, which the controller has not yet written and
-    // dropped. Holding a duplicate of that end means the child never sees EOF
-    // on stdin: a provider that reads its request from stdin blocks until its
-    // timeout instead of running. Close everything except the liveness read
-    // end, which is the only descriptor this loop uses.
-    close_inherited_descriptors_except(read_fd);
+    // The watcher starts before the child is spawned. Close controller
+    // descriptors, especially stdin-pipe writers, so it cannot keep a child
+    // waiting for EOF after its controller drops them.
+    close_inherited_descriptors_except(&[read_fd, registration_read_fd]);
+    let mut pid_bytes = [0_u8; std::mem::size_of::<u32>()];
+    let mut offset = 0;
+    while offset < pid_bytes.len() {
+        let read = unsafe {
+            libc::read(
+                registration_read_fd,
+                pid_bytes[offset..].as_mut_ptr().cast(),
+                pid_bytes.len() - offset,
+            )
+        };
+        if read == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        if read < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            unsafe { libc::_exit(1) };
+        }
+        offset += read as usize;
+    }
+    let process_group = u32::from_ne_bytes(pid_bytes);
     let mut byte = 0_u8;
     loop {
         let read = unsafe { libc::read(read_fd, (&mut byte as *mut u8).cast(), 1) };
@@ -1242,20 +1292,34 @@ pub fn isolate_process_tree(command: &mut Command) {
     // parent are then reparented here and can be reaped during cleanup.
     let _ = enable_child_subreaper();
     #[cfg(unix)]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    configure_isolated_process_tree(command, -1);
 
     #[cfg(not(unix))]
     {
         let _ = command;
+    }
+}
+
+#[cfg(unix)]
+fn configure_isolated_process_tree(command: &mut Command, registration_fd: RawFd) {
+    unsafe {
+        use std::os::unix::process::CommandExt;
+
+        command.pre_exec(move || {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if registration_fd >= 0 {
+                let pid = libc::getpid() as u32;
+                let bytes = pid.to_ne_bytes();
+                if libc::write(registration_fd, bytes.as_ptr().cast(), bytes.len())
+                    != bytes.len() as isize
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
     }
 }
 
