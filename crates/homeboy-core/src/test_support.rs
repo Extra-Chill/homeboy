@@ -1578,6 +1578,44 @@ pub fn write_source_extension(home: &std::path::Path, id: &str, file_extension: 
     }
 }
 
+/// Git command execution shared by test fixtures.
+///
+/// Topology-specific setup stays at the caller: branch names, remotes, commit
+/// identity, and failure scenarios remain visible in each test.
+pub struct GitFixture<'a> {
+    repo: &'a Path,
+    identity: Option<(&'static str, &'static str)>,
+}
+
+impl<'a> GitFixture<'a> {
+    pub fn new(repo: &'a Path) -> Self {
+        Self {
+            repo,
+            identity: None,
+        }
+    }
+
+    fn with_identity(repo: &'a Path, name: &'static str, email: &'static str) -> Self {
+        Self {
+            repo,
+            identity: Some((name, email)),
+        }
+    }
+
+    pub fn execute(&self, args: &[&str]) -> Output {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(self.repo);
+        if let Some((name, email)) = self.identity {
+            command
+                .env("GIT_AUTHOR_NAME", name)
+                .env("GIT_AUTHOR_EMAIL", email)
+                .env("GIT_COMMITTER_NAME", name)
+                .env("GIT_COMMITTER_EMAIL", email);
+        }
+        command.output().expect("git fixture command")
+    }
+}
+
 pub fn shared_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
     git_repo_fixture(name, false)
 }
@@ -1601,15 +1639,8 @@ fn git_repo_fixture(name: &str, committed: bool) -> (TempDir, PathBuf) {
 }
 
 pub fn run_git_fixture_command(repo: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .env("GIT_AUTHOR_NAME", "homeboy-test")
-        .env("GIT_AUTHOR_EMAIL", "homeboy-test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "homeboy-test")
-        .env("GIT_COMMITTER_EMAIL", "homeboy-test@example.invalid")
-        .output()
-        .expect("git fixture command");
+    let output = GitFixture::with_identity(repo, "homeboy-test", "homeboy-test@example.invalid")
+        .execute(args);
     assert!(
         output.status.success(),
         "git fixture command {:?} failed: stdout={} stderr={}",
@@ -1639,15 +1670,8 @@ fn run_git_template_command(repo: &Path, args: &[&str]) {
 }
 
 pub fn git_fixture_output(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .env("GIT_AUTHOR_NAME", "homeboy-test")
-        .env("GIT_AUTHOR_EMAIL", "homeboy-test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "homeboy-test")
-        .env("GIT_COMMITTER_EMAIL", "homeboy-test@example.invalid")
-        .output()
-        .expect("git fixture command");
+    let output = GitFixture::with_identity(repo, "homeboy-test", "homeboy-test@example.invalid")
+        .execute(args);
     assert!(
         output.status.success(),
         "git fixture command {:?} failed: stdout={} stderr={}",
