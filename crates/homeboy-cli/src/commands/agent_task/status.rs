@@ -774,7 +774,10 @@ fn promotion_state(record: &Value) -> String {
     raw.to_string()
 }
 
-fn promotion_gate_state(record: &Value, promotion: &str) -> &'static str {
+fn promotion_gate_state(record: &Value, promotion: &str, target_applied: bool) -> &'static str {
+    if !target_applied {
+        return "not_run";
+    }
     if record
         .pointer("/metadata/latest_promotion/deterministic_gates")
         .and_then(Value::as_array)
@@ -4396,10 +4399,19 @@ pub(crate) fn execution_states_from_aggregate(
         .collect::<Vec<_>>();
     let promotion_status = promotion_state(record);
     let finalization_status = finalization_state(record);
-    let patch_promoted = matches!(
-        promotion_status.as_str(),
-        "verification_pending" | "applied" | "gate_failed"
-    );
+    let promotion = record.pointer("/metadata/latest_promotion");
+    // A retained artifact can carry a pending verification tracker before any
+    // target mutation. Only the post-apply checkpoint is evidence that this
+    // exact promotion reached its declared target.
+    let patch_promoted = canonical.target_applied;
+    let verified = canonical.verified;
+    let target = promotion_target_projection(promotion, patch_promoted);
+    let verification_phase = match promotion_status.as_str() {
+        "verification_pending" if patch_promoted => "post_apply",
+        "verification_pending" => "pre_apply",
+        "applied" | "gate_failed" if patch_promoted => "post_apply",
+        _ => "not_pending",
+    };
 
     json!({
         "schema": "homeboy/agent-task-execution-states/v1",
@@ -4415,13 +4427,37 @@ pub(crate) fn execution_states_from_aggregate(
             },
         },
         "gate": {
-            "state": promotion_gate_state(record, &promotion_status),
+            "state": promotion_gate_state(record, &promotion_status, patch_promoted),
         },
         "promotion": {
             "state": promotion_status,
             "patch_promoted": patch_promoted,
+            "verified": verified,
+            "verification_phase": verification_phase,
+            "target": target,
         },
-        "finalization": { "state": finalization_status },
+        "finalization": {
+            "state": finalization_status,
+            "finalized": canonical.finalized,
+        },
+    })
+}
+
+fn promotion_target_projection(promotion: Option<&Value>, applied: bool) -> Value {
+    let Some(promotion) = promotion else {
+        return json!({ "state": "not_declared", "candidate_fingerprint_matches": Value::Null });
+    };
+    let target = promotion
+        .pointer("/target/worktree")
+        .or_else(|| promotion.get("to_worktree"));
+    let fingerprint_matches = applied
+        && promotion
+            .pointer("/provenance/candidate")
+            .is_some_and(|fingerprint| !fingerprint.is_null());
+    json!({
+        "state": if applied { "applied" } else { "not_applied" },
+        "worktree": target,
+        "candidate_fingerprint_matches": fingerprint_matches,
     })
 }
 

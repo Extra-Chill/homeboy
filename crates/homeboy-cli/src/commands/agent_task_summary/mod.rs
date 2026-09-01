@@ -511,6 +511,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         production_lines[1] = format!("Candidate state: {candidate}");
     }
     lines.extend(production_lines);
+    if let Some(line) = target_application_line(payload) {
+        lines.push(line);
+    }
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
@@ -776,9 +779,19 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .then(|| command_line(payload, &["promotion_candidates", "0", "command"]))
         .flatten();
 
+    let target_applied = payload
+        .pointer("/execution_states/promotion/patch_promoted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let verified = payload
+        .pointer("/execution_states/promotion/verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let outcome = if metrics.candidate_state == CandidateState::Finalized {
         "pull request finalized"
-    } else if metrics.candidate_state == CandidateState::Promoted {
+    } else if target_applied && verified {
+        "patch promoted and verified"
+    } else if target_applied {
         "patch promoted"
     } else if promotable {
         "patch produced, not promoted"
@@ -797,6 +810,9 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         format!("Outcome: {outcome}"),
     ];
     lines.extend(code_production_lines(&metrics));
+    if let Some(line) = target_application_line(payload) {
+        lines.push(line);
+    }
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
@@ -811,6 +827,25 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: {next}"));
     }
     Some(finish(lines))
+}
+
+fn target_application_line(payload: &Value) -> Option<String> {
+    let promotion = value_at(payload, &["execution_states", "promotion"])?;
+    let target = string_value(promotion, &["target", "worktree"]).unwrap_or("not declared");
+    let target_state = string_value(promotion, &["target", "state"]).unwrap_or("not_applied");
+    let fingerprint = promotion
+        .pointer("/target/candidate_fingerprint_matches")
+        .and_then(Value::as_bool)
+        .map(|matches| if matches { "matches" } else { "does not match" })
+        .unwrap_or("unknown");
+    let verification = promotion
+        .get("verified")
+        .and_then(Value::as_bool)
+        .map(|verified| if verified { "verified" } else { "not verified" })
+        .unwrap_or("unknown");
+    Some(format!(
+        "Target application: {target_state} (worktree: {target}; candidate fingerprint: {fingerprint}; verification: {verification})"
+    ))
 }
 
 fn first_actionable_diagnostic(payload: &Value) -> Option<&str> {
@@ -1430,15 +1465,14 @@ mod tests {
     }
 
     #[test]
-    fn review_summary_uses_the_promoted_candidate_fingerprint() {
-        // A promoted candidate is no longer an apply candidate, but its durable
-        // promotion fingerprint remains the authoritative review summary source.
+    fn review_summary_uses_a_target_applied_candidate_fingerprint() {
+        // Target application is independent from retained candidate selection.
         let payload = json!({
             "run_id": "agent-task-11805",
             "state": "succeeded",
             "canonical_candidate": {
                 "schema": "homeboy/agent-task-candidate/v1",
-                "state": "promoted",
+                "state": "apply_ready",
                 "diff_bytes": 0,
                 "counts": { "patch_available": 1 },
                 "scan": { "degraded": false }
@@ -1449,15 +1483,55 @@ mod tests {
                 "size_bytes": 7635,
                 "changed_files": ["a.rs", "b.rs", "c.rs"]
             },
+            "execution_states": {
+                "promotion": {
+                    "patch_promoted": true,
+                    "verified": true,
+                    "target": { "state": "applied", "worktree": "fixture@target", "candidate_fingerprint_matches": true }
+                }
+            },
             "aggregate_review": { "summary": { "apply_candidates": 0, "failed": 0 } },
             "next_actions": ["finalize the pull request"]
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
 
-        assert!(summary.contains("Outcome: patch promoted\n"));
+        assert!(summary.contains("Outcome: patch promoted and verified\n"));
+        assert!(summary.contains("Target application: applied (worktree: fixture@target; candidate fingerprint: matches; verification: verified)\n"));
         assert!(summary.contains("Changed files: 3\n"));
         assert!(summary.contains("Diff bytes: 7635\n"));
+    }
+
+    #[test]
+    fn review_summary_keeps_a_pre_apply_candidate_out_of_the_promoted_outcome() {
+        let payload = json!({
+            "run_id": "retained-candidate",
+            "state": "partial_recoverable",
+            "canonical_candidate": {
+                "schema": "homeboy/agent-task-candidate/v1",
+                "state": "apply_ready",
+                "counts": { "patch_available": 1 }, "scan": { "degraded": false }
+            },
+            "selected_candidate": { "status": "verification_pending" },
+            "execution_states": {
+                "promotion": {
+                    "state": "verification_pending",
+                    "patch_promoted": false,
+                    "verification_phase": "pre_apply",
+                    "target": { "state": "not_applied", "worktree": "fixture@clean-target", "candidate_fingerprint_matches": false }
+                }
+            },
+            "aggregate_review": { "summary": { "apply_candidates": 1, "failed": 0 } }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(
+            summary.contains("Outcome: patch produced, not promoted\n"),
+            "{summary}"
+        );
+        assert!(!summary.contains("Outcome: patch promoted\n"), "{summary}");
+        assert!(summary.contains("Target application: not_applied (worktree: fixture@clean-target; candidate fingerprint: does not match; verification: not verified)\n"), "{summary}");
     }
 
     #[test]
@@ -1900,11 +1974,11 @@ mod tests {
             "cook": { "state": "finalization_failed", "publication": "blocked" },
             "canonical_candidate": {
                 "schema": "homeboy/agent-task-candidate/v1",
-                "state": "promoted",
+                "state": "apply_ready",
                 "counts": {}, "scan": {}
             },
             "execution_states": {
-                "candidate": { "state": "promoted_finalization_failed" },
+                "candidate": { "state": "apply_ready_finalization_failed" },
                 "gate": { "state": "passed" },
                 "finalization": { "state": "finalization_failed" },
                 "provider": [{ "task_id": "cook", "state": "succeeded" }]
@@ -1926,12 +2000,12 @@ mod tests {
 
         assert!(
             summary.starts_with(
-                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (promoted; legacy canonical)\nGates: passed\nPR finalization: finalization_failed"
+                "Agent task status\nCook outcome: finalization_failed\nCandidate: yes (apply_ready; legacy canonical)\nGates: passed\nPR finalization: finalization_failed"
             ),
             "{summary}"
         );
         assert!(!summary.contains("Status: succeeded"), "{summary}");
-        assert!(summary.contains("Candidate state: promoted_finalization_failed\n"));
+        assert!(summary.contains("Candidate state: apply_ready_finalization_failed\n"));
         assert!(summary.contains("Publication: blocked\n"));
         assert!(summary.contains("Provider/task evidence:\n"));
         assert!(summary.contains("Tasks attempted: 1\n"));

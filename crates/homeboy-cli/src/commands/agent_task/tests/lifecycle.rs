@@ -4208,8 +4208,10 @@ fn execution_states_distinguish_patch_noop_provider_failure_and_gate_failure() {
     );
     assert_eq!(patch["provider"][0]["state"], "succeeded");
     assert_eq!(patch["candidate"]["state"], "patch_available");
-    assert_eq!(patch["gate"]["state"], "passed");
+    assert_eq!(patch["gate"]["state"], "not_run");
     assert_eq!(patch["promotion"]["state"], "applied");
+    assert_eq!(patch["promotion"]["patch_promoted"], false);
+    assert_eq!(patch["promotion"]["verified"], false);
 
     let missing = execution_states(
         fixture_execution_outcome(
@@ -4325,7 +4327,7 @@ fn execution_states_prefer_adopted_normalized_gate_outcome_over_stale_attempt_fa
 }
 
 #[test]
-fn execution_states_keep_promoted_candidate_after_a_failed_provider_attempt() {
+fn execution_states_keep_retained_candidate_after_a_failed_provider_attempt() {
     let states = super::super::status::execution_states_from_aggregate(
         &aggregate_for_execution_outcome(fixture_execution_outcome(
             AgentTaskOutcomeStatus::Failed,
@@ -4344,8 +4346,50 @@ fn execution_states_keep_promoted_candidate_after_a_failed_provider_attempt() {
     );
 
     assert_eq!(states["provider"][0]["state"], "failed");
-    assert_eq!(states["candidate"]["state"], "promoted");
+    assert_eq!(states["candidate"]["state"], "apply_ready");
     assert_eq!(states["promotion"]["state"], "applied");
+    assert_eq!(states["promotion"]["patch_promoted"], false);
+    assert_eq!(states["promotion"]["verified"], false);
+    assert_eq!(states["promotion"]["target"]["state"], "not_applied");
+}
+
+#[test]
+fn execution_states_distinguish_target_application_from_verification() {
+    let aggregate = aggregate_for_execution_outcome(fixture_execution_outcome(
+        AgentTaskOutcomeStatus::Succeeded,
+        None,
+        Vec::new(),
+        Value::Null,
+    ));
+    let target_applied = super::super::status::execution_states_from_aggregate(
+        &aggregate,
+        &json!({ "metadata": { "latest_promotion": {
+            "status": "verification_pending",
+            "to_worktree": "fixture@target",
+            "target": { "worktree": "fixture@target" },
+            "patch_artifact": { "id": "patch" },
+            "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
+        } } }),
+    );
+    assert_eq!(target_applied["promotion"]["patch_promoted"], true);
+    assert_eq!(target_applied["promotion"]["verified"], false);
+    assert_eq!(
+        target_applied["promotion"]["verification_phase"],
+        "post_apply"
+    );
+
+    let verified = super::super::status::execution_states_from_aggregate(
+        &aggregate,
+        &json!({ "metadata": { "latest_promotion": {
+            "status": "applied",
+            "to_worktree": "fixture@target",
+            "target": { "worktree": "fixture@target" },
+            "patch_artifact": { "id": "patch" },
+            "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
+        } } }),
+    );
+    assert_eq!(verified["promotion"]["patch_promoted"], true);
+    assert_eq!(verified["promotion"]["verified"], true);
 }
 
 fn execution_states(outcome: AgentTaskOutcome, promotion_status: &str) -> Value {

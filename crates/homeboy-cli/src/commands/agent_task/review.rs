@@ -3312,14 +3312,20 @@ fn review_next_actions(
 }
 
 fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> Value {
-    let patch_promoted = report.status.patch_promoted();
+    // Typed reports are only constructed after the target mutation. The status
+    // remains a compatibility field; expose verification independently.
+    let target_applied = report.status.patch_promoted();
+    let verified = matches!(report.status, AgentTaskPromotionStatus::Applied);
     let mut next_actions = Vec::new();
     if report.status.gate_failed() {
         next_actions.push(
             "patch promoted but deterministic gates failed; use gate feedback before finalizing"
                 .to_string(),
         );
-    } else if patch_promoted {
+    } else if target_applied && verified {
+        next_actions
+            .push("patch promoted and deterministic gates verified; finalize a PR".to_string());
+    } else if target_applied {
         next_actions.push(
             "patch promoted into the target worktree; verify, then finalize a PR".to_string(),
         );
@@ -3332,7 +3338,11 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> V
         "schema": "homeboy/agent-task-promotion-handoff/v1",
         "states": {
             "patch_artifact_produced": true,
-            "patch_promoted": patch_promoted,
+            "candidate_retained": true,
+            "target_applied": target_applied,
+            "patch_promoted": target_applied,
+            "verified": verified,
+            "finalized": false,
             "pr_opened": false
         },
         "boundary": report.status.handoff_boundary(),
@@ -3390,7 +3400,11 @@ fn finalization_handoff(status: &str, pr_url: Option<&str>, run_id: Option<&str>
         "schema": "homeboy/agent-task-finalization-handoff/v1",
         "states": {
             "patch_artifact_produced": true,
+            "candidate_retained": true,
+            "target_applied": true,
             "patch_promoted": true,
+            "verified": pr_opened,
+            "finalized": pr_opened,
             "pr_opened": pr_opened,
             "publication_mutated": !publication_validated && pr_opened
         },
@@ -3613,7 +3627,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_review_preserves_one_promoted_candidate_fingerprint() {
+    fn compact_review_preserves_one_target_applied_candidate_fingerprint() {
         let patch = tempfile::NamedTempFile::new().expect("patch");
         std::fs::write(patch.path(), "x".repeat(7_635)).expect("write patch");
         let value = compact_review(
@@ -3632,6 +3646,7 @@ mod tests {
                                 "path": patch.path(),
                             },
                             "changed_files": ["a.rs", "b.rs", "c.rs"],
+                            "provenance": { "post_apply": true, "candidate": { "head": "candidate-head" } },
                             "deterministic_gates": [{
                                 "name": "cargo test",
                                 "status": "succeeded",
