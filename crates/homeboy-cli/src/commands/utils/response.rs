@@ -741,28 +741,14 @@ fn failure_diagnostics_for_data(
         return Some(command_failed_diagnostics(exit_code, failure_digest));
     }
     if let Some(failure) = declared_failure(data) {
-        let mut details = failure.details;
-        details.insert("exit_code".to_string(), Value::from(exit_code));
-        details.insert(
-            "source_pointer".to_string(),
-            Value::String("/failure".to_string()),
-        );
-        let failure_digest = CommandFailureDigest {
-            summary: failure.message.clone(),
-            stdout_tail: failure.stdout_tail,
-            stderr_tail: failure.stderr_tail,
-            artifact_refs: Vec::new(),
-            next_actions: failure.next_actions,
-            retryable: failure.retryable,
-        };
-        return Some(CommandDiagnostics {
-            code: failure.code,
-            message: failure.message,
-            details: Value::Object(details),
-            hints: None,
-            retryable: failure.retryable,
-            failure_digest: Some(failure_digest),
-        });
+        return Some(declared_failure_diagnostics(exit_code, failure, "/failure"));
+    }
+    if let Some(failure) = unresolved_provider_workspace_failure(data) {
+        return Some(declared_failure_diagnostics(
+            exit_code,
+            failure,
+            "/resolved/workspace",
+        ));
     }
 
     let failure_digest = failure_digest_for_data(data).or_else(|| {
@@ -770,6 +756,35 @@ fn failure_diagnostics_for_data(
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
     failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+}
+
+fn declared_failure_diagnostics(
+    exit_code: i32,
+    failure: DeclaredFailure,
+    source_pointer: &str,
+) -> CommandDiagnostics {
+    let mut details = failure.details;
+    details.insert("exit_code".to_string(), Value::from(exit_code));
+    details.insert(
+        "source_pointer".to_string(),
+        Value::String(source_pointer.to_string()),
+    );
+    let failure_digest = CommandFailureDigest {
+        summary: failure.message.clone(),
+        stdout_tail: failure.stdout_tail,
+        stderr_tail: failure.stderr_tail,
+        artifact_refs: Vec::new(),
+        next_actions: failure.next_actions,
+        retryable: failure.retryable,
+    };
+    CommandDiagnostics {
+        code: failure.code,
+        message: failure.message,
+        details: Value::Object(details),
+        hints: None,
+        retryable: failure.retryable,
+        failure_digest: Some(failure_digest),
+    }
 }
 
 fn upgrade_runner_convergence_diagnostics(
@@ -961,6 +976,55 @@ fn declared_failure(data: &Value) -> Option<DeclaredFailure> {
     })
 }
 
+/// An unresolved provider is the current failure only in the Cook preview
+/// envelope. Other nested workspace records can be historical observations.
+fn unresolved_provider_workspace_failure(data: &Value) -> Option<DeclaredFailure> {
+    if data.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-cook-preview/v1") {
+        return None;
+    }
+    let workspace = data.pointer("/resolved/workspace")?.as_object()?;
+    if workspace.get("action").and_then(Value::as_str) != Some("unresolved_provider") {
+        return None;
+    }
+    let message = workspace.get("reason").and_then(Value::as_str)?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let mut details = workspace
+        .get("details")
+        .map(bounded_failure_detail)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if let Some(remediation) = workspace
+        .get("remediation")
+        .filter(|value| !value.is_null())
+    {
+        details.insert(
+            "remediation".to_string(),
+            bounded_failure_detail(remediation),
+        );
+    }
+    if let Some(provider_id) = workspace
+        .get("provider_id")
+        .filter(|value| !value.is_null())
+    {
+        details.insert(
+            "provider_id".to_string(),
+            bounded_failure_detail(provider_id),
+        );
+    }
+    let next_actions = failure_replay_action(&details).into_iter().collect();
+    Some(DeclaredFailure {
+        code: "worktree.provider_unresolved".to_string(),
+        message: bounded_text(message, 1_000),
+        stdout_tail: None,
+        stderr_tail: None,
+        next_actions,
+        details,
+        retryable: None,
+    })
+}
+
 fn bounded_failure_detail(value: &Value) -> Value {
     match value {
         Value::String(value) => Value::String(bounded_text(value, 1_000)),
@@ -984,6 +1048,11 @@ fn failure_replay_action(details: &Map<String, Value>) -> Option<CommandNextActi
         .and_then(Value::as_str)
         .or_else(|| details.get("replay_command").and_then(Value::as_str))
         .or_else(|| details.get("recovery_command").and_then(Value::as_str))
+        .or_else(|| {
+            details
+                .get("worktree_provider_replay_command")
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             details
                 .get("remediation")
@@ -2458,6 +2527,53 @@ mod tests {
         assert_eq!(
             value["data"]["resolved"]["workspace"]["details"]["worktree_provider_replay_command"],
             "workspace-provider plan example@fix-13848"
+        );
+        assert_eq!(value["data"], payload, "nested evidence remains lossless");
+    }
+
+    #[test]
+    fn cook_preview_lifts_unresolved_provider_workspace_reason_without_failure() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "mutates": false,
+            "failure": null,
+            "resolved": {
+                "workspace": {
+                    "action": "unresolved_provider",
+                    "disposition": "unresolved",
+                    "provider_id": "fixture",
+                    "reason": "Component not found",
+                    "remediation": ["Register the component, then replay the provider plan."],
+                    "details": {
+                        "id": "example-repository",
+                        "field": "repository",
+                        "worktree_provider_phase": "worktree_provider_plan",
+                        "worktree_provider_replay_command": "workspace-provider plan example-repository",
+                    },
+                },
+            },
+        });
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(payload.clone()),
+            1,
+            &CommandIdentity::with_operation("agent-task", "cook"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["diagnostics"]["code"], "worktree.provider_unresolved");
+        assert_eq!(value["summary"], "Component not found");
+        assert_eq!(
+            value["diagnostics"]["details"]["remediation"],
+            json!(["Register the component, then replay the provider plan."])
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["source_pointer"],
+            "/resolved/workspace"
+        );
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "workspace-provider plan example-repository"
         );
         assert_eq!(value["data"], payload, "nested evidence remains lossless");
     }
