@@ -9,17 +9,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use homeboy_extension_contract::agent_task_executor_declaration::parse_agent_task_executor_declaration;
-
 use homeboy_core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, runtime_materialization_plan, AgentRuntimeDiscoveryDiagnostic,
     AgentRuntimeManifest, AgentRuntimeSelectedIdentity, AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT,
     AGENT_RUNTIME_REVISION_PROBE_TIMEOUT,
 };
 use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
-use homeboy_core::extension::catalog::load_extension;
 use homeboy_core::{Error, Result};
-use homeboy_extension_contract::ExtensionManifest;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiAgentTaskExecutorInventoryRequest,
+    EXTENSION_API_AGENT_TASK_EXECUTOR_INVENTORY_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
 
 use super::AgentTaskExecutorProvider;
 
@@ -197,8 +197,7 @@ fn normalize_agent_task_executor_provider_invocation(provider: &mut AgentTaskExe
 pub(crate) fn validate_installed_extension_agent_runtime_provider_discovery(
     extension_id: &str,
 ) -> Result<()> {
-    let extension = load_extension(extension_id)?;
-    let expected = expected_agent_runtime_provider_refs(&extension)?;
+    let expected = expected_agent_runtime_provider_refs(extension_id)?;
     if expected.is_empty() {
         return Ok(());
     }
@@ -250,25 +249,42 @@ struct ExpectedAgentRuntimeProviderRef {
     backend: String,
 }
 
+/// Registration identities the extension advertises, read from the typed
+/// Extension API inventory.
+///
+/// The inventory is the single place declarations are turned into identities, so
+/// the install-time gate and ordinary discovery cannot disagree about what an
+/// extension registers. A declaration that cannot be parsed is surfaced by the
+/// inventory as an unusable entry, and is rejected here rather than silently
+/// installed (#12206).
 fn expected_agent_runtime_provider_refs(
-    extension: &ExtensionManifest,
+    extension_id: &str,
 ) -> Result<Vec<ExpectedAgentRuntimeProviderRef>> {
+    let inventory =
+        homeboy_core::extension::agent_task_executor_api::AgentTaskExecutorApi::discover(
+            &ExtensionApiAgentTaskExecutorInventoryRequest {
+                schema: EXTENSION_API_AGENT_TASK_EXECUTOR_INVENTORY_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+            },
+        );
     let mut expected = Vec::new();
-    for runtime in &extension.agent_runtimes {
-        for value in &runtime.agent_task_executors {
-            // Parsed through the shared declaration contract rather than the
-            // resolved provider type, so extension install/replace enforces
-            // byte-identical validity without depending on this crate (#12206).
-            // Only `id` and `backend` are consumed here; the resolved provider
-            // is built later by the catalog parse.
-            let declaration =
-                parse_agent_task_executor_declaration(&extension.id, &runtime.id, value)?;
-            expected.push(ExpectedAgentRuntimeProviderRef {
-                runtime_id: runtime.id.clone(),
-                provider_id: declaration.id,
-                backend: declaration.backend,
-            });
+    for executor in inventory.registered_by(extension_id) {
+        if let Some(diagnostic) = executor.diagnostic.as_ref() {
+            return Err(Error::validation_invalid_argument(
+                "agent_runtimes.agent_task_executors",
+                format!(
+                    "Extension '{}' declares an agent runtime provider that cannot be registered: {}",
+                    extension_id, diagnostic.message
+                ),
+                Some(executor.runtime_id.clone()),
+                None,
+            ));
         }
+        expected.push(ExpectedAgentRuntimeProviderRef {
+            runtime_id: executor.runtime_id.clone(),
+            provider_id: executor.id.clone(),
+            backend: executor.backend.clone(),
+        });
     }
     Ok(expected)
 }

@@ -7,11 +7,13 @@ use super::{
     ExtensionApiVersion,
 };
 
+mod agent_task_executor;
 mod deployment;
 mod environment;
 mod external_check_detail;
 mod invocation;
 mod recipe_run;
+pub use agent_task_executor::*;
 pub use deployment::*;
 pub use environment::*;
 pub use external_check_detail::*;
