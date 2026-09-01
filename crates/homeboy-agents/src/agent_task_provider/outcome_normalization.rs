@@ -38,8 +38,8 @@ fn normalize_provider_account_block(
     outcome.failure_classification = Some(classification);
     push_unique_diagnostic(
         &mut outcome.diagnostics,
-        "provider.account_blocked".to_string(),
-        "Provider account rejected the request; retrying this account is disabled and the scheduler may rotate to the next configured provider."
+        "provider.capacity_rejected".to_string(),
+        "Provider route rejected the request; retrying this route is disabled and the scheduler may rotate to the next configured provider."
             .to_string(),
         error,
     );

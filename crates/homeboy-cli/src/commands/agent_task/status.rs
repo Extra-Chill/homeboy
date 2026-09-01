@@ -2244,7 +2244,10 @@ fn classification_next_actions(
         // This account cannot satisfy another request until its quota, billing,
         // or credentials are repaired. Show alternative providers rather than
         // offering a same-provider retry.
-        AgentTaskFailureClassification::ProviderAccountBlocked => vec![
+        AgentTaskFailureClassification::ProviderAccountBlocked
+        | AgentTaskFailureClassification::ProviderQuotaExhausted
+        | AgentTaskFailureClassification::ProviderBillingBlocked
+        | AgentTaskFailureClassification::ProviderCredentialsExhausted => vec![
             failure_evidence,
             CommandNextAction::new(
                 "list registered providers to rotate to",
