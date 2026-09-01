@@ -155,6 +155,22 @@ fn write_file_atomic_with_owner_only(
     operation: &str,
     owner_only: bool,
 ) -> Result<()> {
+    write_file_atomic_with_owner_only_writer(
+        path,
+        content,
+        operation,
+        owner_only,
+        write_file_owner_only,
+    )
+}
+
+fn write_file_atomic_with_owner_only_writer(
+    path: &Path,
+    content: &str,
+    operation: &str,
+    owner_only: bool,
+    owner_only_writer: fn(&Path, &str, &str) -> Result<()>,
+) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         Error::internal_io(
             format!("Invalid path: {}", path.display()),
@@ -177,7 +193,12 @@ fn write_file_atomic_with_owner_only(
     let tmp_path = unique_temp_path(parent, filename.to_string_lossy().as_ref());
 
     if owner_only {
-        write_file_owner_only(&tmp_path, content, &format!("{} (write temp)", operation))?;
+        if let Err(error) =
+            owner_only_writer(&tmp_path, content, &format!("{} (write temp)", operation))
+        {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
     } else {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -352,6 +373,24 @@ mod tests {
     use tempfile::tempdir;
     use tempfile::NamedTempFile;
 
+    fn partially_write_owner_only_then_fail(
+        path: &Path,
+        content: &str,
+        operation: &str,
+    ) -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
+        file.write_all(&content.as_bytes()[..1])
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
+        Err(Error::internal_io(
+            "injected owner-only partial-write failure",
+            Some(operation.to_string()),
+        ))
+    }
+
     #[test]
     fn test_local_fs_write_read() {
         let dir = tempdir().unwrap();
@@ -389,6 +428,42 @@ mod tests {
         serde_json::from_str::<serde_json::Value>(&content).expect("valid json");
         let temp_files: Vec<_> = fs::read_dir(dir.path())
             .expect("list tempdir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(
+            temp_files.is_empty(),
+            "temp files left behind: {temp_files:?}"
+        );
+    }
+
+    #[test]
+    fn owner_only_atomic_write_cleans_temp_after_partial_write_failure() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "original").unwrap();
+
+        let error = write_file_atomic_with_owner_only_writer(
+            &path,
+            "replacement",
+            "replace owner-only config",
+            true,
+            partially_write_owner_only_then_fail,
+        )
+        .expect_err("injected partial write must fail");
+
+        assert_eq!(error.code.as_str(), "internal.io_error");
+        assert_eq!(
+            error.details["error"],
+            "injected owner-only partial-write failure"
+        );
+        assert_eq!(
+            error.details["context"],
+            "replace owner-only config (write temp)"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        let temp_files: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
             .collect();
