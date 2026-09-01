@@ -20,9 +20,10 @@ use homeboy::agents::agent_tasks::promotion::{
     AgentTaskPromotionStatus,
 };
 use homeboy::agents::agent_tasks::provider::{
-    evaluate_provider_dispatchability, preflight_provider_dispatchability,
+    evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
     provider_credential_readiness, resolve_provider_for_backend, AgentTaskExecutorProvider,
     AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor, ProviderResolution,
+    ProviderRuntimeReadinessCache,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -1991,7 +1992,19 @@ fn providers_with_catalog(
             0,
         ));
     }
-    let route = resolve_provider_route(&args, &catalog);
+    let mut route = resolve_provider_route(&args, &catalog);
+    // Catalog inspection must probe with the same base configuration Cook will
+    // give the selected executor. Reusing this verdict prevents the summary,
+    // row, validation, and exit decision from disagreeing about one route.
+    let provider_config = effective_provider_catalog_config()?;
+    let mut readiness_cache = ProviderRuntimeReadinessCache::default();
+    let resolved_dispatchability = resolved_provider_dispatchability(
+        &mut route,
+        &catalog,
+        &provider_config,
+        args.validate_readiness,
+        &mut readiness_cache,
+    );
     // A route failure is itself a dispatchability verdict. Keep it in the
     // machine envelope rather than making callers infer failure from null.
     let (dispatch_backend, dispatch_selector, dispatch_model) = match route.as_ref() {
@@ -2012,19 +2025,26 @@ fn providers_with_catalog(
             None,
         ),
     };
-    let dispatchability = evaluate_provider_dispatchability(
-        &catalog,
-        dispatch_backend,
-        dispatch_selector,
-        dispatch_model,
-        args.validate_readiness,
-    );
+    let dispatchability = resolved_dispatchability.unwrap_or_else(|| {
+        evaluate_provider_dispatchability_with_config(
+            &catalog,
+            dispatch_backend,
+            dispatch_selector,
+            dispatch_model,
+            &provider_config,
+            args.validate_readiness,
+            &mut readiness_cache,
+        )
+    });
     // An absent `--backend` sweeps every declared backend instead of inheriting
     // Cook's default-backend precondition (#12569).
-    let declared_backends = (args.validate_readiness && args.backend.is_none())
-        .then(|| declared_backend_readiness(&args, &catalog));
+    let declared_backends = if args.validate_readiness && args.backend.is_none() {
+        Some(declared_backend_readiness(&args, &catalog)?)
+    } else {
+        None
+    };
     let validated_provider = if args.validate_readiness {
-        match validate_effective_provider_route(route.as_ref(), &catalog) {
+        match validate_effective_provider_route(route.as_ref(), Some(&dispatchability)) {
             Ok(validated) => validated,
             // The sweep already reports this backend's verdict alongside every
             // other one, so an unusable effective route must not fail the
@@ -2067,11 +2087,12 @@ fn providers_with_catalog(
                     .as_deref()
                     .is_none_or(|runtime| provider.runtime_id.as_deref() == Some(runtime))
                 && args.status.as_deref().is_none_or(|status| {
-                    let dispatchability = evaluate_provider_dispatchability(
+                    let dispatchability = provider_dispatchability(
                         &catalog,
-                        &provider.backend,
-                        Some(&provider.id),
-                        None,
+                        provider,
+                        &route,
+                        &dispatchability,
+                        &provider_config,
                         args.validate_readiness,
                     );
                     provider_matches_status(provider, &dispatchability, status)
@@ -2163,7 +2184,7 @@ fn providers_with_catalog(
             // catalog look empty even while it listed selectable executors.
             "provider_identity_catalog": provider_identity_catalog(&shown_providers),
             "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
-            "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(|provider| compact_provider(provider, &evaluate_provider_dispatchability(&catalog, &provider.backend, Some(&provider.id), None, args.validate_readiness))).collect()) },
+            "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(|provider| compact_provider(provider, &provider_dispatchability(&catalog, provider, &route, &dispatchability, &provider_config, args.validate_readiness))).collect()) },
             // Availability means dispatchable. Anything that is declared but
             // not dispatchable reports the credential it is missing here so the
             // remediation survives the `--full` serde presentation too (#11479).
@@ -2429,6 +2450,72 @@ fn resolve_provider_route(
     )
 }
 
+fn effective_provider_catalog_config() -> homeboy::core::Result<Value> {
+    homeboy::agents::agent_task_config_materialization::materialize_provider_config_refs(
+        Value::Object(
+            homeboy::core::defaults::load_config()
+                .settings
+                .into_iter()
+                .collect(),
+        ),
+    )
+}
+
+fn resolved_provider_dispatchability(
+    route: &mut Option<ProviderRoute>,
+    catalog: &AgentTaskProviderCatalog,
+    provider_config: &Value,
+    probe_runtime: bool,
+    cache: &mut ProviderRuntimeReadinessCache,
+) -> Option<homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability> {
+    let ProviderRoute::Resolved {
+        backend,
+        provider_id,
+        model,
+        dispatchable,
+    } = route.as_mut()?
+    else {
+        return None;
+    };
+    let verdict = evaluate_provider_dispatchability_with_config(
+        catalog,
+        backend,
+        Some(provider_id),
+        model.as_deref(),
+        provider_config,
+        probe_runtime,
+        cache,
+    );
+    *dispatchable = verdict.ready;
+    Some(verdict)
+}
+
+fn provider_dispatchability(
+    catalog: &AgentTaskProviderCatalog,
+    provider: &AgentTaskExecutorProvider,
+    route: &Option<ProviderRoute>,
+    resolved_dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    provider_config: &Value,
+    probe_runtime: bool,
+) -> homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability {
+    if matches!(
+        route,
+        Some(ProviderRoute::Resolved { provider_id, .. }) if provider.id == *provider_id
+    ) {
+        return resolved_dispatchability.clone();
+    }
+    let mut cache = ProviderRuntimeReadinessCache::default();
+    evaluate_provider_dispatchability_with_config(
+        catalog,
+        &provider.backend,
+        Some(&provider.id),
+        None,
+        provider_config,
+        probe_runtime,
+        &mut cache,
+    )
+}
+
 /// Resolve the route one explicit backend/selector pair produces. The
 /// per-backend readiness sweep reuses this so each backend's verdict comes from
 /// exactly the resolution `--backend <backend>` would take (#12569).
@@ -2489,19 +2576,13 @@ fn resolve_provider_route_for(
                     ),
                 });
             }
-            let dispatchable = evaluate_provider_dispatchability(
-                catalog,
-                &route.backend,
-                Some(&provider.id),
-                route.model.as_deref(),
-                probe_runtime,
-            )
-            .ready;
             Some(ProviderRoute::Resolved {
                 backend: route.backend,
                 provider_id: provider.id.clone(),
                 model: route.model,
-                dispatchable,
+                // The config-aware verdict is resolved by the caller. Do not
+                // run a second, config-less probe while constructing the route.
+                dispatchable: true,
             })
         }
         ProviderResolution::AmbiguousExtensionAlias { mut candidate_ids } => {
@@ -2604,7 +2685,9 @@ fn provider_report_state(
 
 fn validate_effective_provider_route(
     route: Option<&ProviderRoute>,
-    catalog: &AgentTaskProviderCatalog,
+    dispatchability: Option<
+        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    >,
 ) -> homeboy::core::Result<Option<(String, String)>> {
     let Some(route) = route else {
         return Ok(None);
@@ -2612,7 +2695,6 @@ fn validate_effective_provider_route(
     let ProviderRoute::Resolved {
         backend,
         provider_id,
-        model,
         ..
     } = route
     else {
@@ -2633,44 +2715,29 @@ fn validate_effective_provider_route(
             Some(vec![route.next_command()]),
         ));
     };
-    let provider = catalog
-        .providers()
-        .iter()
-        .find(|provider| provider.id == *provider_id)
-        .expect("resolved provider route is catalog-backed");
-    let mut supported_models = provider
-        .cli
-        .profiles
-        .iter()
-        .filter_map(|profile| profile.model.as_deref())
-        .collect::<Vec<_>>();
-    supported_models.sort_unstable();
-    supported_models.dedup();
-    if !supported_models.is_empty()
-        && !model
+    let verdict = dispatchability.expect("resolved provider route has a verdict");
+    if !verdict.ready {
+        let detail = verdict
+            .checks
+            .configuration
+            .reason
             .as_deref()
-            .is_some_and(|model| supported_models.iter().any(|available| *available == model))
-    {
+            .or(verdict.checks.credentials.reason.as_deref())
+            .or(verdict.checks.runtime.reason.as_deref())
+            .filter(|reason| *reason != "not requested")
+            .map(|reason| format!(": {reason}"))
+            .unwrap_or_default();
         return Err(homeboy::core::Error::validation_invalid_argument(
-            "model",
-            match model {
-                Some(model) => format!(
-                    "provider `{}` does not support selected model `{model}`",
-                    provider.id
-                ),
-                None => format!(
-                    "provider `{}` has no concrete selected model; pass --model or configure provider model selection",
-                    provider.id
-                ),
-            },
-            model.clone(),
-            Some(vec![format!(
-                "supported models: {}",
-                supported_models.join(", ")
-            )]),
+            "provider_dispatchability",
+            format!(
+                "agent-task backend `{backend}` is not dispatchable ({}): {}{detail}",
+                verdict.state,
+                verdict.reason.trim_end_matches('.')
+            ),
+            Some(backend.clone()),
+            Some(vec![serde_json::to_string(verdict).unwrap_or_default()]),
         ));
     }
-    preflight_provider_dispatchability(catalog, backend, Some(provider_id), model.as_deref())?;
     Ok(Some((backend.clone(), provider_id.clone())))
 }
 
@@ -2687,8 +2754,9 @@ fn validate_effective_provider_route(
 fn declared_backend_readiness(
     args: &ProvidersArgs,
     catalog: &AgentTaskProviderCatalog,
-) -> Vec<Value> {
-    catalog
+) -> homeboy::core::Result<Vec<Value>> {
+    let provider_config = effective_provider_catalog_config()?;
+    Ok(catalog
         .backends()
         .into_iter()
         .map(|backend| {
@@ -2705,15 +2773,23 @@ fn declared_backend_readiness(
                         .any(|provider| provider.backend == backend && provider.id == *selector)
                 })
                 .map(str::to_string);
-            let route = resolve_provider_route_for(
+            let mut route = resolve_provider_route_for(
                 Some(backend.clone()),
                 selector,
                 args.model.clone(),
                 catalog,
                 true,
             );
+            let mut readiness_cache = ProviderRuntimeReadinessCache::default();
+            let dispatchability = resolved_provider_dispatchability(
+                &mut route,
+                catalog,
+                &provider_config,
+                true,
+                &mut readiness_cache,
+            );
             let (identity, failure) =
-                match validate_effective_provider_route(route.as_ref(), catalog) {
+                match validate_effective_provider_route(route.as_ref(), dispatchability.as_ref()) {
                     Ok(identity) => (identity, None),
                     Err(error) => (None, Some(error.message)),
                 };
@@ -2732,21 +2808,6 @@ fn declared_backend_readiness(
                         .find(|provider| &provider.id == provider_id),
                     _ => None,
                 });
-            let dispatchability = route.as_ref().and_then(|route| match route {
-                ProviderRoute::Resolved {
-                    backend,
-                    provider_id,
-                    model,
-                    ..
-                } => Some(evaluate_provider_dispatchability(
-                    catalog,
-                    backend,
-                    Some(provider_id),
-                    model.as_deref(),
-                    true,
-                )),
-                _ => None,
-            });
             let mut value = readiness_validation_projection(
                 identity.as_ref(),
                 provider,
@@ -2766,7 +2827,7 @@ fn declared_backend_readiness(
             }
             value
         })
-        .collect()
+        .collect())
 }
 
 fn live_dispatch_readiness(
@@ -3790,6 +3851,52 @@ mod tests {
                 "fallback-model"
             );
             assert_eq!(output["readiness_validation"]["live_dispatch"], "validated");
+        });
+    }
+
+    #[test]
+    fn providers_refresh_validated_model_uses_one_effective_verdict_everywhere() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temporary readiness script");
+            let script = temp.path().join("readiness.js");
+            std::fs::write(
+                &script,
+                "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));const model=request.effective_config.model;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='openai/gpt-5.6-terra',classification:model,retryable:false,remediation:'',reason:model,cache_key:model,identity:{model}}));",
+            )
+            .expect("readiness script");
+            let mut provider = provider("opencode.agent-task-executor", "opencode");
+            provider.cli.profiles = serde_json::from_value(serde_json::json!([
+                { "name": "terra", "model": "openai/gpt-5.6-terra" }
+            ]))
+            .expect("provider profile");
+            provider.readiness_invocation = Some(
+                CommandInvocation {
+                    argv: vec!["node".to_string(), script.display().to_string()],
+                    ..CommandInvocation::default()
+                }
+                .into(),
+            );
+            let mut args = providers_args();
+            args.backend = Some("opencode".to_string());
+            args.selector = Some("opencode.agent-task-executor".to_string());
+            args.model = Some("openai/gpt-5.6-terra".to_string());
+            args.validate_readiness = true;
+            args.refresh = true;
+
+            let (output, status) = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect("consistent provider verdict");
+
+            assert_eq!(status, 0);
+            assert_eq!(output["catalog"]["refreshed"], true);
+            assert_eq!(output["operator_summary"]["state"], "ready");
+            assert_eq!(output["dispatchability"]["state"], "ready");
+            assert_eq!(output["providers"][0]["state"], "ready");
+            assert_eq!(output["providers"][0]["dispatchability"]["ready"], true);
+            assert_eq!(output["readiness_validation"]["validated"], true);
+            assert_eq!(
+                output["readiness_validation"]["effective_model"],
+                "openai/gpt-5.6-terra"
+            );
         });
     }
 

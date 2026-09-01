@@ -161,27 +161,6 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
     }
 }
 
-/// Operator-facing statement that an attached local Cook shares its client's
-/// lifetime.
-///
-/// `--detach-after-handoff` already documents the safe shape — with local
-/// placement the Cook is re-executed in its own session, so it survives a client
-/// that is interrupted or times out — but nothing said the default was the other
-/// one. An attached local Cook runs its whole provider stack inside the calling
-/// client's process tree, so a client that goes away takes the provider with it
-/// and leaves the durable run reporting `queued` with zero attempts and nothing
-/// executing it (#12570). This is diagnostics only: the default is unchanged and
-/// is still frequently the right one, so state the consequence rather than
-/// choosing differently.
-pub(crate) fn cook_attached_local_placement_disclosure(
-    provider_placement: Option<&str>,
-    detach_after_handoff: bool,
-) -> Option<String> {
-    (provider_placement == Some("local") && !detach_after_handoff).then(|| {
-        "cook: attached local placement — the provider runs in this client's process tree and will not survive it; pass --detach-after-handoff to re-execute the Cook in its own session".to_string()
-    })
-}
-
 /// Warn before a detached Cook becomes observable only through durable status.
 pub(crate) fn detached_cook_route_less_warning(
     resolution: &homeboy::core::notification_route::NotificationRouteResolution,
@@ -333,8 +312,20 @@ pub(crate) fn preview_cook(
         }
     }
     bind_cook_preview_lifecycle(&mut args);
-    if let Some(backend) = unresolved_cook_backend_preview(&args)? {
-        return Ok((backend, 0));
+    if let Some((provider, replay)) = unresolved_cook_backend_preview(&args)? {
+        return Ok((
+            cook_preview_result(
+                cook_preview_resolved_request(
+                    &args,
+                    preview_placement_policy_with_admission(&replay.argv),
+                ),
+                progress,
+                replay,
+                Some(provider),
+                None,
+            ),
+            0,
+        ));
     }
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
@@ -357,31 +348,16 @@ pub(crate) fn preview_cook(
         Some("materialization_required" | "unresolved_provider")
     ) {
         let failure = provision.get("failure").cloned();
+        let exit_code = if provision["action"] == "unresolved_provider" {
+            1
+        } else {
+            0
+        };
+        let mut resolved = cook_preview_resolved_request(&args, placement);
+        resolved["workspace"] = provision;
         return Ok((
-            serde_json::json!({
-                "schema": "homeboy/agent-task-cook-preview/v1",
-                "mutates": false,
-                "resolved": {
-                    "repository": cook_provision_repository(&args),
-                    "component": cook_component_id(&args),
-                    "repository_identity": args.repository_identity,
-                    "worktree": args.to_worktree,
-                    "base": args.base,
-                    "head": args.head,
-                    "placement": placement,
-                    "workspace": provision,
-                    "notification_resolution": notification_resolution,
-                },
-                "progress": progress,
-                "failure": failure,
-                "replay_argv": replay.argv,
-                "replay_requires": replay.requires,
-            }),
-            if provision["action"] == "unresolved_provider" {
-                1
-            } else {
-                0
-            },
+            cook_preview_result(resolved, progress, replay, None, failure),
+            exit_code,
         ));
     }
     let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
@@ -463,38 +439,64 @@ pub(crate) fn preview_cook(
         .first()
         .map(|task| serde_json::to_value(&task.executor).unwrap_or(Value::Null))
         .unwrap_or(Value::Null);
+    let mut resolved = cook_preview_resolved_request(&args, placement);
+    resolved["workspace"] = provision;
+    resolved["provider"] = executor;
+    resolved["retry_budget"] = plan.metadata["cook_retry_policy"].clone();
+    resolved["notification_resolution"] = serde_json::to_value(notification_resolution)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     Ok((
-        serde_json::json!({
-            "schema": "homeboy/agent-task-cook-preview/v1",
-            "mutates": false,
-            "resolved": {
-                "repository": cook_provision_repository(&args),
-                "component": cook_component_id(&args),
-                "repository_identity": args.repository_identity,
-                "worktree": args.to_worktree,
-                "base": args.base,
-                "head": args.head,
-                "workspace": provision,
-                "placement": placement,
-                "provider": executor,
-                "gates": {
-                    "public": args.gates.verify.len(),
-                    "private": args.gates.private_verify.len(),
-                },
-                "retry_budget": plan.metadata["cook_retry_policy"],
-                "publication": {
-                    "finalize": !args.no_finalize,
-                    "draft": args.draft_pr,
-                    "ai_tool": args.ai_tool,
-                },
-                "notification_resolution": notification_resolution,
-            },
-            "progress": progress,
-            "replay_argv": replay.argv,
-            "replay_requires": replay.requires,
-        }),
+        cook_preview_result(resolved, progress, replay, None, None),
         0,
     ))
+}
+
+fn cook_preview_result(
+    resolved: Value,
+    progress: Vec<Value>,
+    replay: PreviewReplayArgv,
+    provider: Option<Value>,
+    failure: Option<Value>,
+) -> Value {
+    let mut result = serde_json::json!({
+        "schema": "homeboy/agent-task-cook-preview/v1",
+        "mutates": false,
+        "resolved": resolved,
+        "progress": progress,
+        "replay_argv": replay.argv,
+        "replay_requires": replay.requires,
+    });
+    if let Some(provider) = provider {
+        result["resolved"]["provider"] = provider;
+    }
+    if let Some(failure) = failure {
+        result["failure"] = failure;
+    }
+    result
+}
+
+fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> Value {
+    serde_json::json!({
+        "repository": cook_provision_repository(args),
+        "component": cook_component_id(args),
+        "repository_identity": args.repository_identity,
+        "worktree": args.to_worktree,
+        "base": args.base,
+        "head": args.head,
+        "placement": placement,
+        "workspace": null,
+        "provider": null,
+        "gates": {
+            "public": args.gates.verify.len(),
+            "private": args.gates.private_verify.len(),
+        },
+        "publication": {
+            "finalize": !args.no_finalize,
+            "draft": args.draft_pr,
+            "ai_tool": args.ai_tool,
+        },
+        "notification_resolution": homeboy::core::notification_route::current_resolution(),
+    })
 }
 
 fn record_preview_phase(progress: &mut Vec<Value>, phase: &'static str) {
@@ -567,7 +569,7 @@ fn with_preview_heartbeat<T>(
 /// prompt, evidence, or gates.
 fn unresolved_cook_backend_preview(
     args: &AgentTaskCookArgs,
-) -> homeboy::core::Result<Option<Value>> {
+) -> homeboy::core::Result<Option<(Value, PreviewReplayArgv)>> {
     let resolution =
         dispatch_service::resolve_dispatch_request(dispatch_args_for_cook(args).into());
     let Err(error) = resolution else {
@@ -578,7 +580,7 @@ fn unresolved_cook_backend_preview(
     }
 
     let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
-    Ok(Some(missing_backend_preview_value(
+    Ok(Some(missing_backend_preview_resolution(
         args,
         ready_cook_backends(&catalog),
     )))
@@ -614,10 +616,10 @@ fn is_missing_default_backend_policy_error(error: &homeboy::core::Error) -> bool
 
 const MAX_READY_BACKEND_CHOICES: usize = 10;
 
-fn missing_backend_preview_value(
+fn missing_backend_preview_resolution(
     args: &AgentTaskCookArgs,
     mut ready_backends: Vec<String>,
-) -> Value {
+) -> (Value, PreviewReplayArgv) {
     ready_backends.sort_unstable();
     ready_backends.dedup();
     let ready_backend_count = ready_backends.len();
@@ -658,24 +660,21 @@ fn missing_backend_preview_value(
         );
     }
 
-    serde_json::json!({
-            "schema": "homeboy/agent-task-cook-preview/v1",
-            "mutates": false,
-            "resolved": {
-                "backend": {
-                    "state": state,
-                    "default_policy": "missing",
-                    "ready_backends": ready_backends.into_iter().take(MAX_READY_BACKEND_CHOICES).collect::<Vec<_>>(),
-                    "ready_backend_count": ready_backend_count,
-                    "ready_backends_omitted": ready_backends_omitted,
-                    "ready_choices": ready_choices,
-                    "replay_backend": replay_backend,
-                    "readiness_command": "homeboy agent-task providers --validate-readiness",
-                },
+    (
+        serde_json::json!({
+            "backend": {
+                "state": state,
+                "default_policy": "missing",
+                "ready_backends": ready_backends.into_iter().take(MAX_READY_BACKEND_CHOICES).collect::<Vec<_>>(),
+                "ready_backend_count": ready_backend_count,
+                "ready_backends_omitted": ready_backends_omitted,
+                "ready_choices": ready_choices,
+                "replay_backend": replay_backend,
+                "readiness_command": "homeboy agent-task providers --validate-readiness",
             },
-            "replay_argv": replay.argv,
-            "replay_requires": replay.requires,
-    })
+        }),
+        replay,
+    )
 }
 
 const MAX_PREVIEW_REPLAY_ARGS: usize = 128;
@@ -704,10 +703,27 @@ fn cook_preview_replay_argv(args: &AgentTaskCookArgs) -> PreviewReplayArgv {
             .collect::<Vec<_>>();
         rewrite_cook_identity_replay_argv(&mut replay, args);
         append_preview_lifecycle_replay_argv(&mut replay, args);
-        return redact_preview_replay_argv(replay);
+        return finalize_cook_preview_replay(replay, args);
     }
 
-    redact_preview_replay_argv(cook_replay_argv(args))
+    finalize_cook_preview_replay(cook_replay_argv(args), args)
+}
+
+fn finalize_cook_preview_replay(
+    replay: impl IntoIterator<Item = String>,
+    args: &AgentTaskCookArgs,
+) -> PreviewReplayArgv {
+    let mut replay = redact_preview_replay_argv(replay);
+    if args
+        .prompt_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.source == "stdin")
+    {
+        replay.requires.push(
+            "replay requires the original non-empty prompt on stdin for `--prompt -`".to_string(),
+        );
+    }
+    replay
 }
 
 // Unit callers do not have the original process argv. Keep their fallback
@@ -1158,7 +1174,7 @@ mod preview_tests {
 
     #[test]
     fn missing_backend_preview_requires_policy_when_no_ready_backend_exists() {
-        let preview = missing_backend_preview_value(
+        let (provider, replay) = missing_backend_preview_resolution(
             &cook(&[
                 "homeboy",
                 "agent-task",
@@ -1171,14 +1187,10 @@ mod preview_tests {
         );
 
         assert_eq!(
-            preview["resolved"]["backend"]["state"],
+            provider["backend"]["state"],
             "backend_required_no_ready_route"
         );
-        assert!(preview["replay_argv"]
-            .as_array()
-            .expect("replay argv")
-            .iter()
-            .all(|arg| arg != "--backend"));
+        assert!(replay.argv.iter().all(|arg| arg != "--backend"));
     }
 
     #[test]
@@ -1219,21 +1231,35 @@ mod preview_tests {
                     .expect("missing policy returns backend guidance before prompt validation");
 
             assert_eq!(exit_code, 0);
-            assert_eq!(preview["resolved"]["backend"]["default_policy"], "missing");
+            assert_eq!(
+                preview["resolved"]["provider"]["backend"]["default_policy"],
+                "missing"
+            );
             assert!(matches!(
-                preview["resolved"]["backend"]["state"].as_str(),
+                preview["resolved"]["provider"]["backend"]["state"].as_str(),
                 Some(
                     "ready_backend_unambiguous"
                         | "backend_required_no_ready_route"
                         | "backend_required_multiple_ready_routes"
                 )
             ));
+            assert_eq!(
+                preview["progress"],
+                serde_json::json!([
+                    { "event": "cook_preview_progress", "phase": "prompt_input" },
+                    { "event": "cook_preview_progress", "phase": "input_validation" },
+                ])
+            );
+            assert!(
+                preview["replay_argv"].is_array(),
+                "terminal preview has replay"
+            );
         });
     }
 
     #[test]
     fn missing_backend_preview_replays_the_one_ready_backend() {
-        let preview = missing_backend_preview_value(
+        let (provider, replay) = missing_backend_preview_resolution(
             &cook(&[
                 "homeboy",
                 "agent-task",
@@ -1245,26 +1271,19 @@ mod preview_tests {
             vec!["fixture".to_string()],
         );
 
-        assert_eq!(
-            preview["resolved"]["backend"]["state"],
-            "ready_backend_unambiguous"
-        );
-        assert_eq!(preview["resolved"]["backend"]["replay_backend"], "fixture");
-        let replay = preview["replay_argv"].as_array().expect("replay argv");
+        assert_eq!(provider["backend"]["state"], "ready_backend_unambiguous");
+        assert_eq!(provider["backend"]["replay_backend"], "fixture");
+        let replay = replay.argv;
         assert!(replay
             .windows(2)
             .any(|pair| pair == ["--backend", "fixture"]));
-        Cli::try_parse_from(
-            replay
-                .iter()
-                .map(|value| value.as_str().expect("argv string")),
-        )
-        .expect("ready-backend replay parses as Cook");
+        Cli::try_parse_from(replay.iter().map(String::as_str))
+            .expect("ready-backend replay parses as Cook");
     }
 
     #[test]
     fn missing_backend_preview_keeps_multiple_ready_backends_explicit() {
-        let preview = missing_backend_preview_value(
+        let (provider, replay) = missing_backend_preview_resolution(
             &cook(&[
                 "homeboy",
                 "agent-task",
@@ -1277,11 +1296,11 @@ mod preview_tests {
         );
 
         assert_eq!(
-            preview["resolved"]["backend"]["state"],
+            provider["backend"]["state"],
             "backend_required_multiple_ready_routes"
         );
-        assert!(preview["resolved"]["backend"]["replay_backend"].is_null());
-        let choices = preview["resolved"]["backend"]["ready_choices"]
+        assert!(provider["backend"]["replay_backend"].is_null());
+        let choices = provider["backend"]["ready_choices"]
             .as_array()
             .expect("ready choices");
         assert_eq!(
@@ -1308,14 +1327,10 @@ mod preview_tests {
                 argv
             );
         }
-        assert!(preview["replay_requires"]
-            .as_array()
-            .expect("replay requirements")
+        assert!(replay
+            .requires
             .iter()
-            .any(|value| value
-                .as_str()
-                .unwrap_or_default()
-                .contains("multiple eligible routes")));
+            .any(|value| value.contains("multiple eligible routes")));
     }
 
     #[test]
@@ -1325,7 +1340,7 @@ mod preview_tests {
             .map(|index| format!("backend-{index:02}"))
             .chain(std::iter::once("backend-00".to_string()))
             .collect();
-        let preview = missing_backend_preview_value(
+        let (provider, _) = missing_backend_preview_resolution(
             &cook(&[
                 "homeboy",
                 "agent-task",
@@ -1336,7 +1351,7 @@ mod preview_tests {
             ]),
             ready_backends,
         );
-        let backend = &preview["resolved"]["backend"];
+        let backend = &provider["backend"];
 
         assert_eq!(
             backend["ready_backend_count"],
@@ -2167,6 +2182,18 @@ mod preview_tests {
             assert_eq!(exit_code, 0);
             assert_eq!(preview["schema"], "homeboy/agent-task-cook-preview/v1");
             assert_eq!(preview["mutates"], false);
+            assert_eq!(
+                preview["progress"],
+                serde_json::json!([
+                    { "event": "cook_preview_progress", "phase": "prompt_input" },
+                    { "event": "cook_preview_progress", "phase": "input_validation" },
+                    { "event": "cook_preview_progress", "phase": "destination_resolution" },
+                    { "event": "cook_preview_progress", "phase": "placement_projection" },
+                    { "event": "cook_preview_progress", "phase": "gate_contract_validation" },
+                    { "event": "cook_preview_progress", "phase": "provider_preflight" },
+                    { "event": "cook_preview_progress", "phase": "plan_compilation" },
+                ])
+            );
             assert!(preview["resolved"]["provider"].is_object());
             assert_eq!(
                 preview["resolved"]["placement"]["admission"]["schema"],
@@ -2509,6 +2536,21 @@ mod preview_tests {
             assert_eq!(exit_code, 0);
             assert_eq!(preview["schema"], "homeboy/agent-task-cook-preview/v1");
             assert_eq!(preview["mutates"], false);
+            assert_eq!(
+                preview["progress"],
+                serde_json::json!([
+                    { "event": "cook_preview_progress", "phase": "prompt_input" },
+                    { "event": "cook_preview_progress", "phase": "input_validation" },
+                    { "event": "cook_preview_progress", "phase": "destination_resolution" },
+                    { "event": "cook_preview_progress", "phase": "placement_projection" },
+                ])
+            );
+            assert!(
+                preview["replay_argv"].is_array(),
+                "terminal preview has replay"
+            );
+            assert_eq!(preview["resolved"]["gates"]["public"], 0);
+            assert_eq!(preview["resolved"]["gates"]["private"], 0);
             assert_eq!(
                 preview["resolved"]["placement"]["admission"]["schema"],
                 "homeboy/cook-preview-placement-admission/v1"
@@ -8794,11 +8836,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_cook_title, cook_attached_local_placement_disclosure, cook_continuation_status,
-        cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure, default_loop_title,
-        detached_cook_route_less_warning, durable_cook_identity_lines, existing_candidate_title,
-        preflight_continue_cook, project_preview_dirty_admission,
+        bounded_cook_title, cook_continuation_status, cook_provider_timeout_disclosure,
+        cook_report_with_continuation, cook_resolved_policy_disclosure,
+        cook_review_form_timeout_disclosure, default_loop_title, detached_cook_route_less_warning,
+        durable_cook_identity_lines, existing_candidate_title, preflight_continue_cook,
+        project_preview_dirty_admission,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
@@ -8995,31 +9037,6 @@ mod tests {
                 homeboy::agents::agent_task_service::MAX_REVIEW_FORM_TIMEOUT_MS / 1_000
             )
         );
-    }
-
-    /// The unsafe shape is the default one, so the submission preamble is the
-    /// only place an operator learns that this Cook dies with its client.
-    #[test]
-    fn attached_local_placement_is_disclosed_at_submission() {
-        assert_eq!(
-            cook_attached_local_placement_disclosure(Some("local"), false).as_deref(),
-            Some("cook: attached local placement — the provider runs in this client's process tree and will not survive it; pass --detach-after-handoff to re-execute the Cook in its own session")
-        );
-    }
-
-    /// A detached local Cook already survives its client, and a Lab-placed
-    /// provider never ran inside it. Warning there would be noise.
-    #[test]
-    fn a_detached_or_lab_placed_cook_is_not_warned_about_its_client() {
-        assert_eq!(
-            cook_attached_local_placement_disclosure(Some("local"), true),
-            None
-        );
-        assert_eq!(
-            cook_attached_local_placement_disclosure(Some("lab"), false),
-            None
-        );
-        assert_eq!(cook_attached_local_placement_disclosure(None, false), None);
     }
 
     #[test]

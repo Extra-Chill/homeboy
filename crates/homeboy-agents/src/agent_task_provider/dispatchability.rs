@@ -605,14 +605,17 @@ mod tests {
             "backend": "test"
         }))
         .expect("provider fixture");
-        provider.readiness_invocation = Some(CommandInvocation {
-            argv: vec![
-                "node".to_string(),
-                script.display().to_string(),
-                count.display().to_string(),
-            ],
-            ..CommandInvocation::default()
-        });
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec![
+                    "node".to_string(),
+                    script.display().to_string(),
+                    count.display().to_string(),
+                ],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
         provider
     }
 
@@ -730,10 +733,13 @@ mod tests {
             r#"{"token":"present-and-live-checked"}"#,
         )
         .expect("write auth");
-        live_provider.readiness_invocation = Some(CommandInvocation {
-            argv: vec!["node".to_string(), script.display().to_string()],
-            ..CommandInvocation::default()
-        });
+        live_provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
         let catalog = catalog(live_provider);
 
         let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
@@ -759,10 +765,13 @@ mod tests {
         )
         .expect("readiness script");
         let mut provider = provider_with_present_but_unverifiable_credential(&auth);
-        provider.readiness_invocation = Some(CommandInvocation {
-            argv: vec!["node".to_string(), script.display().to_string()],
-            ..CommandInvocation::default()
-        });
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
         let catalog = catalog(provider);
 
         let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);

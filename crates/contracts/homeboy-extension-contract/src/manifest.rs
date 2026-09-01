@@ -101,7 +101,7 @@ pub struct ExtensionManifest {
 
     /// Extension-owned, opt-in hydration for failed external CI statuses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub external_check_detail_resolvers: Vec<ExternalCheckDetailResolverConfig>,
+    pub external_check_detail_resolvers: Vec<ExternalCheckDetailResolverDeclaration>,
 
     /// Runtime requirements needed to execute this extension's runner scripts.
     /// Component-declared requirements still win; these are fallbacks for the
@@ -270,18 +270,6 @@ impl ExtensionManifest {
                     "notification_transports.id",
                     "must be unique within an extension manifest",
                     Some(transport.id.clone()),
-                    None,
-                ));
-            }
-        }
-        let mut providers = std::collections::HashSet::new();
-        for resolver in &self.external_check_detail_resolvers {
-            resolver.validate()?;
-            if !providers.insert(&resolver.provider) {
-                return Err(homeboy_error::Error::validation_invalid_argument(
-                    "external_check_detail_resolvers.provider",
-                    "must be unique within an extension manifest",
-                    Some(resolver.provider.clone()),
                     None,
                 ));
             }

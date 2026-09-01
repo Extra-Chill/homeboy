@@ -2892,7 +2892,7 @@ fn preflight_hot_command_with_input(
             if hot_command.lab_offload_supported
                 && cli.runner.is_none()
                 && !matches!(cli.placement, crate::cli_surface::Placement::Local)
-                && !detached_cook_unmaterialized_admission_eligible(cli)
+                && !nonlocal_cook_requires_durable_admission(cli)
                 && resource_policy::evaluate_with_runner_hint(
                     hot_command,
                     &resources,
@@ -3075,7 +3075,14 @@ fn preflight_hot_command_with_input(
                     warning,
                     cli.placement.is_explicit_local_override() || runner_hosted,
                     is_interactive_shell(),
-                    resource_policy::admission_recovery(normalized_args, lab_readiness.as_ref()),
+                    (!nonlocal_cook_requires_durable_admission(cli))
+                        .then(|| {
+                            resource_policy::admission_recovery(
+                                normalized_args,
+                                lab_readiness.as_ref(),
+                            )
+                        })
+                        .flatten(),
                     runner_admits_offload || auto_local_capacity_fallback,
                 ) {
                     if let Some(diagnostic) = lab_inventory_diagnostic {
@@ -3083,7 +3090,7 @@ fn preflight_hot_command_with_input(
                             .expect("Lab inventory admission diagnostic serializes");
                     }
                     if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload)
-                        || detached_cook_unmaterialized_admission_eligible(cli)
+                        || nonlocal_cook_requires_durable_admission(cli)
                     {
                         return None;
                     }
@@ -3187,13 +3194,12 @@ fn controller_owned_unmaterialized_resume(cli: &Cli) -> bool {
     })
 }
 
-/// A detached non-local Cook owns a durable queue boundary. Resource pressure
-/// may influence its Lab placement, but must not prevent routing from creating
-/// that boundary. Explicit local placement remains the only authorization for
-/// controller provider execution.
-fn detached_cook_unmaterialized_admission_eligible(cli: &Cli) -> bool {
-    cli.detach_after_handoff
-        && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+/// A non-local Cook owns a durable admission boundary. Resource pressure may
+/// influence Lab placement, but cannot prevent creating an inspectable Cook.
+/// Explicit local placement remains the only authorization for controller
+/// provider execution.
+fn nonlocal_cook_requires_durable_admission(cli: &Cli) -> bool {
+    !matches!(cli.placement, crate::cli_surface::Placement::Local)
         && matches!(
             cli.command,
             Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
@@ -4080,6 +4086,87 @@ mod tests {
                 "{placement:?}"
             );
         }
+    }
+
+    #[test]
+    fn metadata_extension_show_bypasses_hot_admission_without_lab_inventory() {
+        use crate::core::parsed_command_preflight::{
+            resolve_parsed_command_preflight, LabReadinessSnapshot, ParsedCommandPolicySnapshot,
+            ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
+        };
+
+        let cli = Cli::parse_from(["homeboy", "extension", "show", "fixture"]);
+        let normalized_args = vec!["homeboy".to_string()];
+        let input = resource_policy::parsed_command_preflight_input(&cli, &normalized_args);
+
+        assert_eq!(
+            input.resource_admission,
+            crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Exempt
+        );
+        assert_eq!(
+            input.lab_route,
+            crate::core::parsed_command_preflight::LabRouteIntent::Unsupported
+        );
+
+        for state in ["stale", "absent"] {
+            let result = resolve_parsed_command_preflight(
+                normalized_args.clone(),
+                input.clone(),
+                ParsedCommandPolicySnapshot {
+                    resource_admission_evidence: ResourceAdmissionEvidence::Observed {
+                        pressure: ResourceHeat::Hot,
+                    },
+                    resource_policy: None,
+                    lab_readiness: Some(LabReadinessSnapshot {
+                        state: state.to_string(),
+                        selected_runner_id: None,
+                        available_runner_ids: Vec::new(),
+                        reasons: vec!["inventory is unavailable".to_string()],
+                        remediation_commands: Vec::new(),
+                        repair_admitted_runner_ids: Vec::new(),
+                    }),
+                    selected_runner_id: None,
+                    generic_route: generic_route_policy_snapshot(&cli, None),
+                    deferred_pressure_refusal: false,
+                    runner_admitted: false,
+                    runner_incompatible: false,
+                    auto_local_capacity_fallback: false,
+                },
+            )
+            .expect("metadata inspection must remain admitted locally");
+
+            assert_eq!(
+                result.resource_admission,
+                ResourceAdmissionDecision::NotRequired
+            );
+        }
+    }
+
+    #[test]
+    fn nonlocal_cook_persists_before_hot_resource_admission() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "fixture@durable-admission",
+            "--verify",
+            "true",
+        ]);
+
+        assert!(nonlocal_cook_requires_durable_admission(&cli));
+        assert_eq!(
+            preflight_hot_command_with(
+                &cli,
+                None,
+                &output::CommandIdentity::with_operation("agent-task", "cook"),
+                || Ok((hot_resources(), 0)),
+            ),
+            None,
+            "Cook must reach its durable admission lifecycle before resource placement"
+        );
     }
 
     #[test]

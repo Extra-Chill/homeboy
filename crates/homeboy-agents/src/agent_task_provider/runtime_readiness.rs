@@ -215,14 +215,17 @@ mod tests {
             "backend": "runtime"
         }))
         .expect("provider fixture");
-        provider.readiness_invocation = Some(CommandInvocation {
-            argv: vec![
-                "node".to_string(),
-                script.display().to_string(),
-                count.display().to_string(),
-            ],
-            ..CommandInvocation::default()
-        });
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec![
+                    "node".to_string(),
+                    script.display().to_string(),
+                    count.display().to_string(),
+                ],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
         provider
     }
 

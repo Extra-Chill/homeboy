@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::agents::agent_task_scheduler::{
@@ -186,6 +186,9 @@ const DRY_RUN_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 const DRY_RUN_MAX_ISSUES: usize = 128;
 const DRY_RUN_MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
 const DRY_RUN_MAX_GATE_BYTES: usize = 8 * 1024;
+/// A preview is a point-in-time admission observation. Execution always probes
+/// again, but callers can use this short bound to avoid treating it as durable.
+const PREVIEW_PROVIDER_DISPATCHABILITY_FRESHNESS: Duration = Duration::from_secs(30);
 const COMPACT_FANOUT_FAILURE_LIMIT: usize = 3;
 
 #[cfg(test)]
@@ -496,8 +499,28 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     // envelope's success/exit_code.
     // The mutating `resume` command keeps the aggregate exit policy, and
     // durable reconciliation / child continuation stay limited to it.
-    let portfolio = if admission_pending {
-        load_portfolio(&report.batch)?.status(&BTreeMap::new())
+    let portfolio = if report.admission_blocker.is_some() || admission_pending {
+        let observations = report
+            .batch
+            .child_runs
+            .iter()
+            .filter(|child| {
+                report.batch.metadata["declared_trackers"][&child.task_id]
+                    .as_str()
+                    .is_some()
+            })
+            .map(|child| {
+                (
+                    child.task_id.clone(),
+                    supervisor::AgentTaskFanoutPortfolioObservation {
+                        child_id: child.task_id.clone(),
+                        tracker: supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        load_portfolio(&report.batch)?.status(&observations)
     } else {
         reconcile_portfolio(&report.batch)?
     };
@@ -890,6 +913,11 @@ fn load_portfolio(
                             .ok()
                             .and_then(|record| {
                                 declared_tracker_ref(&record.metadata).map(str::to_string)
+                            })
+                            .or_else(|| {
+                                batch_record.metadata["declared_trackers"][&child.task_id]
+                                    .as_str()
+                                    .map(str::to_string)
                             })
                             .unwrap_or_else(|| {
                                 format!("homeboy://agent-task/run/{}", child.run_id)
@@ -1553,6 +1581,9 @@ fn persist_fanout_run_batch_record(
             "placement": plan.placement,
             "replan_command": secure_batch_plan_execution(&plan.fanout_id, placement),
             "dependency_graph": plan.dependency_graph_metadata()?,
+            "declared_trackers": plan.cooks.iter().filter_map(|cook| {
+                cook.task_url.as_ref().map(|tracker| (cook.cook_id.clone(), tracker.clone()))
+            }).collect::<BTreeMap<_, _>>(),
         }),
     )?;
     Ok(record.state != batch::AgentTaskBatchState::Planning)
@@ -2668,10 +2699,9 @@ fn empty_causal_failure_projection() -> (Option<Value>, Value) {
     )
 }
 
-/// Static dry-run deliberately stops before any repository, provider, workspace,
-/// gate-file, or evidence-file hydration. This makes the planner's wall-clock
-/// bound enforceable without spawning an unkillable helper around a synchronous
-/// dependency.
+/// Preview stops before repository, workspace, gate-file, or evidence-file
+/// hydration. It does run the selected provider's bounded readiness admission,
+/// so a ready result is executable unless the environment changes before replay.
 fn cook_batch_dry_run(
     mut args: AgentTaskFanoutCookBatchArgs,
     placement: Placement,
@@ -2754,6 +2784,20 @@ fn cook_batch_dry_run(
     plan.ensure_placement(invocation_placement_directive(placement))?;
     let replay_args = pin_cook_batch_replay(&args, &plan.fanout_id);
     let plan_ref = batch_plan_reference(&plan)?;
+    let provider_dispatchability_plan = plan.clone();
+    let provider_dispatchability_plan_ref = plan_ref.clone();
+    let provider_dispatchability = planner.run_bounded(
+        "provider_dispatchability",
+        "bounded provider dispatchability",
+        move || {
+            let catalog = AgentTaskProviderCatalog::discover();
+            preview_provider_dispatchability_evidence(
+                &provider_dispatchability_plan,
+                &catalog,
+                &provider_dispatchability_plan_ref,
+            )
+        },
+    )?;
     let workspace_args = args.clone();
     let workspace = planner.run_bounded(
         "gate_workspace",
@@ -2787,7 +2831,8 @@ fn cook_batch_dry_run(
                 "default_branch": args.base_resolution.clone(),
                 "provider_readiness_command": provider_readiness_command(&args),
                 "provider_selection": provider_selection_preflight(&args),
-                "deferred_live_checks": ["provider_runtime_readiness", "workspace_materialization"],
+                "provider_dispatchability": provider_dispatchability,
+                "deferred_live_checks": ["workspace_materialization"],
                 "placement": fanout_placement_preflight(plan.placement.as_ref()),
                 "deterministic_gates": effective_batch_cook_gates(&plan),
             },
@@ -3760,6 +3805,84 @@ fn preflight_batch_cook_recipes(
         agent_task_service::validate_initial_recipe_compatibility(&options)?;
     }
     Ok(())
+}
+
+/// Preview the same provider admission used while compiling each coordinator
+/// child. The evidence is deliberately redacted and short lived: execution
+/// recompiles and revalidates it after workspace materialization.
+fn preview_provider_dispatchability_evidence(
+    plan: &BatchCookFanoutPlan,
+    catalog: &AgentTaskProviderCatalog,
+    plan_ref: &Value,
+) -> Result<Value> {
+    let mut readiness_cache = provider::ProviderRuntimeReadinessCache::default();
+    let mut children = Vec::with_capacity(plan.cooks.len());
+    for cook in &plan.cooks {
+        let mut invocation = cook.to_cook_invocation(plan)?;
+        // Generated fanout cooks carry a future worktree handle. Provider
+        // admission does not need that path, and resolving it here would turn a
+        // preview into workspace materialization.
+        if cook.cwd.is_none() && cook.workspace.is_none() {
+            invocation.dispatch.workspace = None;
+        }
+        let options = agent_task_service::compile_cook_attempt_with_catalog_and_readiness_cache(
+            invocation.options,
+            invocation.dispatch,
+            catalog,
+            &mut readiness_cache,
+        )?;
+        let task = options.identity.initial_plan.tasks.first().ok_or_else(|| {
+            Error::internal_unexpected("compiled fanout cook has no provider task")
+        })?;
+        let dispatchability = preview_provider_dispatchability_for_executor(
+            catalog,
+            &task.executor.backend,
+            task.executor.selector.as_deref(),
+            task.executor.model(),
+            &task.executor.config,
+            &mut readiness_cache,
+        )?;
+        children.push(serde_json::json!({
+            "cook_id": cook.cook_id,
+            "executor": {
+                "backend": task.executor.backend,
+                "selector": task.executor.selector,
+                "model": task.executor.model(),
+            },
+            "dispatchability": dispatchability,
+        }));
+    }
+    let checked_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    Ok(serde_json::json!({
+        "schema": "homeboy/agent-task-fanout-provider-dispatchability/v1",
+        "state": "ready",
+        "plan_ref": plan_ref,
+        "checked_at_unix_ms": checked_at_unix_ms,
+        "freshness_window_seconds": PREVIEW_PROVIDER_DISPATCHABILITY_FRESHNESS.as_secs(),
+        "revalidate_before_execution": true,
+        "children": children,
+    }))
+}
+
+fn preview_provider_dispatchability_for_executor(
+    catalog: &AgentTaskProviderCatalog,
+    backend: &str,
+    selector: Option<&str>,
+    model: Option<&str>,
+    config: &Value,
+    readiness_cache: &mut provider::ProviderRuntimeReadinessCache,
+) -> Result<provider::AgentTaskProviderDispatchability> {
+    provider::preflight_provider_dispatchability_with_config(
+        catalog,
+        backend,
+        selector,
+        model,
+        config,
+        readiness_cache,
+    )
 }
 
 fn load_fanout_agent_task_plan(
@@ -7918,12 +8041,10 @@ fi
                     serde_json::json!({ "message": "terminal coordinator fixture" }),
                 )
                 .expect("record terminal coordinator fixture");
-                assert!(batch::status(&decoded.fanout_id)
-                    .expect("failed fanout placement status")
-                    .batch
-                    .child_runs[0]
-                    .placement
-                    .is_some());
+                let blocked =
+                    batch::status(&decoded.fanout_id).expect("blocked fanout placement status");
+                assert_eq!(blocked.status, "queued");
+                assert!(blocked.resumable);
             }
         });
     }
@@ -8929,13 +9050,13 @@ fi
             )
             .expect("record blocked preflight");
             assert_eq!(
-                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["terminal_failure"]
+                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["admission_blocker"]
                     ["failure"]["worktrees"],
                 json!(blocked.rows),
                 "the first blocked observation is durable"
             );
             assert_eq!(
-                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["terminal_failure"]
+                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["admission_blocker"]
                     ["failure"]["resolution"]["rows"][0]["state"],
                 "blocked"
             );
@@ -8969,13 +9090,13 @@ fi
             )
             .expect("refresh unchanged blocked preflight");
             assert_eq!(
-                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["terminal_failure"]
+                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["admission_blocker"]
                     ["failure"]["worktrees"],
                 json!(still_blocked.rows),
                 "retry status reflects the current provider observation"
             );
             assert_eq!(
-                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["terminal_failure"]
+                batch::read_batch_record(&plan.fanout_id).unwrap().metadata["admission_blocker"]
                     ["failure"]["resolution"]["rows"][0]["state"],
                 "still_blocked"
             );
@@ -10024,6 +10145,53 @@ fi
             dry_error.message.contains("missing_readiness_invocation")
                 || dry_error.message.contains("readiness invocation")
         );
+    }
+
+    #[test]
+    fn preview_provider_dispatchability_rejects_a_live_unready_provider() {
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "live-unready-provider",
+                "backend": "live-unready",
+                "readiness_invocation": {
+                    "argv": [
+                        "sh",
+                        "-c",
+                        "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"unavailable\",\"retryable\":false,\"remediation\":\"start the provider\",\"reason\":\"provider is offline\",\"cache_key\":\"offline\",\"identity\":{}}'"
+                    ]
+                }
+            }))
+            .expect("provider fixture")],
+            ..AgentTaskProviderCatalog::default()
+        };
+        let mut invocation_args = args();
+        invocation_args.backend = Some("live-unready".to_string());
+        invocation_args.selector = None;
+        let plan = BatchCookFanoutPlan::from_value(
+            json!({
+                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                "fanout_id": "live-unready-preview",
+                "cooks": [{
+                    "cook_id": "child",
+                    "prompt": "fix the issue",
+                    "to_worktree": "homeboy@live-unready-preview",
+                    "backend": "live-unready",
+                    "verify": ["true"]
+                }]
+            }),
+            &invocation_args,
+        )
+        .expect("fanout plan");
+        let error = preview_provider_dispatchability_evidence(
+            &plan,
+            &catalog,
+            &json!({"fanout_id": plan.fanout_id}),
+        )
+        .expect_err("preview must reject a fanout whose provider live readiness fails");
+
+        assert_eq!(error.details["field"], "provider_dispatchability");
+        assert!(error.message.contains("runtime_unavailable"), "{error}");
+        assert!(error.message.contains("provider is offline"), "{error}");
     }
 
     #[test]
@@ -11255,7 +11423,7 @@ fi
     /// read. The documented recovery path (`next_actions` prints exactly this
     /// command) must survive `set -e`.
     #[test]
-    fn batch_status_read_of_a_failed_batch_is_a_successful_operation() {
+    fn pre_admission_status_is_retryable_and_preserves_declared_tracker_identity() {
         with_isolated_home(|_| {
             let batch_id = "read-of-failed-batch";
             batch::persist_fanout_run_batch(
@@ -11265,7 +11433,10 @@ fi
                     task_id: "child".to_string(),
                     run_id: "missing-child-record".to_string(),
                 }],
-                json!({}),
+                json!({
+                    "replan_command": "homeboy agent-task fanout run-plan --input @plan.json",
+                    "declared_trackers": { "child": "https://github.com/Extra-Chill/homeboy/issues/14107" }
+                }),
             )
             .expect("persist fanout batch");
             let claim_id = batch::claim_fanout_run_batch(batch_id)
@@ -11277,7 +11448,7 @@ fi
                 "worktree_preflight",
                 json!({ "message": "fixture failure before first child" }),
             )
-            .expect("persist coordinator failure");
+            .expect("persist coordinator admission blocker");
 
             let (value, exit_code) = batch_status(
                 AgentTaskFanoutBatchStatusArgs {
@@ -11285,14 +11456,25 @@ fi
                 },
                 Placement::Auto,
             )
-            .expect("reading a failed batch must still return its projection");
+            .expect("reading a blocked batch must still return its projection");
 
             assert_eq!(exit_code, 0);
-            assert_eq!(value["batch"]["status"], "failed");
-            assert_eq!(value["batch"]["batch"]["state"], "failed");
+            assert_eq!(value["batch"]["status"], "queued");
+            assert_eq!(value["batch"]["batch"]["state"], "queued");
+            assert_eq!(value["batch"]["admission"]["admitted"], 0);
+            assert_eq!(value["batch"]["admission"]["absent"], 1);
+            assert_eq!(value["batch"]["resumable"], true);
             assert_eq!(
                 value["batch"]["admission_blocker"]["stage"],
                 "worktree_preflight"
+            );
+            assert_eq!(
+                value["portfolio"]["children"][0]["tracker_ref"],
+                "https://github.com/Extra-Chill/homeboy/issues/14107"
+            );
+            assert_eq!(
+                value["portfolio"]["children"][0]["tracker"], "declared_unobserved",
+                "the declared ref is retained even before its provider/worktree observation"
             );
         });
     }

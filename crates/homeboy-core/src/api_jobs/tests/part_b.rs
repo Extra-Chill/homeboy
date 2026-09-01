@@ -153,6 +153,7 @@ fn admitted_staging_dispatch(store: &JobStore, linked_durable_run_id: Option<&st
                 request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
                 public_request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
                 request_digest: format!("digest-{}", Uuid::new_v4()),
+                active_idempotency_key: None,
                 linked_durable_run_id: linked_durable_run_id.map(str::to_string),
                 checkpoint: None,
                 cancellation_requested: false,

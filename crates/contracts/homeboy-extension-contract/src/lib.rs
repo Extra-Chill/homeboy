@@ -124,7 +124,8 @@ pub mod runner_contract;
 pub mod runtime_helper;
 pub mod sidecar_config;
 pub use external_check_detail_resolver::{
-    ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig, ExternalCheckDetailResponse,
+    ExternalCheckDetailRequest, ExternalCheckDetailResolverConfig,
+    ExternalCheckDetailResolverDeclaration, ExternalCheckDetailResponse,
     EXTERNAL_CHECK_DETAIL_REQUEST_SCHEMA, EXTERNAL_CHECK_DETAIL_RESOLVER_SCHEMA,
     EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
 };

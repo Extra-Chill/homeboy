@@ -310,7 +310,7 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     }))
     .expect("register controller driver once");
     let request = serde_json::json!({
-        "type": "test.blocking", "version": 1, "idempotency_key": "run-9421", "request": { "schema": "test/v1", "private_input": "not-public" }
+        "type": "test.blocking", "version": 1, "idempotency_key": "run-9421", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
     });
 
     // Admission is phase one: it is durable but cannot execute until start.
@@ -355,9 +355,20 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
         "not-public"
     ));
 
-    // No submitting-client state is retained: replay returns one daemon job and never executes twice.
-    let duplicate = route_with_body("POST", "/controller/jobs", Some(request), &store);
+    // A retry has a new one-shot key but coalesces with matching active work.
+    let duplicate = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-retry", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
+        })),
+        &store,
+    );
     assert_eq!(duplicate.body["body"]["job"]["id"], job_id.to_string());
+    assert_eq!(
+        duplicate.body["body"]["submission"]["disposition"],
+        "reused"
+    );
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     let conflict = route_with_body(
         "POST",
@@ -382,6 +393,19 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     wait_for(
         "store.get(job_id).expect( first job ).status.is_terminal()",
         || store.get(job_id).expect("first job").status.is_terminal(),
+    );
+    let successor = route_with_body(
+        "POST",
+        "/controller/jobs",
+        Some(serde_json::json!({
+            "type": "test.blocking", "version": 1, "idempotency_key": "run-9421-successor", "active_idempotency_key": "run-9421-active", "request": { "schema": "test/v1", "private_input": "not-public" }
+        })),
+        &store,
+    );
+    assert_ne!(successor.body["body"]["job"]["id"], job_id.to_string());
+    assert_eq!(
+        successor.body["body"]["submission"]["disposition"],
+        "created"
     );
 
     let cancelled = route_with_body(
