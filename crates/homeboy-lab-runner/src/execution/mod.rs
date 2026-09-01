@@ -66,6 +66,7 @@ mod process;
 mod recovery;
 pub(crate) mod redaction;
 mod secrets;
+mod submission;
 mod worker;
 
 #[cfg(test)]
@@ -94,6 +95,7 @@ use paths::*;
 use process::*;
 use redaction::*;
 use secrets::*;
+use submission::*;
 
 // Crate-internal surface consumed by sibling `runner` modules (evidence, worker,
 // lab_env, lab/offload) and re-exported by the parent `runner` module.

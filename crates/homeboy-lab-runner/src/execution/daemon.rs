@@ -7,9 +7,7 @@ use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_workload_result;
-use homeboy_core::api_jobs::{
-    Job, JobEvent, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
-};
+use homeboy_core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
 use homeboy_core::daemon::{DirectDaemonExecSubmitRequest, WorkspaceOwnerRegisterRequest};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::error::{Error, ErrorCode, Result};
@@ -115,36 +113,27 @@ pub(super) fn exec_via_daemon(
     let submission_key = run_id
         .clone()
         .unwrap_or_else(|| format!("direct-daemon:v1:{}:{}", runner.id, uuid::Uuid::new_v4()));
-    let request = RemoteRunnerJobRequest {
+    let envelope = runner_api_execution_envelope(RunnerApiExecutionInput {
         runner_id: runner.id.clone(),
         project_id,
-        operation: "runner.exec".to_string(),
         command: command.clone(),
-        cwd: Some(cwd.clone()),
+        cwd: cwd.clone(),
         env: env.clone(),
         secret_env_names: secret_env_names.clone(),
-        secret_env_plan: Default::default(),
-        env_materialization: None,
         capture_patch,
-        source_snapshot: Some(source_snapshot.clone()),
+        source_snapshot: source_snapshot.clone(),
         path_materialization_plan: path_materialization_plan.clone(),
         require_paths: require_paths.clone(),
         extension_env_providers: extension_env_providers.clone(),
-        lab_runner_workload: lab_runner_workload.clone(),
-        lifecycle: Some(lifecycle),
-        workspace_claim_binding: None,
-        workspace_owner_lease: None,
-        metadata: Some(runner_exec_request_metadata(
-            run_id.as_deref(),
-            "daemon",
-            &runner.id,
-        )),
-    };
+        workload: lab_runner_workload.clone(),
+        lifecycle,
+        metadata: runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id),
+    })?;
     let submission = RunnerApiSubmitRequest {
         schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
         api_version: RUNNER_API_V1,
         submission_key,
-        envelope: request.execution_envelope(),
+        envelope,
         workspace_claim_binding: None,
         workspace_owner_lease: None,
     };

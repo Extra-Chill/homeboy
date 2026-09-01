@@ -6,9 +6,10 @@
 //! execution, and evidence functions.
 
 use homeboy_agents::agent_task_lifecycle::{
-    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation, RunnerLiveJobAuthority,
+    RunnerAuthority, RunnerContinuationProvider, RunnerContinuationSubmission,
+    RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
-use homeboy_core::api_jobs::{Job, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
+use homeboy_core::api_jobs::{Job, RunnerJobLogSnapshot};
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -243,20 +244,12 @@ impl RunnerContinuationProvider for RunnerContinuation {
         Ok(exit_code)
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         runner_id: &str,
-        request: RemoteRunnerJobRequest,
+        submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
-        super::connection::submit_reverse_broker_job(runner_id, request)
-    }
-
-    fn submit_reverse_broker_envelope_job(
-        &self,
-        runner_id: &str,
-        request: homeboy_runner_contract::RunnerApiSubmitRequest,
-    ) -> Result<Job> {
-        super::connection::submit_reverse_broker_envelope_job(runner_id, request)
+        super::connection::submit_runner_api_request(runner_id, submission)
     }
 
     fn lookup_reverse_broker_submission(

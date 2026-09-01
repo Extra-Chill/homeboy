@@ -56,6 +56,14 @@ pub enum RunnerLiveJobAuthority {
     Unknown,
 }
 
+/// One reverse-broker submission operation. Current callers use the Runner API;
+/// the legacy variant exists only to replay request-shaped durable records
+/// without changing their established idempotency fingerprint.
+pub enum RunnerContinuationSubmission {
+    RunnerApi(RunnerApiSubmitRequest),
+    LegacyReplay(RemoteRunnerJobRequest),
+}
+
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
 /// resuming a run that was handed off to a remote runner.
 pub trait RunnerContinuationProvider: Send + Sync {
@@ -189,21 +197,11 @@ pub trait RunnerContinuationProvider: Send + Sync {
     ) -> Result<i32>;
 
     /// Submit a replayable reverse-broker request during lifecycle reconciliation.
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         runner_id: &str,
-        request: RemoteRunnerJobRequest,
+        submission: RunnerContinuationSubmission,
     ) -> Result<Job>;
-
-    fn submit_reverse_broker_envelope_job(
-        &self,
-        _runner_id: &str,
-        _request: RunnerApiSubmitRequest,
-    ) -> Result<Job> {
-        Err(Error::internal_unexpected(
-            "runner subsystem does not support Runner API envelope submission",
-        ))
-    }
 
     fn lookup_reverse_broker_submission(
         &self,
@@ -247,10 +245,10 @@ impl RunnerContinuationProvider for NoopProvider {
         ))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected(
             "runner subsystem is unavailable: cannot submit reverse broker job",
@@ -400,10 +398,10 @@ mod tests {
             Err(Error::internal_unexpected("unused in fixture"))
         }
 
-        fn submit_reverse_broker_job(
+        fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            _request: RemoteRunnerJobRequest,
+            _submission: RunnerContinuationSubmission,
         ) -> Result<Job> {
             Err(Error::internal_unexpected("unused in fixture"))
         }
