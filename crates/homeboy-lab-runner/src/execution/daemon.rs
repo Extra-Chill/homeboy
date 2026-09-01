@@ -7,12 +7,18 @@ use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_workload_result;
-use homeboy_core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
+use homeboy_core::api_jobs::{
+    Job, JobEvent, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
+};
+use homeboy_core::daemon::{DirectDaemonExecSubmitRequest, WorkspaceOwnerRegisterRequest};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::lab_contract::{run_location_index_path, JobArtifactMetadata, LabRunnerWorkload};
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
+use homeboy_runner_contract::{
+    RunnerApiSubmitRequest, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
+};
 
 use super::super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
@@ -106,35 +112,65 @@ pub(super) fn exec_via_daemon(
     if workspace_owner_request.is_some() {
         require_daemon_workspace_owner_lease_v2(&client, local_url)?;
     }
-    let mut payload = json!({
-        "runner_id": runner.id,
-        "runner": runner,
-        "project_id": project_id,
-        "cwd": cwd,
-        "command": command,
-        "env": env,
-        "secret_env_names": secret_env_names,
-        "capture_patch": capture_patch,
-        "source_snapshot": source_snapshot.clone(),
-        "path_materialization_plan": path_materialization_plan.clone(),
-        "require_paths": require_paths.clone(),
-        "extension_env_providers": extension_env_providers.clone(),
-        "runner_workload": lab_runner_workload.clone(),
-        "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id),
-        "lifecycle": lifecycle,
-        // Explicit, first-class idempotency key the daemon dedupes `/exec` on.
-        // The controller asserts it up front instead of the daemon having to
-        // reconstruct it from nested lifecycle/metadata, so a resubmission after
-        // a transport drop is a safe no-op. Uses the durable run id when present.
-        "idempotency_key": run_id,
-    });
-    if let Some((workspace, owner_id)) = workspace_owner_request.as_ref() {
-        payload["workspace_owner_request"] = json!({
-            "workspace": workspace,
-            "owner_id": owner_id,
-            "ttl_ms": homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
-        });
-    }
+    let submission_key = run_id
+        .clone()
+        .unwrap_or_else(|| format!("direct-daemon:v1:{}:{}", runner.id, uuid::Uuid::new_v4()));
+    let request = RemoteRunnerJobRequest {
+        runner_id: runner.id.clone(),
+        project_id,
+        operation: "runner.exec".to_string(),
+        command: command.clone(),
+        cwd: Some(cwd.clone()),
+        env: env.clone(),
+        secret_env_names: secret_env_names.clone(),
+        secret_env_plan: Default::default(),
+        env_materialization: None,
+        capture_patch,
+        source_snapshot: Some(source_snapshot.clone()),
+        path_materialization_plan: path_materialization_plan.clone(),
+        require_paths: require_paths.clone(),
+        extension_env_providers: extension_env_providers.clone(),
+        lab_runner_workload: lab_runner_workload.clone(),
+        lifecycle: Some(lifecycle),
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+        metadata: Some(runner_exec_request_metadata(
+            run_id.as_deref(),
+            "daemon",
+            &runner.id,
+        )),
+    };
+    let submission = RunnerApiSubmitRequest {
+        schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+        api_version: RUNNER_API_V1,
+        submission_key,
+        envelope: request.execution_envelope(),
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+    };
+    let payload = serde_json::to_value(DirectDaemonExecSubmitRequest {
+        submission,
+        runner: Some(serde_json::to_value(runner).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize direct runner descriptor".to_string()),
+            )
+        })?),
+        raw_exec: false,
+        workspace_owner_request: workspace_owner_request.map(|(workspace, owner_id)| {
+            WorkspaceOwnerRegisterRequest {
+                workspace,
+                owner_id,
+                ttl_ms: homeboy_core::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+            }
+        }),
+    })
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize direct runner submission".to_string()),
+        )
+    })?;
     let response = submit_daemon_exec_with_session_recovery(
         local_url,
         accepted_session.as_ref(),

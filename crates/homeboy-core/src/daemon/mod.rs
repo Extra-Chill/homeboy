@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::api_jobs::{
     ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
-    LocalRunnerJobRequest, RunnerJobLifecycleMetadata,
+    LocalRunnerJobRequest, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
 };
 use crate::build_identity;
 use crate::error::{Error, ExecutableAction, RemoteCommandFailedDetails, Result, TargetDetails};
@@ -24,6 +24,10 @@ use crate::process::{pid_has_ownership_token, pid_is_running};
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
+use homeboy_runner_contract::{
+    RunnerApiSubmitRequest, RunnerExecutionEnvelope, RUNNER_API_SUBMIT_REQUEST_SCHEMA,
+    RUNNER_API_V1,
+};
 const VERSION: &str = homeboy_product_identity::product_version();
 
 mod artifact_download;
@@ -982,7 +986,7 @@ pub struct HttpResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ExecRequest {
+struct LegacyExecRequest {
     runner_id: String,
     #[serde(default)]
     runner: Option<serde_json::Value>,
@@ -1026,6 +1030,32 @@ struct ExecRequest {
     workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
     #[serde(default)]
     workspace_owner_request: Option<WorkspaceOwnerRegisterRequest>,
+}
+
+struct ExecRequest {
+    submission_key: Option<String>,
+    legacy_submission_key_is_run_id: bool,
+    envelope: RunnerExecutionEnvelope,
+    runner: Option<serde_json::Value>,
+    raw_exec: bool,
+    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    workspace_owner_request: Option<WorkspaceOwnerRegisterRequest>,
+}
+
+/// Direct-daemon transport adapter for the canonical runner submission.
+///
+/// The inline descriptor and `raw_exec` remain local to the direct runner
+/// implementation; all execution inputs belong to the canonical envelope.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectDaemonExecSubmitRequest {
+    pub submission: RunnerApiSubmitRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<serde_json::Value>,
+    #[serde(default)]
+    pub raw_exec: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_owner_request: Option<WorkspaceOwnerRegisterRequest>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2615,11 +2645,11 @@ struct WorkspaceAuthorityStatusRequest {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-struct WorkspaceOwnerRegisterRequest {
-    workspace: crate::workspace_claim::WorkspaceIdentity,
-    owner_id: String,
+pub struct WorkspaceOwnerRegisterRequest {
+    pub workspace: crate::workspace_claim::WorkspaceIdentity,
+    pub owner_id: String,
     #[serde(default = "default_workspace_owner_ttl_ms")]
-    ttl_ms: u64,
+    pub ttl_ms: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -3150,23 +3180,120 @@ fn resolve_exec_idempotency_key(
         })
 }
 
+/// Decode the shipped scalar `/exec` request only when a caller has not opted
+/// into the envelope-backed direct transport.
+fn decode_legacy_exec_request(body: serde_json::Value) -> Result<ExecRequest> {
+    let legacy: LegacyExecRequest = serde_json::from_value(body).map_err(|err| {
+        Error::validation_invalid_argument(
+            "body",
+            format!("invalid legacy exec request body: {err}"),
+            None,
+            None,
+        )
+    })?;
+    let submission_key = resolve_exec_idempotency_key(
+        legacy.idempotency_key.as_deref(),
+        exec_request_run_ref_metadata(
+            legacy.lifecycle.as_ref(),
+            legacy.lab_runner_workload.as_ref(),
+            legacy.metadata.as_ref(),
+        )
+        .as_ref(),
+    );
+    let request = RemoteRunnerJobRequest {
+        runner_id: legacy.runner_id,
+        project_id: legacy.project_id,
+        operation: "runner.exec".to_string(),
+        command: legacy.command,
+        cwd: legacy.cwd,
+        env: legacy.env,
+        secret_env_names: legacy.secret_env_names,
+        secret_env_plan: legacy.secret_env_plan,
+        env_materialization: None,
+        capture_patch: legacy.capture_patch,
+        source_snapshot: legacy.source_snapshot,
+        path_materialization_plan: legacy.path_materialization_plan,
+        require_paths: legacy.require_paths,
+        extension_env_providers: legacy.extension_env_providers,
+        lab_runner_workload: legacy.lab_runner_workload,
+        lifecycle: legacy.lifecycle,
+        workspace_claim_binding: legacy.workspace_claim_binding.clone(),
+        workspace_owner_lease: None,
+        metadata: legacy.metadata,
+    };
+    Ok(ExecRequest {
+        submission_key,
+        legacy_submission_key_is_run_id: true,
+        envelope: request.execution_envelope(),
+        runner: legacy.runner,
+        raw_exec: legacy.raw_exec,
+        workspace_claim_binding: legacy.workspace_claim_binding,
+        workspace_owner_request: legacy.workspace_owner_request,
+    })
+}
+
+fn decode_exec_request(body: Option<serde_json::Value>) -> Result<ExecRequest> {
+    let body = body.unwrap_or_else(|| json!({}));
+    if body.get("submission").is_none() {
+        return decode_legacy_exec_request(body);
+    }
+    let direct: DirectDaemonExecSubmitRequest = serde_json::from_value(body).map_err(|err| {
+        Error::validation_invalid_argument(
+            "body",
+            format!("invalid direct runner submission: {err}"),
+            None,
+            None,
+        )
+    })?;
+    let submission = direct.submission;
+    if submission.schema != RUNNER_API_SUBMIT_REQUEST_SCHEMA
+        || submission.api_version != RUNNER_API_V1
+    {
+        return Err(Error::validation_invalid_argument(
+            "schema",
+            "unsupported Runner API submit request",
+            Some(submission.schema),
+            None,
+        ));
+    }
+    if submission.submission_key.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "submission_key",
+            "runner submission requires a caller-owned idempotency key",
+            None,
+            None,
+        ));
+    }
+    if submission.workspace_claim_binding.is_some() || submission.workspace_owner_lease.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "submission",
+            "direct execution uses workspace_owner_request registration intent, not submitted workspace authority",
+            None,
+            None,
+        ));
+    }
+    Ok(ExecRequest {
+        submission_key: Some(submission.submission_key),
+        legacy_submission_key_is_run_id: false,
+        envelope: submission.envelope,
+        runner: direct.runner,
+        raw_exec: direct.raw_exec,
+        workspace_claim_binding: None,
+        workspace_owner_request: direct.workspace_owner_request,
+    })
+}
+
 fn enqueue_exec_job(
     body: Option<serde_json::Value>,
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
-    let mut request: ExecRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
-        .map_err(|err| {
-            Error::validation_invalid_argument(
-                "body",
-                format!("invalid exec request body: {err}"),
-                None,
-                None,
-            )
-        })?;
+    let request = decode_exec_request(body)?;
+    let mut execution = crate::api_jobs::legacy_request_from_envelope(&request.envelope)?;
+    execution.workspace_claim_binding = request.workspace_claim_binding.clone();
     // Reconciliation bindings are not direct execution authority. Existing
     // clients may still send one only for ordinary compatibility; workspace
     // work must carry an owner registration request negotiated through v2.
-    if request.workspace_owner_request.is_some() && request.workspace_claim_binding.is_some() {
+    if request.workspace_owner_request.is_some() && execution.workspace_claim_binding.is_some() {
         return Err(Error::validation_invalid_argument(
             "workspace_claim_binding",
             "direct workspace execution uses an owner lease, not a reconciliation claim",
@@ -3174,88 +3301,62 @@ fn enqueue_exec_job(
             None,
         ));
     }
-    let mut base_plan = request
-        .lab_runner_workload
-        .as_ref()
-        .map(|workload| workload.required_secrets.secret_env_plan.clone())
-        .filter(|plan| *plan != SecretEnvPlan::default());
-    if request.secret_env_plan != SecretEnvPlan::default() {
-        if let Some(plan) = base_plan.as_mut() {
-            plan.merge_from(request.secret_env_plan.clone());
-        } else {
-            base_plan = Some(request.secret_env_plan.clone());
-        }
-    }
-    let secret_env_plan = crate::api_jobs::with_runner_job_preparation(|p| {
-        p.runner_exec_secret_env_plan(
-            &request.command,
-            None,
-            &request.secret_env_names,
-            &request.env,
-            base_plan,
-        )
-    });
-    request.secret_env_names = secret_env_plan.secret_env_names();
-    request.secret_env_plan = secret_env_plan.clone();
+    let secret_env_plan = if request.legacy_submission_key_is_run_id {
+        execution.normalize()
+    } else {
+        execution.validate_durable_submission()?;
+        execution.secret_env_plan.clone()
+    };
     crate::api_jobs::with_runner_job_preparation(|p| {
         p.validate_lab_runner_workload_dispatch(
-            request.lab_runner_workload.as_ref(),
-            &request.runner_id,
-            request.cwd.as_deref(),
-            &request.command,
+            execution.lab_runner_workload.as_ref(),
+            &execution.runner_id,
+            execution.cwd.as_deref(),
+            &execution.command,
             &secret_env_plan,
-            request.capture_patch,
+            execution.capture_patch,
         )
     })?;
-    // Resolve this before runner-specific preparation so the opaque process plan
-    // can retain the same authority the daemon uses for durable lifecycle state.
-    let canonical_durable_run_id = resolve_exec_idempotency_key(
-        request.idempotency_key.as_deref(),
-        exec_request_run_ref_metadata(
-            request.lifecycle.as_ref(),
-            request.lab_runner_workload.as_ref(),
-            request.metadata.as_ref(),
-        )
-        .as_ref(),
-    );
+    let submission_key = request.submission_key.clone();
     let plan = runner_exec_driver::prepare_exec(runner_exec_driver::RunnerExecPrepareRequest {
-        runner_id: request.runner_id,
-        runner: request.runner,
-        cwd: request.cwd,
-        project_id: request.project_id,
-        command: request.command,
-        env: request.env,
-        secret_env_names: request.secret_env_names,
+        runner_id: execution.runner_id.clone(),
+        runner: request.runner.clone(),
+        cwd: execution.cwd.clone(),
+        project_id: execution.project_id.clone(),
+        command: execution.command.clone(),
+        env: execution.env.clone(),
+        secret_env_names: execution.secret_env_names.clone(),
         secret_env_plan: Some(
             serde_json::to_value(&secret_env_plan).unwrap_or(serde_json::Value::Null),
         ),
-        capture_patch: request.capture_patch,
+        capture_patch: execution.capture_patch,
         raw_exec: request.raw_exec,
-        source_snapshot: request.source_snapshot,
-        require_paths: request.require_paths,
-        extension_env_providers: request.extension_env_providers,
-        authoritative_run_id: canonical_durable_run_id.clone(),
+        source_snapshot: execution.source_snapshot.clone(),
+        require_paths: execution.require_paths.clone(),
+        extension_env_providers: execution.extension_env_providers.clone(),
+        authoritative_run_id: execution
+            .lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.durable_run_id.clone())
+            .or_else(|| submission_key.clone()),
         validate_require_paths_on_host: true,
     })?;
     let source_snapshot = Some(plan.source_snapshot.clone());
-    let path_materialization_plan = request.path_materialization_plan.clone();
+    let path_materialization_plan = execution.path_materialization_plan.clone();
 
-    let mut lifecycle = request.lifecycle.take();
-    // Prefer the explicit, controller-asserted idempotency key. Fall back to
-    // reconstructing the durable run id from nested lifecycle/metadata for
-    // controllers that predate the explicit field. Either way the resolved key
-    // is folded into the lifecycle's `durable_run_id` below, which is what the
-    // job-store dedup guard keys on.
-    if let Some(durable_run_id) = canonical_durable_run_id {
-        lifecycle
-            .get_or_insert_with(RunnerJobLifecycleMetadata::default)
-            .durable_run_id = Some(durable_run_id);
+    let mut lifecycle = execution.lifecycle.clone();
+    if request.legacy_submission_key_is_run_id {
+        if let Some(durable_run_id) = submission_key.clone() {
+            lifecycle
+                .get_or_insert_with(RunnerJobLifecycleMetadata::default)
+                .durable_run_id = Some(durable_run_id);
+        }
     }
     let summary = json!({
         "runner_id": plan.runner_id,
         "cwd": plan.cwd,
         "command": plan.command,
-        "capture_patch": request.capture_patch,
+        "capture_patch": execution.capture_patch,
         "source_snapshot": source_snapshot,
         "path_materialization_plan": path_materialization_plan,
         "extension_env_providers": plan.extension_env_provenance,
@@ -3263,18 +3364,13 @@ fn enqueue_exec_job(
         "workspace_owner_request": request.workspace_owner_request.clone(),
     });
 
-    // Idempotent resubmission: a daemon `/exec` is not idempotent at the
-    // transport layer — a dropped connection or timeout can hide that the daemon
-    // already accepted this work. When the controller resubmits the same
-    // controller-minted `durable_run_id`, return the job already enqueued for it
-    // instead of spawning a duplicate. Only non-terminal (Queued/Running) jobs
-    // dedupe; a terminal job for the same run id is finished, so a resubmission
-    // is a genuinely new attempt and falls through to a fresh enqueue.
-    if let Some(durable_run_id) = lifecycle
-        .as_ref()
-        .and_then(|lifecycle| lifecycle.durable_run_id.as_deref())
-    {
-        if let Some(existing) = job_store.active_runner_job_for_durable_run_id(durable_run_id) {
+    // A dropped response can hide successful admission. Return the active
+    // execution for the caller-owned submission key, but never confuse its
+    // preceding capacity reservation for the execution itself.
+    if let Some(submission_key) = submission_key.as_deref() {
+        if let Some(existing) =
+            job_store.active_execution_job_for_admission_idempotency_key(submission_key)
+        {
             let existing_job_id = existing.id;
             return Ok(json!({
                 "command": "api.runner.exec.enqueue",
@@ -3292,8 +3388,8 @@ fn enqueue_exec_job(
     let operation = "runner.exec".to_string();
     let mut run_ref_metadata = exec_request_run_ref_metadata(
         lifecycle.as_ref(),
-        request.lab_runner_workload.as_ref(),
-        request.metadata.as_ref(),
+        execution.lab_runner_workload.as_ref(),
+        execution.metadata.as_ref(),
     )
     .unwrap_or_else(|| json!({}));
     run_ref_metadata["runner_job_projection"] = json!({
@@ -3307,7 +3403,7 @@ fn enqueue_exec_job(
     // Capture any potentially slow baseline before reserving child capacity.
     // Once the reservation is durable, the worker performs only the bounded
     // process-spawn handoff before persisting child ownership.
-    let baseline = if request.capture_patch {
+    let baseline = if execution.capture_patch {
         Some(capture_baseline(&plan.cwd, source_snapshot.as_ref())?)
     } else {
         None
@@ -3345,19 +3441,31 @@ fn enqueue_exec_job(
         command: plan.command.clone(),
         cwd: Some(plan.cwd.clone()),
         lifecycle: lifecycle.clone(),
-        workspace_claim_binding: request.workspace_claim_binding.clone(),
+        workspace_claim_binding: execution.workspace_claim_binding.clone(),
         workspace_owner_lease: workspace_owner_lease.clone(),
     };
     let execution_controller_run_id = lifecycle
         .as_ref()
         .and_then(|lifecycle| lifecycle.durable_run_id.clone());
+    let execution_controller_attempt_id = execution
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("controller_attempt_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let execution_accepted_handoff_id = execution
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("accepted_handoff_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     // Every runner process shares the runner's connection and declared process
     // capacity. Diagnostic commands are ordinary runner executions too, so
     // admitting them outside this queue can wedge the shared transport.
     let capacity = plan.concurrency_limit.unwrap_or(usize::MAX).max(1);
     let stall_watchdog_store = job_store.clone();
     let workspace_owner_renewal_store = (*job_store).clone();
-    let runner = match job_store
+    let (runner, created) = match job_store
         .try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             LocalRunnerJobRequest {
                 operation,
@@ -3365,9 +3473,7 @@ fn enqueue_exec_job(
                 metadata: Some(run_ref_metadata),
                 path_materialization_plan: path_materialization_plan.clone(),
                 local_runner: Some(local_runner),
-                admission_idempotency_key: lifecycle
-                    .as_ref()
-                    .and_then(|lifecycle| lifecycle.durable_run_id.clone()),
+                admission_idempotency_key: submission_key.clone(),
             },
             capacity,
             move |job| {
@@ -3398,16 +3504,8 @@ fn enqueue_exec_job(
                 };
                 let execution_context = crate::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon_with_dispatch_metadata(
                     execution_controller_run_id.as_deref(),
-                    request
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.get("controller_attempt_id"))
-                        .and_then(serde_json::Value::as_str),
-                    request
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.get("accepted_handoff_id"))
-                        .and_then(serde_json::Value::as_str),
+                    execution_controller_attempt_id.as_deref(),
+                    execution_accepted_handoff_id.as_deref(),
                     &plan.runner_id,
                     &job.job_id().to_string(),
                     plan.command.first().map(String::as_str).unwrap_or_default(),
@@ -3673,6 +3771,7 @@ fn enqueue_exec_job(
             "events": format!("/jobs/{}/events", runner.job_id),
         },
         "request": summary,
+        "idempotent_resubmission": !created,
     }))
 }
 

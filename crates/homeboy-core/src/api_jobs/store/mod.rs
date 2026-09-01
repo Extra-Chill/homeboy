@@ -2160,7 +2160,7 @@ impl JobStore {
         request: LocalRunnerJobRequest,
         capacity: usize,
         run: F,
-    ) -> Result<JobRunner>
+    ) -> Result<(JobRunner, bool)>
     where
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
@@ -2175,7 +2175,7 @@ impl JobStore {
         // `JobRunner` contract is preserved.
         if !created {
             let handle = thread::spawn(|| {});
-            return Ok(JobRunner { job_id, handle });
+            return Ok((JobRunner { job_id, handle }, false));
         }
         let handle_store = self.clone();
         let worker_store = self.clone();
@@ -2235,7 +2235,7 @@ impl JobStore {
                 }
             }
         });
-        Ok(JobRunner { job_id, handle })
+        Ok((JobRunner { job_id, handle }, true))
     }
 
     fn run_background_with_start_policy<T, F>(
