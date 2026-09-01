@@ -17,9 +17,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use homeboy_core::error::{Error, Result};
-use homeboy_core::workspace_claim::{
-    WorkspaceAuthorityStatus, WorkspaceClaim, WorkspaceClaimProtocol, WorkspaceIdentity,
-    WORKSPACE_CLAIM_CAPABILITY,
+use homeboy_core::workspace_claim::WorkspaceAuthorityStatus;
+use homeboy_runner_contract::{
+    WorkspaceClaim, WorkspaceClaimProtocol, WorkspaceIdentity, WORKSPACE_CLAIM_CAPABILITY,
 };
 
 /// The runner layer's `RunnerContinuationProvider`. Registered with core at startup.

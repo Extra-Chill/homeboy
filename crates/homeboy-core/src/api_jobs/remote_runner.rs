@@ -948,25 +948,13 @@ impl JobStore {
             .submission_key()
             .map(str::to_string)
             .unwrap_or_else(|| format!("test:runner-api:{}", Uuid::new_v4()));
-        let workspace_claim_binding = request
-            .workspace_claim_binding
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        let workspace_owner_lease = request
-            .workspace_owner_lease
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
         self.submit_runner_api_request(RunnerApiSubmitRequest {
             schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
             api_version: RUNNER_API_V1,
             submission_key,
             envelope: request.execution_envelope(),
-            workspace_claim_binding,
-            workspace_owner_lease,
+            workspace_claim_binding: request.workspace_claim_binding,
+            workspace_owner_lease: request.workspace_owner_lease,
         })
     }
 
@@ -1016,31 +1004,8 @@ impl JobStore {
             ));
         }
         validate_command_assets(Some(&envelope.metadata))?;
-        let workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding> =
-            submission
-                .workspace_claim_binding
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| {
-                    Error::validation_invalid_argument(
-                        "workspace_claim_binding",
-                        error.to_string(),
-                        None,
-                        None,
-                    )
-                })?;
-        let workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease> = submission
-            .workspace_owner_lease
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| {
-                Error::validation_invalid_argument(
-                    "workspace_owner_lease",
-                    error.to_string(),
-                    None,
-                    None,
-                )
-            })?;
+        let workspace_claim_binding = submission.workspace_claim_binding;
+        let workspace_owner_lease = submission.workspace_owner_lease;
         if let Some(binding) = workspace_claim_binding.as_ref() {
             binding.verify()?;
         }

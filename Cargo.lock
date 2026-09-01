@@ -1254,6 +1254,7 @@ dependencies = [
 name = "homeboy-runner-contract"
 version = "0.1.0"
 dependencies = [
+ "homeboy-error",
  "homeboy-redaction",
  "homeboy-source-snapshot-contract",
  "serde",

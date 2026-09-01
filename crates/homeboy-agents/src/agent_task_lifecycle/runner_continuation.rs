@@ -16,8 +16,7 @@ use homeboy_core::api_jobs::{
     Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot,
 };
 use homeboy_core::error::{Error, Result};
-use homeboy_core::workspace_claim::{WorkspaceClaim, WorkspaceIdentity};
-use homeboy_runner_contract::RunnerApiSubmitRequest;
+use homeboy_runner_contract::{RunnerApiSubmitRequest, WorkspaceClaim, WorkspaceIdentity};
 
 /// Result of reconciling a runner job across its known daemon generations.
 ///

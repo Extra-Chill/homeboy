@@ -13,127 +13,17 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
-pub const WORKSPACE_CLAIM_CAPABILITY: &str = "workspace-claim";
-pub const WORKSPACE_OWNER_LEASE_CAPABILITY: &str = "workspace-owner-lease";
-pub const WORKSPACE_CLAIM_PROTOCOL_VERSION: u32 = 2;
-pub const WORKSPACE_IDENTITY_SCHEMA: &str = "homeboy/workspace-identity/v1";
-pub const WORKSPACE_CLAIM_SCHEMA: &str = "homeboy/workspace-claim/v2";
-pub const WORKSPACE_OWNER_LEASE_SCHEMA: &str = "homeboy/workspace-owner-lease/v2";
+pub use homeboy_runner_contract::{
+    WorkspaceClaim, WorkspaceClaimBinding, WorkspaceClaimProtocol, WorkspaceIdentity,
+    WorkspaceOwnerLease, WorkspaceOwnerLeaseProtocol, WORKSPACE_CLAIM_CAPABILITY,
+    WORKSPACE_CLAIM_PROTOCOL_VERSION, WORKSPACE_CLAIM_SCHEMA, WORKSPACE_IDENTITY_SCHEMA,
+    WORKSPACE_OWNER_LEASE_CAPABILITY, WORKSPACE_OWNER_LEASE_SCHEMA,
+};
 pub const WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA: &str =
     "homeboy/workspace-owner-release-recovery/v1";
 pub const LOCAL_WORKSPACE_CLAIMS_DIR: &str = "agent-task-workspace-claims";
 const WORKSPACE_AUTHORITY_SCHEMA: &str = "homeboy/workspace-authority/v2";
 pub const MAX_WORKSPACE_CLAIM_TTL_MS: u64 = 300_000;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceClaimProtocol {
-    pub capability: String,
-    pub version: u32,
-}
-impl WorkspaceClaimProtocol {
-    pub fn current() -> Self {
-        Self {
-            capability: WORKSPACE_CLAIM_CAPABILITY.into(),
-            version: WORKSPACE_CLAIM_PROTOCOL_VERSION,
-        }
-    }
-    pub fn verify(&self) -> Result<()> {
-        (self.capability == WORKSPACE_CLAIM_CAPABILITY
-            && self.version == WORKSPACE_CLAIM_PROTOCOL_VERSION)
-            .then_some(())
-            .ok_or_else(|| {
-                invalid(
-                    "workspace_claim_protocol",
-                    "workspace authority does not advertise the required claim protocol",
-                )
-            })
-    }
-}
-
-/// Versioned negotiation record for direct-daemon owner leases. Reconciliation
-/// claims deliberately use a different capability so the two authorities
-/// cannot be substituted for one another.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceOwnerLeaseProtocol {
-    pub capability: String,
-    pub version: u32,
-}
-impl WorkspaceOwnerLeaseProtocol {
-    pub fn current() -> Self {
-        Self {
-            capability: WORKSPACE_OWNER_LEASE_CAPABILITY.into(),
-            version: WORKSPACE_CLAIM_PROTOCOL_VERSION,
-        }
-    }
-    pub fn verify(&self) -> Result<()> {
-        (self.capability == WORKSPACE_OWNER_LEASE_CAPABILITY
-            && self.version == WORKSPACE_CLAIM_PROTOCOL_VERSION)
-            .then_some(())
-            .ok_or_else(|| {
-                invalid(
-                    "workspace_owner_lease_protocol",
-                    "workspace authority does not advertise the required owner lease protocol",
-                )
-            })
-    }
-}
-
-/// A portable logical locator. Host paths are deliberately excluded.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WorkspaceIdentity {
-    pub schema: String,
-    pub kind: String,
-    pub locator: String,
-}
-impl WorkspaceIdentity {
-    pub fn new(kind: impl Into<String>, locator: impl Into<String>) -> Result<Self> {
-        let identity = Self {
-            schema: WORKSPACE_IDENTITY_SCHEMA.into(),
-            kind: kind.into(),
-            locator: locator.into(),
-        };
-        identity.verify()?;
-        Ok(identity)
-    }
-    pub fn verify(&self) -> Result<()> {
-        (self.schema == WORKSPACE_IDENTITY_SCHEMA
-            && !self.kind.trim().is_empty()
-            && !self.locator.trim().is_empty()
-            && !self.kind.contains('\n')
-            && !self.locator.contains('\n'))
-        .then_some(())
-        .ok_or_else(|| {
-            invalid(
-                "workspace_identity",
-                "workspace identity is malformed or unsupported",
-            )
-        })
-    }
-}
-
-/// An exclusive short reconciliation fence. `lifecycle_revision` is an
-/// authority-issued monotonically increasing epoch; callers never supply it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceClaim {
-    pub schema: String,
-    pub protocol: WorkspaceClaimProtocol,
-    pub workspace: WorkspaceIdentity,
-    pub lifecycle_revision: u64,
-    pub token: String,
-    pub expires_at_ms: u64,
-}
-
-/// A renewable active-task authority. Several distinct owner identities may be live.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceOwnerLease {
-    pub schema: String,
-    pub protocol: WorkspaceOwnerLeaseProtocol,
-    pub workspace: WorkspaceIdentity,
-    pub owner_id: String,
-    pub lifecycle_revision: u64,
-    pub token: String,
-    pub expires_at_ms: u64,
-}
 
 /// Token-free owner identity returned by authority inventory. The stable digest
 /// lets callers distinguish live owners without disclosing owner identifiers.
@@ -205,67 +95,6 @@ pub struct WorkspaceOwnerReleaseRecovery {
     pub lease: WorkspaceOwnerLease,
     pub error_code: String,
     pub error_message: String,
-}
-
-/// Optional transport binding for a reconciliation operation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceClaimBinding {
-    pub workspace: WorkspaceIdentity,
-    pub lifecycle_revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim: Option<WorkspaceClaim>,
-}
-impl WorkspaceClaimBinding {
-    pub fn verify(&self) -> Result<()> {
-        self.workspace.verify()?;
-        if let Some(claim) = &self.claim {
-            claim.verify_shape(0)?;
-            if claim.workspace != self.workspace
-                || claim.lifecycle_revision != self.lifecycle_revision
-            {
-                return Err(invalid(
-                    "workspace_claim_binding",
-                    "workspace identity and authority epoch do not agree",
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-impl WorkspaceClaim {
-    pub fn verify_shape(&self, now_ms: u64) -> Result<()> {
-        self.protocol.verify()?;
-        self.workspace.verify()?;
-        (self.schema == WORKSPACE_CLAIM_SCHEMA
-            && !self.token.trim().is_empty()
-            && self.lifecycle_revision > 0
-            && self.expires_at_ms > now_ms)
-            .then_some(())
-            .ok_or_else(|| {
-                invalid(
-                    "workspace_claim",
-                    "workspace reconciliation claim is malformed or expired",
-                )
-            })
-    }
-}
-impl WorkspaceOwnerLease {
-    pub fn verify_shape(&self, now_ms: u64) -> Result<()> {
-        self.protocol.verify()?;
-        self.workspace.verify()?;
-        (self.schema == WORKSPACE_OWNER_LEASE_SCHEMA
-            && !self.owner_id.trim().is_empty()
-            && !self.token.trim().is_empty()
-            && self.lifecycle_revision > 0
-            && self.expires_at_ms > now_ms)
-            .then_some(())
-            .ok_or_else(|| {
-                invalid(
-                    "workspace_owner_lease",
-                    "workspace owner lease is malformed or expired",
-                )
-            })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

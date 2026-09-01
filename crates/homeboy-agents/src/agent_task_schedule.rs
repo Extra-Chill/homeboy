@@ -10,7 +10,7 @@ use crate::agent_task::{AgentTaskComponentContract, AgentTaskOutcome, AgentTaskR
 use homeboy_core::plan::{
     HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepDependencyKind, PlanStepStatus,
 };
-use homeboy_core::workspace_claim::{WorkspaceIdentity, WorkspaceOwnerLease};
+use homeboy_runner_contract::{WorkspaceIdentity, WorkspaceOwnerLease};
 
 mod plan {
     use super::*;
