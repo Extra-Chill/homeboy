@@ -186,7 +186,9 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
         "extension-1",
         "command",
     ],
-    &["extension", "show", "extension-1"],
+    // Manifest/cached-readiness inspection remains controller-local. The
+    // explicit live probe is the only `extension show` shape that uses Lab.
+    &["extension", "show", "extension-1", "--live-readiness"],
     &["tunnel", "preview-consumer", "run", "--config", "config"],
     // `--server` is `required_unless_present = "runner_local"`, so it does not
     // appear in the usage line but clap still demands one of the pair.

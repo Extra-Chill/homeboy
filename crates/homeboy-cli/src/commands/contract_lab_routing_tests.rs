@@ -75,6 +75,30 @@ fn runner_resident_agent_task_execution_keeps_full_runner_evidence() {
 }
 
 #[test]
+fn extension_show_is_controller_local_until_live_readiness_is_requested() {
+    let metadata = parsed_command(&["homeboy", "extension", "show", "extension-1"]);
+    assert!(metadata
+        .lab_route_contract()
+        .expect("metadata route contract")
+        .is_none());
+    assert!(crate::commands::utils::resource_policy::hot_command(&metadata).is_none());
+
+    let live_readiness = parsed_command(&[
+        "homeboy",
+        "extension",
+        "show",
+        "extension-1",
+        "--live-readiness",
+    ]);
+    let contract = live_readiness
+        .lab_contract()
+        .expect("live readiness Lab contract");
+    assert_eq!(contract.hot_label, "extension show --live-readiness");
+    assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
+    assert!(crate::commands::utils::resource_policy::hot_command(&live_readiness).is_some());
+}
+
+#[test]
 fn agent_task_cook_coordinator_stays_controller_local() {
     let command = parsed_command(&[
         "homeboy",

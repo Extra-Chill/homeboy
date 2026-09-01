@@ -3869,10 +3869,13 @@ mod tests {
                 { "name": "terra", "model": "openai/gpt-5.6-terra" }
             ]))
             .expect("provider profile");
-            provider.readiness_invocation = Some(CommandInvocation {
-                argv: vec!["node".to_string(), script.display().to_string()],
-                ..CommandInvocation::default()
-            });
+            provider.readiness_invocation = Some(
+                CommandInvocation {
+                    argv: vec!["node".to_string(), script.display().to_string()],
+                    ..CommandInvocation::default()
+                }
+                .into(),
+            );
             let mut args = providers_args();
             args.backend = Some("opencode".to_string());
             args.selector = Some("opencode.agent-task-executor".to_string());
