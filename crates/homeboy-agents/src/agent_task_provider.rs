@@ -96,7 +96,8 @@ pub use dispatchability::{
     AgentTaskProviderConfigurationDiagnosis, AgentTaskProviderCredentialStatus,
     AgentTaskProviderDispatchability, AgentTaskProviderDispatchabilityCheck,
     AgentTaskProviderDispatchabilityChecks, AgentTaskProviderDispatchabilityCredentialCheck,
-    AgentTaskProviderOwner, AgentTaskProviderRuntimeEvidence,
+    AgentTaskProviderLiveInferenceReadiness, AgentTaskProviderOwner, AgentTaskProviderReadiness,
+    AgentTaskProviderReadinessScope, AgentTaskProviderRuntimeEvidence,
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;
