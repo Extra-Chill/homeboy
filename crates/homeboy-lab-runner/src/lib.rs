@@ -350,7 +350,7 @@ pub use connection::{
     persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
     reconcile_status_with_outcome, reconcile_terminal_jobs, reconnect_job_log_owner,
     reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
-    runner_artifact_content, status, statuses, statuses_indexed, submit_reverse_broker_job,
+    runner_artifact_content, status, statuses, statuses_indexed, submit_runner_api_request,
     PeerSessionMaintenanceReport,
 };
 pub(crate) use connection::{

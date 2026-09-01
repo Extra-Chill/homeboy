@@ -8,7 +8,7 @@ use crate::agent_task_scheduler::{
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::agent_task_service::reconcile_stale_active_runs;
-use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -3147,10 +3147,10 @@ impl RunnerContinuationProvider for CountingRunnerProvider {
         Err(Error::internal_unexpected("counted runner exec"))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         self.record();
         Err(Error::internal_unexpected("counted reverse broker job"))

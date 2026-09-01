@@ -8,7 +8,7 @@ use crate::agent_task_scheduler::{
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::agent_task_service::{reconcile_run, reconcile_stale_active_runs};
-use homeboy_core::api_jobs::{Job, JobEventKind, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, JobEventKind};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
 use std::process::Command;
@@ -63,10 +63,10 @@ impl RunnerContinuationProvider for IdleRunnerFixture {
         Err(Error::internal_unexpected("not used by idle fixture"))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("not used by idle fixture"))
     }
@@ -242,10 +242,10 @@ impl RunnerContinuationProvider for TerminalSnapshotProvider {
         ))
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected(
             "not used by terminal reconciliation",
@@ -286,10 +286,10 @@ impl RunnerContinuationProvider for ServiceRunnerFixture {
         Ok(0)
     }
 
-    fn submit_reverse_broker_job(
+    fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _request: RemoteRunnerJobRequest,
+        _submission: RunnerContinuationSubmission,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("not used by service fixture"))
     }

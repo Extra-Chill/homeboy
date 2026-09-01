@@ -317,9 +317,9 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
     }
     let cwd = replay.cwd().unwrap_or_default().to_string();
     let command = replay.command().to_vec();
-    match runner_continuation::with_runner_continuation(|provider| match replay {
+    let submission = match replay {
         PendingRunnerReplay::Envelope(request) => {
-            provider.submit_reverse_broker_envelope_job(&runner_id, request)
+            runner_continuation::RunnerContinuationSubmission::RunnerApi(request)
         }
         PendingRunnerReplay::Legacy(mut request) => {
             let mut metadata = request.metadata.take().unwrap_or_else(|| json!({}));
@@ -330,8 +330,11 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
             metadata["durable_run_id"] = json!(run_id);
             metadata["reconciled_from"] = json!("durable_detached_handoff_intent");
             request.metadata = Some(metadata);
-            provider.submit_reverse_broker_job(&runner_id, request)
+            runner_continuation::RunnerContinuationSubmission::LegacyReplay(request)
         }
+    };
+    match runner_continuation::with_runner_continuation(|provider| {
+        provider.submit_runner_api_request(&runner_id, submission)
     }) {
         Ok(job) => {
             record_detached_lab_run_in_store(

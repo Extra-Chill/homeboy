@@ -4,9 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use base64::Engine;
-use homeboy_core::api_jobs::{
-    Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata,
-};
+use homeboy_core::api_jobs::{Job, RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::source_snapshot::SourceSnapshot;
@@ -69,51 +67,41 @@ pub(super) fn exec_via_reverse_broker(
             env.insert("HOMEBOY_COMMAND".to_string(), homeboy_path.to_string());
         }
     }
-    let mut request = RemoteRunnerJobRequest {
-        runner_id: runner.id.clone(),
-        project_id,
-        operation: "runner.exec".to_string(),
-        command: command.clone(),
-        cwd: Some(cwd.clone()),
-        env,
-        secret_env_names,
-        secret_env_plan: Default::default(),
-        env_materialization: None,
-        capture_patch,
-        source_snapshot: Some(source_snapshot.clone()),
-        path_materialization_plan: path_materialization_plan.clone(),
-        lab_runner_workload: lab_runner_workload.clone(),
-        metadata: Some({
-            let mut metadata =
-                runner_exec_request_metadata(run_id.as_deref(), "reverse_broker", &runner.id);
-            metadata["submission_key"] = serde_json::json!(run_id.as_deref().map_or_else(
-                || format!("reverse-broker:v1:{}:{}", runner.id, uuid::Uuid::new_v4()),
-                |run_id| reverse_broker_submission_key(&runner.id, run_id),
-            ));
-            metadata
-        }),
-        lifecycle: Some(RunnerJobLifecycleMetadata {
-            source: Some("reverse-broker".to_string()),
-            kind: Some("runner.exec".to_string()),
-            durable_run_id: run_id.clone(),
-            ..Default::default()
-        }),
-        workspace_claim_binding: None,
-        workspace_owner_lease: None,
-        require_paths: require_paths.clone(),
-        extension_env_providers,
-    };
+    let submission_key = run_id.as_deref().map_or_else(
+        || format!("reverse-broker:v1:{}:{}", runner.id, uuid::Uuid::new_v4()),
+        |run_id| reverse_broker_submission_key(&runner.id, run_id),
+    );
+    let mut metadata =
+        runner_exec_request_metadata(run_id.as_deref(), "reverse_broker", &runner.id);
+    metadata["submission_key"] = serde_json::json!(&submission_key);
     let command_assets = durable_command_assets(&command, path_materialization_plan.as_ref())?;
     if !command_assets.is_empty() {
-        request
-            .metadata
-            .as_mut()
-            .expect("reverse broker request metadata")["command_assets"] = serde_json::json!({
+        metadata["command_assets"] = serde_json::json!({
             "schema": "homeboy/reverse-runner-command-assets/v1",
             "assets": command_assets,
         });
     }
-    request.validate_durable_submission()?;
+    let envelope = runner_api_execution_envelope(RunnerApiExecutionInput {
+        runner_id: runner.id.clone(),
+        project_id,
+        command: command.clone(),
+        cwd: cwd.clone(),
+        env,
+        secret_env_names,
+        capture_patch,
+        source_snapshot: source_snapshot.clone(),
+        path_materialization_plan: path_materialization_plan.clone(),
+        workload: lab_runner_workload.clone(),
+        metadata,
+        lifecycle: RunnerJobLifecycleMetadata {
+            source: Some("reverse-broker".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: run_id.clone(),
+            ..Default::default()
+        },
+        require_paths: require_paths.clone(),
+        extension_env_providers,
+    })?;
     persist_runner_execution_transition(
         &RunnerExecutionRecord::planned(
             format!("runner-exec:{}:reverse_broker", runner.id),
@@ -169,30 +157,13 @@ pub(super) fn exec_via_reverse_broker(
             Ok::<_, Error>(lease)
         })
         .transpose()?;
-    request.workspace_owner_lease = workspace_owner_lease.clone();
-    let envelope = request.execution_envelope();
-    let submission_key = request
-        .submission_key()
-        .ok_or_else(|| Error::internal_unexpected("reverse broker submission has no key"))?
-        .to_string();
     let submission = RunnerApiSubmitRequest {
         schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
         api_version: RUNNER_API_V1,
-        submission_key,
+        submission_key: submission_key.clone(),
         envelope,
-        workspace_claim_binding: request
-            .workspace_claim_binding
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("serialize workspace claim binding".to_string()),
-                )
-            })?,
-        workspace_owner_lease: request
-            .workspace_owner_lease
+        workspace_claim_binding: None,
+        workspace_owner_lease: workspace_owner_lease
             .as_ref()
             .map(serde_json::to_value)
             .transpose()
@@ -248,7 +219,7 @@ pub(super) fn exec_via_reverse_broker(
     let data = match data {
         Ok(data) => data,
         Err(error) => {
-            let submission_key = request.submission_key().map(str::to_string);
+            let submission_key = Some(submission_key.clone());
             let accepted =
                 submission_key.as_deref().map(|submission_key| {
                     broker_http::post_json(

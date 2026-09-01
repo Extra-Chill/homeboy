@@ -1492,10 +1492,10 @@ mod tests {
             ))
         }
 
-        fn submit_reverse_broker_job(
+        fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            _request: homeboy_core::api_jobs::RemoteRunnerJobRequest,
+            _submission: RunnerContinuationSubmission,
         ) -> Result<homeboy_core::api_jobs::Job> {
             Err(Error::internal_unexpected(
                 "not used by workspace claim tests",
