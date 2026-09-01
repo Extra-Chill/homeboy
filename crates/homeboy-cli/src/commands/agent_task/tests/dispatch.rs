@@ -739,6 +739,8 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
             "implement the fix".to_string(),
             "--cwd".to_string(),
             destination.display().to_string(),
+            "--to-worktree".to_string(),
+            "inferred@fix-inferred".to_string(),
             "--task-url".to_string(),
             "https://github.com/example/inferred/issues/13947".to_string(),
             "--backend".to_string(),
@@ -766,6 +768,49 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
             plan.metadata["cook_base_resolution"]["source"],
             "compatibility_fallback"
         );
+
+        let inferred_from_worktree =
+            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--to-worktree".to_string(),
+                destination.display().to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect("infer repository from linked worktree destination");
+        assert_eq!(
+            inferred_from_worktree.dispatch.repo.as_deref(),
+            Some("inferred")
+        );
+        assert_eq!(
+            inferred_from_worktree
+                .repository_identity
+                .as_ref()
+                .expect("identity")["provenance"],
+            "--to-worktree:git-remote:origin"
+        );
+
+        let mismatch = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the fix".to_string(),
+            "--repo".to_string(),
+            "other".to_string(),
+            "--cwd".to_string(),
+            destination.display().to_string(),
+            "--to-worktree".to_string(),
+            destination.display().to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect_err("explicit repository must still match the linked worktree");
+        assert!(mismatch.message.contains("does not match"), "{mismatch:?}");
     });
 }
 

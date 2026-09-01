@@ -4593,11 +4593,29 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
         source_identities.push((flag, resolved.clone()));
         identities.extend(resolved);
     }
+    if let Some(to_worktree) = args.to_worktree.as_deref() {
+        // A handle that has not been materialized locally is a provisioning
+        // request, not repository evidence. An existing path or native handle
+        // can attest its Git remote just like --cwd.
+        if cook_workspace_path(to_worktree)?.is_some() {
+            let resolved = cook_repository_identities_for_workspace(
+                "--to-worktree",
+                to_worktree,
+                args.component.as_deref().or(args.dispatch.repo.as_deref()),
+            )?;
+            source_identities.push(("--to-worktree", resolved.clone()));
+            identities.extend(resolved);
+        }
+    }
     if identities.is_empty() {
-        if args.dispatch.workspace.is_some() || args.dispatch.cwd.is_some() {
+        if args.dispatch.workspace.is_some()
+            || args.dispatch.cwd.is_some()
+            || args.to_worktree.is_some()
+        {
             let supplied_workspaces = [
                 args.dispatch.workspace.as_deref(),
                 args.dispatch.cwd.as_deref(),
+                args.to_worktree.as_deref(),
             ]
             .into_iter()
             .flatten()
@@ -5192,7 +5210,7 @@ fn repository_identity_conflict_error(
     homeboy::core::Error::validation_invalid_argument(
         "workspace",
         format!(
-            "--workspace and --cwd must resolve to the same configured repository identity; --repo cannot select one conflicting checkout: {}",
+            "--workspace, --cwd, and --to-worktree must resolve to the same configured repository identity; --repo cannot select one conflicting checkout: {}",
             candidates.join("; ")
         ),
         None,
