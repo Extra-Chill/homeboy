@@ -4082,6 +4082,60 @@ mod tests {
     }
 
     #[test]
+    fn metadata_extension_show_bypasses_hot_admission_without_lab_inventory() {
+        use crate::core::parsed_command_preflight::{
+            resolve_parsed_command_preflight, LabReadinessSnapshot, ParsedCommandPolicySnapshot,
+            ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
+        };
+
+        let cli = Cli::parse_from(["homeboy", "extension", "show", "fixture"]);
+        let normalized_args = vec!["homeboy".to_string()];
+        let input = resource_policy::parsed_command_preflight_input(&cli, &normalized_args);
+
+        assert_eq!(
+            input.resource_admission,
+            crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Exempt
+        );
+        assert_eq!(
+            input.lab_route,
+            crate::core::parsed_command_preflight::LabRouteIntent::Unsupported
+        );
+
+        for state in ["stale", "absent"] {
+            let result = resolve_parsed_command_preflight(
+                normalized_args.clone(),
+                input.clone(),
+                ParsedCommandPolicySnapshot {
+                    resource_admission_evidence: ResourceAdmissionEvidence::Observed {
+                        pressure: ResourceHeat::Hot,
+                    },
+                    resource_policy: None,
+                    lab_readiness: Some(LabReadinessSnapshot {
+                        state: state.to_string(),
+                        selected_runner_id: None,
+                        available_runner_ids: Vec::new(),
+                        reasons: vec!["inventory is unavailable".to_string()],
+                        remediation_commands: Vec::new(),
+                        repair_admitted_runner_ids: Vec::new(),
+                    }),
+                    selected_runner_id: None,
+                    generic_route: generic_route_policy_snapshot(&cli, None),
+                    deferred_pressure_refusal: false,
+                    runner_admitted: false,
+                    runner_incompatible: false,
+                    auto_local_capacity_fallback: false,
+                },
+            )
+            .expect("metadata inspection must remain admitted locally");
+
+            assert_eq!(
+                result.resource_admission,
+                ResourceAdmissionDecision::NotRequired
+            );
+        }
+    }
+
+    #[test]
     fn nonlocal_cook_persists_before_hot_resource_admission() {
         let cli = Cli::parse_from([
             "homeboy",
