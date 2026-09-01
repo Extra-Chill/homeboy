@@ -1592,6 +1592,26 @@ pub fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
     .expect("component registration");
 }
 
+pub fn write_extension_fixture(root: &Path, id: &str) {
+    write_extension_fixture_with_version(root, id, "1.0.0");
+}
+
+pub fn write_extension_fixture_with_version(root: &Path, id: &str, version: &str) {
+    let dir = root.join(id);
+    fs::create_dir_all(&dir).expect("extension dir");
+    fs::write(
+        dir.join(format!("{}.json", id)),
+        format!(
+            r#"{{
+  "name": "{} extension",
+  "version": "{}"
+}}"#,
+            id, version
+        ),
+    )
+    .expect("extension manifest");
+}
+
 /// Git command execution shared by test fixtures.
 ///
 /// Topology-specific setup stays at the caller: branch names, remotes, commit
