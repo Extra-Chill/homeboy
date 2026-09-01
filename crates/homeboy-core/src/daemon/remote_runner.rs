@@ -717,7 +717,7 @@ fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) 
     authorize_workspace_owner_lease(request.workspace_owner_lease.as_ref())?;
     request.normalize();
     let public_request = request.public_metadata();
-    let job = job_store.submit_remote_runner_job(request)?;
+    let job = job_store.submit_legacy_remote_runner_job(request)?;
     Ok(json!({
         "command": "api.runner.jobs.submit",
         "job": job,

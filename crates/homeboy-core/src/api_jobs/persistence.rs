@@ -359,10 +359,7 @@ pub(super) fn read_durable_store(path: &Path) -> Result<DurableJobStore> {
     let content = fs::read_to_string(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", path.display()))))?;
     match serde_json::from_str::<DurableJobStore>(&content) {
-        Ok(store) => {
-            super::remote_runner::validate_stored_remote_runner_jobs(&store.jobs)?;
-            Ok(store)
-        }
+        Ok(store) => Ok(store),
         Err(err) => {
             let quarantine_path = path.with_file_name(format!(
                 "{}.corrupt-{}",
@@ -676,9 +673,8 @@ pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
     let remote_envelope = stored
         .remote_runner
         .as_ref()
-        .and_then(|remote_runner| remote_runner.envelope().ok());
+        .map(|remote_runner| &remote_runner.envelope);
     let linked_agent_task_run_id = remote_envelope
-        .as_ref()
         .and_then(|envelope| {
             lab_runner_workload_from_execution_envelope(envelope)
                 .ok()

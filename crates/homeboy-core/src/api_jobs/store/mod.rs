@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 
 use fs4::fs_std::FileExt;
+use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -334,7 +335,6 @@ impl JobStore {
         inner: &mut JobStoreInner,
     ) -> Result<()> {
         let durable = read_durable_store(path)?;
-        remote_runner::validate_stored_remote_runner_jobs(&durable.jobs)?;
         let next_sequence = durable
             .jobs
             .iter()
@@ -733,7 +733,6 @@ impl JobStore {
         prepare_tombstone_store(&path)?;
         let mut durable: DurableJobStore = serde_json::from_slice(raw)
             .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
-        remote_runner::validate_stored_remote_runner_jobs(&durable.jobs)?;
         let event_retention_limit = event_retention_limit.max(1);
         let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
         let terminal_job_retention_bytes = terminal_job_retention_bytes.max(1);
@@ -3039,9 +3038,7 @@ fn stored_job_durable_run_id(stored: &StoredJob) -> Option<String> {
     stored
         .remote_runner
         .as_ref()
-        .and_then(|remote| remote.request().ok())
-        .and_then(|request| request.lifecycle)
-        .as_ref()
+        .and_then(|remote| remote.envelope.lifecycle.as_ref())
         .or_else(|| {
             stored
                 .local_runner
@@ -3072,10 +3069,12 @@ fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredT
     let run_id = stored
         .remote_runner
         .as_ref()
-        .and_then(|remote| remote.request().ok())
-        .and_then(|request| request.lab_runner_workload)
-        .as_ref()
-        .and_then(|workload| workload.agent_task.as_ref())
+        .and_then(|remote| {
+            lab_runner_workload_from_execution_envelope(&remote.envelope)
+                .ok()
+                .flatten()
+        })
+        .and_then(|workload| workload.agent_task)
         .map(|agent_task| agent_task.run_id.trim().to_string())
         .or_else(|| {
             stored

@@ -2113,7 +2113,7 @@ impl ReverseBrokerFixture {
 
     pub fn enqueue(&self, request: RemoteRunnerJobRequest) -> Job {
         self.store
-            .submit_remote_runner_job(request)
+            .submit_runner_api_fixture(request)
             .expect("enqueue reverse broker fixture job")
     }
 
@@ -2915,7 +2915,7 @@ mod tests {
     fn reverse_broker_fixture_projects_active_and_stale_runner_jobs() {
         let store = JobStore::default();
         let active = store
-            .submit_remote_runner_job(
+            .submit_runner_api_fixture(
                 serde_json::from_value(serde_json::json!({
                     "runner_id": "lab",
                     "command": ["true"],
@@ -2949,7 +2949,7 @@ mod tests {
         let path = temp.path().join("jobs.json");
         let store = JobStore::open(&path).expect("open durable store");
         let stale = store
-            .submit_remote_runner_job(
+            .submit_runner_api_fixture(
                 serde_json::from_value(serde_json::json!({
                     "runner_id": "lab",
                     "command": ["true"],

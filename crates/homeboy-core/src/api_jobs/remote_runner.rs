@@ -619,12 +619,9 @@ impl RemoteRunnerJobResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct StoredRemoteRunnerJob {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) envelope: Option<RunnerExecutionEnvelope>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) request: Option<RemoteRunnerJobRequest>,
+    pub(super) envelope: RunnerExecutionEnvelope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,6 +637,73 @@ pub(super) struct StoredRemoteRunnerJob {
     pub(super) execution_receipt: Option<RemoteRunnerExecutionReceipt>,
 }
 
+#[derive(Deserialize)]
+struct StoredRemoteRunnerJobCompat {
+    #[serde(default)]
+    envelope: Option<RunnerExecutionEnvelope>,
+    #[serde(default)]
+    request: Option<RemoteRunnerJobRequest>,
+    #[serde(default)]
+    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
+    #[serde(default)]
+    workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
+    #[serde(default)]
+    execution_context_id: Option<String>,
+    #[serde(default)]
+    execution_receipt: Option<RemoteRunnerExecutionReceipt>,
+}
+
+impl<'de> Deserialize<'de> for StoredRemoteRunnerJob {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let stored = StoredRemoteRunnerJobCompat::deserialize(deserializer)?;
+        let (envelope, legacy_claim_binding, legacy_owner_lease) =
+            match (stored.envelope, stored.request) {
+                (Some(envelope), None) => (envelope, None, None),
+                (None, Some(request)) => {
+                    let claim_binding = request.workspace_claim_binding.clone();
+                    let owner_lease = request.workspace_owner_lease.clone();
+                    (request.execution_envelope(), claim_binding, owner_lease)
+                }
+                (Some(_), Some(_)) => {
+                    return Err(serde::de::Error::custom(
+                    "remote runner job has conflicting envelope and legacy request representations",
+                ));
+                }
+                (None, None) => {
+                    return Err(serde::de::Error::custom(
+                        "remote runner job has no execution representation",
+                    ));
+                }
+            };
+        if stored.workspace_claim_binding.is_some()
+            && legacy_claim_binding.is_some()
+            && stored.workspace_claim_binding != legacy_claim_binding
+        {
+            return Err(serde::de::Error::custom(
+                "legacy runner record has conflicting workspace claim authority",
+            ));
+        }
+        if stored.workspace_owner_lease.is_some()
+            && legacy_owner_lease.is_some()
+            && stored.workspace_owner_lease != legacy_owner_lease
+        {
+            return Err(serde::de::Error::custom(
+                "legacy runner record has conflicting workspace owner authority",
+            ));
+        }
+        Ok(Self {
+            envelope,
+            workspace_claim_binding: stored.workspace_claim_binding.or(legacy_claim_binding),
+            workspace_owner_lease: stored.workspace_owner_lease.or(legacy_owner_lease),
+            execution_context_id: stored.execution_context_id,
+            execution_receipt: stored.execution_receipt,
+        })
+    }
+}
+
 struct RemoteRunnerAdmission {
     operation: String,
     runner_id: String,
@@ -653,67 +717,20 @@ struct RemoteRunnerAdmission {
 }
 
 impl StoredRemoteRunnerJob {
-    pub(super) fn validate_representation(&self) -> Result<()> {
-        match (self.envelope.is_some(), self.request.is_some()) {
-            (true, false) | (false, true) => Ok(()),
-            (true, true) => Err(Error::internal_unexpected(
-                "remote runner job has conflicting envelope and legacy request representations",
-            )),
-            (false, false) => Err(Error::internal_unexpected(
-                "remote runner job has no execution representation",
-            )),
-        }
-    }
-
-    pub(super) fn request(&self) -> Result<RemoteRunnerJobRequest> {
-        self.validate_representation()?;
-        if let Some(request) = &self.request {
-            return Ok(request.clone());
-        }
-        self.envelope
-            .as_ref()
-            .ok_or_else(|| {
-                Error::internal_unexpected("remote runner job has no execution representation")
-            })
-            .and_then(legacy_request_from_envelope)
-    }
-
-    pub(super) fn envelope(&self) -> Result<RunnerExecutionEnvelope> {
-        self.validate_representation()?;
-        self.envelope
-            .clone()
-            .or_else(|| {
-                self.request
-                    .as_ref()
-                    .map(RemoteRunnerJobRequest::execution_envelope)
-            })
-            .ok_or_else(|| {
-                Error::internal_unexpected("remote runner job has no execution representation")
-            })
+    pub(super) fn protocol_v1_request(&self) -> Result<RemoteRunnerJobRequest> {
+        legacy_request_from_envelope(&self.envelope)
     }
 
     pub(super) fn workspace_owner_lease(
         &self,
     ) -> Option<crate::workspace_claim::WorkspaceOwnerLease> {
-        if self.envelope.is_some() {
-            self.workspace_owner_lease.clone()
-        } else {
-            self.request
-                .as_ref()
-                .and_then(|request| request.workspace_owner_lease.clone())
-        }
+        self.workspace_owner_lease.clone()
     }
 
     pub(super) fn workspace_claim_binding(
         &self,
     ) -> Option<crate::workspace_claim::WorkspaceClaimBinding> {
-        if self.envelope.is_some() {
-            self.workspace_claim_binding.clone()
-        } else {
-            self.request
-                .as_ref()
-                .and_then(|request| request.workspace_claim_binding.clone())
-        }
+        self.workspace_claim_binding.clone()
     }
 
     pub(super) fn replace_workspace_owner_lease(
@@ -721,31 +738,16 @@ impl StoredRemoteRunnerJob {
         expected: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
         renewed: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<()> {
-        self.validate_representation()?;
-        if self.envelope.is_some() {
-            if self.workspace_owner_lease.as_ref() != expected {
-                return Err(Error::validation_invalid_argument(
-                    "workspace_owner_lease",
-                    "heartbeat owner lease does not match the durable job",
-                    None,
-                    None,
-                ));
-            }
-            self.workspace_owner_lease = renewed;
-            return Ok(());
+        if self.workspace_owner_lease.as_ref() != expected {
+            return Err(Error::validation_invalid_argument(
+                "workspace_owner_lease",
+                "heartbeat owner lease does not match the durable job",
+                None,
+                None,
+            ));
         }
-        if let Some(request) = self.request.as_mut() {
-            if request.workspace_owner_lease.as_ref() == expected {
-                request.workspace_owner_lease = renewed;
-                return Ok(());
-            }
-        }
-        Err(Error::validation_invalid_argument(
-            "workspace_owner_lease",
-            "heartbeat owner lease does not match the durable job",
-            None,
-            None,
-        ))
+        self.workspace_owner_lease = renewed;
+        Ok(())
     }
 }
 
@@ -789,17 +791,6 @@ pub fn runner_api_submission_payload_fingerprint(
         )
     })?;
     Ok(format!("sha256:{}", content_hash::sha256_hex(&bytes)))
-}
-
-pub(super) fn validate_stored_remote_runner_jobs(
-    jobs: impl IntoIterator<Item = impl std::borrow::Borrow<StoredJob>>,
-) -> Result<()> {
-    for stored in jobs {
-        if let Some(remote) = stored.borrow().remote_runner.as_ref() {
-            remote.validate_representation()?;
-        }
-    }
-    Ok(())
 }
 
 fn legacy_request_from_envelope(
@@ -902,12 +893,10 @@ impl JobStore {
             .jobs
             .get(&job_id)
             .ok_or_else(|| job_not_found(job_id))?;
-        Ok(stored.remote_runner.as_ref().and_then(|remote| {
-            remote
-                .workspace_claim_binding
-                .clone()
-                .or_else(|| remote.request().ok()?.workspace_claim_binding)
-        }))
+        Ok(stored
+            .remote_runner
+            .as_ref()
+            .and_then(|remote| remote.workspace_claim_binding.clone()))
     }
 
     pub fn remote_runner_workspace_owner_lease(
@@ -945,10 +934,40 @@ impl JobStore {
         RemoteRunnerSubmissionLookup::Absent
     }
 
-    /// Legacy request admission retained only for existing persisted intents and
-    /// callers that have not migrated to the envelope-first Runner API.
+    /// Test-only alias for compatibility fixtures. Shipped legacy wire decoding
+    /// enters through the crate-private method below.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn submit_remote_runner_job(&self, request: RemoteRunnerJobRequest) -> Result<Job> {
-        self.submit_remote_runner_job_inner(request)
+        self.submit_legacy_remote_runner_job(request)
+    }
+
+    /// Submits existing request fixtures through the canonical Runner API.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn submit_runner_api_fixture(&self, request: RemoteRunnerJobRequest) -> Result<Job> {
+        let submission_key = request
+            .submission_key()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("test:runner-api:{}", Uuid::new_v4()));
+        let workspace_claim_binding = request
+            .workspace_claim_binding
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        let workspace_owner_lease = request
+            .workspace_owner_lease
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        self.submit_runner_api_request(RunnerApiSubmitRequest {
+            schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            submission_key,
+            envelope: request.execution_envelope(),
+            workspace_claim_binding,
+            workspace_owner_lease,
+        })
     }
 
     pub fn submit_runner_api_request(&self, submission: RunnerApiSubmitRequest) -> Result<Job> {
@@ -1068,8 +1087,7 @@ impl JobStore {
                 submission_key: Some(submission.submission_key),
                 submission_fingerprint: Some(fingerprint),
                 stored_remote_runner: StoredRemoteRunnerJob {
-                    envelope: Some(envelope),
-                    request: None,
+                    envelope,
                     workspace_claim_binding,
                     workspace_owner_lease,
                     execution_context_id: None,
@@ -1080,7 +1098,10 @@ impl JobStore {
         )
     }
 
-    fn submit_remote_runner_job_inner(&self, mut request: RemoteRunnerJobRequest) -> Result<Job> {
+    pub(crate) fn submit_legacy_remote_runner_job(
+        &self,
+        mut request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
         if request.runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
@@ -1124,6 +1145,7 @@ impl JobStore {
             .as_ref()
             .map(|_| request.submission_payload_fingerprint())
             .transpose()?;
+        let envelope = public_request.execution_envelope();
         let admission = RemoteRunnerAdmission {
             operation: request.operation.clone(),
             runner_id: request.runner_id.clone(),
@@ -1134,10 +1156,9 @@ impl JobStore {
             submission_key,
             submission_fingerprint,
             stored_remote_runner: StoredRemoteRunnerJob {
-                envelope: None,
-                request: Some(public_request),
-                workspace_claim_binding: None,
-                workspace_owner_lease: None,
+                envelope,
+                workspace_claim_binding: public_request.workspace_claim_binding,
+                workspace_owner_lease: public_request.workspace_owner_lease,
                 execution_context_id: None,
                 execution_receipt: None,
             },
@@ -1450,13 +1471,13 @@ impl JobStore {
                         .remote_runner
                         .as_ref()
                         .expect("filtered remote runner job has request");
-                    let envelope = remote_runner.envelope()?;
+                    let envelope = remote_runner.envelope.clone();
                     let workspace_claim_binding = remote_runner.workspace_claim_binding();
                     let workspace_owner_lease = remote_runner.workspace_owner_lease();
                     let request = execution_protocol
                         .is_none_or(|protocol| !protocol.uses_envelope_only_claim())
                         .then(|| {
-                            let mut request = remote_runner.request()?.dispatch_request();
+                            let mut request = remote_runner.protocol_v1_request()?.dispatch_request();
                             request.workspace_claim_binding = workspace_claim_binding.clone();
                             request.workspace_owner_lease = workspace_owner_lease.clone();
                             Ok::<RemoteRunnerJobRequest, Error>(request)
@@ -1770,7 +1791,7 @@ impl JobStore {
                         "runner execution receipt was already consumed",
                     ));
                 }
-                let envelope = remote_runner.envelope()?;
+                let envelope = remote_runner.envelope.clone();
                 let expected =
                     crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
                         &stored.job,
