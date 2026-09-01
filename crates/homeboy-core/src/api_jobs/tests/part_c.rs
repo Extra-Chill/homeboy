@@ -11,13 +11,13 @@ use crate::observation::{ArtifactRecord, RunRecord};
 fn remote_runner_job_claim_returns_oldest_matching_job() {
     let store = JobStore::default();
     let other = store
-        .submit_remote_runner_job(remote_runner_request("other-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("other-lab", Some("extrachill")))
         .expect("other runner job queues");
     let first = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("first runner job queues");
     let second = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("second runner job queues");
 
     let claim = store
@@ -139,7 +139,7 @@ fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
     let path = temp.path().join("jobs.json");
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
     store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -172,10 +172,10 @@ fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
 fn remote_runner_job_claim_respects_concurrency_limit() {
     let store = JobStore::default();
     let first = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("first runner job queues");
     let second = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("events")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("events")))
         .expect("second runner job queues");
 
     let first_claim = store
@@ -237,10 +237,10 @@ fn remote_runner_job_claim_respects_concurrency_limit() {
 fn remote_runner_job_claim_can_be_filtered_by_project() {
     let store = JobStore::default();
     let wire = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("wire")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("wire")))
         .expect("wire job queues");
     let events = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("events")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("events")))
         .expect("events job queues");
 
     let claim = store
@@ -265,7 +265,7 @@ fn remote_runner_claim_persists_and_requires_authenticated_execution_context() {
         "accepted_handoff_id": "reverse_broker:homeboy-lab:cook-42:attempt-2",
     }));
     let job = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -314,10 +314,10 @@ fn remote_runner_claim_persists_and_requires_authenticated_execution_context() {
 fn remote_runner_context_rejects_expired_or_different_durable_claims() {
     let store = JobStore::default();
     let first = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("one")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("one")))
         .expect("first job queues");
     let second = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("two")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("two")))
         .expect("second job queues");
     let first_claim = store
         .claim_remote_runner_job("homeboy-lab", Some("one"), 30_000, None)
@@ -345,7 +345,7 @@ fn remote_runner_context_rejects_expired_or_different_durable_claims() {
 fn remote_runner_execution_receipt_is_one_time_and_revalidates_the_live_claim() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -370,7 +370,7 @@ fn remote_runner_execution_receipt_is_one_time_and_revalidates_the_live_claim() 
     }));
 
     let expired_job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("expired job queues");
     let expired_claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -407,7 +407,7 @@ fn remote_runner_claim_rejects_workers_without_the_context_protocol() {
     let mut request = remote_runner_request("homeboy-lab", None);
     request.extension_env_providers = vec!["authenticated-provider".to_string()];
     let job = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect("remote runner job queues");
 
     let missing = store.claim_remote_runner_job_with_execution_protocol(
@@ -462,7 +462,9 @@ fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
         lifecycle_revision: 4,
         claim: Some(claim),
     });
-    let job = store.submit_remote_runner_job(request).expect("job queues");
+    let job = store
+        .submit_runner_api_fixture(request)
+        .expect("job queues");
 
     assert!(store
         .claim_remote_runner_job_with_protocols(
@@ -657,7 +659,7 @@ fn remote_runner_context_evidence_survives_controller_restart() {
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -694,7 +696,7 @@ fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -761,7 +763,7 @@ fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
 fn remote_runner_job_result_records_terminal_state_and_artifacts() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
@@ -909,7 +911,7 @@ fn remote_runner_result_observation_details_are_additive_and_validate_declared_r
 fn remote_runner_job_failed_result_records_error_and_terminal_state() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -964,7 +966,7 @@ fn remote_runner_job_failed_result_records_error_and_terminal_state() {
 fn remote_runner_job_writes_require_matching_claim_id() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -1005,7 +1007,7 @@ fn remote_runner_job_writes_require_matching_claim_id() {
 fn remote_runner_job_writes_reject_expired_claims() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -1042,7 +1044,7 @@ fn remote_runner_job_writes_reject_expired_claims() {
 fn cancelled_remote_runner_job_cannot_be_claimed() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     store.cancel(job.id, "user requested").expect("job cancels");
 
@@ -1057,7 +1059,7 @@ fn cancelled_remote_runner_job_cannot_be_claimed() {
 fn running_remote_runner_job_can_be_cancelled_by_broker() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -1078,7 +1080,7 @@ fn running_remote_runner_job_can_be_cancelled_by_broker() {
 fn expired_remote_runner_claims_are_reconciled_as_failed() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote runner job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 1, None)
@@ -1104,10 +1106,10 @@ fn expired_remote_runner_claims_are_reconciled_as_failed() {
 fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliation() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let queued = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("remote job queues");
     let claimed = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("second remote job queues");
     let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -1173,7 +1175,7 @@ fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliati
     assert_eq!(completed.status, JobStatus::Succeeded);
 
     let expired = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
         .expect("expired fixture queues");
     let expired_claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
@@ -1208,12 +1210,12 @@ fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliati
 }
 
 #[test]
-fn remote_runner_jobs_persist_request_and_claim_state() {
+fn remote_runner_jobs_persist_envelope_and_claim_state() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("jobs.json");
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
         .expect("remote runner job queues");
 
     let reopened = JobStore::open(&path).expect("durable store reopens");
@@ -1240,7 +1242,9 @@ fn remote_runner_job_enqueue_persists_run_ref_metadata() {
         active_cell_count: None,
     });
 
-    let job = store.submit_remote_runner_job(request).expect("job queued");
+    let job = store
+        .submit_runner_api_fixture(request)
+        .expect("job queued");
     let events = store.events(job.id).expect("job events");
 
     assert!(events.iter().any(|event| {

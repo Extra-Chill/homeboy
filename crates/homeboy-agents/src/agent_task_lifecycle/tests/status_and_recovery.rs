@@ -1202,7 +1202,7 @@ fn pending_submission_owns_running_proxy_until_job_projection_arrives() {
         record_lab_offload_submission_request(run_id, &request)
             .expect("persist pending broker request");
         let accepted_job = store
-            .submit_remote_runner_job(request)
+            .submit_runner_api_fixture(request)
             .expect("broker accepts before response projection");
         rewrite_record_for_test(run_id, |record| {
             set_run_state(record, AgentTaskRunState::Running);
@@ -1445,7 +1445,7 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
             let request = replay_request(run_id, &command);
             record_lab_offload_submission_request(run_id, &request).expect("pending request");
             let job = store
-                .submit_remote_runner_job(request)
+                .submit_runner_api_fixture(request)
                 .expect("accepted broker job");
 
             if run_id == "accepted-then-expired" {

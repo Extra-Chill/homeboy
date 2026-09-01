@@ -921,7 +921,7 @@ fn runs_list_includes_active_runner_jobs() {
         ObservationStore::open_initialized().expect("store");
         let store = JobStore::default();
         let job = store
-            .submit_remote_runner_job(RemoteRunnerJobRequest {
+            .submit_runner_api_fixture(RemoteRunnerJobRequest {
                 runner_id: "homeboy-lab".to_string(),
                 project_id: None,
                 operation: "runner.exec".to_string(),
