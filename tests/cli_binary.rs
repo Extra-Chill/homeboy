@@ -12,6 +12,8 @@ mod cook_prompt_stdin;
 mod fanout_supervisor_cli;
 #[path = "cli_binary/help_fast_path.rs"]
 mod help_fast_path;
+#[path = "cli_binary/notification_route_admission.rs"]
+mod notification_route_admission;
 #[path = "cli_binary/output_dispatch.rs"]
 mod output_dispatch;
 #[path = "cli_binary/output_errors.rs"]
