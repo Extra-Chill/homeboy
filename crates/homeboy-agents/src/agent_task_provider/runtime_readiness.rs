@@ -96,6 +96,7 @@ struct ProviderReadinessProbeGate {
     changed: Condvar,
 }
 
+#[derive(Debug)]
 struct ProviderReadinessProbePermit(&'static ProviderReadinessProbeGate);
 
 impl Drop for ProviderReadinessProbePermit {
@@ -110,19 +111,32 @@ impl Drop for ProviderReadinessProbePermit {
     }
 }
 
-fn acquire_probe_permit(deadline_unix_ms: Option<u64>) -> Result<ProviderReadinessProbePermit> {
+fn acquire_probe_permit(
+    deadline: Instant,
+    timeout_ms: u64,
+) -> std::result::Result<ProviderReadinessProbePermit, String> {
     static GATE: OnceLock<ProviderReadinessProbeGate> = OnceLock::new();
     let gate = GATE.get_or_init(|| ProviderReadinessProbeGate {
         active: Mutex::new(0),
         changed: Condvar::new(),
     });
+    acquire_probe_permit_from_gate(gate, deadline, timeout_ms)
+}
+
+fn acquire_probe_permit_from_gate(
+    gate: &'static ProviderReadinessProbeGate,
+    deadline: Instant,
+    timeout_ms: u64,
+) -> std::result::Result<ProviderReadinessProbePermit, String> {
     let mut active = gate
         .active
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     while *active >= MAX_CONCURRENT_PROVIDER_READINESS_PROBES {
-        let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
-            return Err(readiness_deadline_error("probe_permit", deadline_unix_ms));
+        let Some(wait) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(format!(
+                "provider readiness invocation timed out after {timeout_ms} ms while waiting for a probe permit"
+            ));
         };
         let (next, timeout) = gate
             .changed
@@ -130,11 +144,53 @@ fn acquire_probe_permit(deadline_unix_ms: Option<u64>) -> Result<ProviderReadine
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         active = next;
         if timeout.timed_out() && *active >= MAX_CONCURRENT_PROVIDER_READINESS_PROBES {
-            return Err(readiness_deadline_error("probe_permit", deadline_unix_ms));
+            return Err(format!(
+                "provider readiness invocation timed out after {timeout_ms} ms while waiting for a probe permit"
+            ));
         }
     }
     *active += 1;
     Ok(ProviderReadinessProbePermit(gate))
+}
+
+fn run_readiness_probe_with_gate(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    gate: Option<&'static ProviderReadinessProbeGate>,
+    probe_deadline: Instant,
+    probe_timeout_ms: u64,
+) -> std::result::Result<ProviderReadinessInvocationResult, String> {
+    let _permit = match gate {
+        Some(gate) => acquire_probe_permit_from_gate(gate, probe_deadline, probe_timeout_ms)?,
+        None => acquire_probe_permit(probe_deadline, probe_timeout_ms)?,
+    };
+    let mut result = Err("provider readiness invocation did not run".to_string());
+    for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
+        let Some(remaining) = probe_deadline.checked_duration_since(Instant::now()) else {
+            result = Err(format!(
+                "provider '{}' readiness invocation timed out after {} ms",
+                provider.id, probe_timeout_ms
+            ));
+            break;
+        };
+        result = run_provider_readiness_invocation_with_env_and_timeout(
+            provider,
+            config,
+            credential_env,
+            remaining,
+        );
+        let should_retry = match &result {
+            Err(_) => true,
+            Ok(verdict) => {
+                !verdict.ready && verdict.retryable && verdict.classification == "transient_failure"
+            }
+        };
+        if !should_retry {
+            break;
+        }
+    }
+    result
 }
 
 fn remaining_deadline_duration(deadline_unix_ms: Option<u64>) -> Option<Duration> {
@@ -439,6 +495,13 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
         let provider = provider.clone();
         let config = config.clone();
         let credential_env = credential_env.to_vec();
+        let probe_timeout = provider
+            .readiness_invocation
+            .as_ref()
+            .map(|invocation| Duration::from_millis(invocation.timeout_ms))
+            .unwrap_or(Duration::from_secs(20));
+        let probe_timeout_ms = u64::try_from(probe_timeout.as_millis()).unwrap_or(u64::MAX);
+        let probe_deadline = Instant::now() + probe_timeout;
         let shared = Arc::clone(&cache.shared);
         let probe_request_key = request_key.clone();
         drop(state);
@@ -446,28 +509,14 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
             .name("provider-readiness-probe".to_string())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _permit = acquire_probe_permit(None).map_err(|error| error.message)?;
-                    let mut result = Err("provider readiness invocation did not run".to_string());
-                    for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
-                        result = run_provider_readiness_invocation_with_env_and_timeout(
-                            &provider,
-                            &config,
-                            &credential_env,
-                            Duration::from_secs(20),
-                        );
-                        let should_retry = match &result {
-                            Err(_) => true,
-                            Ok(verdict) => {
-                                !verdict.ready
-                                    && verdict.retryable
-                                    && verdict.classification == "transient_failure"
-                            }
-                        };
-                        if !should_retry {
-                            break;
-                        }
-                    }
-                    result
+                    run_readiness_probe_with_gate(
+                        &provider,
+                        &config,
+                        &credential_env,
+                        None,
+                        probe_deadline,
+                        probe_timeout_ms,
+                    )
                 }))
                 .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
 
@@ -543,6 +592,7 @@ fn readiness_error(
         | "auth_failure"
         | "account"
         | "capacity"
+        | "unavailable"
         | "transient_failure" => verdict.classification.as_str(),
         _ => "unknown",
     };
@@ -1114,6 +1164,70 @@ mod tests {
                 .count(),
             PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS + 1
         );
+    }
+
+    #[test]
+    fn readiness_timeout_is_shared_across_retries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("retry-deadline.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const count=process.argv[2];const n=fs.existsSync(count)?Number(fs.readFileSync(count,'utf8'))+1:1;fs.writeFileSync(count,String(n));if(n===1){process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'transient_failure',retryable:true,remediation:'retry',reason:'transient',cache_key:'retry',identity:{}}))}else{setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'ready',identity:{}})),5000)}",
+        )
+        .expect("readiness script");
+        let mut provider = provider(&script, &count);
+        provider
+            .readiness_invocation
+            .as_mut()
+            .expect("readiness invocation")
+            .timeout_ms = 2_000;
+        let gate = Box::leak(Box::new(ProviderReadinessProbeGate {
+            active: Mutex::new(0),
+            changed: Condvar::new(),
+        }));
+        let error = run_readiness_probe_with_gate(
+            &provider,
+            &json!({"model":"retry-deadline"}),
+            &[],
+            Some(gate),
+            Instant::now() + Duration::from_millis(2_000),
+            2_000,
+        )
+        .expect_err("the retry shares the first attempt's total deadline");
+
+        assert!(error.contains("timed out after"), "{error}");
+        assert!(error.contains(" ms"), "{error}");
+        let retry_timeout_ms = error
+            .split("timed out after ")
+            .nth(1)
+            .and_then(|value| value.split(" ms").next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("millisecond retry timeout");
+        assert!(retry_timeout_ms < 2_000, "{error}");
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+    }
+
+    #[test]
+    fn readiness_permit_wait_uses_the_total_probe_deadline() {
+        let gate = Box::leak(Box::new(ProviderReadinessProbeGate {
+            active: Mutex::new(0),
+            changed: Condvar::new(),
+        }));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let permits = (0..MAX_CONCURRENT_PROVIDER_READINESS_PROBES)
+            .map(|_| {
+                acquire_probe_permit_from_gate(gate, deadline, 1_000)
+                    .expect("fill readiness permits")
+            })
+            .collect::<Vec<_>>();
+
+        let error =
+            acquire_probe_permit_from_gate(gate, Instant::now() + Duration::from_millis(25), 25)
+                .expect_err("saturated readiness queue must be bounded");
+
+        assert!(error.contains("timed out after 25 ms"), "{error}");
+        drop(permits);
     }
 
     #[test]

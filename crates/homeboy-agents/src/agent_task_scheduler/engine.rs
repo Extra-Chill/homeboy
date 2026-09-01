@@ -2351,43 +2351,44 @@ fn provider_readiness_exhausted_outcome(
         && classifications
             .iter()
             .all(|classification| *classification == "capability");
-    let route_diagnostic =
-        scheduled
-            .readiness_skips
-            .iter()
-            .find_map(|route| match route.state.as_str() {
-                "provider_missing" => Some("agent_task.provider_missing"),
-                "provider_selector_mismatch" => Some("agent_task.provider_selector_mismatch"),
-                "provider_ambiguous" => Some("agent_task.provider_ambiguous"),
-                _ => None,
-            });
-    let diagnostic_class = if let Some(class) = route_diagnostic {
+    let route_diagnostic = scheduled.readiness_skips.iter().find_map(|route| {
+        let class = match route.diagnostic_data.as_ref()? {
+            ProviderRouteDiagnosticData::ProviderMissing { .. } => "agent_task.provider_missing",
+            ProviderRouteDiagnosticData::ProviderSelectorMismatch { .. } => {
+                "agent_task.provider_selector_mismatch"
+            }
+            ProviderRouteDiagnosticData::ProviderAmbiguous { .. } => {
+                "agent_task.provider_ambiguous"
+            }
+            ProviderRouteDiagnosticData::ProviderCapabilityUnavailable { .. } => return None,
+        };
+        Some((route, class))
+    });
+    let diagnostic_class = if let Some((_, class)) = route_diagnostic {
         class
     } else if capability_only {
         "agent_task.provider_capability_unavailable"
     } else {
         "agent_task.provider_readiness_routes_exhausted"
     };
-    let diagnostic_data = if let Some(data) = route_diagnostic
-        .and_then(|_| scheduled.readiness_skips.first())
-        .and_then(|route| route.diagnostic_data.clone())
-    {
-        serde_json::to_value(data).unwrap_or(serde_json::Value::Null)
-    } else if capability_only {
-        serde_json::json!({
-            "layer": "provider",
-            "required_capabilities": scheduled.request.executor.required_capabilities,
-            "skipped": scheduled.readiness_skips,
-            "classifications": classifications.clone(),
-            "retryable": retryable,
-        })
-    } else {
-        serde_json::json!({
-            "skipped": scheduled.readiness_skips,
-            "classifications": classifications.clone(),
-            "retryable": retryable,
-        })
-    };
+    let diagnostic_data =
+        if let Some(data) = route_diagnostic.and_then(|(route, _)| route.diagnostic_data.clone()) {
+            serde_json::to_value(data).unwrap_or(serde_json::Value::Null)
+        } else if capability_only {
+            serde_json::json!({
+                "layer": "provider",
+                "required_capabilities": scheduled.request.executor.required_capabilities,
+                "skipped": scheduled.readiness_skips,
+                "classifications": classifications.clone(),
+                "retryable": retryable,
+            })
+        } else {
+            serde_json::json!({
+                "skipped": scheduled.readiness_skips,
+                "classifications": classifications.clone(),
+                "retryable": retryable,
+            })
+        };
     let mut outcome = AgentTaskOutcome {
         task_id: scheduled.request.task_id.clone(),
         status: if failure_classification == AgentTaskFailureClassification::Timeout {
@@ -2397,7 +2398,7 @@ fn provider_readiness_exhausted_outcome(
         },
         summary: Some(
             route_diagnostic
-                .and_then(|_| scheduled.readiness_skips.first())
+                .map(|(route, _)| route)
                 .map(|route| route.reason.clone())
                 .unwrap_or_else(|| {
                     "all configured provider routes are unavailable from cached readiness evidence"
@@ -2408,7 +2409,7 @@ fn provider_readiness_exhausted_outcome(
         diagnostics: vec![AgentTaskDiagnostic {
             class: diagnostic_class.to_string(),
             message: route_diagnostic
-                .and_then(|_| scheduled.readiness_skips.first())
+                .map(|(route, _)| route)
                 .map(|route| route.reason.clone())
                 .unwrap_or_else(|| {
                     "all configured provider routes were skipped before dispatch".to_string()

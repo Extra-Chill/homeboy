@@ -215,11 +215,9 @@ fn dispatch_with_provider_catalog(
                 return Err(with_declared_credential_hints(error, &plan, catalog));
             }
         };
-    // Keep the complete route chain durable. The scheduler evaluates readiness
-    // immediately before each possible execution and records zero-dispatch
-    // exhaustion evidence when every route is unavailable.
+    // The admitted plan retains the complete route chain while binding execution
+    // to the selected route and its forward-only rotation cursor.
     run_dispatch_plan(
-        plan,
         execution_plan,
         request.run_id.as_deref(),
         request.core.queue_only,
@@ -312,7 +310,6 @@ pub fn dispatch_with_provider_requirements(
             }
         };
     run_dispatch_plan(
-        plan,
         execution_plan,
         request.run_id.as_deref(),
         request.core.queue_only,
@@ -361,14 +358,13 @@ fn with_declared_credential_hints(
 /// points prepare a plan differently, then share lifecycle transitions,
 /// scheduler execution, aggregate persistence, and report construction here.
 fn run_dispatch_plan(
-    durable_plan: AgentTaskPlan,
     execution_plan: AgentTaskPlan,
     requested_run_id: Option<&str>,
     queue_only: bool,
     backend_selection: Option<BackendSelection>,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
-    let submitted = lifecycle::submit_plan(&durable_plan, requested_run_id)?;
+    let submitted = lifecycle::submit_plan(&execution_plan, requested_run_id)?;
     let run_id = submitted.run_id.clone();
 
     if queue_only {
@@ -391,7 +387,7 @@ fn run_dispatch_plan(
             Err(error) => {
                 lifecycle::record_pre_execution_failure(
                     &run_id,
-                    &durable_plan,
+                    &execution_plan,
                     "validate_harvest_transport",
                     &error,
                 )?;
@@ -402,8 +398,8 @@ fn run_dispatch_plan(
     let aggregate = AgentTaskScheduler::new_controller(executor)
         .with_harvest_context(harvest_context)
         .with_run_id(run_id.clone())
-        .run(execution_plan);
-    let record = lifecycle::record_run_aggregate(&run_id, &durable_plan, &aggregate)?;
+        .run(execution_plan.clone());
+    let record = lifecycle::record_run_aggregate(&run_id, &execution_plan, &aggregate)?;
     let exit_code = aggregate_exit_code(&aggregate);
 
     Ok(AgentTaskRunResult {
@@ -990,7 +986,7 @@ mod tests {
         let primary = serde_json::from_value(serde_json::json!({
             "id": "test.primary",
             "backend": "test",
-            "secret_env": [required],
+            "secret_env_requirements": [{ "env": [required] }],
         }))
         .expect("primary provider");
         let fallback = serde_json::from_value(serde_json::json!({
@@ -1045,6 +1041,91 @@ mod tests {
 
         preflight_dispatch_provider_admission(&request, &catalog)
             .expect("the generic path admits the reachable fallback");
+    }
+
+    #[test]
+    fn queued_dispatch_persists_the_admitted_fallback_binding() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "test.primary",
+                        "backend": "test",
+                        "secret_env_requirements": [{ "env": [required] }],
+                    }))
+                    .expect("primary provider"),
+                    serde_json::from_value(serde_json::json!({
+                        "id": "test.fallback",
+                        "backend": "test",
+                    }))
+                    .expect("fallback provider"),
+                ],
+                ..Default::default()
+            };
+            let run_id = format!("queued-fallback-{}", uuid::Uuid::new_v4());
+            let request = AgentTaskDispatchRequest {
+                prompt: Some("run".to_string()),
+                prompt_is_literal: false,
+                tasks: Vec::new(),
+                cwd: None,
+                workspace: None,
+                repo: None,
+                component: None,
+                task_url: None,
+                backend: "test".to_string(),
+                selector: Some("test.primary".to_string()),
+                model: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                concurrency: 1,
+                run_id: Some(run_id.clone()),
+                task_id: None,
+                core: DispatchCoreInputs {
+                    queue_only: true,
+                    resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
+                        backend: "test".to_string(),
+                        selector: Some("test.primary".to_string()),
+                        model: None,
+                        rotation: Some(AgentTaskProviderRotationPolicy {
+                            entries: vec![
+                                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                    selector: Some("test.fallback".to_string()),
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }),
+                        rotation_starts_with_first_entry: false,
+                        retry: Default::default(),
+                        liveness_timeout_ms: None,
+                        runtime_identity: None,
+                    }),
+                    ..Default::default()
+                },
+                backend_selection: None,
+            };
+
+            let result =
+                dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
+                    .expect("queue admitted fallback");
+            assert!(result.value.queued);
+            let plan =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store")
+                    .read_controller_plan(&run_id)
+                    .expect("queued controller plan");
+
+            assert_eq!(
+                plan.tasks[0].executor.selector.as_deref(),
+                Some("test.fallback")
+            );
+            assert_eq!(
+                plan.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
+                1
+            );
+            assert_eq!(plan.options.rotation.as_ref().unwrap().entries.len(), 1);
+        });
     }
 
     fn command_with_backend(backend: Option<&str>) -> AgentTaskDispatchCommand {

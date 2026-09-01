@@ -1176,6 +1176,72 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn readiness_diagnostic_class_message_and_data_use_one_route() {
+        struct MixedDiagnosticRoutes;
+
+        impl AgentTaskExecutorAdapter for MixedDiagnosticRoutes {
+            fn provider_route_readiness(
+                &self,
+                request: &AgentTaskRequest,
+            ) -> ProviderRouteReadiness {
+                if request.executor.backend == "offline" {
+                    return ProviderRouteReadiness {
+                        ready: false,
+                        state: "runtime_unavailable".to_string(),
+                        reason: "offline route".to_string(),
+                        reset_at: None,
+                        classification: Some("unavailable".to_string()),
+                        retryable: true,
+                        remediation: None,
+                        cache_identity: None,
+                        provider_identity: None,
+                        capacity_key: None,
+                        diagnostic_data: None,
+                    };
+                }
+                ProviderRouteReadiness {
+                    ready: false,
+                    state: "provider_missing".to_string(),
+                    reason: "missing route".to_string(),
+                    reset_at: None,
+                    classification: Some("capability".to_string()),
+                    retryable: false,
+                    remediation: None,
+                    cache_identity: None,
+                    provider_identity: None,
+                    capacity_key: None,
+                    diagnostic_data: Some(ProviderRouteDiagnosticData::ProviderMissing {
+                        backend: "missing".to_string(),
+                        runtime_discovery_diagnostics: Vec::new(),
+                    }),
+                }
+            }
+
+            fn execute(
+                &self,
+                _request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                panic!("unavailable routes must not execute")
+            }
+        }
+
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].executor.backend = "offline".to_string();
+        plan.options.rotation = Some(rotation_policy(vec![entry("missing")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(MixedDiagnosticRoutes)).run(plan);
+        let outcome = &aggregate.outcomes[0];
+
+        assert_eq!(outcome.summary.as_deref(), Some("missing route"));
+        assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_missing");
+        assert_eq!(outcome.diagnostics[0].message, "missing route");
+        assert_eq!(outcome.diagnostics[0].data["kind"], "provider_missing");
+        assert_eq!(outcome.diagnostics[0].data["backend"], "missing");
+    }
+
+    #[test]
     fn readiness_exhaustion_after_rotation_preserves_prior_execution_evidence() {
         struct UnreadyAfterFirstExecution {
             calls: AtomicUsize,

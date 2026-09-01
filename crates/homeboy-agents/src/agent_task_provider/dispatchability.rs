@@ -7,7 +7,9 @@ use super::{
     validate_provider_immediate_failure_patterns, AgentTaskProviderCatalog, ProviderResolution,
     ProviderRuntimeReadinessCache,
 };
-use crate::agent_task_scheduler::{AgentTaskPlan, AgentTaskScheduleSupport, ProviderRouteEvidence};
+use crate::agent_task_scheduler::{
+    AgentTaskPlan, AgentTaskScheduleSupport, ProviderRouteDiagnosticData, ProviderRouteEvidence,
+};
 use serde_json::Value;
 
 /// One redacted, precedence-ordered answer to whether a provider can accept
@@ -423,6 +425,9 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     let credentials_verified =
         probe_runtime && provider.readiness_invocation.is_some() && runtime.ready;
     let provider_owned_auth = provider_requires_live_auth_validation(provider);
+    let credentials_rejected = runtime_evidence.as_ref().is_some_and(|evidence| {
+        matches!(evidence.classification.as_str(), "auth_failure" | "account")
+    });
     let (credential_status, credential_reason) = if !credentials.dispatchable {
         (AgentTaskProviderCredentialStatus::Missing, None)
     } else if credentials_verified {
@@ -430,6 +435,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     } else if probe_runtime
         && provider.readiness_invocation.is_some()
         && !runtime.ready
+        && credentials_rejected
         && (!credentials.requirements.is_empty() || provider_owned_auth)
     {
         (
@@ -508,7 +514,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             false,
             "provider-owned authentication has no live validation route",
         )
-    } else if provider_owned_auth && !runtime.ready {
+    } else if provider_owned_auth && !runtime.ready && credentials_rejected {
         (
             "credentials_unusable",
             false,
@@ -531,7 +537,14 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     AgentTaskProviderDispatchability {
         state,
         ready,
-        reason: reason.to_string(),
+        reason: if state == "runtime_unavailable" {
+            format!(
+                "runtime_unavailable: {}",
+                runtime.reason.as_deref().unwrap_or(reason)
+            )
+        } else {
+            reason.to_string()
+        },
         checks: AgentTaskProviderDispatchabilityChecks {
             route: AgentTaskProviderDispatchabilityCheck {
                 ready: true,
@@ -594,6 +607,7 @@ fn sanitize_classification(classification: &str) -> String {
         | "auth_failure"
         | "account"
         | "capacity"
+        | "unavailable"
         | "transient_failure" => classification.to_string(),
         _ => "unknown".to_string(),
     }
@@ -602,6 +616,7 @@ fn sanitize_classification(classification: &str) -> String {
 pub(crate) struct EvaluatedRequestDispatchability {
     pub(crate) dispatchability: AgentTaskProviderDispatchability,
     pub(crate) runtime_evidence: Option<AgentTaskProviderRuntimeEvidence>,
+    pub(crate) diagnostic_data: Option<ProviderRouteDiagnosticData>,
 }
 
 pub(crate) fn evaluate_request_dispatchability(
@@ -638,18 +653,60 @@ pub(crate) fn evaluate_request_dispatchability(
                     return verdict;
                 }
             }
-            let route_exists = resolved.resolved().is_some();
-            return unavailable_request_dispatchability(
-                if route_exists {
-                    "provider_capability_unavailable"
-                } else {
-                    "route_unavailable"
-                },
+            let (state, classification, diagnostic_data) = match resolved {
+                ProviderResolution::Resolved(_) => (
+                    "provider_capability_unavailable",
+                    "capability",
+                    ProviderRouteDiagnosticData::ProviderCapabilityUnavailable {
+                        layer: "provider".to_string(),
+                        required_capabilities: request.executor.required_capabilities.clone(),
+                    },
+                ),
+                ProviderResolution::NotFound => {
+                    let diagnostics = super::runtime_discovery_diagnostics_for_backend(
+                        &catalog.diagnostics,
+                        &request.executor.backend,
+                    );
+                    (
+                        "provider_missing",
+                        "capability",
+                        ProviderRouteDiagnosticData::ProviderMissing {
+                            backend: request.executor.backend.clone(),
+                            runtime_discovery_diagnostics: diagnostics,
+                        },
+                    )
+                }
+                ProviderResolution::SelectorMismatch {
+                    available_ids,
+                    selector_hint,
+                } => (
+                    "provider_selector_mismatch",
+                    "capability",
+                    ProviderRouteDiagnosticData::ProviderSelectorMismatch {
+                        backend: request.executor.backend.clone(),
+                        selector: request.executor.selector.clone(),
+                        available_provider_ids: available_ids,
+                        hint: selector_hint,
+                    },
+                ),
+                ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => (
+                    "provider_ambiguous",
+                    "capability",
+                    ProviderRouteDiagnosticData::ProviderAmbiguous {
+                        backend: request.executor.backend.clone(),
+                        available_provider_ids: candidate_ids,
+                    },
+                ),
+            };
+            let mut verdict = unavailable_request_dispatchability(
+                state,
                 "no provider satisfies the effective route and required capabilities",
-                if route_exists { "capability" } else { "route" },
+                classification,
                 false,
                 None,
             );
+            verdict.diagnostic_data = Some(diagnostic_data);
+            return verdict;
         }
         Err(reason) => {
             return unavailable_request_dispatchability(
@@ -742,6 +799,7 @@ pub(crate) fn evaluate_request_dispatchability_with_credentials(
     EvaluatedRequestDispatchability {
         dispatchability,
         runtime_evidence,
+        diagnostic_data: None,
     }
 }
 
@@ -764,6 +822,7 @@ fn unavailable_request_dispatchability(
             cache_identity: None,
             provider_identity: None,
         }),
+        diagnostic_data: None,
         dispatchability: AgentTaskProviderDispatchability {
             state,
             ready: false,
@@ -973,6 +1032,7 @@ fn selected_plan_provider_dispatchability_with_providers(
                 );
             }
             let evaluated = evaluate_request_dispatchability(catalog, &candidate, cache);
+            let diagnostic_data = evaluated.diagnostic_data;
             let verdict = evaluated.dispatchability;
             if verdict.ready {
                 selected = Some((candidate, next_rotation_index));
@@ -1003,7 +1063,7 @@ fn selected_plan_provider_dispatchability_with_providers(
                     .and_then(|evidence| evidence.provider_identity.clone()),
                 runtime_evidence: runtime_evidence.clone(),
                 checks: Some(verdict.checks.clone()),
-                diagnostic_data: None,
+                diagnostic_data,
             });
             if first_failure.is_none() {
                 first_failure = Some((candidate, verdict));
@@ -1199,7 +1259,11 @@ mod tests {
         assert_eq!(error.details["deadline_unix_ms"], deadline);
         assert_eq!(
             error.details["route_evidence"][0]["classification"],
-            "route"
+            "capability"
+        );
+        assert_eq!(
+            error.details["route_evidence"][0]["diagnostic_data"]["kind"],
+            "provider_missing"
         );
         assert_eq!(
             error.details["route_evidence"][1]["classification"],
@@ -1405,6 +1469,48 @@ mod tests {
         assert!(
             error.message.contains("Log out and sign in again"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn offline_provider_owned_auth_remains_runtime_unavailable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let auth = root.path().join("auth.json");
+        let script = root.path().join("readiness.js");
+        std::fs::write(&auth, r#"{"token":"present-token"}"#).expect("write auth");
+        std::fs::write(
+            &script,
+            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'unavailable',retryable:true,remediation:'Start the provider runtime.',reason:'provider is offline',cache_key:'offline',identity:{}}));",
+        )
+        .expect("readiness script");
+        let mut provider = provider_with_present_but_unverifiable_credential(&auth);
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec!["node".to_string(), script.display().to_string()],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
+
+        let verdict =
+            evaluate_provider_dispatchability(&catalog(provider), "revocable", None, None, true);
+
+        assert_eq!(verdict.state, "runtime_unavailable");
+        assert_eq!(
+            verdict.reason,
+            "runtime_unavailable: unavailable: provider is offline"
+        );
+        assert_eq!(
+            verdict.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Unverified
+        );
+        assert_eq!(
+            verdict.checks.runtime.reason.as_deref(),
+            Some("unavailable: provider is offline")
+        );
+        assert_eq!(
+            verdict.checks.credentials.remediation,
+            vec!["Start the provider runtime."]
         );
     }
 
@@ -1691,6 +1797,55 @@ mod tests {
         assert_eq!(
             probes.lines().filter(|model| *model == "primary").count(),
             2
+        );
+    }
+
+    #[test]
+    fn repeated_admission_of_a_bound_fallback_never_reconsiders_primary() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;fs.appendFileSync(process.argv[2],model+'\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='fallback',classification:model==='fallback'?'ready':'account',retryable:false,remediation:'',reason:'blocked',cache_key:model,identity:{model}}));",
+        )
+        .expect("readiness script");
+        let catalog = catalog(provider(&script, &count));
+        let mut plan = AgentTaskPlan::new("bound-admission", vec![request("primary")]);
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![AgentTaskProviderRotationEntry {
+                model: Some("fallback".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let admitted = admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("fallback admitted");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;fs.appendFileSync(process.argv[2],model+'\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:model,identity:{model}}));",
+        )
+        .expect("recover primary");
+
+        let readmitted = admit_plan_provider_dispatchability_with_providers(
+            &admitted,
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("bound fallback remains admitted");
+
+        assert_eq!(readmitted.tasks[0].executor.model(), Some("fallback"));
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .expect("probe log")
+                .lines()
+                .filter(|model| *model == "primary")
+                .count(),
+            1
         );
     }
 

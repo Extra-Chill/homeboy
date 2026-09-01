@@ -74,33 +74,11 @@ pub fn provider_secret_sources_for_plan_with_providers(
     providers: &[AgentTaskExecutorProvider],
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
     let mut sources = HashMap::new();
-    let mut conflicted = BTreeSet::new();
     for request in &plan.tasks {
-        for (candidate, _) in
-            crate::agent_task_scheduler::AgentTaskScheduleSupport::provider_route_candidates(
-                request,
-                plan.options.rotation.as_ref(),
-            )
-        {
-            let Some(provider) = select_provider(providers, &candidate) else {
-                continue;
-            };
-            for (name, source) in provider_secret_sources(provider, Some(&candidate)) {
-                if conflicted.contains(&name) {
-                    continue;
-                }
-                match sources.get(&name) {
-                    None => {
-                        sources.insert(name, source);
-                    }
-                    Some(existing) if existing == &source => {}
-                    Some(_) => {
-                        sources.remove(&name);
-                        conflicted.insert(name);
-                    }
-                }
-            }
-        }
+        let Some(provider) = select_provider(providers, request) else {
+            continue;
+        };
+        sources.extend(provider_secret_sources(provider, Some(request)));
     }
     sources
 }
@@ -484,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_secret_sources_include_plan_and_task_local_rotation_fallbacks() {
+    fn unbound_plan_secret_sources_use_only_each_current_route() {
         let providers: Vec<AgentTaskExecutorProvider> = [
             serde_json::json!({
                 "id": "test.primary",
@@ -558,23 +536,17 @@ mod tests {
 
         let sources = provider_secret_sources_for_plan_with_providers(&plan, &providers);
 
-        assert_eq!(sources.len(), 3);
+        assert_eq!(sources.len(), 1);
         assert_eq!(
             sources["PRIMARY_TOKEN"].env_var.as_deref(),
             Some("PRIMARY_SOURCE")
         );
-        assert_eq!(
-            sources["PLAN_FALLBACK_TOKEN"].env_var.as_deref(),
-            Some("PLAN_FALLBACK_SOURCE")
-        );
-        assert_eq!(
-            sources["TASK_FALLBACK_TOKEN"].env_var.as_deref(),
-            Some("TASK_FALLBACK_SOURCE")
-        );
+        assert!(!sources.contains_key("PLAN_FALLBACK_TOKEN"));
+        assert!(!sources.contains_key("TASK_FALLBACK_TOKEN"));
     }
 
     #[test]
-    fn plan_secret_sources_dedupe_identical_mappings_and_omit_conflicts() {
+    fn admitted_fallback_keeps_its_conflicting_secret_source() {
         let providers: Vec<AgentTaskExecutorProvider> = [
             ("test.primary", "SHARED_SOURCE"),
             ("test.identical", "SHARED_SOURCE"),
@@ -615,10 +587,16 @@ mod tests {
             ],
             ..Default::default()
         });
+        plan.tasks[0].executor.selector = Some("test.conflicting".to_string());
+        plan.tasks[0].metadata = serde_json::json!({
+            "provider_readiness_routing": { "next_rotation_index": 3 }
+        });
 
-        assert!(
-            !provider_secret_sources_for_plan_with_providers(&plan, &providers)
-                .contains_key("SHARED_TOKEN")
+        assert_eq!(
+            provider_secret_sources_for_plan_with_providers(&plan, &providers)["SHARED_TOKEN"]
+                .env_var
+                .as_deref(),
+            Some("OTHER_SOURCE")
         );
     }
 }

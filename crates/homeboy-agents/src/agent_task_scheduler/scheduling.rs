@@ -1447,10 +1447,19 @@ impl AgentTaskScheduleSupport {
             return vec![(candidate, 0)];
         };
         Self::apply_rotation_policy_limits(&mut candidate, policy);
-        if let Some(entry) = policy.entries.first() {
-            Self::apply_initial_rotation_entry_model(&mut candidate, entry);
+        let bound_index = candidate
+            .metadata
+            .pointer("/provider_readiness_routing/next_rotation_index")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .map(|index| index.min(policy.entries.len()));
+        if bound_index.is_none() {
+            if let Some(entry) = policy.entries.first() {
+                Self::apply_initial_rotation_entry_model(&mut candidate, entry);
+            }
         }
-        let mut index = Self::initial_rotation_index(&candidate, policy);
+        let mut index =
+            bound_index.unwrap_or_else(|| Self::initial_rotation_index(&candidate, policy));
         let mut candidates = vec![(candidate.clone(), index)];
         while index < policy.entries.len() {
             Self::apply_rotation_entry(&mut candidate, &policy.entries[index], policy);

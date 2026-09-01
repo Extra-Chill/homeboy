@@ -2735,10 +2735,9 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
         )?;
     // The shared verdict considers the ordered rotation routes with their
     // effective model/config before Cook can consume a provider execution.
-    // Never persist a TTL-bounded readiness decision as a reduced route chain.
-    // Runtime scheduling re-evaluates the complete durable policy. Deterministic
-    // exhaustion still fails compilation; retryable exhaustion reaches runtime
-    // so it can carry zero-dispatch budget evidence.
+    // Persist the selected route and forward cursor without reducing the durable
+    // rotation policy. Deterministic exhaustion still fails compilation;
+    // retryable exhaustion reaches runtime with the fresh, unbound plan.
     match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
         &options.identity.initial_plan,
         catalog,
@@ -2752,6 +2751,7 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
                 catalog.providers(),
             )?;
             super::execution::preflight_plan_secret_env(&selected_plan)?;
+            options.identity.initial_plan = selected_plan;
         }
         Err(error) if error.retryable == Some(true) => {}
         Err(error) => return Err(error),

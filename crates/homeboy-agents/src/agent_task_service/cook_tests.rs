@@ -4822,7 +4822,7 @@ fn cook_preflight_exposes_missing_readiness_invocation_diagnosis_without_provide
 }
 
 #[test]
-fn compiled_cook_preserves_rotation_and_executes_the_first_ready_production_provider_route() {
+fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("executed.json");
@@ -4895,8 +4895,12 @@ fn compiled_cook_preserves_rotation_and_executes_the_first_ready_production_prov
         )
         .expect("Cook compiles to its first ready route");
         let plan = options.identity.initial_plan;
-        assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
-        assert!(plan.tasks[0].executor.config.get("account").is_none());
+        assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
+        assert_eq!(plan.tasks[0].executor.config["account"], "ready-account");
+        assert_eq!(
+            plan.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
+            1
+        );
         assert_eq!(plan.options.rotation.as_ref().unwrap().entries.len(), 1);
 
         let aggregate = AgentTaskScheduler::new(Arc::new(
@@ -6154,15 +6158,12 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
         assert!(backend.committed && backend.pushed && backend.created);
 
         let record = agent_task_lifecycle::reconcile_status(&fixture.run_id)
-            .expect("successful adoption supersedes the historical refusal");
+            .expect("historical refusal remains readable after recovery");
         assert_eq!(
             record.state,
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
+            agent_task_lifecycle::AgentTaskRunState::Failed
         );
-        assert_eq!(
-            record.lifecycle.execution.state,
-            RunExecutionState::Succeeded
-        );
+        assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
         assert_eq!(
             record.metadata["pre_execution_failure"]["candidate_adoption_recovery"]["reason"],
             "dirty_destination_first_provider_admission",
@@ -6174,6 +6175,21 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
             &fixture.options.identity.initial_plan.tasks[0]
         )
         .is_ok());
+        let remediation_run_id = record
+            .candidate_adoption
+            .as_ref()
+            .and_then(|attempt| attempt.remediation_run_id.as_deref())
+            .expect("recovery successor run");
+        let remediation = agent_task_lifecycle::reconcile_status(remediation_run_id)
+            .expect("successful recovery successor");
+        assert_eq!(
+            remediation.state,
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+        );
+        assert_eq!(
+            remediation.lifecycle.execution.state,
+            RunExecutionState::Succeeded
+        );
     });
 }
 

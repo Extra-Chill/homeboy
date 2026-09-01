@@ -2605,6 +2605,7 @@ fn run_provider_readiness_invocation_with_timeout(
     credential_env: &[(String, String)],
     timeout: Duration,
 ) -> Result<ProviderReadinessInvocationResult, String> {
+    let started = Instant::now();
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
         unreachable!("readiness invocation timeout requires an invocation")
     };
@@ -2677,7 +2678,6 @@ fn run_provider_readiness_invocation_with_timeout(
     });
     let stdout_reader = child.stdout.take().map(spawn_readiness_output_reader);
     let stderr_reader = child.stderr.take().map(spawn_readiness_output_reader);
-    let started = Instant::now();
     let mut stdin_complete = stdin_writer.is_none();
     let terminal = loop {
         if !stdin_complete {
@@ -2695,16 +2695,27 @@ fn run_provider_readiness_invocation_with_timeout(
             }
         }
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(10));
+            Ok(Some(status)) => {
+                if started.elapsed() <= timeout {
+                    break Ok(status);
+                }
+                break Err(format!(
+                    "provider '{}' readiness invocation timed out after {} ms",
+                    provider.id,
+                    timeout.as_millis()
+                ));
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                break Err(format!(
+                    "provider '{}' readiness invocation timed out after {} ms",
+                    provider.id,
+                    timeout.as_millis()
+                ));
             }
             Ok(None) => {
-                break Err(format!(
-                    "provider '{}' readiness invocation timed out after {} seconds",
-                    provider.id,
-                    timeout.as_secs_f64()
-                ))
+                std::thread::sleep(
+                    Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
+                );
             }
             Err(error) => {
                 break Err(format!(
