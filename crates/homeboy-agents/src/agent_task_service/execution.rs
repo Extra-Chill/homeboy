@@ -667,6 +667,16 @@ pub fn run_submitted_with_timeout(
     timeout_ms: Option<u64>,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
+    let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    run_submitted_with_timeout_and_catalog(run_id, timeout_ms, executor, &catalog)
+}
+
+pub(crate) fn run_submitted_with_timeout_and_catalog(
+    run_id: String,
+    timeout_ms: Option<u64>,
+    executor: SharedAgentTaskExecutor,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
     }
@@ -683,7 +693,32 @@ pub fn run_submitted_with_timeout(
     if let Some(timeout_ms) = timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
-    prepare_plan_for_execution(&mut plan, Some(&run_id))?;
+    if let Err(error) = preflight_plan_provider_eligibility_with_catalog(&mut plan, catalog) {
+        agent_task_lifecycle::record_pre_execution_failure(
+            &run_id,
+            &plan,
+            "admit_plan_provider_dispatchability",
+            &error,
+        )?;
+        return Err(error);
+    }
+    // Admission chooses a concrete provider route and advances its durable
+    // cursor. Persist that exact plan before Running so execution never derives
+    // a second route from the submitted rotation chain.
+    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+    if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
+        agent_task_lifecycle::record_pre_execution_failure(
+            &run_id,
+            &plan,
+            "prepare_plan_for_execution",
+            &error,
+        )?;
+        return Err(error);
+    }
+    // Preparation enriches the admitted plan with its materialized workspace
+    // and runner-secret contract. Persist that final form before Running so the
+    // scheduler executes exactly the durable plan reviewers can inspect.
+    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
     let harvest_context =
         match crate::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
             Ok(context) => context,
@@ -749,7 +784,7 @@ pub fn run_next_with_cook_dispatcher(
         scoped_run_ids,
         |record, plan| {
             validate_queued_cook_identity(record)?;
-            preflight_queued_plan_provider_eligibility(plan)
+            preflight_plan_provider_eligibility(plan)
         },
     )
 }
@@ -2429,8 +2464,15 @@ pub(crate) fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
 /// Queue admission validates provider eligibility and credential provenance
 /// before a record is claimed Running. Workspace preparation remains after the
 /// claim because it creates controller-owned filesystem state.
-fn preflight_queued_plan_provider_eligibility(plan: &mut AgentTaskPlan) -> Result<()> {
+fn preflight_plan_provider_eligibility(plan: &mut AgentTaskPlan) -> Result<()> {
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    preflight_plan_provider_eligibility_with_catalog(plan, &catalog)
+}
+
+fn preflight_plan_provider_eligibility_with_catalog(
+    plan: &mut AgentTaskPlan,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> Result<()> {
     let catalog_owns_every_route = plan.tasks.iter().all(|task| {
         crate::agent_task_provider::is_fixture_backend(&task.executor.backend)
             || crate::agent_task_gate_executor::is_repo_local_gate_request(task)
@@ -2444,7 +2486,7 @@ fn preflight_queued_plan_provider_eligibility(plan: &mut AgentTaskPlan) -> Resul
     }
     let admitted = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
         plan,
-        &catalog,
+        catalog,
         &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
     )?;
     // Admission owns live route selection. These are the remaining static and
