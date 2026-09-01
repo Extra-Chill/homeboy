@@ -20,6 +20,21 @@ use crate::api_jobs::{
 use crate::daemon::controller_job_driver::{ControllerJobDriver, ControllerJobHandle};
 use crate::error::{Error, Result};
 
+pub fn save_test_server(id: &str, host: &str) -> Result<()> {
+    crate::server::save(&crate::server::Server {
+        id: id.to_string(),
+        aliases: Vec::new(),
+        host: host.to_string(),
+        user: "tester".to_string(),
+        port: 22,
+        identity_file: None,
+        kind: None,
+        auth: None,
+        env: std::collections::HashMap::new(),
+        runner: None,
+    })
+}
+
 /// A real in-memory controller job boundary for domain-driver tests.
 ///
 /// The harness keeps construction internals out of the production API while

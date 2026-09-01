@@ -3,24 +3,11 @@ use super::service::{
 };
 use super::*;
 use crate::test_support;
-use homeboy::core::server::Server;
-use std::collections::HashMap;
 use std::fs;
 
 fn create_server() {
-    homeboy::core::server::save(&Server {
-        id: "private-host".to_string(),
-        aliases: Vec::new(),
-        host: "private.example.test".to_string(),
-        user: "tester".to_string(),
-        port: 22,
-        identity_file: None,
-        kind: None,
-        auth: None,
-        env: HashMap::new(),
-        runner: None,
-    })
-    .expect("save server");
+    homeboy::core::test_support::save_test_server("private-host", "private.example.test")
+        .expect("save server");
 }
 
 #[test]
