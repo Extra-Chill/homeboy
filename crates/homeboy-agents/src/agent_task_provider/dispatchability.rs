@@ -21,8 +21,34 @@ pub struct AgentTaskProviderDispatchability {
     pub ready: bool,
     pub reason: String,
     pub checks: AgentTaskProviderDispatchabilityChecks,
+    /// Structural routing and live inference answer different questions. Keep
+    /// both scopes in the shared verdict so inventory and Cook cannot claim a
+    /// provider-native account check that never ran.
+    pub readiness: AgentTaskProviderReadiness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configuration_diagnosis: Option<AgentTaskProviderConfigurationDiagnosis>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskProviderReadiness {
+    pub structural_dispatchability: AgentTaskProviderReadinessScope,
+    pub live_inference: AgentTaskProviderLiveInferenceReadiness,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskProviderReadinessScope {
+    pub state: &'static str,
+    pub ready: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskProviderLiveInferenceReadiness {
+    pub state: &'static str,
+    pub ready: bool,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<AgentTaskProviderRuntimeEvidence>,
 }
 
 /// A static provider contract defect that prevents dispatch. This keeps the
@@ -235,42 +261,47 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             && candidate_providers
                 .iter()
                 .all(|provider| validate_provider_immediate_failure_patterns(provider).is_ok());
+        let checks = AgentTaskProviderDispatchabilityChecks {
+            route: AgentTaskProviderDispatchabilityCheck {
+                ready: false,
+                reason: Some(route_reason),
+            },
+            model: AgentTaskProviderDispatchabilityCheck {
+                ready: false,
+                reason: None,
+            },
+            credentials: AgentTaskProviderDispatchabilityCredentialCheck {
+                status: if credentials_ready {
+                    AgentTaskProviderCredentialStatus::Unverified
+                } else {
+                    AgentTaskProviderCredentialStatus::Missing
+                },
+                ready: credentials_ready,
+                missing: Vec::new(),
+                // A route that never resolved to one provider was never
+                // probed, so nothing here was live-verified.
+                verified: false,
+                reason: Some(
+                    "the provider route did not resolve, so credentials were not live-validated"
+                        .to_string(),
+                ),
+                remediation: Vec::new(),
+            },
+            configuration: AgentTaskProviderDispatchabilityCheck {
+                ready: configuration_ready,
+                reason: None,
+            },
+            runtime: AgentTaskProviderDispatchabilityCheck {
+                ready: false,
+                reason: None,
+            },
+        };
         AgentTaskProviderDispatchability {
             state,
             ready: false,
             reason: reason.to_string(),
-            checks: AgentTaskProviderDispatchabilityChecks {
-                route: AgentTaskProviderDispatchabilityCheck {
-                    ready: false,
-                    reason: Some(route_reason),
-                },
-                model: AgentTaskProviderDispatchabilityCheck {
-                    ready: false,
-                    reason: None,
-                },
-                credentials: AgentTaskProviderDispatchabilityCredentialCheck {
-                    status: if credentials_ready {
-                        AgentTaskProviderCredentialStatus::Unverified
-                    } else {
-                        AgentTaskProviderCredentialStatus::Missing
-                    },
-                    ready: credentials_ready,
-                    missing: Vec::new(),
-                    // A route that never resolved to one provider was never
-                    // probed, so nothing here was live-verified.
-                    verified: false,
-                    reason: Some("the provider route did not resolve, so credentials were not live-validated".to_string()),
-                    remediation: Vec::new(),
-                },
-                configuration: AgentTaskProviderDispatchabilityCheck {
-                    ready: configuration_ready,
-                    reason: None,
-                },
-                runtime: AgentTaskProviderDispatchabilityCheck {
-                    ready: false,
-                    reason: None,
-                },
-            },
+            readiness: readiness_scopes(&checks, false, false, None),
+            checks,
             configuration_diagnosis: None,
         }
     };
@@ -425,9 +456,13 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     let credentials_verified =
         probe_runtime && provider.readiness_invocation.is_some() && runtime.ready;
     let provider_owned_auth = provider_requires_live_auth_validation(provider);
-    let credentials_rejected = runtime_evidence.as_ref().is_some_and(|evidence| {
-        matches!(evidence.classification.as_str(), "auth_failure" | "account")
-    });
+    let credentials_rejected = runtime_evidence
+        .as_ref()
+        .is_some_and(|evidence| evidence.classification == "auth_failure");
+    let account_blocked = !runtime.ready
+        && runtime_evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence.classification == "account");
     let (credential_status, credential_reason) = if !credentials.dispatchable {
         (AgentTaskProviderCredentialStatus::Missing, None)
     } else if credentials_verified {
@@ -514,6 +549,12 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             false,
             "provider-owned authentication has no live validation route",
         )
+    } else if account_blocked {
+        (
+            "account_unavailable",
+            false,
+            "provider account quota or billing is unavailable",
+        )
     } else if provider_owned_auth && !runtime.ready && credentials_rejected {
         (
             "credentials_unusable",
@@ -526,56 +567,136 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             false,
             "provider runtime readiness validation failed",
         )
-    } else if !probe_runtime {
-        ("ready", true, "live runtime readiness was not requested")
+    } else if !probe_runtime || provider.readiness_invocation.is_none() {
+        (
+            "structurally_dispatchable",
+            true,
+            "structural dispatchability checks passed; live inference was not probed",
+        )
     } else if !provider_owned_auth || credentials_verified {
         ("ready", true, "all dispatchability checks passed")
     } else {
         unreachable!("provider-owned auth without verification is rejected above")
     };
+    let reason = if state == "runtime_unavailable" {
+        format!(
+            "runtime_unavailable: {}",
+            runtime.reason.as_deref().unwrap_or(reason)
+        )
+    } else {
+        reason.to_string()
+    };
+    let checks = AgentTaskProviderDispatchabilityChecks {
+        route: AgentTaskProviderDispatchabilityCheck {
+            ready: true,
+            reason: Some(provider.id.clone()),
+        },
+        model: AgentTaskProviderDispatchabilityCheck {
+            ready: model_ready,
+            reason: (!model_ready).then_some("unsupported selected model".to_string()),
+        },
+        credentials: AgentTaskProviderDispatchabilityCredentialCheck {
+            status: credential_status,
+            ready: credentials.dispatchable,
+            missing: credentials.missing,
+            verified: credentials_verified,
+            reason: credential_reason,
+            remediation: if provider_owned_auth
+                && probe_runtime
+                && provider.readiness_invocation.is_none()
+            {
+                configuration_diagnosis
+                    .as_ref()
+                    .map(|diagnosis| vec![diagnosis.remediation.clone()])
+                    .unwrap_or_default()
+            } else {
+                runtime_remediation
+            },
+        },
+        configuration,
+        runtime,
+    };
+    let readiness = readiness_scopes(
+        &checks,
+        probe_runtime,
+        provider.readiness_invocation.is_some(),
+        runtime_evidence.clone(),
+    );
     *runtime_evidence_out = runtime_evidence;
     AgentTaskProviderDispatchability {
         state,
         ready,
-        reason: if state == "runtime_unavailable" {
-            format!(
-                "runtime_unavailable: {}",
-                runtime.reason.as_deref().unwrap_or(reason)
-            )
-        } else {
-            reason.to_string()
-        },
-        checks: AgentTaskProviderDispatchabilityChecks {
-            route: AgentTaskProviderDispatchabilityCheck {
-                ready: true,
-                reason: Some(provider.id.clone()),
-            },
-            model: AgentTaskProviderDispatchabilityCheck {
-                ready: model_ready,
-                reason: (!model_ready).then_some("unsupported selected model".to_string()),
-            },
-            credentials: AgentTaskProviderDispatchabilityCredentialCheck {
-                status: credential_status,
-                ready: credentials.dispatchable,
-                missing: credentials.missing,
-                verified: credentials_verified,
-                reason: credential_reason,
-                remediation: if provider_owned_auth
-                    && probe_runtime
-                    && provider.readiness_invocation.is_none()
-                {
-                    configuration_diagnosis
-                        .as_ref()
-                        .map(|diagnosis| vec![diagnosis.remediation.clone()])
-                        .unwrap_or_default()
-                } else {
-                    runtime_remediation
-                },
-            },
-            configuration,
-            runtime,
-        },
+        reason,
+        readiness,
+        checks,
         configuration_diagnosis,
+    }
+}
+
+fn readiness_scopes(
+    checks: &AgentTaskProviderDispatchabilityChecks,
+    probe_requested: bool,
+    probe_declared: bool,
+    evidence: Option<AgentTaskProviderRuntimeEvidence>,
+) -> AgentTaskProviderReadiness {
+    let structural_ready = checks.route.ready
+        && checks.model.ready
+        && checks.credentials.ready
+        && checks.configuration.ready;
+    let structural_reason = if structural_ready {
+        "route, model, credentials, and configuration are structurally dispatchable".to_string()
+    } else {
+        "one or more structural dispatchability checks failed".to_string()
+    };
+    let live_inference = if !structural_ready {
+        AgentTaskProviderLiveInferenceReadiness {
+            state: "unavailable",
+            ready: false,
+            reason: structural_reason.clone(),
+            evidence: None,
+        }
+    } else if !probe_requested {
+        AgentTaskProviderLiveInferenceReadiness {
+            state: "structurally_dispatchable",
+            ready: false,
+            reason: "live inference probe was not requested".to_string(),
+            evidence: None,
+        }
+    } else if !probe_declared {
+        AgentTaskProviderLiveInferenceReadiness {
+            state: "inference_unverified",
+            ready: false,
+            reason: "the provider declares no bounded live inference probe".to_string(),
+            evidence: None,
+        }
+    } else if checks.runtime.ready {
+        AgentTaskProviderLiveInferenceReadiness {
+            state: "validated",
+            ready: true,
+            reason: "a bounded provider-native probe accepted the selected route".to_string(),
+            evidence,
+        }
+    } else {
+        AgentTaskProviderLiveInferenceReadiness {
+            state: "unavailable",
+            ready: false,
+            reason: checks.runtime.reason.clone().unwrap_or_else(|| {
+                "the bounded live inference probe did not accept work".to_string()
+            }),
+            evidence,
+        }
+    };
+    AgentTaskProviderReadiness {
+        structural_dispatchability: AgentTaskProviderReadinessScope {
+            state: if structural_ready {
+                "ready"
+            } else {
+                "unavailable"
+            },
+            ready: structural_ready,
+            reason: structural_reason,
+        },
+        live_inference,
     }
 }
 
@@ -828,6 +949,19 @@ fn unavailable_request_dispatchability(
             ready: false,
             reason: reason.to_string(),
             configuration_diagnosis: None,
+            readiness: AgentTaskProviderReadiness {
+                structural_dispatchability: AgentTaskProviderReadinessScope {
+                    state: "unavailable",
+                    ready: false,
+                    reason: reason.to_string(),
+                },
+                live_inference: AgentTaskProviderLiveInferenceReadiness {
+                    state: "unavailable",
+                    ready: false,
+                    reason: reason.to_string(),
+                    evidence: None,
+                },
+            },
             checks: AgentTaskProviderDispatchabilityChecks {
                 route: AgentTaskProviderDispatchabilityCheck {
                     ready: false,
@@ -1511,6 +1645,72 @@ mod tests {
         assert_eq!(
             verdict.checks.credentials.remediation,
             vec!["Start the provider runtime."]
+        );
+    }
+
+    #[test]
+    fn account_blocked_probe_is_unavailable_before_a_provider_execution() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("probe-count");
+        let script = root.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'account',retryable:false,remediation:'restore account quota or billing access',reason:'account spending limit is exhausted',cache_key:'blocked-account',identity:{account:'blocked'}}));",
+        )
+        .expect("readiness script");
+        let mut provider = provider(&script, &count);
+        provider.cli.profiles = serde_json::from_value(json!([
+            { "name": "blocked", "model": "selected-model" }
+        ]))
+        .expect("model profile");
+        let catalog = catalog(provider);
+
+        let verdict =
+            evaluate_provider_dispatchability(&catalog, "test", None, Some("selected-model"), true);
+
+        assert_eq!(verdict.state, "account_unavailable");
+        assert!(!verdict.ready);
+        assert!(verdict.readiness.structural_dispatchability.ready);
+        assert_ne!(
+            verdict.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Unusable,
+            "an account quota or billing block is not a rejected credential"
+        );
+        assert_eq!(verdict.readiness.live_inference.state, "unavailable");
+        assert_eq!(
+            verdict
+                .readiness
+                .live_inference
+                .evidence
+                .as_ref()
+                .map(|evidence| evidence.classification.as_str()),
+            Some("account")
+        );
+        assert!(verdict.reason.contains("quota or billing"));
+        assert_eq!(
+            std::fs::read_to_string(&count).expect("one bounded probe"),
+            "probe\n"
+        );
+
+        std::fs::remove_file(&count).expect("reset probe evidence for Cook admission");
+
+        let error = admit_plan_provider_dispatchability_with_providers(
+            &AgentTaskPlan::new("account-blocked", vec![request("selected-model")]),
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect_err("Cook admission must reject an account-blocked route");
+        assert_eq!(
+            error.details["route_evidence"][0]["classification"],
+            "account"
+        );
+        assert_eq!(
+            error.details["route_evidence"][0]["state"],
+            "account_unavailable"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&count).expect("one bounded Cook admission probe"),
+            "probe\n"
         );
     }
 
