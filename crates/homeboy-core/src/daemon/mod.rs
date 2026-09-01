@@ -24,6 +24,7 @@ use crate::process::{pid_has_ownership_token, pid_is_running};
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
+use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 use homeboy_runner_contract::{
     RunnerApiSubmitRequest, RunnerExecutionEnvelope, RUNNER_API_SUBMIT_REQUEST_SCHEMA,
     RUNNER_API_V1,
@@ -3288,12 +3289,35 @@ fn enqueue_exec_job(
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
     let request = decode_exec_request(body)?;
-    let mut execution = crate::api_jobs::legacy_request_from_envelope(&request.envelope)?;
-    execution.workspace_claim_binding = request.workspace_claim_binding.clone();
+    let dispatch = request.envelope.dispatch.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "envelope.dispatch",
+            "runner execution envelope requires dispatch",
+            None,
+            None,
+        )
+    })?;
+    let workload = lab_runner_workload_from_execution_envelope(&request.envelope)?;
+    let secret_env_plan = request.envelope.secret_env.clone().unwrap_or_default();
+    let path_materialization_plan = request
+        .envelope
+        .metadata
+        .get("path_materialization_plan")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode envelope path materialization plan".to_string()),
+            )
+        })?;
+    let execution_metadata =
+        (!request.envelope.metadata.is_null()).then_some(&request.envelope.metadata);
     // Reconciliation bindings are not direct execution authority. Existing
     // clients may still send one only for ordinary compatibility; workspace
     // work must carry an owner registration request negotiated through v2.
-    if request.workspace_owner_request.is_some() && execution.workspace_claim_binding.is_some() {
+    if request.workspace_owner_request.is_some() && request.workspace_claim_binding.is_some() {
         return Err(Error::validation_invalid_argument(
             "workspace_claim_binding",
             "direct workspace execution uses an owner lease, not a reconciliation claim",
@@ -3301,40 +3325,58 @@ fn enqueue_exec_job(
             None,
         ));
     }
-    let secret_env_plan = if request.legacy_submission_key_is_run_id {
-        execution.normalize()
-    } else {
-        execution.validate_durable_submission()?;
-        execution.secret_env_plan.clone()
-    };
+    if !request.legacy_submission_key_is_run_id {
+        let inline_secret_names = secret_env_plan
+            .secret_env_names()
+            .into_iter()
+            .filter(|name| {
+                dispatch
+                    .env
+                    .get(name)
+                    .is_some_and(|value| !value.is_empty())
+            })
+            .collect::<Vec<_>>();
+        if !inline_secret_names.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "env",
+                "durable reverse-runner jobs cannot accept inline secret env values",
+                Some("durable_reverse_runner_inline_secret_env".to_string()),
+                Some(vec![format!(
+                    "Inline secret variables: {}",
+                    inline_secret_names.join(", ")
+                )]),
+            ));
+        }
+    }
     crate::api_jobs::with_runner_job_preparation(|p| {
         p.validate_lab_runner_workload_dispatch(
-            execution.lab_runner_workload.as_ref(),
-            &execution.runner_id,
-            execution.cwd.as_deref(),
-            &execution.command,
+            workload.as_ref(),
+            &dispatch.runner_id,
+            dispatch.cwd.as_deref(),
+            &dispatch.command,
             &secret_env_plan,
-            execution.capture_patch,
+            request.envelope.mutation_policy.capture_patch,
         )
     })?;
     let submission_key = request.submission_key.clone();
     let plan = runner_exec_driver::prepare_exec(runner_exec_driver::RunnerExecPrepareRequest {
-        runner_id: execution.runner_id.clone(),
+        runner_id: dispatch.runner_id.clone(),
         runner: request.runner.clone(),
-        cwd: execution.cwd.clone(),
-        project_id: execution.project_id.clone(),
-        command: execution.command.clone(),
-        env: execution.env.clone(),
-        secret_env_names: execution.secret_env_names.clone(),
+        cwd: dispatch.cwd.clone(),
+        project_id: dispatch.project_id.clone(),
+        command: dispatch.command.clone(),
+        env: dispatch.env.clone(),
+        secret_env_names: secret_env_plan.secret_env_names(),
         secret_env_plan: Some(
             serde_json::to_value(&secret_env_plan).unwrap_or(serde_json::Value::Null),
         ),
-        capture_patch: execution.capture_patch,
+        capture_patch: request.envelope.mutation_policy.capture_patch,
         raw_exec: request.raw_exec,
-        source_snapshot: execution.source_snapshot.clone(),
-        require_paths: execution.require_paths.clone(),
-        extension_env_providers: execution.extension_env_providers.clone(),
-        authoritative_run_id: execution
+        source_snapshot: dispatch.source_snapshot.clone(),
+        require_paths: dispatch.require_paths.clone(),
+        extension_env_providers: dispatch.extension_env_providers.clone(),
+        authoritative_run_id: request
+            .envelope
             .lifecycle
             .as_ref()
             .and_then(|lifecycle| lifecycle.durable_run_id.clone())
@@ -3342,9 +3384,8 @@ fn enqueue_exec_job(
         validate_require_paths_on_host: true,
     })?;
     let source_snapshot = Some(plan.source_snapshot.clone());
-    let path_materialization_plan = execution.path_materialization_plan.clone();
 
-    let mut lifecycle = execution.lifecycle.clone();
+    let mut lifecycle = request.envelope.lifecycle.clone();
     if request.legacy_submission_key_is_run_id {
         if let Some(durable_run_id) = submission_key.clone() {
             lifecycle
@@ -3356,7 +3397,7 @@ fn enqueue_exec_job(
         "runner_id": plan.runner_id,
         "cwd": plan.cwd,
         "command": plan.command,
-        "capture_patch": execution.capture_patch,
+        "capture_patch": request.envelope.mutation_policy.capture_patch,
         "source_snapshot": source_snapshot,
         "path_materialization_plan": path_materialization_plan,
         "extension_env_providers": plan.extension_env_provenance,
@@ -3386,12 +3427,9 @@ fn enqueue_exec_job(
     }
 
     let operation = "runner.exec".to_string();
-    let mut run_ref_metadata = exec_request_run_ref_metadata(
-        lifecycle.as_ref(),
-        execution.lab_runner_workload.as_ref(),
-        execution.metadata.as_ref(),
-    )
-    .unwrap_or_else(|| json!({}));
+    let mut run_ref_metadata =
+        exec_request_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
+            .unwrap_or_else(|| json!({}));
     run_ref_metadata["runner_job_projection"] = json!({
         "runner_id": plan.runner_id,
         "command": crate::redaction::redact_argv_display(&plan.command),
@@ -3403,7 +3441,7 @@ fn enqueue_exec_job(
     // Capture any potentially slow baseline before reserving child capacity.
     // Once the reservation is durable, the worker performs only the bounded
     // process-spawn handoff before persisting child ownership.
-    let baseline = if execution.capture_patch {
+    let baseline = if request.envelope.mutation_policy.capture_patch {
         Some(capture_baseline(&plan.cwd, source_snapshot.as_ref())?)
     } else {
         None
@@ -3441,21 +3479,17 @@ fn enqueue_exec_job(
         command: plan.command.clone(),
         cwd: Some(plan.cwd.clone()),
         lifecycle: lifecycle.clone(),
-        workspace_claim_binding: execution.workspace_claim_binding.clone(),
+        workspace_claim_binding: request.workspace_claim_binding.clone(),
         workspace_owner_lease: workspace_owner_lease.clone(),
     };
     let execution_controller_run_id = lifecycle
         .as_ref()
         .and_then(|lifecycle| lifecycle.durable_run_id.clone());
-    let execution_controller_attempt_id = execution
-        .metadata
-        .as_ref()
+    let execution_controller_attempt_id = execution_metadata
         .and_then(|metadata| metadata.get("controller_attempt_id"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let execution_accepted_handoff_id = execution
-        .metadata
-        .as_ref()
+    let execution_accepted_handoff_id = execution_metadata
         .and_then(|metadata| metadata.get("accepted_handoff_id"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);

@@ -108,6 +108,22 @@ impl RunnerContinuationProvider for IntentReplayProvider {
         Ok(job)
     }
 
+    fn submit_reverse_broker_envelope_job(
+        &self,
+        _runner_id: &str,
+        request: homeboy_runner_contract::RunnerApiSubmitRequest,
+    ) -> Result<Job> {
+        let job = self.store.submit_runner_api_request(request)?;
+        self.submitted.lock().expect("submission log").push(job.id);
+        let mut fail = self.fail_after_accept_once.lock().expect("fault flag");
+        if std::mem::take(&mut *fail) {
+            return Err(Error::internal_unexpected(
+                "injected post-accept pre-ack crash",
+            ));
+        }
+        Ok(job)
+    }
+
     fn lookup_reverse_broker_submission(
         &self,
         _runner_id: &str,

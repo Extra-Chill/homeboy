@@ -995,7 +995,7 @@ impl JobStore {
                     .map(|remote| {
                         super::super::summary::active_runner_job_summary(
                             &stored.job,
-                            &remote.request().expect("remote runner representation"),
+                            &remote.envelope().expect("remote runner representation"),
                             now,
                         )
                     })
@@ -1048,10 +1048,10 @@ impl JobStore {
                 stored.job.status == JobStatus::Failed && stored.job.stale_reason.is_some()
             })
             .filter_map(|stored| {
-                let request = stored.remote_runner.as_ref()?.request().ok()?;
+                let envelope = stored.remote_runner.as_ref()?.envelope().ok()?;
                 Some(super::super::summary::active_runner_job_summary(
                     &stored.job,
-                    &request,
+                    &envelope,
                     now,
                 ))
             })

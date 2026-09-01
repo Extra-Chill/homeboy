@@ -275,7 +275,7 @@ fn run_once_output(
             )
         })?
         .verify()?;
-    if claim.request.requires_workspace_claim_protocol() {
+    if claim.workspace_claim_binding.is_some() {
         claim
             .workspace_claim_protocol
             .as_ref()
@@ -289,7 +289,7 @@ fn run_once_output(
             })?
             .verify()?;
     }
-    if claim.request.requires_workspace_owner_lease_protocol() {
+    if claim.workspace_owner_lease.is_some() {
         claim
             .workspace_owner_lease_protocol
             .as_ref()
@@ -303,7 +303,7 @@ fn run_once_output(
             })?
             .verify()?;
     }
-    let execution_context = execution_context.verify_claim(&claim.job, &claim.request)?;
+    let execution_context = execution_context.verify_claim(&claim.job, &claim.envelope)?;
 
     // Commit runner-owned evidence before materializing any broker input. The
     // controller persists the same identity in its claim event; keeping both
@@ -334,15 +334,15 @@ fn run_once_output(
             "phase": "runner_job_execution_context_verified",
             "runner_job_execution_context": execution_context.evidence_record()?,
         }),
-        claim.request.workspace_claim_binding.as_ref(),
-        claim.request.workspace_owner_lease.as_ref(),
+        claim.workspace_claim_binding.as_ref(),
+        claim.workspace_owner_lease.as_ref(),
     )?;
     let heartbeat = start_claim_heartbeat(
         &client,
         &options,
         &claim.job,
-        claim.request.workspace_claim_binding.clone(),
-        claim.request.workspace_owner_lease.clone(),
+        claim.workspace_claim_binding.clone(),
+        claim.workspace_owner_lease.clone(),
     )?;
     let current_owner_lease = heartbeat.owner_lease_handle();
     // Remote capability-parity preflight: validate that this runner can satisfy
@@ -350,8 +350,15 @@ fn run_once_output(
     // starting execution, so a missing tool fails before remote dispatch instead
     // of mid-run (#5093). The local worker execution path runs this preflight
     // before handing the claimed job directly to the local runtime.
-    let capability_preflight = reverse_worker_capability_preflight(&claim.request);
+    let capability_preflight = reverse_worker_capability_preflight(&claim.envelope);
     let mut execution_envelope = claim.envelope.clone();
+    let lab_runner_workload = lab_runner_workload_from_execution_envelope(&execution_envelope)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("decode claimed runner workload".to_string()),
+            )
+        })?;
     // Authorize the exact durable owner lease immediately before any workspace,
     // private-file, or source materialization. This intentionally does not consume
     // the receipt; consume remains at the provider-invocation boundary below.
@@ -388,7 +395,7 @@ fn run_once_output(
             &options.runner_id,
             &claim.job,
             result,
-            claim.request.workspace_claim_binding.as_ref(),
+            claim.workspace_claim_binding.as_ref(),
             current_owner_lease
                 .lock()
                 .expect("owner lease lock")
@@ -401,7 +408,7 @@ fn run_once_output(
     let progress_client = client.clone();
     let progress_options = options.clone();
     let progress_job = claim.job.clone();
-    let progress_workspace_claim_binding = claim.request.workspace_claim_binding.clone();
+    let progress_workspace_claim_binding = claim.workspace_claim_binding.clone();
     let progress_owner_lease = current_owner_lease.clone();
     let progress_sink = Arc::new(move |data| {
         append_progress_data(
@@ -442,7 +449,7 @@ fn run_once_output(
                 &options.runner_id,
                 &claim.job,
                 recovered.id(),
-                claim.request.workspace_claim_binding.as_ref(),
+                claim.workspace_claim_binding.as_ref(),
                 current_owner_lease
                     .lock()
                     .expect("owner lease lock")
@@ -525,7 +532,7 @@ fn run_once_output(
     let job = finish(remote_runner_result_from_exec_output(
         exec_output,
         exit_code,
-        claim.request.lab_runner_workload.clone(),
+        lab_runner_workload,
     ))?;
 
     Ok((
