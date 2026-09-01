@@ -27,8 +27,8 @@ use homeboy_extension_contract::api::v1::{
     EXTENSION_API_READINESS_RESPONSE_SCHEMA, EXTENSION_API_RECIPE_RUN_PLAN_REQUEST_SCHEMA,
     EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
     EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
-    EXTERNAL_CHECK_DETAIL_RESOLVER_CAPABILITY_PREFIX, FINGERPRINT_FILE_CAPABILITY_PREFIX,
-    FINGERPRINT_INPUT_SCHEMA, FINGERPRINT_OUTPUT_SCHEMA, FORMAT_FILE_CAPABILITY_PREFIX,
+    EXTERNAL_CHECK_DETAIL_RESOLVER_CAPABILITY_PREFIX, FINGERPRINT_INPUT_SCHEMA,
+    FINGERPRINT_OUTPUT_SCHEMA, FORMAT_FILE_CAPABILITY_PREFIX,
     RECIPE_RUN_PROVIDER_CAPABILITY_PREFIX, REFACTOR_ANALYSIS_INPUT_SCHEMA,
     REFACTOR_ANALYSIS_OUTPUT_SCHEMA, REFACTOR_FILE_CAPABILITY_PREFIX,
 };
@@ -122,34 +122,13 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
             EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA,
         ));
     }
-    if extension.compiler_warnings_script().is_some() {
-        capabilities.push(schema_capability_descriptor(
-            COMPILER_WARNINGS_CAPABILITY_ID,
-            COMPILER_WARNINGS_INPUT_SCHEMA,
-            COMPILER_WARNINGS_OUTPUT_SCHEMA,
-        ));
-    }
-    if extension.compiler_warning_fixes_script().is_some() {
-        capabilities.push(schema_capability_descriptor(
-            COMPILER_WARNING_FIXES_CAPABILITY_ID,
-            COMPILER_WARNING_FIXES_INPUT_SCHEMA,
-            COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
-        ));
-    }
-    if extension.fingerprint_script().is_some() {
-        capabilities.extend(
-            extension
-                .provided_file_extensions()
-                .iter()
-                .map(|file_extension| {
-                    schema_capability_descriptor(
-                        &format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}{file_extension}"),
-                        FINGERPRINT_INPUT_SCHEMA,
-                        FINGERPRINT_OUTPUT_SCHEMA,
-                    )
-                }),
-        );
-    }
+    // Advertised JSON-stdin capabilities come from the manifest contract, which
+    // is the same source API invocation resolves through, so an advertised
+    // capability is always invocable.
+    capabilities.extend(extension.json_capability_ids().iter().map(|capability_id| {
+        let (input_schema, output_schema) = json_capability_schemas(capability_id);
+        schema_capability_descriptor(capability_id, input_schema, output_schema)
+    }));
     if extension.format_script().is_some() {
         capabilities.extend(
             extension
@@ -159,20 +138,6 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
                     capability_descriptor(&format!(
                         "{FORMAT_FILE_CAPABILITY_PREFIX}{file_extension}"
                     ))
-                }),
-        );
-    }
-    if extension.refactor_script().is_some() {
-        capabilities.extend(
-            extension
-                .provided_file_extensions()
-                .iter()
-                .map(|file_extension| {
-                    schema_capability_descriptor(
-                        &format!("{REFACTOR_FILE_CAPABILITY_PREFIX}{file_extension}"),
-                        REFACTOR_ANALYSIS_INPUT_SCHEMA,
-                        REFACTOR_ANALYSIS_OUTPUT_SCHEMA,
-                    )
                 }),
         );
     }
@@ -252,6 +217,28 @@ fn negotiate_api(
 ) -> Result<ExtensionApiHandshakeResponse> {
     let descriptor = api_descriptor(extension_id)?;
     Ok(negotiate_descriptor(descriptor, request))
+}
+
+/// Input and output schema references for one JSON-stdin capability id.
+fn json_capability_schemas(capability_id: &str) -> (&'static str, &'static str) {
+    if capability_id == COMPILER_WARNINGS_CAPABILITY_ID {
+        (
+            COMPILER_WARNINGS_INPUT_SCHEMA,
+            COMPILER_WARNINGS_OUTPUT_SCHEMA,
+        )
+    } else if capability_id == COMPILER_WARNING_FIXES_CAPABILITY_ID {
+        (
+            COMPILER_WARNING_FIXES_INPUT_SCHEMA,
+            COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
+        )
+    } else if capability_id.starts_with(REFACTOR_FILE_CAPABILITY_PREFIX) {
+        (
+            REFACTOR_ANALYSIS_INPUT_SCHEMA,
+            REFACTOR_ANALYSIS_OUTPUT_SCHEMA,
+        )
+    } else {
+        (FINGERPRINT_INPUT_SCHEMA, FINGERPRINT_OUTPUT_SCHEMA)
+    }
 }
 
 fn negotiate_descriptor(
