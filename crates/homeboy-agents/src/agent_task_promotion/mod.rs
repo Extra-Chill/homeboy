@@ -28,7 +28,9 @@ pub(crate) use promote::emit_promotion_progress;
 pub(crate) use promote::with_gate_supervision;
 pub use promote::{canonical_recoverable_patch_artifacts, CanonicalRecoverablePatchArtifacts};
 pub(crate) use promote::{
-    canonical_recoverable_patch_artifacts_in_observation_store,
+    canonical_recoverable_patch_artifacts_in_observation_store, outcome_has_patch_artifacts,
+    preflight_patch_artifact_admission_in_observation_store,
+    preflight_recoverable_candidate_promotion_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store,
 };

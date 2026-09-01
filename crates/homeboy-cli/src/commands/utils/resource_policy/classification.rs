@@ -75,6 +75,9 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Cook(cook) if cook.dispatch.core.queue_only => {
             AgentTaskResourceBehavior::LocalControl
         }
+        agent_task::AgentTaskCommand::CookContinue(args) if args.preflight => {
+            AgentTaskResourceBehavior::BoundedMetadataRead
+        }
         agent_task::AgentTaskCommand::Cook(_)
         | agent_task::AgentTaskCommand::CookContinue(_)
         | agent_task::AgentTaskCommand::RunPlan(_)

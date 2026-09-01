@@ -1846,7 +1846,42 @@ pub fn terminal_artifact_projection_readiness_bounded_in_store(
         &record,
         lifecycle_store.read_aggregate_bounded(&record.run_id),
         |record, aggregate| {
-            terminal_artifact_projection_is_verified_in_store(lifecycle_store, record, aggregate)
+            terminal_artifact_projection_is_verified_with(record, aggregate, || {
+                lifecycle_store.open_observation_readonly()
+            })
+        },
+    )
+}
+
+/// Read-only promotion-path counterpart that preserves execution's mirrored
+/// aggregate preference while avoiding observation-store initialization.
+pub fn terminal_artifact_projection_readiness_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let (record, aggregate) =
+        lifecycle_store.read_record_with_aggregate_bounded(&super::sanitize_run_id(run_id))?;
+    terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+        lifecycle_store,
+        &record,
+        aggregate.as_ref(),
+    )
+}
+
+pub fn terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Result<Option<String>> {
+    terminal_artifact_projection_readiness_for_record_with(
+        record,
+        aggregate
+            .cloned()
+            .ok_or_else(|| Error::internal_unexpected("authoritative aggregate mirror is absent")),
+        |record, aggregate| {
+            terminal_artifact_projection_is_verified_with(record, aggregate, || {
+                lifecycle_store.open_observation_readonly()
+            })
         },
     )
 }
@@ -2652,13 +2687,15 @@ pub fn verified_controller_artifact_projection_path_in_store(
             None,
         ));
     }
-    if !matches!(
-        candidate
-            .metadata_json
-            .pointer("/agent_task/projection")
-            .and_then(serde_json::Value::as_str),
-        Some("controller_local" | "controller_finalized" | "runner_mirrored")
-    ) {
+    if !store.is_readonly()
+        && !matches!(
+            candidate
+                .metadata_json
+                .pointer("/agent_task/projection")
+                .and_then(serde_json::Value::as_str),
+            Some("controller_local" | "controller_finalized" | "runner_mirrored")
+        )
+    {
         candidate.metadata_json["agent_task"]["projection"] = json!("controller_local");
         store.update_artifact_metadata(&candidate.id, candidate.metadata_json)?;
     }

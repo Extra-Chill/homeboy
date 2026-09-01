@@ -1941,7 +1941,7 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
                 record.map(|record| record.run_id)
             }
             crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
-                if matches!(cli.placement, crate::cli_surface::Placement::Local) {
+                if args.preflight || matches!(cli.placement, crate::cli_surface::Placement::Local) {
                     return Ok(None);
                 }
                 return delegate_cook_continue_to_pinned_runtime(
@@ -3780,6 +3780,24 @@ mod tests {
         assert!(error
             .message
             .contains("omitted both capabilities and failure"));
+    }
+
+    #[test]
+    fn cook_continue_preflight_never_delegates_to_a_pinned_runtime() {
+        let argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook-continue".to_string(),
+            "missing-attempt".to_string(),
+            "--preflight".to_string(),
+        ];
+        let cli = Cli::try_parse_from(&argv).expect("parse continuation preflight");
+
+        assert_eq!(
+            delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &argv)
+                .expect("preflight remains in the current read-only runtime"),
+            None
+        );
     }
 
     struct AdmissionFixtureCapability;

@@ -1606,6 +1606,36 @@ mod tests {
     }
 
     #[test]
+    fn continuation_preflight_is_controller_only_and_resource_exempt() {
+        use crate::core::parsed_command_preflight::{
+            ControllerExecution, ResourceAdmissionRequirement,
+        };
+
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "missing-cook",
+            "--preflight",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let cli = Cli::parse_from(&args);
+        let preflight = parsed_command_preflight_input(&cli, &args);
+
+        assert_eq!(
+            preflight.controller_execution,
+            ControllerExecution::ControllerOnly
+        );
+        assert_eq!(
+            preflight.resource_admission,
+            ResourceAdmissionRequirement::Exempt
+        );
+        assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
     fn agent_task_cook_batch_dry_run_does_not_start_hot_workloads() {
         let cli = Cli::parse_from([
             "homeboy",

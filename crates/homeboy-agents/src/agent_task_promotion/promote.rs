@@ -260,43 +260,20 @@ fn resume_promoted_patch_internal<'a>(
     gate_workspace: Option<&Path>,
     before_gates: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
 ) -> Result<AgentTaskPromotionReport> {
-    validate_resume_provenance(&options, target_path, previous)?;
-    let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
-        Error::validation_invalid_json(
-            error,
-            Some("agent-task promotion source".to_string()),
-            Some(options.source.clone()),
-        )
-    })?;
-    let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
-    let artifact = select_patch_artifact(&outcome, options.artifact_id.as_deref())?;
-    let patch_path = resolve_artifact_path(
-        &artifact,
-        &outcome.task_id,
-        options.source_run_id.as_deref(),
-        options.source_path.as_deref(),
-        observation_store,
-    )?;
-    let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("read patch artifact {}", patch_path.display())),
-        )
-    })?;
-    validate_artifact_content(&artifact, &patch)?;
-    validate_resume_candidate(
+    let ResumePromotedPatchAdmission {
+        source_kind,
+        outcome,
+        artifact,
+        patch_path,
+        normalized_patch,
+        command_evidence,
+    } = resume_promoted_patch_admission(
         &options,
         target_path,
         previous,
-        &outcome,
-        &artifact,
+        observation_store,
         replacement_gates,
     )?;
-    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
-    let command_evidence = vec![verify_patch_is_present(
-        target_path,
-        &normalized_patch.content,
-    )?];
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
     // A resumed checkpoint verifies the already-applied candidate. Its base is
     // the immutable observation made before apply, not a new moving origin read.
@@ -389,6 +366,106 @@ fn resume_promoted_patch_internal<'a>(
         report.provenance["worktree_provider"] = provenance.clone();
     }
     Ok(report)
+}
+
+struct ResumePromotedPatchAdmission {
+    source_kind: String,
+    outcome: AgentTaskOutcome,
+    artifact: AgentTaskArtifact,
+    patch_path: PathBuf,
+    normalized_patch: super::patch::NormalizedPromotionPatch,
+    command_evidence: Vec<AgentTaskPromotionCommandReport>,
+}
+
+struct PatchArtifactAdmission {
+    path: PathBuf,
+    patch: String,
+    normalized_patch: Option<super::patch::NormalizedPromotionPatch>,
+}
+
+fn patch_artifact_admission(
+    artifact: &AgentTaskArtifact,
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<PatchArtifactAdmission> {
+    let path = resolve_artifact_path(
+        artifact,
+        &outcome.task_id,
+        options.source_run_id.as_deref(),
+        options.source_path.as_deref(),
+        observation_store,
+    )?;
+    let patch = std::fs::read_to_string(&path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read patch artifact {}", path.display())),
+        )
+    })?;
+    validate_artifact_content(artifact, &patch)?;
+    let normalized_patch = (!patch.trim().is_empty())
+        .then(|| normalize_promotion_patch(&patch, &options.to_worktree))
+        .transpose()?;
+    Ok(PatchArtifactAdmission {
+        path,
+        patch,
+        normalized_patch,
+    })
+}
+
+pub(crate) fn preflight_patch_artifact_admission_in_observation_store(
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskArtifact> {
+    let artifact = select_patch_artifact(outcome, options.artifact_id.as_deref())?;
+    patch_artifact_admission(&artifact, outcome, options, observation_store)?;
+    Ok(artifact)
+}
+
+fn resume_promoted_patch_admission(
+    options: &AgentTaskPromotionOptions,
+    target_path: &Path,
+    previous: &Value,
+    observation_store: &homeboy_core::observation::ObservationStore,
+    replacement_gates: bool,
+) -> Result<ResumePromotedPatchAdmission> {
+    validate_resume_provenance(options, target_path, previous)?;
+    let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some("agent-task promotion source".to_string()),
+            Some(options.source.clone()),
+        )
+    })?;
+    let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
+    let artifact = select_patch_artifact(&outcome, options.artifact_id.as_deref())?;
+    let PatchArtifactAdmission {
+        path: patch_path,
+        patch: _,
+        normalized_patch,
+    } = patch_artifact_admission(&artifact, &outcome, &options, observation_store)?;
+    validate_resume_candidate(
+        options,
+        target_path,
+        previous,
+        &outcome,
+        &artifact,
+        replacement_gates,
+    )?;
+    let normalized_patch = normalized_patch.expect("non-empty admitted patches are normalized");
+    let command_evidence = vec![verify_patch_is_present(
+        target_path,
+        &normalized_patch.content,
+    )?];
+    Ok(ResumePromotedPatchAdmission {
+        source_kind,
+        outcome,
+        artifact,
+        patch_path,
+        normalized_patch,
+        command_evidence,
+    })
 }
 
 fn validate_resume_provenance(
@@ -776,12 +853,20 @@ fn promote_with_provider_and_checkpoint_internal(
         );
     }
 
-    let artifact = match if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
-        select_recoverable_patch_artifact(&outcome, &options, observation_store)
+    let admission = if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
+        recoverable_candidate_promotion_admission(
+            &source_for_provenance,
+            &outcome,
+            &options,
+            observation_store,
+        )
+        .map(|admission| (admission.artifact.clone(), Some(admission)))
     } else {
         select_patch_artifact(&outcome, options.artifact_id.as_deref())
-    } {
-        Ok(artifact) => artifact,
+            .map(|artifact| (artifact, None))
+    };
+    let (artifact, recoverable_admission) = match admission {
+        Ok(admission) => admission,
         Err(error) if options.artifact_id.is_none() && !outcome_has_patch_artifacts(&outcome) => {
             if let Some(committed_patch) = committed_changes_patch(&options)? {
                 return promote_committed_changes(
@@ -799,40 +884,28 @@ fn promote_with_provider_and_checkpoint_internal(
         }
         Err(error) => return Err(error),
     };
-    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
-        && !has_recoverable_candidate_provenance(&options, &outcome, &artifact)
-    {
-        return Err(Error::validation_invalid_argument(
-            "artifact_id",
-            "recoverable-candidate promotion requires a fingerprinted artifact bound to its producing run, task, base, and workspace",
-            Some(artifact.id.clone()),
-            None,
-        ));
-    }
-    let gate_feedback_baseline = bind_gate_feedback_baseline_internal(
-        gate_feedback_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?,
-        observation_store,
-    )?;
-    let promotion_chain_baseline =
-        promotion_chain_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
+    let (gate_feedback_baseline, promotion_chain_baseline) = match recoverable_admission {
+        Some(admission) => (
+            admission.gate_feedback_baseline,
+            admission.promotion_chain_baseline,
+        ),
+        None => (
+            bind_gate_feedback_baseline_internal(
+                gate_feedback_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?,
+                observation_store,
+            )?,
+            promotion_chain_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?,
+        ),
+    };
     let destination_baseline = promotion_chain_baseline
         .as_ref()
         .or(gate_feedback_baseline.as_ref())
         .cloned();
-    let patch_path = resolve_artifact_path(
-        &artifact,
-        &outcome.task_id,
-        options.source_run_id.as_deref(),
-        options.source_path.as_deref(),
-        observation_store,
-    )?;
-    let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("read patch artifact {}", patch_path.display())),
-        )
-    })?;
-    validate_artifact_content(&artifact, &patch)?;
+    let PatchArtifactAdmission {
+        path: patch_path,
+        patch,
+        normalized_patch,
+    } = patch_artifact_admission(&artifact, &outcome, &options, observation_store)?;
     if patch.trim().is_empty() {
         if let Some(committed_patch) = committed_changes_patch(&options)? {
             return promote_committed_changes(
@@ -932,7 +1005,7 @@ fn promote_with_provider_and_checkpoint_internal(
             operator_notification,
         });
     }
-    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let normalized_patch = normalized_patch.expect("non-empty admitted patches are normalized");
     let changed_files = normalized_patch.changed_files.clone();
     // Resolving the destination is a worktree-safety question: is the dirt in
     // that checkout this promotion's own candidate, or someone else's work?
@@ -1399,7 +1472,7 @@ fn source_canonical_artifact<'a>(
     Ok(artifact)
 }
 
-fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
+pub(crate) fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
     outcome
         .artifacts
         .iter()
@@ -1440,6 +1513,69 @@ fn has_recoverable_candidate_provenance(
         && options.task_base_sha.as_deref().is_none_or(|base_ref| {
             artifact.metadata.get("base_ref").and_then(Value::as_str) == Some(base_ref)
         })
+}
+
+struct RecoverableCandidatePromotionAdmission {
+    artifact: AgentTaskArtifact,
+    gate_feedback_baseline: Option<Value>,
+    promotion_chain_baseline: Option<Value>,
+}
+
+/// Perform the complete read-only admission that recoverable-candidate
+/// promotion uses before resolving or mutating its destination.
+fn recoverable_candidate_promotion_admission(
+    source: &Value,
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<RecoverableCandidatePromotionAdmission> {
+    let artifact = select_recoverable_patch_artifact(outcome, options, observation_store)?;
+    if !has_recoverable_candidate_provenance(options, outcome, &artifact) {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "recoverable-candidate promotion requires a fingerprinted artifact bound to its producing run, task, base, and workspace",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    let gate_feedback_baseline = bind_gate_feedback_baseline_internal(
+        gate_feedback_baseline_for_artifact(source, outcome, &artifact)?,
+        observation_store,
+    )?;
+    let promotion_chain_baseline =
+        promotion_chain_baseline_for_artifact(source, outcome, &artifact)?;
+    Ok(RecoverableCandidatePromotionAdmission {
+        artifact,
+        gate_feedback_baseline,
+        promotion_chain_baseline,
+    })
+}
+
+pub(crate) fn preflight_recoverable_candidate_promotion_in_observation_store(
+    options: &AgentTaskPromotionOptions,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskArtifact> {
+    validate_workspace_handle(&options.to_worktree)?;
+    let source: Value = serde_json::from_str(&options.source).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some("agent-task promotion source".to_string()),
+            Some(options.source.clone()),
+        )
+    })?;
+    let (_, outcome) = select_outcome(source.clone(), options.task_id.as_deref())?;
+    if outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            "recoverable-candidate promotion admission requires a recoverable-candidate outcome",
+            Some(outcome.task_id),
+            None,
+        ));
+    }
+    Ok(
+        recoverable_candidate_promotion_admission(&source, &outcome, options, observation_store)?
+            .artifact,
+    )
 }
 
 fn valid_sha256(value: &str) -> bool {

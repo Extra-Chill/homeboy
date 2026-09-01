@@ -249,7 +249,7 @@ pub struct CookContinueArgs {
     #[arg(long)]
     pub preflight: bool,
     /// Explicitly rearm one failed terminal continuation before consuming it.
-    #[arg(long, conflicts_with = "preflight")]
+    #[arg(long)]
     pub rearm: bool,
     /// Select the patch artifact to promote when the durable attempt produced
     /// more than one patch candidate. This resumes controller-side promotion
@@ -275,6 +275,52 @@ pub struct CookContinueArgs {
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
+}
+
+#[cfg(test)]
+mod cook_continue_tests {
+    use clap::Parser;
+
+    use crate::{
+        cli_surface::{Cli, Commands},
+        commands::agent_task::AgentTaskCommand,
+    };
+
+    #[test]
+    fn continuation_preflight_parses_the_public_rearm_and_artifact_path() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "run-a",
+            "--preflight",
+            "--rearm",
+            "--artifact-id",
+            "patch-a",
+            "--full",
+        ])
+        .expect("continuation rearm preflight parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::CookContinue(args) = agent_task.command else {
+            panic!("expected cook-continue command");
+        };
+        assert!(args.preflight);
+        assert!(args.rearm);
+        assert_eq!(args.artifact_id.as_deref(), Some("patch-a"));
+        assert!(args.full);
+
+        for rejected in [
+            vec!["--preflight", "--timeout-ms", "1000"],
+            vec!["--rearm", "--timeout-ms", "1000"],
+            vec!["--artifact-id", "patch-a", "--timeout-ms", "1000"],
+        ] {
+            let mut argv = vec!["homeboy", "agent-task", "cook-continue", "run-a"];
+            argv.extend(rejected);
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+    }
 }
 
 #[derive(Args, Debug)]

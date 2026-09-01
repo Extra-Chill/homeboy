@@ -1348,7 +1348,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
                 .expect("phases")
                 .last()
                 .expect("blocked")["phase"],
-            "model_provenance"
+            "candidate_admission"
         );
         assert!(report["phases"]
             .as_array()
@@ -1465,16 +1465,19 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
         })
         .expect("preflight evaluates pre-execution retry");
 
-        assert_eq!(exit_code, 1, "{report:#}");
-        assert_eq!(report["admitted"], false);
+        assert_eq!(exit_code, 0, "{report:#}");
+        assert_eq!(report["admitted"], true);
+        assert_eq!(report["pre_dispatch_admitted"], true);
+        assert_eq!(report["status"], "admitted");
+        assert_eq!(report["execution_required"], true);
         assert_eq!(report["selected_attempt"]["run_id"], run_id);
         let phases = report["phases"].as_array().expect("phases");
         assert!(phases
             .iter()
             .all(|phase| phase["phase"] != "model_provenance"));
         assert_eq!(
-            phases.last().expect("workspace boundary")["phase"],
-            "provider_workspace_baseline",
+            phases.last().expect("execution boundary")["phase"],
+            "execution_only",
             "{report:#}"
         );
     });
@@ -1872,10 +1875,12 @@ fn cook_continue_selects_a_recoverable_candidate_without_provider_redispatch() {
                 .expect("local origin configured");
         }
         let provider = workspace.path().join("worktree-provider.sh");
+        let provider_invocations = workspace.path().join("worktree-provider.invoked");
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@recoverable\",\"path\":\"{}\",\"branch\":\"main\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@recoverable\",\"path\":\"{}\",\"branch\":\"main\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                provider_invocations.display(),
                 workspace.path().display()
             ),
         )
@@ -1929,15 +1934,18 @@ fn cook_continue_selects_a_recoverable_candidate_without_provider_redispatch() {
         .unwrap();
         let promotion_provider = workspace.path().join("promotion-provider.sh");
         let provider_patch = workspace.path().join("provider.patch");
+        let promotion_provider_invocations = workspace.path().join("promotion-provider.invoked");
         std::fs::write(
             &promotion_provider,
             format!(
                 r#"#!/bin/sh
 set -eu
+touch '{}'
 python3 -c 'import json,sys; open(sys.argv[1], "w").write(json.load(sys.stdin)["patch"])' '{}'
 git -C '{}' apply '{}'
 printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","workspace_path":"{}"}}'
 "#,
+                promotion_provider_invocations.display(),
                 provider_patch.display(),
                 workspace.path().display(),
                 provider_patch.display(),
@@ -1972,13 +1980,24 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
             run_id,
         )
         .unwrap();
+        let candidate_base_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(workspace.path())
+                .output()
+                .expect("resolve candidate base")
+                .stdout,
+        )
+        .expect("candidate base is UTF-8")
+        .trim()
+        .to_string();
         let provenance = |id: &str, path: &std::path::Path, patch: &str| AgentTaskArtifact {
             id: id.to_string(),
             kind: "patch".to_string(),
             path: Some(path.display().to_string()),
             size_bytes: Some(patch.len() as u64),
             sha256: Some(format!("{:x}", Sha256::digest(patch.as_bytes()))),
-            metadata: json!({"task_id":"provider","run_id":run_id,"producer_attempt":1,"base_ref":"main","provider_backend":"fixture","provider_model":"fixture-model","repository_identity":"fixture","workspace_identity":"fixture"}),
+            metadata: json!({"task_id":"provider","run_id":run_id,"producer_attempt":1,"base_ref":candidate_base_sha,"provider_backend":"fixture","provider_model":"fixture-model","repository_identity":"fixture","workspace_identity":"fixture"}),
             ..Default::default()
         };
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &AgentTaskAggregate { schema: "homeboy/agent-task-aggregate/v1".to_string(), plan_id: plan.plan_id.clone(), status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable, totals: Default::default(), outcomes: vec![AgentTaskOutcome { schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(), task_id: "provider".to_string(), status: AgentTaskOutcomeStatus::CandidateRecoverable, summary: None, failure_classification: None, artifacts: vec![provenance("selected", &selected, selected_patch), provenance("alternate", &alternate, &std::fs::read_to_string(&alternate).unwrap()), AgentTaskArtifact { id: "mime-shaped".to_string(), kind: "log".to_string(), mime: Some("text/x-patch".to_string()), path: Some(workspace.path().join("missing.patch").display().to_string()), size_bytes: Some(1), sha256: Some("a".repeat(64)), metadata: json!({"actionable": false}), ..Default::default() }], typed_artifacts: Vec::new(), evidence_refs: Vec::new(), diagnostics: Vec::new(), outputs: Value::Null, workflow: None, follow_up: None, metadata: json!({"model": "fixture-model"}) }], events: Vec::new(), artifact_lineage: Vec::new(), child_runs: Vec::new(), artifact_bindings: Vec::new(), queue: Default::default() }).unwrap();
@@ -2077,6 +2096,178 @@ printf '%s\n' '{{"schema":"homeboy/agent-task-promotion-apply-response/v1","work
         )
         .unwrap();
         assert_eq!(invalid.1, 1);
+        let _ = std::fs::remove_file(&provider_invocations);
+        let _ = std::fs::remove_file(&promotion_provider_invocations);
+        let before_preflight =
+            filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root"));
+        let (blocked_preflight, blocked_exit) =
+            super::super::run::preflight_continue_cook(CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: true,
+                rearm: true,
+                artifact_id: Some("mime-shaped".to_string()),
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                full: true,
+            })
+            .expect("preflight rejects the same invalid artifact as promotion");
+        assert_eq!(blocked_exit, 1);
+        assert_eq!(blocked_preflight["admitted"], false);
+        assert!(!provider_invocations.exists());
+        assert!(!promotion_provider_invocations.exists());
+        assert!(blocked_preflight["continuation_command"]
+            .as_str()
+            .expect("blocked rearm command")
+            .contains("--rearm"));
+        assert_eq!(
+            blocked_preflight["phases"]
+                .as_array()
+                .expect("blocked phases")
+                .last()
+                .expect("candidate denial")["phase"],
+            "candidate_admission"
+        );
+        assert_eq!(
+            filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
+            before_preflight
+        );
+        let (preflight, preflight_exit) =
+            super::super::run::preflight_continue_cook(CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: true,
+                rearm: true,
+                artifact_id: Some("selected".to_string()),
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                full: true,
+            })
+            .expect("preflight admits deterministic checks for the retained candidate");
+        assert_eq!(preflight_exit, 0, "{preflight:#}");
+        assert_eq!(preflight["admitted"], true);
+        assert_eq!(preflight["pre_dispatch_admitted"], true);
+        assert_eq!(preflight["status"], "admitted");
+        assert_eq!(preflight["execution_required"], true);
+        assert!(!provider_invocations.exists());
+        assert!(!promotion_provider_invocations.exists());
+        assert_eq!(
+            preflight["candidate_fingerprint"]["schema"],
+            "homeboy/agent-task-recoverable-candidate-fingerprint/v1"
+        );
+        assert_eq!(
+            preflight["candidate_fingerprint"]["artifact_id"],
+            "selected"
+        );
+        assert_eq!(
+            preflight["candidate_fingerprint"]["sha256"],
+            format!("{:x}", Sha256::digest(selected_patch.as_bytes()))
+        );
+        assert_eq!(preflight["candidate_fingerprint"]["run_id"], run_id);
+        assert_eq!(
+            filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
+            before_preflight
+        );
+        let persisted_candidate = json!({
+            "schema": "homeboy/agent-task-recoverable-candidate-fingerprint/v1",
+            "artifact_id": "selected",
+            "sha256": format!("{:x}", Sha256::digest(selected_patch.as_bytes())),
+        });
+        let persisted = json!({
+            "schema":"homeboy/agent-task-promotion-report/v1",
+            "status":"verification_pending",
+            "source":{"kind":"aggregate","task_id":"provider","run_id":run_id},
+            "to_worktree":"fixture@recoverable",
+            "target":{"worktree":"fixture@recoverable","path":workspace.path()},
+            "patch_artifact":{"id":"selected","kind":"patch","path":selected,"sha256":format!("{:x}", Sha256::digest(selected_patch.as_bytes())),"size_bytes":selected_patch.len()},
+            "provenance":{"post_apply":true,"candidate":persisted_candidate},
+            "operator_notification":{"status":"blocked","message":"pending"}
+        });
+        agent_task_lifecycle::record_promotion(run_id, persisted).unwrap();
+        let loaded = homeboy::agents::agent_task_service::preflight_cook_promotion_in_store(
+            &test_lifecycle_store(),
+            &options,
+            run_id,
+            Some("mime-shaped"),
+        )
+        .expect("verification-pending promotion is observed without executing Git verification");
+        assert_eq!(loaded["behavior"], "resume_verification_pending");
+        assert_eq!(loaded["artifact_id"], "selected");
+        assert_eq!(
+            loaded["execution_only_checks"],
+            json!([
+                "promotion_target_resolution",
+                "patch_presence",
+                "verification_gates",
+                "cook_loop_evaluation"
+            ])
+        );
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .expect("record metadata")
+                .remove("latest_promotion");
+        })
+        .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"] = json!([
+                {"task_id":"provider","attempt":1,"state":"candidate_recoverable","model":"model-a"},
+                {"task_id":"provider","attempt":1,"state":"candidate_recoverable","model":"model-b"}
+            ]);
+        })
+        .unwrap();
+        let model_error = homeboy::agents::agent_task_service::preflight_cook_promotion_in_store(
+            &test_lifecycle_store(),
+            &options,
+            run_id,
+            Some("selected"),
+        )
+        .expect_err("ambiguous terminal ledger models fail preflight");
+        assert_eq!(model_error.details["field"], "provider_model");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .expect("record metadata")
+                .remove("provider_executions");
+        })
+        .unwrap();
+        let original_aggregate = test_lifecycle_store().read_aggregate(run_id).unwrap();
+        let mut succeeded_aggregate = original_aggregate.clone();
+        succeeded_aggregate.status =
+            homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded;
+        succeeded_aggregate.outcomes[0].status = AgentTaskOutcomeStatus::Succeeded;
+        let mut committed_candidate_aggregate = succeeded_aggregate.clone();
+        committed_candidate_aggregate.outcomes[0].artifacts.clear();
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &committed_candidate_aggregate)
+            .unwrap();
+        let committed_candidate =
+            homeboy::agents::agent_task_service::preflight_cook_promotion_in_store(
+                &test_lifecycle_store(),
+                &options,
+                run_id,
+                None,
+            )
+            .expect("read-only preflight defers committed-candidate discovery");
+        assert_eq!(
+            committed_candidate["behavior"],
+            "promote_committed_candidate"
+        );
+        assert!(committed_candidate["execution_only_checks"]
+            .as_array()
+            .expect("execution-only checks")
+            .iter()
+            .any(|check| check == "committed_candidate_resolution"));
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &succeeded_aggregate).unwrap();
+        let succeeded = homeboy::agents::agent_task_service::preflight_cook_promotion_in_store(
+            &test_lifecycle_store(),
+            &options,
+            run_id,
+            Some("alternate"),
+        )
+        .expect("succeeded outcome uses the execution artifact selector");
+        assert_eq!(succeeded["behavior"], "promote_new");
+        assert_eq!(succeeded["artifact_id"], "alternate");
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &original_aggregate).unwrap();
         continue_cook_with(
             CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),

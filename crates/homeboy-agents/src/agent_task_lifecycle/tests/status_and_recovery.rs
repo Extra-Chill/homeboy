@@ -3334,6 +3334,12 @@ fn durable_aggregate_read_does_not_pair_a_record_with_an_unmirrored_cache() {
 
     assert_eq!(snapshot.record.run_id, record.run_id);
     assert!(snapshot.aggregate.is_none());
+    assert!(
+        lifecycle_store
+            .read_aggregate_readonly(&record.run_id)
+            .is_err(),
+        "read-only admission must not fall back to independently cached aggregate bytes"
+    );
     assert_eq!(snapshot.unavailable_sources.len(), 1);
     assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
     assert_eq!(
