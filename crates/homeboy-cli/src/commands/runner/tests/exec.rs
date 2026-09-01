@@ -117,6 +117,7 @@ fn synced_node_workload_receives_runner_extension_environment() {
         homeboy_core::extension::lifecycle::install(
             &extension.path().display().to_string(),
             Some("fixture"),
+            homeboy_core::extension::registry::ExtensionLifecycleValidation::declaration_only(),
         )
         .expect("install fixture extension");
         runner::create(

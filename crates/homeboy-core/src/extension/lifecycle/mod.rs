@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::extension::catalog::load_extension;
+use crate::extension::registry::ExtensionLifecycleValidation;
 
 pub(crate) const EXTENSION_SOURCE_PREPARE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -76,8 +77,12 @@ fn manifest_path_for_extension(extension_dir: &Path, id: &str) -> PathBuf {
 
 /// Install a extension from a git URL or link a local directory.
 /// Automatically detects whether source is a URL (git clone) or local path (symlink).
-pub fn install(source: &str, id_override: Option<&str>) -> Result<InstallResult> {
-    install_with_revision(source, id_override, None)
+pub fn install(
+    source: &str,
+    id_override: Option<&str>,
+    validation: ExtensionLifecycleValidation<'_>,
+) -> Result<InstallResult> {
+    install_with_revision(source, id_override, None, validation)
 }
 
 /// Install a extension from a git URL or link a local directory.
@@ -86,11 +91,12 @@ pub fn install_with_revision(
     source: &str,
     id_override: Option<&str>,
     revision: Option<&str>,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<InstallResult> {
     if is_git_url(source) {
-        install_from_url(source, id_override, revision)
+        install_from_url(source, id_override, revision, validation)
     } else {
-        install_from_path(source, id_override, None, revision)
+        install_from_path(source, id_override, None, revision, validation)
     }
 }
 
@@ -100,6 +106,7 @@ pub fn install_with_revision(
 pub fn install_for_component(
     component: &homeboy_core::component::Component,
     source: &str,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<InstallForComponentResult> {
     let extensions = component.extensions.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -131,7 +138,11 @@ pub fn install_for_component(
             continue;
         }
 
-        installed.push(install_configured_extension(source, &extension_id)?);
+        installed.push(install_configured_extension(
+            source,
+            &extension_id,
+            validation,
+        )?);
     }
 
     Ok(InstallForComponentResult {
@@ -163,6 +174,7 @@ pub fn refresh(
     source: &str,
     id_override: Option<&str>,
     revision: Option<&str>,
+    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<RefreshResult> {
     let extension_id = match id_override {
         Some(id) => slugify_id(id)?,
@@ -184,6 +196,7 @@ pub fn refresh(
             &install_source,
             Some(&extension_id),
             effective_revision,
+            validation,
         )?;
         InstallResult {
             extension_id: replaced.extension_id,
@@ -193,7 +206,12 @@ pub fn refresh(
             source_revision: replaced.source_revision,
         }
     } else {
-        install_with_revision(&install_source, Some(&extension_id), effective_revision)?
+        install_with_revision(
+            &install_source,
+            Some(&extension_id),
+            effective_revision,
+            validation,
+        )?
     };
 
     Ok(RefreshResult {
@@ -411,6 +429,7 @@ mod tests {
         register_component_install_runner, shared_assets_for_extension_source, source_metadata,
         uninstall, update,
     };
+    use crate::extension::registry::ExtensionLifecycleValidation;
     use homeboy_core::component;
     use homeboy_core::test_support::{
         with_isolated_home, write_extension_fixture, write_extension_fixture_with_version,
@@ -739,8 +758,12 @@ exec '{}' "$@"
             write_component_fixture(&component_dir, &["alpha", "beta"]);
             let component = component::discover_from_portable(&component_dir).expect("component");
 
-            let result = install_for_component(&component, &source.to_string_lossy())
-                .expect("install should succeed");
+            let result = install_for_component(
+                &component,
+                &source.to_string_lossy(),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install should succeed");
 
             let installed_ids = result
                 .installed
@@ -805,11 +828,19 @@ exec '{}' "$@"
             write_component_fixture(&component_dir, &["alpha", "beta"]);
             let component = component::discover_from_portable(&component_dir).expect("component");
 
-            install(&source.join("alpha").to_string_lossy(), Some("alpha"))
-                .expect("pre-install alpha");
+            install(
+                &source.join("alpha").to_string_lossy(),
+                Some("alpha"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("pre-install alpha");
 
-            let result = install_for_component(&component, &source.to_string_lossy())
-                .expect("install should succeed");
+            let result = install_for_component(
+                &component,
+                &source.to_string_lossy(),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install should succeed");
 
             let installed_ids = result
                 .installed
@@ -835,8 +866,12 @@ exec '{}' "$@"
 
             let component = component::discover_from_portable(&component_dir)
                 .expect("component should resolve from portable path");
-            let result = install_for_component(&component, &source.to_string_lossy())
-                .expect("install should succeed");
+            let result = install_for_component(
+                &component,
+                &source.to_string_lossy(),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install should succeed");
 
             assert_eq!(result.component_id, "multi-extension-component");
             assert_eq!(result.installed.len(), 2);
@@ -850,8 +885,13 @@ exec '{}' "$@"
             let source = home.join("source");
             write_extension_fixture(&source, "alpha");
 
-            let result = refresh(&source.join("alpha").to_string_lossy(), Some("alpha"), None)
-                .expect("first-time refresh should install");
+            let result = refresh(
+                &source.join("alpha").to_string_lossy(),
+                Some("alpha"),
+                None,
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("first-time refresh should install");
 
             assert_eq!(result.extension_id, "alpha");
             assert!(
@@ -869,13 +909,23 @@ exec '{}' "$@"
             let source = home.join("source");
             write_extension_fixture_with_version(&source, "alpha", "1.0.0");
 
-            install(&source.join("alpha").to_string_lossy(), Some("alpha")).expect("pre-install");
+            install(
+                &source.join("alpha").to_string_lossy(),
+                Some("alpha"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("pre-install");
 
             // Update the source, then refresh — the reinstall should pick it up
             // without erroring on the pre-existing install.
             write_extension_fixture_with_version(&source, "alpha", "2.0.0");
-            let result = refresh(&source.join("alpha").to_string_lossy(), Some("alpha"), None)
-                .expect("refresh over existing install should succeed");
+            let result = refresh(
+                &source.join("alpha").to_string_lossy(),
+                Some("alpha"),
+                None,
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("refresh over existing install should succeed");
 
             assert!(
                 result.uninstalled_previous,
@@ -905,11 +955,17 @@ exec '{}' "$@"
             install(
                 &old_source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("pre-install");
 
-            let err = refresh(&invalid_source.to_string_lossy(), Some("wordpress"), None)
-                .expect_err("refresh should reject the invalid replacement");
+            let err = refresh(
+                &invalid_source.to_string_lossy(),
+                Some("wordpress"),
+                None,
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect_err("refresh should reject the invalid replacement");
 
             assert!(!err.message.is_empty());
             let installed_path = home.join(".config/homeboy/extensions/wordpress");
@@ -944,6 +1000,7 @@ exec '{}' "$@"
                 &lab_source.join("alpha").to_string_lossy(),
                 Some("alpha"),
                 None,
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("refresh should install from transient source");
 
@@ -984,6 +1041,7 @@ exec '{}' "$@"
                 &source.join("nodejs").to_string_lossy(),
                 Some("nodejs"),
                 None,
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("refresh should install from local git source");
 
@@ -1030,6 +1088,7 @@ exec '{}' "$@"
             install(
                 &old_source.join("opencode").to_string_lossy(),
                 Some("opencode"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install old extension");
             crate::runtime_package::refresh_shared_assets(&boundary_source)
@@ -1039,6 +1098,7 @@ exec '{}' "$@"
                 &source.join("agent-runtimes/opencode").to_string_lossy(),
                 Some("opencode"),
                 None,
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("refresh nested runtime package");
 
@@ -1096,6 +1156,7 @@ exec '{}' "$@"
             install(
                 &old_source.join("opencode").to_string_lossy(),
                 Some("opencode"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install old extension");
             crate::runtime_package::refresh_shared_assets(&boundary_source)
@@ -1107,6 +1168,7 @@ exec '{}' "$@"
                 &source.join("agent-runtimes/opencode").to_string_lossy(),
                 Some("opencode"),
                 None,
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect_err("malformed root manifest should reject refresh");
 
@@ -1130,11 +1192,19 @@ exec '{}' "$@"
             let source = home.join("source");
             write_extension_fixture(&source, "swift");
 
-            install(&source.join("swift").to_string_lossy(), Some("swift"))
-                .expect("initial install");
+            install(
+                &source.join("swift").to_string_lossy(),
+                Some("swift"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("initial install");
 
-            let err = install(&source.join("swift").to_string_lossy(), Some("swift"))
-                .expect_err("second install should still fail");
+            let err = install(
+                &source.join("swift").to_string_lossy(),
+                Some("swift"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect_err("second install should still fail");
 
             assert!(err.to_string().contains("already exists"));
         });
@@ -1152,8 +1222,12 @@ exec '{}' "$@"
             };
 
             let extension_source = source.join("wordpress");
-            install(&extension_source.to_string_lossy(), Some("wordpress"))
-                .expect("install linked extension");
+            install(
+                &extension_source.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install linked extension");
 
             let before = read_source_revision("wordpress").expect("linked git revision");
             assert!(!extension_source.join(".source-revision").exists());
@@ -1183,6 +1257,7 @@ exec '{}' "$@"
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
                 Some("abc1234"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked staged extension");
 
@@ -1271,8 +1346,12 @@ exec '{}' "$@"
             };
             let remote_url = remote.path().join("extension.git");
 
-            let result = install(&remote_url.to_string_lossy(), Some("wordpress"))
-                .expect("install cloned extension");
+            let result = install(
+                &remote_url.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install cloned extension");
 
             assert!(result.path.join(".source-revision").exists());
             assert_eq!(
@@ -1311,8 +1390,12 @@ exec '{}' "$@"
             };
             let remote_url = remote.path().join("extension.git");
 
-            let installed = install(&remote_url.to_string_lossy(), Some("rust"))
-                .expect("install cloned extension");
+            let installed = install(
+                &remote_url.to_string_lossy(),
+                Some("rust"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install cloned extension");
 
             assert!(home
                 .join(".config/homeboy/extensions/rust/rust.json")
@@ -1346,8 +1429,12 @@ exec '{}' "$@"
             };
             let remote_url = remote.path().join("extension.git");
 
-            install(&remote_url.to_string_lossy(), Some("wordpress"))
-                .expect("install cloned extension");
+            install(
+                &remote_url.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install cloned extension");
 
             assert!(home
                 .join(".config/homeboy/extensions/wordpress/wordpress.json")
@@ -1382,8 +1469,12 @@ exec '{}' "$@"
             };
             let remote_url = remote.path().join("extension.git");
 
-            install(&remote_url.to_string_lossy(), Some("wordpress"))
-                .expect("install cloned extension");
+            install(
+                &remote_url.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install cloned extension");
 
             // Cloned installs must keep copying: the clone temp dir is discarded,
             // so the shared trees have to be standalone copies, not symlinks.
@@ -1408,8 +1499,12 @@ exec '{}' "$@"
             };
             let remote_url = remote.path().join("extension.git");
 
-            install(&remote_url.to_string_lossy(), Some("wordpress"))
-                .expect("install cloned extension");
+            install(
+                &remote_url.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install cloned extension");
 
             write_declared_runtime_shared_assets(&source);
             assert!(commit_all(&source, "add runtime package"));
@@ -1455,6 +1550,7 @@ exec '{}' "$@"
             install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -1479,6 +1575,7 @@ exec '{}' "$@"
             install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -1521,6 +1618,7 @@ exec '{}' "$@"
             install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -1578,6 +1676,7 @@ exec '{}' "$@"
             install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -1612,8 +1711,12 @@ exec '{}' "$@"
             write_extension_fixture(&source, "wordpress");
             write_declared_runtime_shared_assets(&source);
 
-            install(&source.to_string_lossy(), Some("wordpress"))
-                .expect("install linked extension from monorepo root");
+            install(
+                &source.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install linked extension from monorepo root");
 
             assert!(home
                 .join(".config/homeboy/extensions/wordpress/wordpress.json")
@@ -1638,6 +1741,7 @@ exec '{}' "$@"
             let result = install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -1661,6 +1765,7 @@ exec '{}' "$@"
             let err = install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect_err("install should fail invalid provider declaration");
 
@@ -1681,8 +1786,12 @@ exec '{}' "$@"
             )
             .expect("extension manifest");
 
-            let _err = install(&extension_dir.to_string_lossy(), Some("wordpress"))
-                .expect_err("failed setup must fail installation");
+            let _err = install(
+                &extension_dir.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect_err("failed setup must fail installation");
 
             assert!(
                 std::fs::symlink_metadata(home.path().join(".config/homeboy/extensions/wordpress"))
@@ -1716,6 +1825,7 @@ exec '{}' "$@"
                 &remote_url.to_string_lossy(),
                 Some("wordpress"),
                 Some(&pinned_revision),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install pinned revision");
 
@@ -1756,6 +1866,7 @@ exec '{}' "$@"
                 &remote_url.to_string_lossy(),
                 Some("wordpress"),
                 Some("next-extension"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install branch revision");
 
@@ -1790,6 +1901,7 @@ exec '{}' "$@"
                 &remote_url.to_string_lossy(),
                 Some("wordpress"),
                 Some(&pinned_revision),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install pinned extracted extension");
             update("wordpress", false).expect("update pinned extracted extension");
@@ -1821,6 +1933,7 @@ exec '{}' "$@"
             install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -1846,6 +1959,7 @@ exec '{}' "$@"
             install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -1883,11 +1997,13 @@ exec '{}' "$@"
             install(
                 &source.join("fixture-a").to_string_lossy(),
                 Some("fixture-a"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked fixture-a extension");
             install(
                 &source.join("fixture-b").to_string_lossy(),
                 Some("fixture-b"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked fixture-b extension");
             // Install now runs setup, so restore the fixture checkout to the
@@ -1982,6 +2098,7 @@ exec '{}' "$@"
             install(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -2025,8 +2142,12 @@ exec '{}' "$@"
             };
             let remote_url = remote.path().join("extension.git");
 
-            let result = install(&remote_url.to_string_lossy(), Some("wordpress"))
-                .expect("install extracted extension");
+            let result = install(
+                &remote_url.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install extracted extension");
             assert!(!result.path.join(".git").exists());
 
             write_extension_fixture_with_version(&source, "wordpress", "2.0.0");
@@ -2058,8 +2179,12 @@ exec '{}' "$@"
             };
             let remote_url = remote.path().join("extension.git");
 
-            let result = install(&remote_url.to_string_lossy(), Some("wordpress"))
-                .expect("install extracted extension");
+            let result = install(
+                &remote_url.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .expect("install extracted extension");
 
             fs::write(source.join("wordpress/wordpress.json"), "not json")
                 .expect("write invalid manifest");
@@ -2257,7 +2382,11 @@ impl homeboy_core::component_install_provider::ComponentInstallRunner
         source: &str,
     ) -> homeboy_core::Result<homeboy_core::component_install_provider::ComponentInstallResult>
     {
-        let result = install_for_component(component, source)?;
+        let result = install_for_component(
+            component,
+            source,
+            homeboy_core::extension::registry::ExtensionLifecycleValidation::declaration_only(),
+        )?;
         Ok(
             homeboy_core::component_install_provider::ComponentInstallResult {
                 component_id: result.component_id,

@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
+use homeboy_agents::agent_task_provider::discovery::AgentTaskExecutorDiscovery;
 use homeboy_core::extension;
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use serde::{Deserialize, Serialize};
 
 use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
@@ -1403,6 +1405,7 @@ fn install_extension(
             source,
             id.as_deref(),
             revision.as_deref(),
+            ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
         )?;
         return Ok((
             ExtensionOutput::Replace {
@@ -1422,6 +1425,7 @@ fn install_extension(
         source,
         id.as_deref(),
         revision.as_deref(),
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
     )?;
     let linked = is_extension_linked(&result.extension_id);
 
@@ -1443,7 +1447,12 @@ fn refresh_extension(
     id: Option<&str>,
     revision: Option<&str>,
 ) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::extension::lifecycle::refresh(source, id, revision)?;
+    let result = homeboy_core::extension::lifecycle::refresh(
+        source,
+        id,
+        revision,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
     let linked = is_extension_linked(&result.extension_id);
 
     Ok((
@@ -1465,7 +1474,11 @@ fn refresh_extension(
 }
 
 fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutput> {
-    let result = homeboy_core::extension::lifecycle::relink(extension_id, source)?;
+    let result = homeboy_core::extension::lifecycle::relink(
+        extension_id,
+        source,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
 
     Ok((
         ExtensionOutput::Replace {
@@ -1495,7 +1508,11 @@ fn dev_run_extension(
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy_core::extension::lifecycle::install_for_component(&component, source)?;
+    let result = homeboy_core::extension::lifecycle::install_for_component(
+        &component,
+        source,
+        ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
+    )?;
 
     let installed = result
         .installed

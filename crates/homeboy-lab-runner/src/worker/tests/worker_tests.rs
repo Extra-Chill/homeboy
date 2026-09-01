@@ -24,6 +24,7 @@ use super::support::{
 };
 use super::worker_options;
 use crate::runner_staging_operation::SourceArtifactTransfer;
+use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 
 #[test]
 fn reverse_worker_executes_claimed_job_and_finishes_it() {
@@ -817,6 +818,7 @@ fn reverse_worker_injects_lifecycle_run_id_into_claimed_job_env() {
         homeboy_core::extension::lifecycle::install(
             &extension.path().display().to_string(),
             Some("fixture"),
+            ExtensionLifecycleValidation::declaration_only(),
         )
         .expect("install provider fixture");
         let store = JobStore::default();
