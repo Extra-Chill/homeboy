@@ -1216,15 +1216,7 @@ impl CliRuntime {
             }
         }
 
-        if matches!(
-            &cli.command,
-            Commands::AgentTask(agent_task)
-                if matches!(
-                    &agent_task.command,
-                    crate::commands::agent_task::AgentTaskCommand::Cook(_)
-                )
-        ) && notification_route.is_none()
-        {
+        if Self::admits_ambient_notification_route(&cli.command) && notification_route.is_none() {
             notification_resolution =
                 match crate::core::notification_route_resolver::resolve_installed_with_evidence() {
                     Ok(resolution) => resolution,
@@ -1441,6 +1433,23 @@ impl CliRuntime {
             schedule_runner_exec_recovery();
         }
         std::process::ExitCode::from(exit_code_to_u8(exit_code))
+    }
+
+    /// Commands that create a Cook-owned durable route may ask installed extensions
+    /// to resolve an ambient destination. Previews remain entirely side-effect-free.
+    fn admits_ambient_notification_route(command: &Commands) -> bool {
+        let Commands::AgentTask(agent_task) = command else {
+            return false;
+        };
+        match &agent_task.command {
+            crate::commands::agent_task::AgentTaskCommand::Cook(cook) => !cook.preview,
+            crate::commands::agent_task::AgentTaskCommand::Fanout(fanout) => matches!(
+                &fanout.command,
+                crate::commands::agent_task::args::AgentTaskFanoutCommand::CookBatch(cook_batch)
+                    if !cook_batch.preview
+            ),
+            _ => false,
+        }
     }
 
     fn build_augmented_command(&self) -> Command {
@@ -4906,6 +4915,55 @@ mod tests {
     #[test]
     fn normal_output_file_paths_are_allowed() {
         assert!(output_runtime::validate_output_file_path("./homeboy-output.json").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambient_notification_discovery_admission_is_shared_by_cook_and_cook_batch() {
+        let cook =
+            Cli::try_parse_from(["homeboy", "agent-task", "cook", "--to-worktree", "fixture"])
+                .expect("parse Cook invocation");
+        let cook_preview = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "fixture",
+            "--preview",
+        ])
+        .expect("parse Cook preview");
+        let cook_batch = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "fixture",
+            "https://github.com/Extra-Chill/homeboy/issues/14195",
+        ])
+        .expect("parse cook-batch invocation");
+        let cook_batch_preview = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "fixture",
+            "--preview",
+            "https://github.com/Extra-Chill/homeboy/issues/14195",
+        ])
+        .expect("parse cook-batch preview");
+
+        assert!(CliRuntime::admits_ambient_notification_route(&cook.command));
+        assert!(CliRuntime::admits_ambient_notification_route(
+            &cook_batch.command
+        ));
+        assert!(!CliRuntime::admits_ambient_notification_route(
+            &cook_preview.command
+        ));
+        assert!(!CliRuntime::admits_ambient_notification_route(
+            &cook_batch_preview.command
+        ));
     }
 
     #[cfg(unix)]
