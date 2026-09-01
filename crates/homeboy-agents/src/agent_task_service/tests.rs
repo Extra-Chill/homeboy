@@ -16,7 +16,7 @@ use crate::agent_task_scheduler::{
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::run_lifecycle_record::RunExecutionState;
-use homeboy_core::test_support::with_isolated_home;
+use homeboy_core::test_support::{with_isolated_home, write_component_registration};
 use homeboy_core::worktree;
 use serde_json::Value;
 use std::path::Path;
@@ -3609,20 +3609,6 @@ fn create_git_repo(path: &Path) {
     std::fs::write(path.join("README.md"), "initial\n").expect("readme");
     homeboy_core::test_support::run_git_fixture_command(path, &["add", "."]);
     homeboy_core::test_support::run_git_fixture_command(path, &["commit", "-q", "-m", "initial"]);
-}
-
-fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
-    let dir = home.join(".config/homeboy/components");
-    std::fs::create_dir_all(&dir).expect("components dir");
-    std::fs::write(
-        dir.join(format!("{id}.json")),
-        serde_json::json!({
-            "local_path": local_path,
-            "remote_path": format!("wp-content/plugins/{id}")
-        })
-        .to_string(),
-    )
-    .expect("component registration");
 }
 
 fn test_plan() -> AgentTaskPlan {

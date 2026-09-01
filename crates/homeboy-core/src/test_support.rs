@@ -1578,6 +1578,20 @@ pub fn write_source_extension(home: &std::path::Path, id: &str, file_extension: 
     }
 }
 
+pub fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
+    let dir = home.join(".config/homeboy/components");
+    fs::create_dir_all(&dir).expect("components dir");
+    fs::write(
+        dir.join(format!("{id}.json")),
+        serde_json::json!({
+            "local_path": local_path,
+            "remote_path": format!("wp-content/plugins/{id}")
+        })
+        .to_string(),
+    )
+    .expect("component registration");
+}
+
 /// Git command execution shared by test fixtures.
 ///
 /// Topology-specific setup stays at the caller: branch names, remotes, commit
