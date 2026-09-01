@@ -263,19 +263,12 @@ pub(super) fn reconcile_pending(
     selector: Option<&str>,
 ) -> Result<Option<OperationRecord>> {
     let store = OperationRecordStore::in_roots(roots);
-    let records = match selector {
-        Some(owner) => store.load(owner)?.into_iter().collect(),
-        None => store.pending_for_subject("provider_workspace", component_id)?,
-    };
-    let record = match records.as_slice() {
-        [] => return Ok(None),
-        [record] => record.clone(),
-        _ => return Err(Error::validation_invalid_argument(
-            "owner_run_ref",
-            "more than one provider workspace requires reconciliation; select one with --owner-run-ref",
-            None,
-            Some(records.iter().map(|record| record.owner_run_ref.clone()).collect()),
-        )),
+    let record = match selector {
+        Some(owner) => match store.load(owner)? {
+            Some(record) => record,
+            None => return Ok(None),
+        },
+        None => return Ok(None),
     };
     if record.subject != component_id || record.operation != "provider_workspace" {
         return Err(Error::validation_invalid_argument(
@@ -906,6 +899,45 @@ mod tests {
             assert!(reconcile_pending(&test_roots(), "component", None)
                 .expect("implicit recovery ignores historical completion")
                 .is_none());
+        });
+    }
+
+    #[test]
+    fn implicit_recovery_ignores_historical_provider_workspaces() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            for owner in ["release/old-one", "release/old-two"] {
+                test_store()
+                    .create(&OperationRecord {
+                        owner_run_ref: owner.to_string(),
+                        operation: "provider_workspace".to_string(),
+                        subject: "component".to_string(),
+                        provider: "removed-provider".to_string(),
+                        handle: format!("deleted-{owner}"),
+                        path: None,
+                        source_sha: "abc".to_string(),
+                        cleanup_policy: "remove_on_success".to_string(),
+                        lifecycle_state: "provisioning".to_string(),
+                        terminal_disposition: None,
+                        finalization_status: "pending".to_string(),
+                        finalization_lease: None,
+                        finalization_lease_started_ms: None,
+                        attempt_count: 0,
+                        continuation_evidence: Vec::new(),
+                        attributes: serde_json::Map::new(),
+                    })
+                    .expect("persist historical provider workspace");
+            }
+
+            assert!(reconcile_pending(&test_roots(), "component", None)
+                .expect("implicit recovery proceeds with the current checkout")
+                .is_none());
+            assert_eq!(
+                test_store()
+                    .pending_for_subject("provider_workspace", "component")
+                    .expect("historical records remain available for explicit recovery")
+                    .len(),
+                2
+            );
         });
     }
 
