@@ -67,9 +67,8 @@ pub struct ReviewArgs {
     // flattens, so `review --changed-since` and `review lint --changed-since`
     // can no longer drift apart.
     //
-    // Only the lint stage scopes `--changed-only` natively; audit and test
-    // run on the full component with a hint noting the limitation. Use
-    // `--changed-since` for full umbrella scoping.
+    // Lint and audit reuse the precomputed working-tree file set for
+    // `--changed-only`; test still runs against the full component.
     #[command(flatten)]
     pub changed: ChangedScopeArgs,
 
@@ -301,7 +300,7 @@ fn dispatch_review_plan_step(
         "review.audit" => {
             let descriptor = ReviewStageDescriptor {
                 name: "audit",
-                include_changed_only_scope: false,
+                include_changed_only_scope: true,
                 build_args: build_audit_args,
                 run: audit::run,
                 finding_count: audit_finding_count,
@@ -339,12 +338,14 @@ fn dispatch_review_plan_step(
 
 pub fn run(args: ReviewArgs) -> CmdResult<Value> {
     match args.command {
-        Some(ReviewCommand::Audit(args)) => {
-            let requested_source = args.audit.release_readiness_source.clone();
-            let component = args.audit.comp.load()?;
+        Some(ReviewCommand::Audit(review_audit)) => {
+            let requested_source = review_audit.audit.release_readiness_source.clone();
+            let component = review_audit.audit.comp.load()?;
             prepare_local_review_dependencies(&component)?;
+            let audit_args =
+                review_audit_args(review_audit.audit, &args.changed, &component.local_path)?;
             to_value_with_readiness_provenance(
-                audit::run(args.audit),
+                audit::run(audit_args),
                 &component,
                 requested_source.as_deref(),
             )
@@ -374,6 +375,24 @@ pub fn run(args: ReviewArgs) -> CmdResult<Value> {
         Some(ReviewCommand::Ci(args)) => to_value(ci::run(args)),
         None => to_value(run_umbrella(args)),
     }
+}
+
+/// Translate review's working-tree scope to audit's existing HEAD-based scoped
+/// workflow. The injected list avoids a second git walk and keeps untracked
+/// files in scope.
+fn review_audit_args(
+    mut audit_args: audit::AuditArgs,
+    changed: &ChangedScopeArgs,
+    source_path: &str,
+) -> homeboy::core::Result<audit::AuditArgs> {
+    if changed.changed_only && audit_args.changed.changed_since.is_none() {
+        audit_args.changed.changed_since = Some("HEAD".to_string());
+        audit_args.changed.precomputed_changed_files = Some(git::get_dirty_files(source_path)?);
+        // `AuditArgs::profile` defaults to full for direct audit. A working-tree
+        // review instead uses the bounded profile promised by review's scope.
+        audit_args.profile = "pr".to_string();
+    }
+    Ok(audit_args)
 }
 
 /// Portable release preflight consumes this child-produced provenance from the
@@ -655,7 +674,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
 
     if args.changed.changed_only {
         top_hints.push(
-            "--changed-only scopes lint only; audit and test ran on the full component".to_string(),
+            "--changed-only scopes lint and audit; audit uses the bounded pr detector profile while test runs on the full component".to_string(),
         );
     }
 
@@ -1055,7 +1074,14 @@ fn build_audit_args(
         profile: selected_audit_profile(args, review_context),
         baseline_args: args.baseline_args.clone(),
         changed: ChangedSinceArgs {
-            changed_since: args.changed.changed_since().map(str::to_string),
+            // Audit has no separate --changed-only flag. Reusing HEAD with the
+            // already-resolved dirty file list preserves working-tree semantics
+            // while activating its scoped execution path and bounded output.
+            changed_since: args
+                .changed
+                .changed_since()
+                .map(str::to_string)
+                .or(args.changed.changed_only.then_some("HEAD".to_string())),
             precomputed_changed_files: review_context
                 .precomputed_changed_files()
                 .map(<[String]>::to_vec),
@@ -1294,6 +1320,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_changed_only_before_direct_audit() {
+        let cli = TestCli::try_parse_from(["test", "--changed-only", "audit"])
+            .expect("direct audit should retain the parent changed-only scope");
+
+        assert!(cli.review.changed.changed_only);
+        assert!(matches!(cli.review.command, Some(ReviewCommand::Audit(_))));
+    }
+
+    #[test]
     fn parses_report_pr_comment() {
         let cli = TestCli::try_parse_from(["test", "my-comp", "--report=pr-comment"])
             .expect("should parse");
@@ -1508,9 +1543,30 @@ mod tests {
             baseline_args: BaselineArgs::default(),
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-only");
-        // audit/test do not support --changed-only, so the suffix is empty
-        // when the caller requests it not be included.
+        // Test still runs full-component, but audit now translates this into its
+        // scoped HEAD workflow.
         assert_eq!(scope_flag_suffix(&args, false), "");
+    }
+
+    #[test]
+    fn changed_only_review_builds_bounded_head_scoped_audit() {
+        let mut args = review_args_fixture();
+        args.changed.changed_only = true;
+        let review_context = ReviewExecutionContext {
+            scope: "changed-only".to_string(),
+            changed_file_count: Some(1),
+            precomputed_changed_files: Some(vec!["src/changed.rs".to_string()]),
+        };
+
+        let audit_args = build_audit_args(&args, &review_context);
+
+        assert_eq!(audit_args.profile, "pr");
+        assert_eq!(audit_args.changed.changed_since.as_deref(), Some("HEAD"));
+        assert_eq!(
+            audit_args.changed.precomputed_changed_files.as_deref(),
+            Some(&["src/changed.rs".to_string()][..]),
+            "working-tree files must be injected instead of recomputing a HEAD diff"
+        );
     }
 
     #[test]
