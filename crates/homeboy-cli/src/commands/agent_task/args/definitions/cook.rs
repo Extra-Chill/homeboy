@@ -1113,7 +1113,7 @@ pub struct AgentTaskCookArgs {
     /// Maximum Cook attempts before giving up. Each attempt re-runs the agent
     /// and gates; a later attempt can recover from a transient failure. This
     /// derives provider execution and same-provider remediation budgets. An
-    /// explicit --backend plus --model stays on that route; use
+    /// explicit --model pins the provider route; use
     /// --allow-provider-rotation to opt it into configured fallbacks (default 3).
     #[arg(
         long = "max-attempts",
@@ -1123,7 +1123,7 @@ pub struct AgentTaskCookArgs {
     )]
     pub max_attempts: u32,
     /// Permit configured cross-provider/model fallbacks after explicitly
-    /// selecting both --backend and --model. This is distinct from
+    /// selecting a model. This is distinct from
     /// same-provider remediation, which retries the selected route for gate
     /// and required review-form fixes.
     #[arg(long = "allow-provider-rotation")]

@@ -229,6 +229,24 @@ impl CookRecipeStore {
         Ok(recipe)
     }
 
+    pub(crate) fn record_recipe_attempt_replacement_with_plan(
+        &self,
+        cook_id: &str,
+        replaced_run_id: &str,
+        replacement_run_id: &str,
+        plan: &AgentTaskPlan,
+    ) -> Result<AgentTaskCookRecipe> {
+        let recipe = record_recipe_attempt_replacement_in_store_with_plan(
+            self,
+            cook_id,
+            replaced_run_id,
+            replacement_run_id,
+            plan,
+        )?;
+        sync_fanout_replacement(self, &recipe, replaced_run_id, replacement_run_id)?;
+        Ok(recipe)
+    }
+
     pub fn enqueue_continuation(
         &self,
         continuation: &AgentTaskCookContinuation,
@@ -1209,12 +1227,18 @@ pub(crate) fn record_recipe_attempt(
     default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
 }
 
-pub(crate) fn record_recipe_attempt_replacement(
+pub(crate) fn record_recipe_attempt_replacement_with_plan(
     cook_id: &str,
     replaced_run_id: &str,
     replacement_run_id: &str,
+    plan: &AgentTaskPlan,
 ) -> Result<AgentTaskCookRecipe> {
-    default_store()?.record_recipe_attempt_replacement(cook_id, replaced_run_id, replacement_run_id)
+    default_store()?.record_recipe_attempt_replacement_with_plan(
+        cook_id,
+        replaced_run_id,
+        replacement_run_id,
+        plan,
+    )
 }
 
 pub fn record_recipe_attempt_in_store(
@@ -1286,6 +1310,35 @@ pub fn record_recipe_attempt_replacement_in_store(
     replaced_run_id: &str,
     replacement_run_id: &str,
 ) -> Result<AgentTaskCookRecipe> {
+    let plan = store
+        .load_recipe(cook_id)?
+        .attempts
+        .last()
+        .map(|attempt| attempt.plan.clone())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "durable cook recipe has no attempt to replace",
+                Some(cook_id.to_string()),
+                None,
+            )
+        })?;
+    record_recipe_attempt_replacement_in_store_with_plan(
+        store,
+        cook_id,
+        replaced_run_id,
+        replacement_run_id,
+        &plan,
+    )
+}
+
+fn record_recipe_attempt_replacement_in_store_with_plan(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    replaced_run_id: &str,
+    replacement_run_id: &str,
+    replacement_plan: &AgentTaskPlan,
+) -> Result<AgentTaskCookRecipe> {
     let mut recipe = store.load_recipe(cook_id)?;
     if let Some(existing) = recipe
         .attempts
@@ -1296,6 +1349,7 @@ pub fn record_recipe_attempt_replacement_in_store(
             .attempts
             .iter()
             .any(|attempt| attempt.run_id == replaced_run_id && attempt.attempt == existing.attempt)
+            && existing.plan == *replacement_plan
         {
             return Ok(recipe);
         }
@@ -1325,7 +1379,7 @@ pub fn record_recipe_attempt_replacement_in_store(
     recipe.attempts.push(AgentTaskCookRecipeAttempt {
         attempt: replaced.attempt,
         run_id: replacement_run_id.to_string(),
-        plan: replaced.plan,
+        plan: replacement_plan.clone(),
     });
     validate_recipe(&recipe)?;
     store.persist_recipe(&recipe)?;

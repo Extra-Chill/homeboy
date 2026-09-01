@@ -272,6 +272,23 @@ pub struct CookContinueArgs {
         conflicts_with_all = ["preflight", "rearm", "artifact_id", "timeout_ms"]
     )]
     pub review_form_timeout_ms: Option<u64>,
+    /// Backend for a rearmed Cook retry. The original Cook recipe remains
+    /// authoritative for prompt, gates, worktree, notification, and disclosure.
+    #[arg(long, value_name = "BACKEND", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub backend: Option<String>,
+    /// Provider-specific selector for a rearmed Cook retry.
+    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub selector: Option<String>,
+    /// Model for a rearmed Cook retry. This pins rotation unless explicitly
+    /// paired with --allow-provider-rotation or a positive --provider-rotations.
+    #[arg(long, value_name = "MODEL", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub model: Option<String>,
+    /// Re-enable configured provider/model rotation after a route override.
+    #[arg(long, requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub allow_provider_rotation: bool,
+    /// Explicit cross-provider/model rotations after a route override.
+    #[arg(long, value_name = "N", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub provider_rotations: Option<u32>,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
@@ -320,6 +337,44 @@ mod cook_continue_tests {
             argv.extend(rejected);
             assert!(Cli::try_parse_from(argv).is_err());
         }
+    }
+
+    #[test]
+    fn continuation_route_override_requires_rearm_and_preserves_rotation_semantics() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "run-a",
+            "--rearm",
+            "--backend",
+            "replacement",
+            "--selector",
+            "replacement-selector",
+            "--model",
+            "replacement-model",
+            "--allow-provider-rotation",
+        ])
+        .expect("route override parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::CookContinue(args) = agent_task.command else {
+            panic!("expected cook-continue command");
+        };
+        assert_eq!(args.backend.as_deref(), Some("replacement"));
+        assert_eq!(args.selector.as_deref(), Some("replacement-selector"));
+        assert_eq!(args.model.as_deref(), Some("replacement-model"));
+        assert!(args.allow_provider_rotation);
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-continue",
+            "run-a",
+            "--model",
+            "replacement-model",
+        ])
+        .is_err());
     }
 }
 
