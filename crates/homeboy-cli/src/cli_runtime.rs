@@ -3592,6 +3592,13 @@ fn try_augment_clap_error(
 /// generic runner surface and deliberately require discovery before selecting
 /// a runner ID.
 fn command_domain_hints(unrecognized: &str, parent_command: &str) -> Option<Vec<String>> {
+    if parent_command.is_empty() && unrecognized.eq_ignore_ascii_case("init") {
+        return Some(vec![
+            "`init` is no longer a top-level command. Discover extension lifecycle commands with `homeboy extension --help`".to_string(),
+            "Converge installed extensions with `homeboy extension converge`, or refresh Homeboy and extensions with `homeboy upgrade`".to_string(),
+        ]);
+    }
+
     if !parent_command.is_empty()
         || !(unrecognized.eq_ignore_ascii_case("lab")
             || homeboy::core::engine::text::levenshtein(&unrecognized.to_lowercase(), "runner")
@@ -5232,6 +5239,30 @@ mod tests {
                 "{command}: {output}"
             );
         }
+    }
+
+    #[test]
+    fn removed_init_command_uses_extension_lifecycle_guidance_not_extension_id_matching() {
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "rust", "rust");
+            entity_suggest::reset_entity_suggestion_cache_for_test();
+            let err = build_augmented_command(&[], &ExtensionCliHealth::default())
+                .try_get_matches_from(["homeboy", "init"])
+                .expect_err("init is not a top-level command");
+
+            let output = try_augment_clap_error(
+                &err,
+                &argv(&["homeboy", "init"]),
+                &ExtensionCliHealth::default(),
+            )
+            .expect("init should have lifecycle recovery guidance");
+
+            assert!(output.contains("homeboy extension --help"));
+            assert!(output.contains("homeboy extension converge"));
+            assert!(output.contains("homeboy upgrade"));
+            assert!(!output.contains("extension 'rust'"), "{output}");
+            assert!(!output.contains("homeboy extension rust"), "{output}");
+        });
     }
 
     #[test]
