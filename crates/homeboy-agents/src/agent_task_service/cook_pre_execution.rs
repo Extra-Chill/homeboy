@@ -21,8 +21,7 @@ use homeboy_core::cook_status::CookDisposition;
 use homeboy_core::{Error, Result};
 
 use super::cook::{
-    AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookPrimaryFailure,
-    AgentTaskCookRecoveryAction, AgentTaskCookReport, CookRequest,
+    AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookReport, CookRequest,
 };
 use super::cook_promotion::{cook_report, CookReportInput};
 use super::cook_recipe::CookRecipeStore;
@@ -607,55 +606,7 @@ pub(crate) fn pre_execution_failure_report(
     });
     report.value.terminal_phase = failure.phase;
     report.value.terminal_failure_classification = failure.classification;
-    report.value.primary_failure = provider_primary_failure(
-        report.value.latest_run_id.as_deref(),
-        &phase,
-        &error.details,
-    );
     report
-}
-
-fn provider_primary_failure(
-    run_id: Option<&str>,
-    phase: &str,
-    details: &Value,
-) -> Option<AgentTaskCookPrimaryFailure> {
-    let run_id = run_id?.trim();
-    if run_id.is_empty() {
-        return None;
-    }
-    let compact =
-        homeboy_core::worktree_provider::compact_worktree_provider_failure_details(details)?;
-    let provider_id = compact.get("provider_id")?.as_str()?.to_string();
-    let operation = compact.get("operation")?.as_str()?.to_string();
-    let exit_code = compact.get("exit_code")?.as_i64()?;
-    let stderr_excerpt = compact.get("stderr_excerpt")?.as_str()?.to_string();
-    let repair = details
-        .get("worktree_provider_cwd_recovery_command")
-        .and_then(Value::as_str)
-        .filter(|command| !command.trim().is_empty());
-    let (action, command) = repair
-        .map(|command| ("repair", command.to_string()))
-        .unwrap_or_else(|| {
-            (
-                "diagnose",
-                format!("homeboy agent-task diagnose {run_id} --full"),
-            )
-        });
-    Some(AgentTaskCookPrimaryFailure {
-        schema: "homeboy/agent-task-cook-primary-failure/v1",
-        provider_id,
-        operation,
-        phase: phase.to_string(),
-        exit_code,
-        stderr_excerpt,
-        evidence_ref: format!("homeboy://agent-task/run/{run_id}/status"),
-        next_action: AgentTaskCookRecoveryAction {
-            action: action.to_string(),
-            command,
-        },
-        diagnostic: None,
-    })
 }
 
 /// Pre-execution failures happen before a provider can receive work. Persist a
@@ -862,92 +813,6 @@ mod tests {
     use crate::agent_task_service::cook_recipe::{
         AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, COOK_RECIPE_SCHEMA,
     };
-
-    #[test]
-    fn provider_primary_failure_prefers_known_repair_and_references_full_evidence() {
-        let details = serde_json::json!({
-            "worktree_provider_id": "dmc",
-            "worktree_provider_operation": "resolve",
-            "worktree_provider_cwd_recovery_command": "homeboy agent-task cook --cwd /repo --to-worktree repo@fix",
-            "command_evidence": {
-                "command": "studio wp datamachine-code workspace show repo@fix",
-                "exit_code": 1,
-                "stderr": "DMC standalone identity does not provide tracker ownership.\nfull context remains durable",
-            },
-        });
-
-        let failure = provider_primary_failure(
-            Some("agent-task-provider-failure"),
-            "transport_dispatcher_prepare",
-            &details,
-        )
-        .expect("typed provider failure");
-
-        assert_eq!(failure.provider_id, "dmc");
-        assert_eq!(failure.operation, "resolve");
-        assert_eq!(failure.phase, "transport_dispatcher_prepare");
-        assert_eq!(failure.exit_code, 1);
-        assert_eq!(
-            failure.stderr_excerpt,
-            "DMC standalone identity does not provide tracker ownership."
-        );
-        assert_eq!(
-            failure.evidence_ref,
-            "homeboy://agent-task/run/agent-task-provider-failure/status"
-        );
-        assert_eq!(failure.next_action.action, "repair");
-        assert_eq!(
-            failure.next_action.command,
-            "homeboy agent-task cook --cwd /repo --to-worktree repo@fix"
-        );
-        let projected = serde_json::to_string(&failure).expect("serialize primary failure");
-        assert!(!projected.contains("full context remains durable"));
-        assert!(!projected.contains("command_evidence"));
-    }
-
-    #[test]
-    fn provider_primary_failure_falls_back_to_exact_diagnosis() {
-        let details = serde_json::json!({
-            "worktree_provider_id": "dmc",
-            "worktree_provider_operation": "resolve",
-            "command_evidence": {
-                "exit_code": 1,
-                "stderr": "",
-            },
-        });
-
-        let failure = provider_primary_failure(
-            Some("agent-task-provider-failure"),
-            "worktree_provider_lookup",
-            &details,
-        )
-        .expect("typed provider failure");
-
-        assert_eq!(failure.stderr_excerpt, "");
-        assert_eq!(failure.next_action.action, "diagnose");
-        assert_eq!(
-            failure.next_action.command,
-            "homeboy agent-task diagnose agent-task-provider-failure --full"
-        );
-    }
-
-    #[test]
-    fn non_provider_pre_execution_failure_has_no_provider_primary_failure() {
-        let details = serde_json::json!({
-            "field": "gate_declaration",
-            "command_evidence": {
-                "exit_code": 1,
-                "stderr": "not a provider failure",
-            },
-        });
-
-        assert!(provider_primary_failure(
-            Some("agent-task-preflight-failure"),
-            "gate_declaration_preflight",
-            &details,
-        )
-        .is_none());
-    }
 
     #[test]
     fn retryable_pre_execution_terminal_does_not_cancel_runtime_admission() {

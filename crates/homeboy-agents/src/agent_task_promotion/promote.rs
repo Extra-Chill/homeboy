@@ -38,7 +38,7 @@ use homeboy_core::{Error, Result};
 
 use super::apply::{
     AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
-    ExternalPromotionWorkspaceProvider, TrustedUnpushedCandidateDestination,
+    NativePromotionWorkspaceProvider, TrustedUnpushedCandidateDestination,
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
 };
 use super::committed_changes::{committed_changes_patch, CommittedChangesPatch};
@@ -140,16 +140,13 @@ pub fn promote_with_checkpoint(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
+    let mut provider = NativePromotionWorkspaceProvider;
     let mut report = promote_with_provider_and_checkpoint_internal(
         options,
         &mut provider,
         &mut checkpoint,
         &observation_store,
     )?;
-    if let Some(provenance) = provider.provenance() {
-        report.provenance["worktree_provider"] = provenance.clone();
-    }
     if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
         report.provenance["lab_offload"] = json!({
             "runner_id": runner_id,
@@ -167,16 +164,13 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
     observation_store: &homeboy_core::observation::ObservationStore,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
-    let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
+    let mut provider = NativePromotionWorkspaceProvider;
     let mut report = promote_with_provider_and_checkpoint_internal(
         options,
         &mut provider,
         &mut checkpoint,
         observation_store,
     )?;
-    if let Some(provenance) = provider.provenance() {
-        report.provenance["worktree_provider"] = provenance.clone();
-    }
     if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
         report.provenance["lab_offload"] = json!({
             "runner_id": runner_id,
@@ -273,7 +267,7 @@ fn resume_promoted_patch_internal<'a>(
         observation_store,
         replacement_gates,
     )?;
-    let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
+    let mut provider = NativePromotionWorkspaceProvider;
     // A resumed checkpoint verifies the already-applied candidate. Its base is
     // the immutable observation made before apply, not a new moving origin read.
     let verified_base = previous
@@ -330,7 +324,7 @@ fn resume_promoted_patch_internal<'a>(
     };
     let operator_notification =
         promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
-    let mut report = AgentTaskPromotionReport {
+    let report = AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
         source: promotion_source(&source_kind, &outcome, &options),
@@ -361,9 +355,6 @@ fn resume_promoted_patch_internal<'a>(
         }),
         operator_notification,
     };
-    if let Some(provenance) = provider.provenance() {
-        report.provenance["worktree_provider"] = provenance.clone();
-    }
     Ok(report)
 }
 
@@ -2640,29 +2631,43 @@ fn candidate_patch_safety_baseline(
 fn resolve_promotion_target_path(
     to_worktree: &str,
     trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
-    safety_baseline: Option<&Value>,
+    _safety_baseline: Option<&Value>,
 ) -> Result<Option<PathBuf>> {
     // Direct paths do not need provider resolution, but must participate in
     // the same pre-apply declared-base contract as provider-owned targets.
     if Path::new(to_worktree).is_dir() {
-        return Ok(Some(PathBuf::from(to_worktree)));
-    }
-    let trusted_unpushed_destination = trusted_unpushed_candidate_destination.map(|trusted| {
-        homeboy_core::worktree_provider::WorktreeTrustedUnpushedDestination {
-            path: trusted.path.clone(),
-            head: trusted.head.clone(),
+        let path = std::fs::canonicalize(to_worktree).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(to_worktree.to_string()))
+        })?;
+        if homeboy_core::git::output_allow_empty(&path, &["rev-parse", "--is-inside-work-tree"])
+            .as_deref()
+            != Some("true")
+        {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "promotion target path is not a Git worktree",
+                Some(to_worktree.to_string()),
+                None,
+            ));
         }
-    });
-    match homeboy_core::worktree_provider::resolve_worktree_mutation_target_from_config(
-        to_worktree,
-        &homeboy_core::defaults::load_config(),
-        homeboy_core::worktree_provider::WorktreeMutationContext {
-            safety_baseline,
-            trusted_unpushed_destination: trusted_unpushed_destination.as_ref(),
-        },
-    ) {
-        Ok(target) => Ok(target.path.is_dir().then_some(target.path)),
-        Err(error) if error.details["worktree_provider_lookup"] == "not_found" => Ok(None),
+        return Ok(Some(path));
+    }
+    if let Some(trusted) = trusted_unpushed_candidate_destination {
+        if trusted.path.is_dir() {
+            let path = std::fs::canonicalize(&trusted.path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(trusted.path.display().to_string()))
+            })?;
+            if homeboy_core::git::output_allow_empty(&path, &["rev-parse", "--is-inside-work-tree"])
+                .as_deref()
+                == Some("true")
+            {
+                return Ok(Some(path));
+            }
+        }
+    }
+    match homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(to_worktree) {
+        Ok(Some(target)) => Ok(target.path.is_dir().then_some(target.path)),
+        Ok(None) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -3294,7 +3299,11 @@ fn select_recoverable_patch_artifact(
     let canonical =
         canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)?;
     match canonical.artifacts.len() {
-        1 => Ok(canonical.artifacts.into_iter().next().expect("one canonical patch")),
+        1 => Ok(canonical
+            .artifacts
+            .into_iter()
+            .next()
+            .expect("one canonical patch")),
         0 => Err(Error::new(
             homeboy_core::ErrorCode::ValidationInvalidArgument,
             "recoverable-candidate promotion found no readable actionable patch; reconcile or hydrate the run artifacts before retrying",

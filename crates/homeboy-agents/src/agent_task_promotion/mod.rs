@@ -18,7 +18,7 @@ mod promote;
 mod run_plan_projection;
 mod types;
 
-pub use apply::{apply_materialized_workspace_patch, preflight_configured_workspace_provider};
+pub use apply::{apply_materialized_workspace_patch, preflight_managed_workspace};
 pub use fingerprint::{
     candidate_fingerprint, AgentTaskCandidateFingerprint, AgentTaskPromotionCandidate,
 };
