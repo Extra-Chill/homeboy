@@ -171,6 +171,7 @@
       "node tests/wordpress-fuzz-coverage-aggregate-smoke.js",
       "node tests/wordpress-fuzz-manifest-smoke.js",
       "node tests/wordpress-fuzz-manifest-validator-smoke.js",
+      "node tests/wordpress-fuzz-nested-report-promotion-smoke.js",
       "node tests/wordpress-fuzz-plan-from-surfaces-smoke.js",
       "node tests/wordpress-fuzz-runtime-workload-operations-smoke.js",
       "node tests/wordpress-fuzz-schemas-smoke.js",

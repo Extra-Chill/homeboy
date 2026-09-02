@@ -244,6 +244,9 @@ const FUZZ_ARTIFACT_SEMANTIC_KEYS = {
 	normalized_fuzz_result: 'fuzz.result.normalized',
 	coverage: 'fuzz.coverage',
 };
+const FUZZ_ARTIFACT_ROLES_BY_SEMANTIC_KEY = Object.fromEntries(
+	Object.entries(FUZZ_ARTIFACT_SEMANTIC_KEYS).map(([role, semanticKey]) => [semanticKey, role])
+);
 
 const REQUIRED_WP_CODEBOX_FUZZ_CONTRACT_PATHS = [
 	'abilities.wordpressRuntime.runFuzzSuite',
@@ -312,7 +315,11 @@ function wpCodeboxWordPressWorkloadRunCommand(options = {}) {
 
 function wpCodeboxFuzzSuiteInput(options = {}) {
 	const source = normalizeHomeboyFuzzWorkloadSource(options);
-	const context = { packageRoot: options.packageRoot || options.package_root || source?.packageRoot || source?.package_root || source?.metadata?.package_root || source?.metadata?.packageRoot || source?.metadata?.homeboy_runtime_context?.package_root };
+	const executionRequest = options.executionRequest ?? options.execution_request;
+	const context = {
+		packageRoot: options.packageRoot || options.package_root || source?.packageRoot || source?.package_root || source?.metadata?.package_root || source?.metadata?.packageRoot || source?.metadata?.homeboy_runtime_context?.package_root,
+		executionRequest,
+	};
 	const cases = normalizeWpCodeboxFuzzSuiteCases(source || options, context);
 	const artifacts = source?.artifacts || options.artifacts;
 	const postprocessBinding = options.postprocessBinding || options.postprocess_binding || source?.postprocess_binding || source?.postprocessBinding;
@@ -322,7 +329,7 @@ function wpCodeboxFuzzSuiteInput(options = {}) {
 		schema: wpCodeboxFuzzSuiteSchema(options),
 		id: options.id || options.runId || options.run_id,
 		goal: options.goal || options.instructions,
-		execution_request: options.executionRequest ?? options.execution_request,
+		execution_request: executionRequest,
 		version: options.version,
 		target: options.target,
 		cases,
@@ -469,7 +476,7 @@ function normalizeWpCodeboxFuzzSuiteCases(source = {}, context = {}) {
 	}
 	const planCases = homeboyFuzzWorkloadPlanCases(source);
 	if (planCases.length > 0) {
-		return planCases.map((entry, index) => homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry, source, index));
+		return planCases.map((entry, index) => homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry, source, index, context));
 	}
 	if (directCases.length === 0) {
 		const defaultCase = homeboyFuzzWorkloadDefaultCase(source);
@@ -759,7 +766,7 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 	}
 	const workloadDefinition = objectOrUndefined(execute.definition) || objectOrUndefined(manifest.workload?.definition);
 	if (workloadDefinition) {
-		return homeboyFuzzWorkloadRunInputFromDefinition(workloadDefinition, { entry: execute.entry || manifest.workload?.entry });
+		return homeboyFuzzWorkloadRunInputFromDefinition(workloadDefinition, { entry: execute.entry || manifest.workload?.entry, executionRequest: context.executionRequest });
 	}
 	const workloadPath = resolveWorkloadPath(execute.path || homeboyFuzzManifestWorkloadPath(manifest), context);
 	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
@@ -767,6 +774,7 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 		if (workloadType === 'php') {
 			return wpCodeboxWordPressWorkloadRunInput({
 				id: execute.entry || manifest.workload?.entry,
+				executionRequest: context.executionRequest,
 				steps: [{ command: 'wordpress.run-workload', args: [`path=${workloadPath}`, 'type=php'] }],
 				metadata: stripUndefined({
 					source_path: workloadPath,
@@ -775,7 +783,7 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 				}),
 			});
 		}
-		const workloadInput = homeboyFuzzWorkloadRunInputFromFile(workloadPath, { entry: execute.entry || manifest.workload?.entry });
+		const workloadInput = homeboyFuzzWorkloadRunInputFromFile(workloadPath, { entry: execute.entry || manifest.workload?.entry, executionRequest: context.executionRequest });
 		if (workloadInput) {
 			return workloadInput;
 		}
@@ -798,9 +806,11 @@ function homeboyFuzzWorkloadRunInputFromDefinition(source = {}, options = {}) {
 	}
 	return wpCodeboxWordPressWorkloadRunInput({
 		id: source.id || options.entry,
+		executionRequest: options.executionRequest,
 		before: source.before,
 		steps,
 		after: source.after,
+		artifacts: source.artifacts,
 		metadata: stripUndefined({
 			...(objectOrUndefined(source.metadata) || {}),
 			source: 'inline',
@@ -828,9 +838,11 @@ function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
 	}
 	return wpCodeboxWordPressWorkloadRunInput({
 		id: source.id || options.entry,
+		executionRequest: options.executionRequest,
 		before: source.before,
 		steps,
 		after: source.after,
+		artifacts: source.artifacts,
 		metadata: stripUndefined({
 			...(objectOrUndefined(source.metadata) || {}),
 			source_path: filePath,
@@ -874,7 +886,7 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 	const setup = typeof activation === 'string' && activation.trim() !== ''
 		? [wpCodeboxPluginActivationStep(activation)]
 		: undefined;
-	const action = homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, workloadDefinition, execute, pluginSlug: pluginSlugFromActivation(activation) });
+	const action = homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, workloadDefinition, execute, pluginSlug: pluginSlugFromActivation(activation), executionRequest: context.executionRequest });
 	const collect = normalizeArray(intent.collect).length > 0 ? normalizeArray(intent.collect) : artifacts.map((artifact) => ({ artifact: artifact.name }));
 	const assert = collect
 		.map((item) => item?.artifact)
@@ -887,13 +899,13 @@ function wpCodeboxPluginActivationStep(plugin) {
 	return { command: 'wordpress.plugin-state', args: ['action=activate', `plugin=${plugin}`] };
 }
 
-function homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, workloadDefinition, execute = {}, pluginSlug } = {}) {
+function homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, workloadDefinition, execute = {}, pluginSlug, executionRequest } = {}) {
 	if (typeof genericCommand === 'string') {
 		return [{ command: genericCommand, args: homeboyFuzzCommandArgs(objectOrUndefined(execute.parameters) || {}) }];
 	}
 	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
 		const workloadType = String(execute.type || typeFromWorkloadPath(workloadPath) || '').toLowerCase();
-		const jsonWorkload = workloadType === 'json' || workloadPath.toLowerCase().endsWith('.json') ? homeboyFuzzWorkloadRunInputFromFile(workloadPath, { entry: execute.entry }) : undefined;
+		const jsonWorkload = workloadType === 'json' || workloadPath.toLowerCase().endsWith('.json') ? homeboyFuzzWorkloadRunInputFromFile(workloadPath, { entry: execute.entry, executionRequest }) : undefined;
 		if (jsonWorkload) {
 			if (pluginSlug) {
 				jsonWorkload.metadata = { ...(objectOrUndefined(jsonWorkload.metadata) || {}), plugin_slug: pluginSlug };
@@ -1043,6 +1055,7 @@ function wpCodeboxWordPressWorkloadRunInput(options = {}) {
 	return stageWordPressRunWorkloadPhpFiles(stripUndefined({
 		schema: wpCodeboxWordPressWorkloadRunSchema(options),
 		id: options.id || options.runId || options.run_id,
+		execution_request: options.executionRequest ?? options.execution_request,
 		wordpress_version: options.wordpressVersion || options.wordpress_version,
 		blueprint: options.blueprint,
 		preview: objectOrUndefined(options.preview),
@@ -1055,6 +1068,7 @@ function wpCodeboxWordPressWorkloadRunInput(options = {}) {
 		before: normalizeArray(options.before),
 		steps: normalizeWordPressWorkloadSteps(options.steps, options),
 		after: normalizeArray(options.after),
+		artifacts: normalizeArray(options.artifacts),
 		metadata,
 	}), { packageRoot: options.packageRoot || options.package_root, sourcePath: metadata?.source_path || metadata?.sourcePath });
 }
@@ -2940,10 +2954,12 @@ function fuzzArtifactIdentity(artifact = {}) {
 	const explicitRole = artifact.role || artifact.artifact_role || artifact.artifactRole;
 	const explicitKind = artifact.kind || artifact.type;
 	const semanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey;
-	const name = artifact.name || artifact.id || artifact.key || explicitRole || explicitKind || semanticKey;
+	const name = artifact.name || artifact.id || artifact.key || artifact.metadata?.artifactId || artifact.metadata?.id || explicitRole || explicitKind || semanticKey;
+	const roleKind = ['typed-artifact', 'json'].includes(String(explicitKind || '').toLowerCase()) ? undefined : explicitKind;
+	const semanticRole = FUZZ_ARTIFACT_ROLES_BY_SEMANTIC_KEY[semanticKey];
 	return {
 		name,
-		role: normalizeFuzzArtifactRole(explicitRole || explicitKind || name || semanticKey || artifact.path || artifact.url || artifact.file),
+		role: normalizeFuzzArtifactRole(explicitRole || roleKind || semanticRole || name || semanticKey || artifact.path || artifact.url || artifact.file),
 	};
 }
 

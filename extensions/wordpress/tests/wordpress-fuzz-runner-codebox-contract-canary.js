@@ -24,6 +24,7 @@ const resultsPath = path.join(tempDir, 'campaign.json');
 const executionRequestPath = path.join(tempDir, 'execution-request.json');
 const observedRequestPath = path.join(tempDir, 'observed-fuzz-suite-request.json');
 const observedArgvPath = path.join(tempDir, 'observed-fuzz-suite-argv.json');
+const artifactRoot = path.join(tempDir, 'artifacts');
 const emptyCodeboxInstallRoot = path.join(tempDir, 'empty-wp-codebox-install');
 const checkoutRoot = path.join(tempDir, 'checkout');
 const pluginRoot = path.join(checkoutRoot, 'plugins', 'woocommerce');
@@ -197,6 +198,7 @@ const cli = spawnSync(runnerPath, [], {
 		HOMEBOY_FUZZ_MAX_DURATION: '5',
 		HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE: executionRequestPath,
 		HOMEBOY_FUZZ_RESULTS_FILE: resultsPath,
+		HOMEBOY_FUZZ_ARTIFACTS_DIR: artifactRoot,
 		HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE: checkoutRoot,
 	},
 });
@@ -243,6 +245,7 @@ const observedRequest = JSON.parse(fs.readFileSync(observedRequestPath, 'utf8'))
 const observedArgv = JSON.parse(fs.readFileSync(observedArgvPath, 'utf8'));
 assert.equal(observedArgv[0], fakeCodeboxBin, 'the explicit external pin is executed, not replaced by a managed candidate');
 assert.deepEqual(observedArgv.slice(1, 3), ['run-fuzz-suite', '--input-file']);
+assert.deepEqual(observedArgv.slice(-2), ['--artifacts', artifactRoot]);
 assert.equal(observedRequest.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.schema, 'homeboy/wp-codebox-fuzz-execution/v1');
 assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.task_id, 'contract-run');

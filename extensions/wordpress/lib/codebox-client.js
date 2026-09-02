@@ -75,10 +75,14 @@ class CodeboxClient {
 	}
 
 	runArtifactApplyPreflight({ bundlePath, approvedFiles, cwd, env } = {}) {
-		if (!bundlePath) throw new Error('WP Codebox artifact apply preflight requires bundlePath.');
+		if (!bundlePath) {
+			throw new Error('WP Codebox artifact apply preflight requires bundlePath.');
+		}
 		const args = publicArtifactApplyPreflightArgs({ bundlePath, approvedFiles });
 		const result = this.runPublicCliCommand(args, { cwd, env });
-		if (result.status !== 0) throw new Error(`${this.publicCliBin({ env })} ${args.join(' ')} failed: ${[result.stderr, result.stdout].filter(Boolean).join('\n').trim()}`);
+		if (result.status !== 0) {
+			throw new Error(`${this.publicCliBin({ env })} ${args.join(' ')} failed: ${[result.stderr, result.stdout].filter(Boolean).join('\n').trim()}`);
+		}
 		return parseJsonCliOutput(result.stdout, args.join(' '));
 	}
 
@@ -105,15 +109,30 @@ class CodeboxClient {
 }
 
 function publicJsonArgs(command, inputFile, options = {}) {
-	const runnerMode = typeof options.runnerMode === 'string' && options.runnerMode.trim()
-		? options.runnerMode.trim()
-		: typeof options.runner_mode === 'string' && options.runner_mode.trim()
-			? options.runner_mode.trim()
-			: '';
-	if (command === 'run-fuzz-suite' && runnerMode) {
-		return [command, `--runner-mode=${runnerMode}`, '--input-file', inputFile, '--json'];
+	let runnerMode = '';
+	if (typeof options.runnerMode === 'string' && options.runnerMode.trim()) {
+		runnerMode = options.runnerMode.trim();
+	} else if (typeof options.runner_mode === 'string' && options.runner_mode.trim()) {
+		runnerMode = options.runner_mode.trim();
+	}
+	if (command === 'run-fuzz-suite') {
+		const args = runnerMode
+			? [command, `--runner-mode=${runnerMode}`, '--input-file', inputFile, '--json']
+			: [command, '--input-file', inputFile, '--format=json'];
+		const artifactRoot = wpCodeboxArtifactRoot(options);
+		if (artifactRoot) {
+			args.push('--artifacts', artifactRoot);
+		}
+		return args;
 	}
 	return [command, '--input-file', inputFile, '--format=json'];
+}
+
+function wpCodeboxArtifactRoot(options = {}) {
+	const env = { ...process.env, ...(options.env || {}) };
+	return options.artifactsRoot || options.artifactRoot || options.artifacts_root || options.artifact_root
+		|| env.artifactsRoot || env.artifactRoot || env.artifacts_root || env.artifact_root
+		|| env.HOMEBOY_FUZZ_ARTIFACTS_DIR || env.HOMEBOY_ARTIFACT_ROOT || env.HOMEBOY_ARTIFACT_DIR || env.HOMEBOY_ARTIFACTS_DIR || env.HOMEBOY_RUN_ARTIFACT_ROOT || env.HOMEBOY_RUN_ARTIFACT_DIR;
 }
 
 function publicArtifactApplyPreflightArgs({ bundlePath, approvedFiles } = {}) {
@@ -128,7 +147,7 @@ function parseJsonCliOutput(stdout, label = 'wp-codebox') {
 	const text = String(stdout || '').trim();
 	try {
 		return JSON.parse(text);
-	} catch (error) {
+	} catch {
 		throw new Error(`${label} did not return valid JSON${text ? `: ${text}` : ''}`);
 	}
 }
