@@ -4676,6 +4676,10 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
 ) {
     homeboy_core::test_support::with_isolated_home(|_| {
         let missing_workspace = "/definitely-not-a-workspace";
+        let missing_credential = format!(
+            "HOMEBOY_TEST_MISSING_CREDENTIAL_{}",
+            uuid::Uuid::new_v4().simple()
+        );
         let cases = vec![
             (
                 "route",
@@ -4702,7 +4706,7 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                     providers: vec![serde_json::from_value(serde_json::json!({
                         "id": "credential.provider",
                         "backend": "credential",
-                        "provider_defaults": { "credential": { "required_secret_env": ["HOMEBOY_TEST_MISSING_CREDENTIAL"] } }
+                        "provider_defaults": { "credential": { "required_secret_env": [missing_credential] } }
                     })).expect("credential provider")],
                     ..Default::default()
                 },
@@ -4715,7 +4719,7 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                     providers: vec![serde_json::from_value(serde_json::json!({
                         "id": "runtime.provider",
                         "backend": "runtime",
-                        "readiness_invocation": { "argv": ["sh", "-c", "printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"repair runtime\",\"reason\":\"runtime unavailable\",\"cache_key\":\"test\",\"identity\":{}}'"] }
+                        "readiness_invocation": { "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"repair runtime\",\"reason\":\"runtime unavailable\",\"cache_key\":\"test\",\"identity\":{}}'"] }
                     })).expect("runtime provider")],
                     ..Default::default()
                 },
@@ -5998,7 +6002,11 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
         let result = run_cook(CookContext::new(reconstructed, Arc::new(UnusedExecutor)))
             .expect("durable Cook failure report before provider execution");
         assert_eq!(result.exit_code, 1);
-        assert_eq!(result.value.status, "durable_failure");
+        assert_eq!(result.value.status, "pre_execution_failure");
+        assert_eq!(
+            result.value.terminal_phase.as_deref(),
+            Some("cook_pre_execution")
+        );
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
     });
 }

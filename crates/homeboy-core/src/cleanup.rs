@@ -3761,62 +3761,64 @@ mod tests {
 
     #[test]
     fn exact_checkout_scope_keeps_dry_run_and_apply_off_sibling_worktrees() {
-        let repo = git_repo();
-        let sibling_parent = TempDir::new().expect("sibling parent");
-        let sibling = sibling_parent.path().join("artifact-worktree");
-        git(repo.path(), &["worktree", "add", sibling.to_str().unwrap()]);
-        write_file(&repo.path().join("target/debug/app"), "primary artifact");
-        write_file(
-            &sibling.join("node_modules/pkg/index.js"),
-            &"dependency artifact".repeat(1024),
-        );
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            let sibling_parent = TempDir::new().expect("sibling parent");
+            let sibling = sibling_parent.path().join("artifact-worktree");
+            git(repo.path(), &["worktree", "add", sibling.to_str().unwrap()]);
+            write_file(&repo.path().join("target/debug/app"), "primary artifact");
+            write_file(
+                &sibling.join("node_modules/pkg/index.js"),
+                &"dependency artifact".repeat(1024),
+            );
 
-        let options = ArtifactCleanupOptions {
-            path: Some(repo.path().to_path_buf()),
-            scope: ArtifactCleanupScope::ExactCheckout,
-            apply: false,
-            self_artifacts: false,
-            temp_roots: Vec::new(),
-            sort: ArtifactCleanupSort::Size,
-            limit: Some(1),
-            merged_only: false,
-            min_age_days: None,
-            include_active_worktrees: true,
-            max_scan_duration: None,
-        };
-        let output = cleanup_artifacts(options.clone()).expect("dry-run cleanup");
+            let options = ArtifactCleanupOptions {
+                path: Some(repo.path().to_path_buf()),
+                scope: ArtifactCleanupScope::ExactCheckout,
+                apply: false,
+                self_artifacts: false,
+                temp_roots: Vec::new(),
+                sort: ArtifactCleanupSort::Size,
+                limit: Some(1),
+                merged_only: false,
+                min_age_days: None,
+                include_active_worktrees: true,
+                max_scan_duration: None,
+            };
+            let output = cleanup_artifacts(options.clone()).expect("dry-run cleanup");
 
-        assert_eq!(output.mode, "dry_run");
-        assert_eq!(output.scope, ArtifactCleanupScope::ExactCheckout);
-        assert_eq!(output.worktree_count, 1);
-        assert_eq!(output.applied_count, 0);
-        assert_eq!(output.candidate_count, 1);
-        assert_eq!(output.candidates[0].relative_path, "target");
-        assert!(output.candidates[0]
-            .worktree
-            .ends_with(repo.path().file_name().unwrap().to_str().unwrap()));
-        assert!(!output
-            .candidates
-            .iter()
-            .any(|row| row.worktree.ends_with("artifact-worktree")));
-        assert_eq!(
-            serde_json::to_value(&output).expect("serialize output")["scope"],
-            "exact_checkout"
-        );
-        assert!(repo.path().join("target/debug/app").exists());
-        assert!(sibling.join("node_modules/pkg/index.js").exists());
+            assert_eq!(output.mode, "dry_run");
+            assert_eq!(output.scope, ArtifactCleanupScope::ExactCheckout);
+            assert_eq!(output.worktree_count, 1);
+            assert_eq!(output.applied_count, 0);
+            assert_eq!(output.candidate_count, 1);
+            assert_eq!(output.candidates[0].relative_path, "target");
+            assert!(output.candidates[0]
+                .worktree
+                .ends_with(repo.path().file_name().unwrap().to_str().unwrap()));
+            assert!(!output
+                .candidates
+                .iter()
+                .any(|row| row.worktree.ends_with("artifact-worktree")));
+            assert_eq!(
+                serde_json::to_value(&output).expect("serialize output")["scope"],
+                "exact_checkout"
+            );
+            assert!(repo.path().join("target/debug/app").exists());
+            assert!(sibling.join("node_modules/pkg/index.js").exists());
 
-        let output = cleanup_artifacts(ArtifactCleanupOptions {
-            apply: true,
-            ..options
-        })
-        .expect("apply cleanup");
-        assert_eq!(output.scope, ArtifactCleanupScope::ExactCheckout);
-        assert!(!repo.path().join("target").exists());
-        assert!(
-            sibling.join("node_modules/pkg/index.js").exists(),
-            "apply must use the same exact-checkout scope as the dry run"
-        );
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..options
+            })
+            .expect("apply cleanup");
+            assert_eq!(output.scope, ArtifactCleanupScope::ExactCheckout);
+            assert!(!repo.path().join("target").exists());
+            assert!(
+                sibling.join("node_modules/pkg/index.js").exists(),
+                "apply must use the same exact-checkout scope as the dry run"
+            );
+        });
     }
 
     #[test]
@@ -4332,34 +4334,36 @@ mod tests {
 
     #[test]
     fn merged_only_reclaims_merged_worktree_target() {
-        let remote = TempDir::new().expect("remote");
-        git(remote.path(), &["init", "--bare", "-b", "main"]);
-        let remote_url = remote.path().to_string_lossy().to_string();
+        crate::test_support::with_isolated_home(|_| {
+            let remote = TempDir::new().expect("remote");
+            git(remote.path(), &["init", "--bare", "-b", "main"]);
+            let remote_url = remote.path().to_string_lossy().to_string();
 
-        let repo = git_repo();
-        git(repo.path(), &["remote", "add", "origin", &remote_url]);
-        git(repo.path(), &["push", "-u", "origin", "main"]);
+            let repo = git_repo();
+            git(repo.path(), &["remote", "add", "origin", &remote_url]);
+            git(repo.path(), &["push", "-u", "origin", "main"]);
 
-        // Branch tip equals upstream → merged. Leftover target/ should be reclaimed.
-        write_file(&repo.path().join("target/debug/app"), "artifact");
+            // Branch tip equals upstream → merged. Leftover target/ should be reclaimed.
+            write_file(&repo.path().join("target/debug/app"), "artifact");
 
-        let output = cleanup_artifacts(ArtifactCleanupOptions {
-            path: Some(repo.path().to_path_buf()),
-            scope: ArtifactCleanupScope::ExactCheckout,
-            apply: true,
-            self_artifacts: false,
-            temp_roots: Vec::new(),
-            sort: ArtifactCleanupSort::Discovery,
-            limit: None,
-            merged_only: true,
-            min_age_days: None,
-            include_active_worktrees: false,
-            max_scan_duration: None,
-        })
-        .expect("merged-only cleanup");
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                path: Some(repo.path().to_path_buf()),
+                scope: ArtifactCleanupScope::ExactCheckout,
+                apply: true,
+                self_artifacts: false,
+                temp_roots: Vec::new(),
+                sort: ArtifactCleanupSort::Discovery,
+                limit: None,
+                merged_only: true,
+                min_age_days: None,
+                include_active_worktrees: false,
+                max_scan_duration: None,
+            })
+            .expect("merged-only cleanup");
 
-        assert!(output.applied_count >= 1, "merged target must be reclaimed");
-        assert!(!repo.path().join("target").exists());
+            assert!(output.applied_count >= 1, "merged target must be reclaimed");
+            assert!(!repo.path().join("target").exists());
+        });
     }
 
     #[test]
