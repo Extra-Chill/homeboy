@@ -159,8 +159,8 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--isolate-gate-xdg` | `<ISOLATE_GATE_XDG>` | Run gates with isolated XDG base directories so gate side effects do not touch the operator's config/cache/data dirs (default true) Values: `true`, `false`. |
 | `--gate-shared-cargo-target` | flag | Override the component's declared shared Cargo target policy for deterministic gates. Omit to inherit the repository component policy |
 | `--no-gate-shared-cargo-target` | flag | Explicitly keep deterministic gate Cargo output local to its workspace |
-| `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. This derives provider execution and same-provider remediation budgets. An explicit --backend plus --model stays on that route; use --allow-provider-rotation to opt it into configured fallbacks (default 3) |
-| `--allow-provider-rotation` | flag | Permit configured cross-provider/model fallbacks after explicitly selecting both --backend and --model. This is distinct from same-provider remediation, which retries the selected route for gate and required review-form fixes |
+| `--max-attempts` | `<N>` | Maximum Cook attempts before giving up. Each attempt re-runs the agent and gates; a later attempt can recover from a transient failure. This derives provider execution and same-provider remediation budgets. An explicit --model pins the provider route; use --allow-provider-rotation to opt it into configured fallbacks (default 3) |
+| `--allow-provider-rotation` | flag | Permit configured cross-provider/model fallbacks after explicitly selecting a model. This is distinct from same-provider remediation, which retries the selected route for gate and required review-form fixes |
 | `--no-finalize` | flag | Stop after the work is verified but before opening the pull request, leaving the committed change on the worktree branch for manual review or a later `agent-task review`/finalize |
 | `--draft-pr` | flag | Complete normal verified finalization but create a draft pull request. Existing pull requests retain their current draft or ready state |
 | `--full` | flag | Return the complete cook report, including nested promotion and gate evidence |
@@ -195,6 +195,11 @@ Continue a detached Cook from its durable Cook ID or provider attempt ID. The pe
 | `--artifact-id` | `<ID>` | Select the patch artifact to promote when the durable attempt produced more than one patch candidate. This resumes controller-side promotion without dispatching another provider execution |
 | `--timeout-ms` | `<MS>` | Explicitly increase the provider timeout for a new retry attempt. The override and its operator authority are retained in the Cook recipe |
 | `--review-form-timeout-ms` | `<MS>` | Explicitly increase the optional review-form deadline for a new retry attempt. Distinct from `--timeout-ms`; capped at 600000ms |
+| `--backend` | `<BACKEND>` | Backend for a rearmed Cook retry. The original Cook recipe remains authoritative for prompt, gates, worktree, notification, and disclosure |
+| `--selector` | `<SELECTOR>` | Provider-specific selector for a rearmed Cook retry |
+| `--model` | `<MODEL>` | Model for a rearmed Cook retry. This pins rotation unless explicitly paired with --allow-provider-rotation or a positive --provider-rotations |
+| `--allow-provider-rotation` | flag | Re-enable configured provider/model rotation after a route override |
+| `--provider-rotations` | `<N>` | Explicit cross-provider/model rotations after a route override |
 | `--full` | flag | Include the complete Cook report rather than the compact lifecycle view |
 
 ## `homeboy agent-task loop`
@@ -715,6 +720,11 @@ Submit a fresh durable run from an existing run's plan
 | `--run` | flag | Execute the retry immediately after creating it |
 | `--force` | flag | Permit a new retry after every prior retry in this lineage is terminal |
 | `--idempotency-key` | `<KEY>` | Stable caller key for safely replaying this retry reservation |
+| `--backend` | `<BACKEND>` | Backend for the next Cook attempt. This explicit route change is recorded with its prior route and operator authority in the Cook lineage |
+| `--selector` | `<SELECTOR>` | Provider-specific selector for the next Cook attempt |
+| `--model` | `<MODEL>` | Model for the next Cook attempt. A model override pins provider rotation unless --allow-provider-rotation or a positive --provider-rotations is also supplied |
+| `--allow-provider-rotation` | flag | Re-enable configured provider/model rotation for this overridden route |
+| `--provider-rotations` | `<N>` | Explicit cross-provider/model rotations available after this override |
 
 ## `homeboy agent-task fanout`
 
@@ -796,7 +806,7 @@ Every child requires a deterministic gate from shared --verify/ --private-verify
 | `--verification-profiles` | `<JSON>` | JSON verification profile declaration, inline or @file.json. Profiles select one typed `plan`; shared `--verify` and `--private-verify` remain explicit shell escape hatches. Assignment selectors accept a full issue URL, an `owner/repo#number` issue key, or the generated `issue-number` child selector. Complete example: {"profiles":{"review":{"plan":{"adapter":"homeboy_review_test","command":["homeboy","review","test","my-component"],"suite_timeout_seconds":1800}}},"assignments":[{"selector":"https://github.com/owner/repo/issues/123","profile":"review"}]} |
 | `--max-concurrency` | `<N>` | Maximum number of child cooks to run at once |
 | `--max-duration` | `<SECONDS>` | Wall-clock budget, in seconds, for the whole batch — every child, every attempt, and every gate |
-| `--preview` | flag | Resolve and validate the batch without side effects: no repository hydration, provider dispatch, worktree creation, or file reads. Prints the static plan, worktree projection, preflight, and a replayable command — the batch-wide counterpart of `agent-task cook --preview`. `--dry-run` is accepted as the historical spelling of this flag |
+| `--preview` | flag | Resolve and validate the batch without repository hydration, provider dispatch, or worktree creation. Runs the selected provider's bounded readiness admission, then prints the static plan, worktree projection, preflight, and a replayable command — the batch-wide counterpart of `agent-task cook --preview`. `--dry-run` is accepted as the historical spelling of this flag |
 | `--dry-run-planner-timeout-seconds` | `<SECONDS>` | Maximum wall-clock budget for each bounded static --preview planning phase (default 10 seconds per phase) |
 | `--run-plan` | flag | Execute the planned wave in this invocation. After admission and worktree preflight, every child cook runs through the cook-loop service and successful children open or update their own pull requests. Without this flag the command only plans the batch and creates or reuses the child worktrees — see the two-phase model above |
 
