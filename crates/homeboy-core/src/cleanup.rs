@@ -58,6 +58,12 @@ pub use policy::{
     RUNNER_MIN_AGE_HOURS, RUNNER_WORKSPACE_APPLY_PASSES, RUNNER_WORKSPACE_DRY_RUN_PASSES,
     RUNNER_WORKSPACE_PAGE_LIMIT,
 };
+pub mod release_artifacts;
+pub use release_artifacts::{
+    cleanup_release_artifacts, measure_release_version, ReleaseArtifactCleanupOptions,
+    ReleaseArtifactCleanupOutput, ReleaseArtifactRepo, ReleaseArtifactVersion, ReleaseVersionUsage,
+    RELEASE_ARTIFACT_MIN_AGE_HOURS, RELEASE_ARTIFACT_STORE,
+};
 mod self_artifacts;
 
 use extension_declarations::extension_artifact_declarations;

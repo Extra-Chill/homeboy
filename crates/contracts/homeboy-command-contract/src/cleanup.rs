@@ -84,6 +84,11 @@ pub enum CleanupCategoryArg {
     /// filename marker plus the liveness of the PID stamped into it, so it can
     /// plan and apply with the observation store shut (#11073).
     LeakedTestHomes,
+    /// Superseded copies in the durable release artifact store. These are
+    /// referenced by durable release records, so `orphaned-artifact-bytes`
+    /// correctly finds zero candidates against them and they need their own
+    /// per-repository count and byte bounds (#14223).
+    ReleaseArtifacts,
     /// Installed runtime providers own discovery and native reclaim for roots
     /// outside Homeboy worktrees.
     ExternalStorage,
@@ -250,6 +255,17 @@ pub const LEAKED_TEST_HOMES_METADATA: CleanupInventoryCategoryMetadata =
         include_arg: "leaked-test-homes",
         dry_run_command: "homeboy cleanup --include leaked-test-homes",
         apply_command: "homeboy cleanup --include leaked-test-homes --apply",
+    };
+
+/// Superseded durable release artifact copies. There is no specialist command:
+/// the retention decision is per-repository rank plus two budgets, and a second
+/// spelling of that would be a second place for it to drift.
+pub const RELEASE_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "release_artifacts",
+        include_arg: "release-artifacts",
+        dry_run_command: "homeboy cleanup --include release-artifacts",
+        apply_command: "homeboy cleanup --include release-artifacts --apply",
     };
 
 /// Renders the aggregate cleanup command for the managed runtime-temp override.
@@ -442,6 +458,16 @@ mod tests {
         assert_eq!(
             LEAKED_TEST_HOMES_METADATA.canonical_cleanup_command(false),
             "homeboy cleanup --include leaked-test-homes"
+        );
+        assert_eq!(
+            RELEASE_ARTIFACTS_METADATA.canonical_cleanup_command(true),
+            "homeboy cleanup --include release-artifacts --apply"
+        );
+        assert!(
+            CleanupParserTest::parse_from(["cleanup", "--include", "release-artifacts"])
+                .cleanup
+                .include
+                .contains(&CleanupCategoryArg::ReleaseArtifacts)
         );
         assert!(
             CleanupParserTest::parse_from(["cleanup", "--include", "leaked-test-homes"])

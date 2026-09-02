@@ -147,6 +147,8 @@ own arguments.
 - `limit` — Maximum records inspected per cleanup invocation (default: 1000).
 - `controller_runtime_days` — Age threshold before an unreferenced controller runtime identity is eligible (default: 30).
 - `controller_runtime_max_bytes` — Byte budget above which unreferenced controller runtime identities are reclaimed regardless of age.
+- `release_artifact_max_count` — Maximum published versions retained per repository in the durable release artifact store (default: 5). The newest release of every repository is always retained regardless of this value.
+- `release_artifact_max_bytes` — Byte budget for retained release artifacts, per repository (default: 2 GiB). Applies alongside `release_artifact_max_count`; the stricter bound wins. A count alone cannot bound this store because per-release payloads span two orders of magnitude across repositories (#14223).
 - `shared_store_days` — Age threshold for shared Cargo target stores.
 - `shared_store_max_bytes` — Byte budget for shared Cargo target stores.
 - `shared_store_lease_seconds` — Lease TTL that keeps an in-use shared Cargo target store alive.

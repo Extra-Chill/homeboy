@@ -126,6 +126,72 @@ The byte ceiling (2 GiB retained) relaxes step 3, and only step 3, for the
 oldest entries that already passed step 2. An age window alone cannot bound a
 directory accumulating hundreds of megabytes per kill at an unbounded rate.
 
+## Release Artifacts
+
+`homeboy release` copies every published asset into
+`<artifact-root>/release/<repo>/<version>/` so a retry, a repair command, or a
+deploy reaches the exact published bytes without a rebuild. Nothing removed
+those copies until #14223: the store had no count, byte, or age bound of any
+kind, and on one host reached **6.1 GB** — 6.0 GB of it a single repository
+holding fourteen ~435 MB builds published inside a nine-day window, while
+upstream had already moved several minor versions past every one of them.
+
+```bash
+homeboy cleanup --include release-artifacts
+homeboy cleanup --include release-artifacts --apply
+```
+
+`orphaned-artifact-bytes` cannot reach this store and never will. These
+directories are referenced by durable release records, so that category
+correctly inventories **zero** candidates against them. They are live, not
+orphaned, which is why bounding them needs a policy of its own.
+
+Deleting them is safe because every entry is a local copy of bytes already
+published to a GitHub Release under an immutable tag. The remote copy is the
+source of truth; the local one is a cache that avoids a rebuild. Losing an old
+entry costs a download, not a release.
+
+Two budgets apply, both **per repository**, and the stricter one wins:
+
+- `retention.release_artifact_max_count` — versions retained per repository
+  (default: 5).
+- `retention.release_artifact_max_bytes` — retained bytes per repository
+  (default: 2 GiB).
+
+Both exist because per-release payloads span two orders of magnitude across
+repositories. A count that preserves a small repository's whole history lets a
+large one hold gigabytes; a byte ceiling that bounds the large one would
+needlessly truncate the small one's history. Whichever limit a repository's own
+payload size makes binding is the one that governs it.
+
+Three rules constrain every removal:
+
+1. **The newest release is never pruned.** Rank 0 for a repository always
+   carries a retention reason, whatever the budgets say. A bound cannot empty a
+   repository's directory — not even `--release-max-count 0`.
+2. **A release published within the last hour is never pruned.** The fixed floor
+   covers an in-flight publication. Rank alone does not cover this: two releases
+   cut back to back put the second at rank 1, past a tight count budget, while
+   its publication is still running.
+3. **Retention is monotone in age.** Once a repository's byte budget is
+   exhausted every *older* entry is eligible too, so pruning a newer entry while
+   keeping an older one is unreachable.
+
+Reported bytes are **hardlink-corrected**. Each version directory holds its
+payload under two names — a numbered durable copy and the canonical upload name
+GitHub derives an asset name from — and those are the same inode, because
+staging hardlinks first and only copies if the link fails. Summing `st_size`
+across directory entries reports roughly **twice** the disk a removal returns.
+Each version reports `size_bytes` (what a removal actually frees), the naive
+`logical_bytes`, and the `hardlink_duplicate_bytes` difference, so the
+correction is visible rather than something to trust.
+
+`candidate_count` and `estimated_bytes` count genuinely removable versions only.
+Each version's `eligible` is computed as `retention_reasons.is_empty()` and is
+never assigned any other way, so a populated reason forces `eligible: false`
+structurally and cleanup cannot advertise reclaim the apply path will not
+perform.
+
 ## Automatic Retention
 
 Starting the Homeboy daemon installs the bounded retention pass by default:
@@ -188,6 +254,7 @@ apply.
 | `remote-lab-workspaces` | `homeboy runner workspace prune <runner>` | Orphaned runner-side Lab workspaces | `homeboy/runner-workspace/v1` metadata plus a resolvable `local_path`; never outside `_lab_workspaces`. A workspace is also reachable when its *exact* durable owner run is terminal and its lease is `delete_on_success` — an existing controller-side source path is not evidence the runner copy is live | 24h floor; pending apply-back or an unexpired lifecycle TTL preserves the workspace. Live, unavailable, ambiguous, or malformed run authority all retain |
 | `runtime-tmp` | `homeboy self cleanup-runtime-tmp` | Orphaned Homeboy runtime temp entries | Owner id recorded in the entry | `retention.runtime_tmp_days` plus byte/count budgets; entries whose owner process is running are preserved |
 | `leaked-test-homes` | — (aggregate only) | Isolated test homes abandoned by killed test processes, under `$TMPDIR`, `/tmp`, `/var/tmp`, `/dev/shm` | `hb-test-<pid>-` filename marker directly under a scanned root, plus a liveness probe on that PID; the database is deliberately **not** consulted | Fixed 1h floor, not operator-overridable, plus a 2 GiB retained-byte ceiling that relaxes the floor for the oldest *abandoned* entries only. A running owner, an unrecorded owner, a symlink, and a non-directory are all unreachable |
+| `release-artifacts` | — (aggregate only) | Superseded durable release copies under `<artifact-root>/release/<repo>/<version>/` | Version directory under a repository directory in the release store; the database is deliberately **not** consulted. `orphaned-artifact-bytes` cannot reach these — they are referenced by durable release records and correctly inventory as zero orphans | `retention.release_artifact_max_count` (default 5) and `retention.release_artifact_max_bytes` (default 2 GiB), both per repository, stricter wins. The newest release of every repository is structurally unreachable, a fixed 1h floor covers an in-flight publication, and retention is monotone in age. Sizes are hardlink-corrected, so the numbered and canonical copies of one payload are billed once |
 | `controller-scratch` | — (aggregate only) | Released controller scratch resources, including ephemeral attempt Git worktrees | Scratch index ownership with pid liveness; a linked worktree is proved by Git's own two-way `.git`/`gitdir` pointers, never by a database join | Per-resource retention window (P7D) unless `--older-than-days` is typed. A linked attempt worktree is additionally retained unless every commit reachable from its HEAD is already reachable from a branch, tag, or remote-tracking ref in its source repository. Removal goes through `git worktree remove`; a worktree that cannot be unregistered is reported and retained, never deleted behind Git |
 | `shared-cargo-targets` | — (aggregate only) | Shared Cargo target stores | Store layout below Homeboy's data directory | `retention.shared_store_days` and byte budget; an unexpired lease preserves the store independently |
 | `controller-runtimes` | `homeboy runtime controller-prune` | Unreferenced immutable controller runtime identities | Content-addressed pin path not referenced by a nonterminal durable record or the active generation, under the admission lock | `retention.controller_runtime_days` and byte budget; `--ignore-retention` is the explicit destructive opt-out |
