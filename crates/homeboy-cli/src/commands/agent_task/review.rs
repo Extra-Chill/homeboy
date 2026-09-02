@@ -2125,6 +2125,8 @@ fn providers_with_catalog(
         homeboy::agents::agent_tasks::provider::provider_secret_env_scopes(providers);
 
     let full_command = provider_full_command(&args);
+    let readiness_next_action =
+        provider_readiness_next_action(route.as_ref(), Some(&dispatchability));
     let shown_providers = if args.full {
         providers.to_vec()
     } else {
@@ -2174,7 +2176,8 @@ fn providers_with_catalog(
                 "identity": "agent-task providers",
                 "state": provider_report_state(route.as_ref(), all_providers, Some(&dispatchability)),
                 "risk": if diagnostics.is_empty() { Vec::new() } else { vec![format!("{} discovery diagnostic(s)", diagnostics.len())] },
-                "next_action": provider_next_command(route.as_ref(), Some(&dispatchability)).unwrap_or(full_command.clone()),
+                "next_action": readiness_next_action.primary.clone().or_else(|| route.is_none().then(|| full_command.clone())),
+                "refresh_action": readiness_next_action.refresh,
                 "selection_choices": selection_choices(route.as_ref()),
             },
             "truncation": {
@@ -2438,6 +2441,35 @@ fn provider_next_command(
         }
     }
     Some(route.next_command())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProviderReadinessNextAction {
+    primary: Option<String>,
+    refresh: Option<String>,
+}
+
+/// Projects one readiness verdict into the action vocabulary shared by the
+/// compact report, full report, and human summary. A successful live probe has
+/// no required follow-up; repeating it remains available as an explicit refresh.
+fn provider_readiness_next_action(
+    route: Option<&ProviderRoute>,
+    dispatchability: Option<
+        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    >,
+) -> ProviderReadinessNextAction {
+    let command = provider_next_command(route, dispatchability);
+    if dispatchability.is_some_and(|verdict| verdict.readiness.live_inference.ready) {
+        ProviderReadinessNextAction {
+            primary: None,
+            refresh: command,
+        }
+    } else {
+        ProviderReadinessNextAction {
+            primary: command,
+            refresh: None,
+        }
+    }
 }
 
 fn resolve_provider_route(
@@ -2864,6 +2896,7 @@ fn readiness_validation_projection(
             .collect::<Vec<_>>()
     });
     let resolved = route.and_then(ProviderRoute::resolved);
+    let next_action = provider_readiness_next_action(route, dispatchability);
     let (effective_backend, effective_provider_id, effective_model) = match resolved {
         Some(ProviderRoute::Resolved {
             backend,
@@ -2892,7 +2925,8 @@ fn readiness_validation_projection(
         "live_inference": dispatchability.map(|verdict| &verdict.readiness.live_inference),
         "live_dispatch": live_dispatch_readiness(dispatchability),
         "route_state": route.map(ProviderRoute::state),
-        "next_command": provider_next_command(route, dispatchability),
+        "next_command": next_action.primary,
+        "refresh_command": next_action.refresh,
         "reason": match route { Some(ProviderRoute::Blocked { reason, .. }) => Some(reason), _ => None },
         "selection_choices": selection_choices(route),
         // One entry per declared backend, each carrying this same projection
@@ -3769,6 +3803,25 @@ mod tests {
         .expect("provider fixture")
     }
 
+    fn provider_with_readiness_result(
+        id: &str,
+        backend: &str,
+        ready: bool,
+        classification: &str,
+        retryable: bool,
+    ) -> AgentTaskExecutorProvider {
+        let mut provider = provider(id, backend);
+        provider.readiness_invocation = Some(
+            serde_json::from_value(serde_json::json!({
+                "argv": ["sh", "-c", format!(
+                    "cat >/dev/null; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":{ready},\"classification\":\"{classification}\",\"retryable\":{retryable},\"remediation\":\"repair {classification}\",\"reason\":\"{classification}\",\"cache_key\":\"test\",\"identity\":{{}}}}'"
+                )]
+            }))
+            .expect("readiness invocation"),
+        );
+        provider
+    }
+
     fn save_provider_policy(
         default_backend: Option<&str>,
         rotation: Option<homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy>,
@@ -3819,6 +3872,125 @@ mod tests {
                 .0;
             assert_eq!(output["scope"]["matched"], 1);
             assert_eq!(output["providers"][0]["id"], "other.provider");
+        });
+    }
+
+    #[test]
+    fn provider_readiness_next_actions_are_consistent_for_every_verdict() {
+        crate::test_support::with_isolated_home(|_| {
+            let cases = [
+                (
+                    "ready",
+                    provider_with_readiness_result("ready.provider", "ready", true, "ready", false),
+                    "validated",
+                    None,
+                    Some("homeboy agent-task providers --backend ready --selector ready.provider --validate-readiness"),
+                ),
+                (
+                    "unavailable",
+                    provider_with_readiness_result(
+                        "unavailable.provider",
+                        "unavailable",
+                        false,
+                        "account",
+                        false,
+                    ),
+                    "unavailable",
+                    Some("homeboy agent-task providers --backend unavailable --selector unavailable.provider --validate-readiness"),
+                    None,
+                ),
+                (
+                    "unverified",
+                    provider("unverified.provider", "unverified"),
+                    "inference_unverified",
+                    Some("homeboy agent-task providers --backend unverified --selector unverified.provider --validate-readiness"),
+                    None,
+                ),
+                (
+                    "transient",
+                    provider_with_readiness_result(
+                        "transient.provider",
+                        "transient",
+                        false,
+                        "transient_failure",
+                        true,
+                    ),
+                    "unavailable",
+                    Some("homeboy agent-task providers --backend transient --selector transient.provider --validate-readiness"),
+                    None,
+                ),
+            ];
+
+            for (name, provider, live_dispatch, next, refresh) in cases {
+                let catalog = provider_catalog(vec![provider.clone()]);
+                let dispatchability = evaluate_provider_dispatchability(
+                    &catalog,
+                    &provider.backend,
+                    Some(&provider.id),
+                    None,
+                    true,
+                );
+                let projection = readiness_validation_projection(
+                    None,
+                    Some(&provider),
+                    Some(&ProviderRoute::Resolved {
+                        backend: provider.backend.clone(),
+                        provider_id: provider.id.clone(),
+                        model: None,
+                        dispatchable: dispatchability.ready,
+                    }),
+                    Some(&dispatchability),
+                    true,
+                    None,
+                );
+                let expected_next = next
+                    .map(|command| Value::String(command.to_string()))
+                    .unwrap_or(Value::Null);
+                let expected_refresh = refresh
+                    .map(|command| Value::String(command.to_string()))
+                    .unwrap_or(Value::Null);
+
+                assert_eq!(projection["live_dispatch"], live_dispatch, "{name}");
+                assert_eq!(projection["next_command"], expected_next, "{name}");
+                assert_eq!(projection["refresh_command"], expected_refresh, "{name}");
+                let rendered = render_agent_task_summary(
+                    AgentTaskSummaryKind::Providers,
+                    &serde_json::json!({
+                        "providers": [{}],
+                        "operator_summary": {
+                            "state": "ready",
+                            "next_action": expected_next,
+                            "refresh_action": expected_refresh,
+                        },
+                    }),
+                )
+                .expect("rendered provider report");
+                assert_eq!(rendered.contains("\nNext:"), next.is_some(), "{name}");
+                assert_eq!(rendered.contains("\nRefresh:"), refresh.is_some(), "{name}");
+            }
+
+            let provider =
+                provider_with_readiness_result("ready.provider", "ready", true, "ready", false);
+            for full in [false, true] {
+                let output = providers_with_catalog(
+                    ProvidersArgs {
+                        backend: Some(provider.backend.clone()),
+                        selector: Some(provider.id.clone()),
+                        validate_readiness: true,
+                        full,
+                        ..providers_args()
+                    },
+                    provider_catalog(vec![provider.clone()]),
+                )
+                .expect("ready provider report")
+                .0;
+                assert!(output["operator_summary"]["next_action"].is_null());
+                assert!(output["readiness_validation"]["next_command"].is_null());
+                assert_eq!(
+                    output["operator_summary"]["refresh_action"],
+                    output["readiness_validation"]["refresh_command"]
+                );
+            }
         });
     }
 
