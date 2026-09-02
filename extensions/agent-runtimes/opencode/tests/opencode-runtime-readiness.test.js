@@ -67,6 +67,11 @@ try {
 	assert.notEqual(changedModel.cache_key, ready.cache_key);
 	const changedCredential = openCodeRuntimeReadiness(request(), { env: env({ OPENAI_API_KEY: 'other-secret' }), spawnSync: probe(readyResponses()) });
 	assert.notEqual(changedCredential.cache_key, ready.cache_key);
+	const changedConfigCredential = openCodeRuntimeReadiness(request(), {
+		env: env({ OPENCODE_CONFIG_CONTENT: '{"provider":{"openai":{"options":{"apiKey":"other-secret"}}}}' }),
+		spawnSync: probe(readyResponses()),
+	});
+	assert.notEqual(changedConfigCredential.cache_key, ready.cache_key);
 	const authStore = path.join(root, '.local', 'share', 'opencode');
 	fs.mkdirSync(authStore, { recursive: true });
 	fs.writeFileSync(path.join(authStore, 'auth.json'), '{"openai":"first"}');

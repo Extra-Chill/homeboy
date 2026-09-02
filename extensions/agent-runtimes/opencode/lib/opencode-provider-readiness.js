@@ -258,7 +258,16 @@ function credentialIdentity(env) {
 	return crypto.createHash('sha256').update(JSON.stringify({
 		environment: values,
 		auth_store: authStoreIdentity(env),
+		// Custom provider credentials and account routing can be configured here.
+		opencode_config: configContentIdentity(env),
 	})).digest('hex');
+}
+
+function configContentIdentity(env) {
+	const content = env.OPENCODE_CONFIG_CONTENT;
+	return typeof content === 'string'
+		? crypto.createHash('sha256').update(content).digest('hex')
+		: '';
 }
 
 function authStoreIdentity(env) {
