@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { openCodeRuntimeReadiness } = require('..');
+const fixtures = require('./fixtures/provider-readiness.json');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-readiness-'));
 const executable = path.join(root, 'opencode');
@@ -30,15 +31,20 @@ function probe(responses, expectedTimeout = 15_000) {
 		assert.equal(options.maxBuffer, 16 * 1024);
 		const response = responses[index++];
 		assert.deepEqual(args.slice(-response.args.length), response.args);
+		if (response.args[0] === 'run') {
+			assert.ok(options.cwd);
+			assert.equal(JSON.parse(options.env.OPENCODE_CONFIG_CONTENT).agent['homeboy-readiness'].permission['*'], 'deny');
+		}
 		return response.result;
 	};
 }
 
-function readyResponses() {
+function readyResponses(providerResult = fixtures.success, model = 'gpt-5.6-terra') {
 	return [
 		{ args: ['--version'], result: { status: 0, stdout: '1.18.25\n', stderr: '' } },
 		{ args: ['auth', 'list'], result: { status: 0, stdout: 'Credentials ~/.local/share/opencode/auth.json\nOpenAI oauth\n', stderr: '' } },
-		{ args: ['models', 'openai'], result: { status: 0, stdout: 'openai/gpt-5.6-terra\n', stderr: '' } },
+		{ args: ['models', 'openai'], result: { status: 0, stdout: `openai/${model}\n`, stderr: '' } },
+		{ args: ['run', '--model', `openai/${model}`, '--format', 'json', '--agent', 'homeboy-readiness', '--title', 'homeboy-readiness', 'Reply with exactly READY. Do not access files, run commands, or make changes.'], result: providerResult },
 	];
 }
 
@@ -50,16 +56,14 @@ try {
 	assert.equal(ready.identity.provider, 'openai');
 	assert.equal(ready.identity.model, 'gpt-5.6-terra');
 	assert.equal(ready.identity.version, '1.18.25');
+	assert.equal(ready.reason, 'model_execution_ready');
 	assert.equal(JSON.stringify(ready).includes('secret-do-not-leak'), false);
 	const clampedTimeout = openCodeRuntimeReadiness(request({ readiness_timeout_ms: 60_000 }), {
 		env: env(),
 		spawnSync: probe(readyResponses(), 30_000),
 	});
 	assert.equal(clampedTimeout.ready, true);
-	const changedModel = openCodeRuntimeReadiness(request({ model: 'openai/gpt-5.6-terra-fast' }), { env: env(), spawnSync: probe([
-		...readyResponses().slice(0, 2),
-		{ args: ['models', 'openai'], result: { status: 0, stdout: 'openai/gpt-5.6-terra-fast\n', stderr: '' } },
-	]) });
+	const changedModel = openCodeRuntimeReadiness(request({ model: 'openai/gpt-5.6-terra-fast' }), { env: env(), spawnSync: probe(readyResponses(fixtures.success, 'gpt-5.6-terra-fast')) });
 	assert.notEqual(changedModel.cache_key, ready.cache_key);
 	const changedCredential = openCodeRuntimeReadiness(request(), { env: env({ OPENAI_API_KEY: 'other-secret' }), spawnSync: probe(readyResponses()) });
 	assert.notEqual(changedCredential.cache_key, ready.cache_key);
@@ -83,12 +87,24 @@ try {
 	]) });
 	assert.equal(rejectedAuth.classification, 'auth_failure');
 	assert.equal(JSON.stringify(rejectedAuth).includes('secret-do-not-leak'), false);
-	const quota = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe([
-		readyResponses()[0], readyResponses()[1],
-		{ args: ['models', 'openai'], result: { status: 1, stdout: '', stderr: '429 rate limit exhausted' } },
-	]) });
+	const accountBlocked = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses(fixtures.account_blocked)) });
+	assert.equal(accountBlocked.ready, false);
+	assert.equal(accountBlocked.classification, 'provider_account_blocked');
+	assert.equal(accountBlocked.reason, 'provider_account_blocked');
+	const quota = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses(fixtures.quota)) });
 	assert.equal(quota.classification, 'provider_quota');
 	assert.equal(quota.retryable, true);
+	const providerAuth = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses(fixtures.auth)) });
+	assert.equal(providerAuth.classification, 'auth_failure');
+	const providerTransient = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses(fixtures.transient)) });
+	assert.equal(providerTransient.classification, 'transient_failure');
+	const unsupported = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses(fixtures.unsupported)) });
+	assert.equal(unsupported.classification, 'configuration_failure');
+	assert.equal(unsupported.reason, 'model_unsupported');
+	const indeterminate = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses(fixtures.indeterminate)) });
+	assert.equal(indeterminate.ready, false);
+	assert.equal(indeterminate.classification, 'indeterminate');
+	assert.equal(indeterminate.reason, 'model_probe_unsupported');
 	const transient = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe([
 		{ args: ['--version'], result: { error: { code: 'ETIMEDOUT' }, stdout: '', stderr: '' } },
 	]) });

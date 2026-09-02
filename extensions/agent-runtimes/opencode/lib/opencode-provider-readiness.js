@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const {
@@ -15,8 +16,13 @@ const OPENCODE_READINESS_TIMEOUT_MS = 15_000;
 const OPENCODE_READINESS_MAX_TIMEOUT_MS = 30_000;
 const OPENCODE_READINESS_MAX_OUTPUT_BYTES = 16 * 1024;
 const OPENCODE_AUTH_FAILURE_PATTERN = /\b(?:auth(?:entication)?|credential|login|token|unauthori[sz]ed|forbidden|account)\b/i;
+const OPENCODE_ACCOUNT_BLOCKED_PATTERN = /\b(?:personal-team-blocked|spending limit|run out of credits|need a \w+ subscription|billing|insufficient credits)\b/i;
 const OPENCODE_QUOTA_PATTERN = /\b(?:quota|rate limit|usage limit|spending limit|limit exhausted|too many requests|\b429\b)\b/i;
 const OPENCODE_TRANSIENT_PATTERN = /\b(?:timeout|timed out|temporar(?:y|ily)|network|connect(?:ion)?|unavailable|service unavailable|\b5\d\d\b)\b/i;
+const OPENCODE_UNSUPPORTED_MODEL_PATTERN = /\b(?:model|deployment|engine)\b[\s\S]{0,100}\b(?:unsupported|unavailable|not found|does not exist|unknown)\b/i;
+const OPENCODE_UNSUPPORTED_PROBE_PATTERN = /\b(?:unknown|unrecognized|invalid) (?:argument|option|command)|\bnot supported\b/i;
+const OPENCODE_READINESS_AGENT = 'homeboy-readiness';
+const OPENCODE_READINESS_PROMPT = 'Reply with exactly READY. Do not access files, run commands, or make changes.';
 
 function openCodeRuntimeReadiness(request = {}, options = {}) {
 	const config = objectValue(request.effective_config);
@@ -71,7 +77,13 @@ function openCodeRuntimeReadiness(request = {}, options = {}) {
 	if (!listedModel(modelsResult.stdout, selected.provider, selected.model)) {
 		return verdict('configuration_failure', versionIdentity, `Configure a model that OpenCode exposes for provider ${selected.provider}, then retry.`, false, 'model_not_available');
 	}
-	return verdict('ready', versionIdentity, `OpenCode provider ${selected.provider}/${selected.model} is ready.`, false, 'ready');
+	const providerResult = runModelProbe(probe, executable, commandArgs(config, env, options), selected, env, config, options);
+	if (providerResult.isolationError) {
+		return verdict('indeterminate', versionIdentity, 'OpenCode could not create an isolated workspace for the provider readiness probe.', true, 'model_probe_isolation_unavailable');
+	}
+	const providerFailure = probeFailure(providerResult, versionIdentity, 'model_execution');
+	if (providerFailure) return providerFailure;
+	return verdict('ready', versionIdentity, `OpenCode provider ${selected.provider}/${selected.model} accepted the bounded readiness request.`, false, 'model_execution_ready');
 }
 
 function selectedProviderModel(config = {}) {
@@ -100,7 +112,7 @@ function parseArgs(value) {
 	}
 }
 
-function runProbe(probe, executable, args, command, env, config) {
+function runProbe(probe, executable, args, command, env, config, cwd) {
 	const result = probe(executable, [...args, ...command], {
 		encoding: 'utf8',
 		timeout: boundedTimeout(
@@ -109,12 +121,36 @@ function runProbe(probe, executable, args, command, env, config) {
 		),
 		maxBuffer: OPENCODE_READINESS_MAX_OUTPUT_BYTES,
 		env,
+		...(cwd ? { cwd } : {}),
 	});
 	return {
 		...result,
 		stdout: redact(String(result.stdout || ''), env),
 		stderr: redact(String(result.stderr || ''), env),
 	};
+}
+
+function runModelProbe(probe, executable, args, selected, env, config, options) {
+	const fileSystem = options.fs || fs;
+	let cwd;
+	try {
+		cwd = fileSystem.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-readiness-'));
+	} catch {
+		return { isolationError: true, stdout: '', stderr: '' };
+	}
+	try {
+		return runProbe(probe, executable, args, [
+			'run', '--model', `${selected.provider}/${selected.model}`, '--format', 'json',
+			'--agent', OPENCODE_READINESS_AGENT, '--title', OPENCODE_READINESS_AGENT,
+			OPENCODE_READINESS_PROMPT,
+		], readinessProbeEnvironment(env), config, cwd);
+	} finally {
+		try {
+			fileSystem.rmSync(cwd, { recursive: true, force: true });
+		} catch {
+			// The probe result remains valid when its disposable local state cannot be removed.
+		}
+	}
 }
 
 function probeFailure(result, identity, probeName) {
@@ -129,6 +165,9 @@ function probeFailure(result, identity, probeName) {
 		return verdict('transient_failure', identity, 'Retry the bounded OpenCode readiness probe after the local process error is resolved.', true, `${probeName}_error`);
 	}
 	if (result.status !== 0) {
+		if (probeName === 'model_execution' && OPENCODE_ACCOUNT_BLOCKED_PATTERN.test(output)) {
+			return verdict('provider_account_blocked', identity, 'Restore provider account access or billing for the selected model, then retry.', false, 'provider_account_blocked');
+		}
 		if (OPENCODE_QUOTA_PATTERN.test(output)) {
 			return verdict('provider_quota', identity, 'Wait for the provider quota or rate limit to reset, then retry.', true, 'provider_quota_or_rate_limit');
 		}
@@ -138,9 +177,42 @@ function probeFailure(result, identity, probeName) {
 		if (OPENCODE_TRANSIENT_PATTERN.test(output)) {
 			return verdict('transient_failure', identity, 'Retry the OpenCode provider readiness probe after the provider is reachable.', true, `${probeName}_transient_failure`);
 		}
+		if (probeName === 'model_execution' && OPENCODE_UNSUPPORTED_MODEL_PATTERN.test(output)) {
+			return verdict('configuration_failure', identity, 'Select a provider model supported by the authenticated account, then retry.', false, 'model_unsupported');
+		}
+		if (probeName === 'model_execution' && OPENCODE_UNSUPPORTED_PROBE_PATTERN.test(output)) {
+			return verdict('indeterminate', identity, 'This OpenCode CLI cannot run the isolated model readiness probe; do not treat catalog discovery as provider readiness.', false, 'model_probe_unsupported');
+		}
+		if (probeName === 'model_execution') {
+			return verdict('indeterminate', identity, 'OpenCode could not prove that the selected provider model is usable; do not treat catalog discovery as provider readiness.', true, 'model_probe_unclassified');
+		}
 		return verdict('configuration_failure', identity, 'Configure a compatible OpenCode CLI and provider route, then retry.', false, `${probeName}_rejected`);
 	}
 	return null;
+}
+
+function readinessProbeEnvironment(env) {
+	let config = {};
+	try {
+		config = objectValue(JSON.parse(env.OPENCODE_CONFIG_CONTENT || '{}')) || {};
+	} catch {
+		// Preserve malformed ambient config for OpenCode to report without replacing it.
+		return env;
+	}
+	return {
+		...env,
+		OPENCODE_CONFIG_CONTENT: JSON.stringify({
+			...config,
+			agent: {
+				...objectValue(config.agent),
+				[OPENCODE_READINESS_AGENT]: {
+					mode: 'primary',
+					prompt: OPENCODE_READINESS_PROMPT,
+					permission: { '*': 'deny' },
+				},
+			},
+		}),
+	};
 }
 
 function authenticatedProvider(output, provider) {

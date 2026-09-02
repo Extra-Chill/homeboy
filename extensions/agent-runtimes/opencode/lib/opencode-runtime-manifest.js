@@ -9,7 +9,7 @@ function runtimeManifest() {
 		schema: 'homeboy/agent-runtime-manifest/v1',
 		id: 'opencode',
 		name: 'OpenCode',
-		version: '1.4.6',
+		version: '1.4.7',
 		description: 'OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.',
 		requires: {
 			// Older cores safely ignore the optional top-level retention capability.
