@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.40.1] - 2026-09-02
+
+### Fixed
+- normalize fuzz artifact semantic roles
+- promote nested fuzz evidence
+- forward fuzz requests to nested workloads
+
 ## [3.40.0] - 2026-09-02
 
 ### Added
