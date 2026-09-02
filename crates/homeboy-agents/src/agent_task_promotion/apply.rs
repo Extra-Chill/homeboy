@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::agent_task_gate::{
-    run_gate_command, run_gate_command_with_policy, AgentTaskGateReport, AgentTaskGateRevealPolicy,
-    AgentTaskGateVisibility,
+    AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility,
 };
 use homeboy_core::git::output_allow_empty;
 use homeboy_core::worktree_provider;
@@ -231,112 +230,63 @@ pub(crate) struct AgentTaskPromotionWorkspace {
     pub(crate) command_evidence: Vec<AgentTaskPromotionCommandReport>,
 }
 
-pub(crate) trait AgentTaskPromotionWorkspaceProvider {
-    fn apply_patch(
-        &mut self,
-        request: AgentTaskPromotionApplyRequest,
-    ) -> Result<AgentTaskPromotionWorkspace>;
-    fn verify(
-        &mut self,
-        cwd: &Path,
-        index: usize,
-        command: &str,
-        visibility: AgentTaskGateVisibility,
-        reveal_policy: AgentTaskGateRevealPolicy,
-    ) -> Result<AgentTaskGateReport>;
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "trait adapter preserves the stable gate verifier provider contract"
-    )]
-    fn verify_with_runtime_tmpdir(
-        &mut self,
-        cwd: &Path,
-        index: usize,
-        command: &str,
-        visibility: AgentTaskGateVisibility,
-        reveal_policy: AgentTaskGateRevealPolicy,
-        _runtime_tmpdir: &Path,
-        _gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
-        _package_artifacts: &[crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement],
-    ) -> Result<AgentTaskGateReport> {
-        self.verify(cwd, index, command, visibility, reveal_policy)
-    }
+pub(crate) fn apply_patch(
+    request: AgentTaskPromotionApplyRequest,
+    materialized_workspace: Option<&Path>,
+) -> Result<AgentTaskPromotionWorkspace> {
+    let path = if let Some(path) = materialized_workspace {
+        path.to_path_buf()
+    } else if Path::new(&request.to_workspace).is_dir() {
+        PathBuf::from(&request.to_workspace)
+    } else {
+        worktree_provider::resolve_native_worktree_mutation_target(&request.to_workspace)?
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "to_worktree",
+                    "promotion requires an active native Homeboy worktree",
+                    Some(request.to_workspace.clone()),
+                    None,
+                )
+            })?
+            .path
+    };
+    let response = apply_materialized_workspace_patch(
+        &path,
+        &serde_json::to_string(&request)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )?;
+    let response: AgentTaskPromotionApplyResponse = serde_json::from_str(&response)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Ok(AgentTaskPromotionWorkspace {
+        path,
+        command_evidence: response.command_evidence,
+    })
 }
 
-pub(crate) struct NativePromotionWorkspaceProvider;
-
-impl AgentTaskPromotionWorkspaceProvider for NativePromotionWorkspaceProvider {
-    fn apply_patch(
-        &mut self,
-        request: AgentTaskPromotionApplyRequest,
-    ) -> Result<AgentTaskPromotionWorkspace> {
-        let path = if Path::new(&request.to_workspace).is_dir() {
-            PathBuf::from(&request.to_workspace)
-        } else {
-            worktree_provider::resolve_native_worktree_mutation_target(&request.to_workspace)?
-                .ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "to_worktree",
-                        "promotion requires an active native Homeboy worktree",
-                        Some(request.to_workspace.clone()),
-                        None,
-                    )
-                })?
-                .path
-        };
-        let response = apply_materialized_workspace_patch(
-            &path,
-            &serde_json::to_string(&request)
-                .map_err(|error| Error::internal_json(error.to_string(), None))?,
-        )?;
-        let response: AgentTaskPromotionApplyResponse = serde_json::from_str(&response)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        Ok(AgentTaskPromotionWorkspace {
-            path,
-            command_evidence: response.command_evidence,
-        })
-    }
-
-    fn verify(
-        &mut self,
-        cwd: &Path,
-        index: usize,
-        command: &str,
-        visibility: AgentTaskGateVisibility,
-        reveal_policy: AgentTaskGateRevealPolicy,
-    ) -> Result<AgentTaskGateReport> {
-        if visibility == AgentTaskGateVisibility::Visible
-            && reveal_policy == AgentTaskGateRevealPolicy::FullEvidence
-        {
-            return run_gate_command(cwd, index, command);
-        }
-
-        run_gate_command_with_policy(cwd, index, command, visibility, reveal_policy)
-    }
-
-    fn verify_with_runtime_tmpdir(
-        &mut self,
-        cwd: &Path,
-        index: usize,
-        command: &str,
-        visibility: AgentTaskGateVisibility,
-        reveal_policy: AgentTaskGateRevealPolicy,
-        runtime_tmpdir: &Path,
-        gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
-        package_artifacts: &[crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement],
-    ) -> Result<AgentTaskGateReport> {
-        crate::agent_task_gate::run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
-            cwd,
-            index,
-            command,
-            visibility,
-            reveal_policy,
-            Some(runtime_tmpdir),
-            gate_environment,
-            package_artifacts,
-        )
-    }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "gate execution requires explicit runtime isolation inputs"
+)]
+pub(crate) fn verify_with_runtime_tmpdir(
+    cwd: &Path,
+    index: usize,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    runtime_tmpdir: &Path,
+    gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement],
+) -> Result<AgentTaskGateReport> {
+    crate::agent_task_gate::run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+        cwd,
+        index,
+        command,
+        visibility,
+        reveal_policy,
+        Some(runtime_tmpdir),
+        gate_environment,
+        package_artifacts,
+    )
 }
 
 fn validate_provider_workspace_path(path: &Path) -> Result<()> {
