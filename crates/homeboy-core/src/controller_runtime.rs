@@ -16,9 +16,75 @@ use uuid::Uuid;
 use crate::controller_pin_reference::{ControllerPinProtectionReason, ReferencedControllerPin};
 use crate::{build_identity, paths, Error, Result};
 
-const RETENTION_REASON_ACTIVE_GENERATION: &str = "protected_by_active_generation";
-const RETENTION_REASON_WITHIN_AGE_WINDOW: &str = "within_age_window";
-const RETENTION_REASON_RECLAIMABLE: &str = "reclaimable";
+/// One classification recorded against a controller runtime identity.
+///
+/// Eligibility is *derived* from this set rather than tracked beside it. Every
+/// variant answers a single exhaustively-matched question — does this
+/// classification forbid removing the identity — so a newly added reason cannot
+/// leave a stale `eligible: true` behind the way `within_age_window` did
+/// (#14222): the report advertised 143 MB of reclaimable space that no `--apply`
+/// could ever free, because the pinned path cleared `eligible` and the age/size
+/// budget path did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ControllerRuntimeRetentionReason {
+    /// The identity backs the active admission generation.
+    ProtectedByActiveGeneration,
+    /// A durable record is genuinely in flight (`Queued` or `Running`).
+    ProtectedInFlight,
+    /// A mutating lifecycle action remains available inside the window.
+    ProtectedByPendingMutation,
+    /// The configured age and size budget still protects the identity.
+    WithinAgeWindow,
+    /// This sweep exhausted its removal limit before reaching the identity.
+    /// Another bounded pass can still reclaim it, but this one cannot, so it is
+    /// not advertised as reclaimable now.
+    CleanupLimitReached,
+    /// Disposition, not retention: nothing protects the identity and this sweep
+    /// will remove it (or would, in a dry run).
+    Reclaimable,
+}
+
+impl ControllerRuntimeRetentionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProtectedByActiveGeneration => "protected_by_active_generation",
+            Self::ProtectedInFlight => ControllerPinProtectionReason::ProtectedInFlight.as_str(),
+            Self::ProtectedByPendingMutation => {
+                ControllerPinProtectionReason::ProtectedByPendingMutation.as_str()
+            }
+            Self::WithinAgeWindow => "within_age_window",
+            Self::CleanupLimitReached => "cleanup_limit_reached",
+            Self::Reclaimable => "reclaimable",
+        }
+    }
+
+    /// Whether this classification forbids removing the identity.
+    ///
+    /// This match is deliberately exhaustive: adding a variant without deciding
+    /// its retention force is a compile error, not a silent inconsistency
+    /// between `eligible` and `retention_reasons`.
+    pub const fn retains(self) -> bool {
+        match self {
+            Self::ProtectedByActiveGeneration
+            | Self::ProtectedInFlight
+            | Self::ProtectedByPendingMutation
+            | Self::WithinAgeWindow
+            | Self::CleanupLimitReached => true,
+            Self::Reclaimable => false,
+        }
+    }
+}
+
+impl From<ControllerPinProtectionReason> for ControllerRuntimeRetentionReason {
+    fn from(reason: ControllerPinProtectionReason) -> Self {
+        match reason {
+            ControllerPinProtectionReason::ProtectedInFlight => Self::ProtectedInFlight,
+            ControllerPinProtectionReason::ProtectedByPendingMutation => {
+                Self::ProtectedByPendingMutation
+            }
+        }
+    }
+}
 
 pub const CONTROLLER_RUNTIME_METADATA_KEY: &str = "controller_runtime";
 #[cfg(any(test, feature = "test-support"))]
@@ -261,9 +327,10 @@ struct ExecutableFileIdentity {
 
 /// Report-only retention inventory for immutable controller runtime pins.
 ///
-/// No current cleanup command deletes controller runtime pins. This report is
-/// intentionally the eligibility primitive for a future narrowly-scoped pruner;
-/// callers must retain every path in `retained` and may consider only `eligible`.
+/// `eligible` is the projection of [`ControllerRuntimeSnapshot::eligible`] onto
+/// pin paths, never an independent computation: a path is advertised only when
+/// the identity that owns it carries no retaining reason. Callers must retain
+/// every path in `retained`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerRuntimeRetentionReport {
     pub retained: Vec<PathBuf>,
@@ -271,15 +338,70 @@ pub struct ControllerRuntimeRetentionReport {
     pub snapshots: Vec<ControllerRuntimeSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// One controller runtime identity and every retention decision made about it.
+///
+/// The recorded reasons are the single source of truth. `eligible` is derived
+/// from them rather than stored beside them, so no code path can record a
+/// retention reason and leave a contradictory `eligible: true` behind (#14222).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerRuntimeSnapshot {
     pub identity: String,
     pub path: PathBuf,
     pub size_bytes: u64,
     pub age_seconds: u64,
     pub pins: Vec<PathBuf>,
-    pub retention_reasons: Vec<String>,
-    pub eligible: bool,
+    reasons: Vec<ControllerRuntimeRetentionReason>,
+}
+
+impl ControllerRuntimeSnapshot {
+    /// Every classification recorded against this identity, in decision order.
+    pub fn reasons(&self) -> &[ControllerRuntimeRetentionReason] {
+        &self.reasons
+    }
+
+    /// The recorded classifications rendered for operator-facing output.
+    pub fn retention_reasons(&self) -> Vec<String> {
+        self.reasons
+            .iter()
+            .map(|reason| reason.as_str().to_string())
+            .collect()
+    }
+
+    /// Whether cleanup may remove this identity.
+    ///
+    /// Derived, never stored: a single retaining reason is enough to disqualify
+    /// the identity, and `reclaimable` is a disposition rather than a guard.
+    pub fn eligible(&self) -> bool {
+        !self
+            .reasons
+            .iter()
+            .any(|reason| ControllerRuntimeRetentionReason::retains(*reason))
+    }
+
+    fn record(&mut self, reason: ControllerRuntimeRetentionReason) {
+        self.reasons.push(reason);
+    }
+}
+
+impl serde::Serialize for ControllerRuntimeSnapshot {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("ControllerRuntimeSnapshot", 7)?;
+        state.serialize_field("identity", &self.identity)?;
+        state.serialize_field("path", &self.path)?;
+        state.serialize_field("size_bytes", &self.size_bytes)?;
+        state.serialize_field("age_seconds", &self.age_seconds)?;
+        state.serialize_field("pins", &self.pins)?;
+        state.serialize_field("retention_reasons", &self.retention_reasons())?;
+        // Serialized from the same derivation callers read, so the evidence an
+        // operator inspects cannot disagree with the decision cleanup made.
+        state.serialize_field("eligible", &self.eligible())?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,6 +474,35 @@ pub struct ControllerRuntimePruneResult {
     pub removed_identities: Vec<PathBuf>,
     pub reclaimed_bytes: u64,
     pub snapshots: Vec<ControllerRuntimeSnapshot>,
+}
+
+impl ControllerRuntimePruneResult {
+    /// Identities this sweep either removed or would remove under `--apply`.
+    ///
+    /// Reported rather than recomputed by callers, so advertised reclaim always
+    /// matches achievable reclaim. Cleanup surfaced 143 MB of "candidates" no
+    /// `--apply` could ever free while an operator was at 95% disk because the
+    /// CLI derived its own count from a stale `eligible` flag (#14222).
+    pub fn candidates(&self) -> impl Iterator<Item = &ControllerRuntimeSnapshot> {
+        self.snapshots.iter().filter(|snapshot| {
+            snapshot.eligible()
+                || snapshot
+                    .reasons()
+                    .contains(&ControllerRuntimeRetentionReason::Reclaimable)
+        })
+    }
+
+    pub fn candidate_count(&self) -> usize {
+        self.candidates().count()
+    }
+
+    /// Bytes the candidates account for. Under `--apply` this equals
+    /// `reclaimed_bytes`; in a dry run it is the reclaim an apply would achieve.
+    pub fn candidate_bytes(&self) -> u64 {
+        self.candidates()
+            .map(|snapshot| snapshot.size_bytes)
+            .fold(0, u64::saturating_add)
+    }
 }
 
 /// Discover pin references through the durable lifecycle store and classify the
@@ -444,7 +595,6 @@ fn retention_report_with_references_at(
     }
 
     let pins = discover_pin_paths(root)?;
-    let eligible = pins.difference(&retained).cloned().collect();
     let mut snapshots = Vec::new();
     for entry in fs::read_dir(root).map_err(|error| {
         Error::internal_io(
@@ -479,7 +629,7 @@ fn retention_report_with_references_at(
             .iter()
             .any(|pin| active_generation_pins.contains(pin))
         {
-            reasons.push(RETENTION_REASON_ACTIVE_GENERATION.to_string());
+            reasons.push(ControllerRuntimeRetentionReason::ProtectedByActiveGeneration);
         }
         let mut pin_reasons = BTreeSet::new();
         for pin in &identity_pins {
@@ -488,7 +638,7 @@ fn retention_report_with_references_at(
             }
         }
         for reason in pin_reasons.iter().rev() {
-            reasons.push(reason.as_str().to_string());
+            reasons.push(ControllerRuntimeRetentionReason::from(*reason));
         }
         let modified = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
@@ -503,17 +653,30 @@ fn retention_report_with_references_at(
             size_bytes: path_size(&path),
             age_seconds,
             pins: identity_pins,
-            eligible: reasons.is_empty(),
-            retention_reasons: reasons,
+            reasons,
             path,
         });
     }
     snapshots.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(ControllerRuntimeRetentionReport {
         retained: retained.into_iter().collect(),
-        eligible,
+        // Projected from the snapshots rather than computed independently, so a
+        // path can never be advertised as eligible while its owning identity
+        // records a reason that retains it.
+        eligible: eligible_pins(&snapshots),
         snapshots,
     })
+}
+
+/// Every pin belonging to an identity nothing currently retains.
+fn eligible_pins(snapshots: &[ControllerRuntimeSnapshot]) -> Vec<PathBuf> {
+    snapshots
+        .iter()
+        .filter(|snapshot| snapshot.eligible())
+        .flat_map(|snapshot| snapshot.pins.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Remove only content-addressed pins not protected by an in-flight or
@@ -554,7 +717,7 @@ pub fn cleanup_in_root(
     let mut candidates = report
         .snapshots
         .iter_mut()
-        .filter(|snapshot| snapshot.eligible)
+        .filter(|snapshot| snapshot.eligible())
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right
@@ -569,20 +732,16 @@ pub fn cleanup_in_root(
         let expired = snapshot.age_seconds >= options.min_age.as_secs();
         let pressured = total > options.max_total_bytes;
         if !(expired || pressured) {
-            snapshot
-                .retention_reasons
-                .push(RETENTION_REASON_WITHIN_AGE_WINDOW.to_string());
+            // Recording the reason is what clears eligibility; the two cannot
+            // drift because `eligible` is derived from exactly this set.
+            snapshot.record(ControllerRuntimeRetentionReason::WithinAgeWindow);
             continue;
         }
         if removed.len() >= options.limit {
-            snapshot
-                .retention_reasons
-                .push("cleanup_limit_reached".to_string());
+            snapshot.record(ControllerRuntimeRetentionReason::CleanupLimitReached);
             continue;
         }
-        snapshot
-            .retention_reasons
-            .push(RETENTION_REASON_RECLAIMABLE.to_string());
+        snapshot.record(ControllerRuntimeRetentionReason::Reclaimable);
         if options.apply {
             // Rename first: an interrupted cleanup leaves a non-discoverable
             // tombstone rather than a partially materialized identity.
@@ -605,11 +764,16 @@ pub fn cleanup_in_root(
             total = total.saturating_sub(snapshot.size_bytes);
         }
     }
+    // Re-projected after the budget pass, not carried from the pre-pass report:
+    // the window and limit decisions above are themselves retention reasons, so
+    // an identity this sweep declined to remove must stop being advertised as a
+    // candidate (#14222). Removed pins are gone from disk and drop out too.
     let removed_set = removed.iter().collect::<BTreeSet<_>>();
-    report.eligible.retain(|path| !removed_set.contains(path));
+    let mut eligible = eligible_pins(&report.snapshots);
+    eligible.retain(|path| !removed_set.contains(path));
     Ok(ControllerRuntimePruneResult {
         retained: report.retained,
-        eligible: report.eligible,
+        eligible,
         removed,
         removed_identities,
         reclaimed_bytes,
@@ -4969,20 +5133,18 @@ mod tests {
             assert!(inventory.snapshots.iter().any(|snapshot| snapshot
                 .pins
                 .contains(&current_pin)
-                && !snapshot.eligible
-                && snapshot
-                    .retention_reasons
-                    .iter()
-                    .any(|reason| reason == RETENTION_REASON_ACTIVE_GENERATION)));
+                && !snapshot.eligible()
+                && snapshot.reasons().contains(
+                    &ControllerRuntimeRetentionReason::ProtectedByActiveGeneration
+                )));
             assert!(inventory
                 .snapshots
                 .iter()
                 .any(|snapshot| snapshot.pins.contains(&stale_pin)
-                    && snapshot.eligible
+                    && snapshot.eligible()
                     && snapshot
-                        .retention_reasons
-                        .iter()
-                        .any(|reason| reason == RETENTION_REASON_RECLAIMABLE)));
+                        .reasons()
+                        .contains(&ControllerRuntimeRetentionReason::Reclaimable)));
             let applied = cleanup(ControllerRuntimeCleanupOptions {
                 apply: true,
                 min_age: Duration::from_secs(u64::MAX),
@@ -5047,24 +5209,20 @@ mod tests {
                     .expect("snapshot")
             };
             assert_eq!(
-                snapshot_for(&current_pin).retention_reasons,
-                vec![RETENTION_REASON_ACTIVE_GENERATION.to_string()]
+                snapshot_for(&current_pin).reasons(),
+                [ControllerRuntimeRetentionReason::ProtectedByActiveGeneration]
             );
-            assert!(!snapshot_for(&current_pin).eligible);
+            assert!(!snapshot_for(&current_pin).eligible());
             assert_eq!(
-                snapshot_for(&in_flight_pin).retention_reasons,
-                vec![ControllerPinProtectionReason::ProtectedInFlight
-                    .as_str()
-                    .to_string()]
+                snapshot_for(&in_flight_pin).reasons(),
+                [ControllerRuntimeRetentionReason::ProtectedInFlight]
             );
-            assert!(!snapshot_for(&in_flight_pin).eligible);
+            assert!(!snapshot_for(&in_flight_pin).eligible());
             assert_eq!(
-                snapshot_for(&pending_pin).retention_reasons,
-                vec![ControllerPinProtectionReason::ProtectedByPendingMutation
-                    .as_str()
-                    .to_string()]
+                snapshot_for(&pending_pin).reasons(),
+                [ControllerRuntimeRetentionReason::ProtectedByPendingMutation]
             );
-            assert!(!snapshot_for(&pending_pin).eligible);
+            assert!(!snapshot_for(&pending_pin).eligible());
         });
     }
 
@@ -5146,17 +5304,20 @@ mod tests {
             let pin = pinned_path("homeboy test+stale", &digest).expect("stale path");
             publish_pin(&stale, &pin, &digest).expect("publish stale");
 
-            // Unreferenced, so eligible — but still inside the operator's
-            // configured age and size budget, so it must survive.
+            // Unreferenced, but still inside the operator's configured age and
+            // size budget, so it must survive — and must not be advertised as
+            // reclaimable, because no apply under this policy can free it.
             let planned = prune_pins(false, ControllerRuntimeRetentionOverrides::default())
                 .expect("plan inside configured window");
-            assert!(planned.eligible.contains(&pin));
+            assert!(!planned.eligible.contains(&pin));
+            assert_eq!(planned.candidate_count(), 0);
+            assert_eq!(planned.candidate_bytes(), 0);
             assert!(planned.snapshots.iter().any(|snapshot| {
                 snapshot.pins.contains(&pin)
+                    && !snapshot.eligible()
                     && snapshot
-                        .retention_reasons
-                        .iter()
-                        .any(|reason| reason == RETENTION_REASON_WITHIN_AGE_WINDOW)
+                        .reasons()
+                        .contains(&ControllerRuntimeRetentionReason::WithinAgeWindow)
             }));
             let applied = prune_pins(true, ControllerRuntimeRetentionOverrides::default())
                 .expect("apply inside configured window");
@@ -5173,6 +5334,226 @@ mod tests {
             .expect("explicit policy-free purge");
             assert!(purged.removed.contains(&pin));
             assert!(!pin.exists());
+        });
+    }
+
+    /// Every reason that names a protection must clear eligibility.
+    ///
+    /// The expectations are spelled out literally rather than derived from
+    /// [`ControllerRuntimeRetentionReason::retains`], so weakening that function
+    /// fails here instead of silently redefining what the test asserts. This is
+    /// the exact defect: `within_age_window` recorded a retention reason while
+    /// leaving `eligible: true`, so cleanup advertised a 143 MB candidate it
+    /// could never remove (#14222).
+    #[test]
+    fn no_retention_reason_can_coexist_with_eligibility() {
+        // `Reclaimable` is a disposition, not a guard, so it alone leaves the
+        // identity eligible. Every other reason must forbid removal.
+        let expectations = [
+            (
+                ControllerRuntimeRetentionReason::ProtectedByActiveGeneration,
+                false,
+            ),
+            (ControllerRuntimeRetentionReason::ProtectedInFlight, false),
+            (
+                ControllerRuntimeRetentionReason::ProtectedByPendingMutation,
+                false,
+            ),
+            (ControllerRuntimeRetentionReason::WithinAgeWindow, false),
+            (ControllerRuntimeRetentionReason::CleanupLimitReached, false),
+            (ControllerRuntimeRetentionReason::Reclaimable, true),
+        ];
+
+        for (reason, expected_eligible) in expectations {
+            let mut snapshot = ControllerRuntimeSnapshot {
+                identity: "identity".to_string(),
+                path: PathBuf::from("/runtime/identity"),
+                size_bytes: 142_542_592,
+                age_seconds: 2_362_162,
+                pins: vec![PathBuf::from("/runtime/identity/homeboy")],
+                reasons: Vec::new(),
+            };
+            assert!(
+                snapshot.eligible(),
+                "an unclassified identity starts eligible"
+            );
+
+            snapshot.record(reason);
+            assert_eq!(
+                snapshot.eligible(),
+                expected_eligible,
+                "`{}` must decide eligibility, never contradict it",
+                reason.as_str()
+            );
+            assert!(
+                snapshot
+                    .retention_reasons()
+                    .contains(&reason.as_str().to_string()),
+                "the reason must remain visible to operators"
+            );
+        }
+
+        // A protection paired with the reclaimable disposition must still win,
+        // so ordering between the two passes cannot resurrect the bug.
+        let mut contested = ControllerRuntimeSnapshot {
+            identity: "identity".to_string(),
+            path: PathBuf::from("/runtime/identity"),
+            size_bytes: 1,
+            age_seconds: 1,
+            pins: vec![PathBuf::from("/runtime/identity/homeboy")],
+            reasons: Vec::new(),
+        };
+        contested.record(ControllerRuntimeRetentionReason::Reclaimable);
+        contested.record(ControllerRuntimeRetentionReason::WithinAgeWindow);
+        assert!(!contested.eligible());
+    }
+
+    /// The serialized evidence an operator reads must agree with the decision
+    /// cleanup made. The bug was visible precisely because a snapshot rendered
+    /// `eligible: true` beside `retention_reasons: ["within_age_window"]`.
+    #[test]
+    fn serialized_snapshot_eligibility_never_contradicts_its_reasons() {
+        let mut snapshot = ControllerRuntimeSnapshot {
+            identity: "identity".to_string(),
+            path: PathBuf::from("/runtime/identity"),
+            size_bytes: 142_542_592,
+            age_seconds: 2_362_162,
+            pins: vec![PathBuf::from("/runtime/identity/homeboy")],
+            reasons: Vec::new(),
+        };
+        snapshot.record(ControllerRuntimeRetentionReason::WithinAgeWindow);
+
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(value["eligible"], json!(false));
+        assert_eq!(value["retention_reasons"], json!(["within_age_window"]));
+    }
+
+    /// The pinned path and the budget path must agree, because the asymmetry
+    /// between them *was* the defect: pinned cleared `eligible`, budget did not.
+    #[cfg(unix)]
+    #[test]
+    fn retained_identities_are_never_counted_as_candidates_on_either_path() {
+        crate::test_support::with_isolated_home(|_| {
+            // Nothing is expired and nothing is over budget, so the budget path
+            // must retain the unreferenced identity, and the active generation
+            // must retain the pinned one.
+            save_retention_config(crate::defaults::RetentionConfig {
+                controller_runtime_days: 3_650,
+                controller_runtime_max_bytes: u64::MAX,
+                limit: 10,
+                ..crate::defaults::RetentionConfig::default()
+            });
+            let temporary = tempfile::tempdir().expect("temporary controller directory");
+            let current = temporary.path().join("current");
+            let stale = temporary.path().join("stale");
+            let current_digest = fake_controller(&current, "homeboy test+current", "current");
+            let stale_digest = fake_controller(&stale, "homeboy test+stale", "stale");
+            let current_pin =
+                pinned_path("homeboy test+current", &current_digest).expect("current path");
+            let stale_pin = pinned_path("homeboy test+stale", &stale_digest).expect("stale path");
+            publish_pin(&current, &current_pin, &current_digest).expect("publish current");
+            publish_pin(&stale, &stale_pin, &stale_digest).expect("publish stale");
+            write_active_generation(
+                &runtime_root().expect("root").join(ACTIVE_GENERATION_FILE),
+                &json!({ "originating": { "pinned_executable": current_pin } }),
+            )
+            .expect("activate current");
+
+            for apply in [false, true] {
+                let result = prune_pins(apply, ControllerRuntimeRetentionOverrides::default())
+                    .expect("prune inside the configured window");
+
+                // Advertised reclaim must equal achievable reclaim: zero.
+                assert_eq!(result.candidate_count(), 0, "apply={apply}");
+                assert_eq!(result.candidate_bytes(), 0, "apply={apply}");
+                assert!(result.eligible.is_empty(), "apply={apply}");
+                assert!(result.removed.is_empty(), "apply={apply}");
+                assert_eq!(result.reclaimed_bytes, 0, "apply={apply}");
+
+                for snapshot in &result.snapshots {
+                    assert!(
+                        !snapshot.eligible(),
+                        "{} was retained yet advertised as eligible",
+                        snapshot.identity
+                    );
+                    assert!(
+                        !snapshot.reasons().is_empty(),
+                        "{} was retained without naming a reason",
+                        snapshot.identity
+                    );
+                }
+
+                let budget = result
+                    .snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.pins.contains(&stale_pin))
+                    .expect("budget-retained snapshot");
+                assert!(budget
+                    .reasons()
+                    .contains(&ControllerRuntimeRetentionReason::WithinAgeWindow));
+
+                let pinned = result
+                    .snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.pins.contains(&current_pin))
+                    .expect("pin-retained snapshot");
+                assert!(pinned
+                    .reasons()
+                    .contains(&ControllerRuntimeRetentionReason::ProtectedByActiveGeneration));
+            }
+
+            assert!(current_pin.exists());
+            assert!(stale_pin.exists());
+        });
+    }
+
+    /// An identity the limit deferred is not reclaimable *by this sweep*, so it
+    /// must not inflate the reclaim this sweep advertises.
+    #[cfg(unix)]
+    #[test]
+    fn limit_deferred_identities_are_retained_and_not_advertised() {
+        crate::test_support::with_isolated_home(|_| {
+            save_retention_config(crate::defaults::RetentionConfig {
+                controller_runtime_days: 0,
+                controller_runtime_max_bytes: u64::MAX,
+                limit: 1,
+                ..crate::defaults::RetentionConfig::default()
+            });
+            let temporary = tempfile::tempdir().expect("temporary controller directory");
+            for index in 0..3 {
+                let artifact = temporary.path().join(format!("stale-{index}"));
+                let identity = format!("homeboy test+stale-{index}");
+                let digest = fake_controller(&artifact, &identity, &format!("stale {index}"));
+                let pin = pinned_path(&identity, &digest).expect("stale path");
+                publish_pin(&artifact, &pin, &digest).expect("publish stale");
+            }
+
+            let applied = prune_pins(true, ControllerRuntimeRetentionOverrides::default())
+                .expect("apply configured limit");
+
+            // One removal happened; the two the limit deferred are retained and
+            // excluded from the advertised reclaim.
+            assert_eq!(applied.removed_identities.len(), 1);
+            assert_eq!(applied.candidate_count(), 1);
+            assert_eq!(applied.reclaimed_bytes, applied.candidate_bytes());
+
+            let deferred = applied
+                .snapshots
+                .iter()
+                .filter(|snapshot| {
+                    snapshot
+                        .reasons()
+                        .contains(&ControllerRuntimeRetentionReason::CleanupLimitReached)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(deferred.len(), 2);
+            for snapshot in deferred {
+                assert!(!snapshot.eligible());
+                assert!(!applied
+                    .eligible
+                    .iter()
+                    .any(|path| snapshot.pins.contains(path)));
+            }
         });
     }
 
