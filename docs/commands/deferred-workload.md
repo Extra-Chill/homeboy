@@ -52,5 +52,5 @@ instead of waiting out the lease.
 One pass is time-bounded. Whatever the budget does not reach is reported under
 `remaining`; run the command again to continue.
 
-The generated [CLI reference](../reference/cli/commands/deferred-workload.md)
-contains the complete command, argument, and flag surface.
+Run `homeboy deferred-workload --help` for the complete current command,
+argument, and flag surface.

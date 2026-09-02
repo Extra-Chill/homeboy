@@ -684,9 +684,9 @@ mod surface {
             .filter(|entry| !entry.hidden)
             .map(|entry| entry.name.clone())
             .collect();
-        let docs_index_commands = documented_command_index_entries(include_str!(
-            "../../../../docs/commands/commands-index.md"
-        ));
+        let docs_index_commands = documented_command_index_entries(
+            &super::reference_docs::generated_command_index(&Cli::command_with_scoped_lab_args()),
+        );
 
         command_surface_doctor_report(
             command_provenance,
@@ -719,16 +719,15 @@ mod surface {
         command: Command,
         command_provenance: Vec<CommandSurfaceCommandProvenance>,
     ) -> CommandSurfaceDoctorReport {
+        let docs_index_commands = documented_command_index_entries(
+            &super::reference_docs::generated_command_index(&command),
+        );
         let help_commands = command_surface_from(command)
             .commands
             .into_iter()
             .filter(|entry| !entry.hidden)
             .map(|entry| entry.name)
             .collect();
-        let docs_index_commands = documented_command_index_entries(include_str!(
-            "../../../../docs/commands/commands-index.md"
-        ));
-
         command_surface_doctor_report(
             command_provenance,
             docs_index_commands,
@@ -741,9 +740,15 @@ mod surface {
         mut command_provenance: Vec<CommandSurfaceCommandProvenance>,
         docs_index_commands: BTreeSet<String>,
         help_commands: BTreeSet<String>,
-        runtime_extension_docs: BTreeSet<String>,
+        mut runtime_extension_docs: BTreeSet<String>,
     ) -> CommandSurfaceDoctorReport {
         command_provenance.sort_by(|left, right| left.command.cmp(&right.command));
+        runtime_extension_docs.extend(
+            command_provenance
+                .iter()
+                .filter(|entry| entry.registry == CommandSurfaceRegistry::Extension)
+                .map(|entry| entry.command.clone()),
+        );
         let provenance_by_command: BTreeMap<_, _> = command_provenance
             .iter()
             .map(|entry| (entry.command.clone(), entry.registry))
@@ -797,12 +802,12 @@ mod surface {
         push_drift_note(
             &mut drift_notes,
             &missing_from_docs_index,
-            "source registry commands missing from docs/commands/commands-index.md",
+            "source registry commands missing from the runtime command index",
         );
         push_drift_note(
             &mut drift_notes,
             &stale_docs_index,
-            "docs/commands/commands-index.md lists stale commands",
+            "runtime command index lists stale commands",
         );
         push_drift_note(
             &mut drift_notes,
@@ -913,7 +918,7 @@ mod tests {
     }
 
     fn commands_index() -> String {
-        command_doc("commands-index")
+        reference_docs::generated_command_index(&Cli::command_with_scoped_lab_args())
     }
 
     fn root_command(command: &str) -> clap::Command {
@@ -1015,7 +1020,7 @@ mod tests {
             );
             assert!(
                 index.contains(&format!("[{slug}]({slug}.md)")),
-                "docs/commands/commands-index.md is missing registered command `{}`",
+                "runtime command index is missing registered command `{}`",
                 entry.name
             );
         }

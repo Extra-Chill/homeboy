@@ -1404,28 +1404,40 @@ impl CliRuntime {
             })
         )
         .then(|| self.command_surface_doctor_report());
-        let exit_code = crate::cli_surface::with_command_surface_doctor_report(
-            command_surface_doctor_report,
-            || {
-                crate::core::notification_route::with_current_resolution(
-                    Some(notification_resolution.evidence),
-                    || {
-                        crate::core::notification_route::with_current(notification_route, || {
-                            #[cfg(test)]
-                            record_marker_context_before_run_command();
-                            commands::output_runtime::run_command(
-                                cli.command,
-                                command_spec,
-                                output_file.as_deref(),
-                                &command_identity,
-                                command_provenance,
-                                cli.placement,
+        let docs_command = matches!(
+            &cli.command,
+            Commands::SelfCmd(crate::commands::self_cmd::SelfArgs {
+                command: crate::commands::self_cmd::SelfCommand::Docs(_),
+            })
+        )
+        .then(|| self.build_augmented_command());
+        let exit_code = crate::help_topics::with_command(docs_command, || {
+            crate::cli_surface::with_command_surface_doctor_report(
+                command_surface_doctor_report,
+                || {
+                    crate::core::notification_route::with_current_resolution(
+                        Some(notification_resolution.evidence),
+                        || {
+                            crate::core::notification_route::with_current(
+                                notification_route,
+                                || {
+                                    #[cfg(test)]
+                                    record_marker_context_before_run_command();
+                                    commands::output_runtime::run_command(
+                                        cli.command,
+                                        command_spec,
+                                        output_file.as_deref(),
+                                        &command_identity,
+                                        command_provenance,
+                                        cli.placement,
+                                    )
+                                },
                             )
-                        })
-                    },
-                )
-            },
-        );
+                        },
+                    )
+                },
+            )
+        });
         // The command's initial outcome is now durable and returned. Historical
         // runner evidence is a separately owned
         // best-effort recovery concern and cannot delay that boundary.
