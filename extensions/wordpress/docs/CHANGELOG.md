@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.40.0] - 2026-09-02
+
+### Added
+- forward fuzz execution requests
+
 ## [3.39.11] - 2026-08-31
 
 ### Changed
