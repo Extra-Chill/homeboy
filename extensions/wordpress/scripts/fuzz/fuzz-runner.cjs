@@ -27,6 +27,7 @@ const {
 	wpCodeboxWordPressWorkloadRunAbility,
 	wpCodeboxWordPressWorkloadRunCommand,
 } = require('../../lib/wp-codebox-fuzz-run');
+const { publicJsonArgs } = require('../../lib/codebox-client');
 
 const WP_CODEBOX_FUZZ_EXECUTION_SCHEMA = 'homeboy/wp-codebox-fuzz-execution/v1';
 if (require.main === module) {
@@ -190,17 +191,14 @@ function wpCodeboxCommandFromPublicAbility(ability, options = {}) {
 async function runWpCodeboxPublicRuntimeCommand(command, invocation, tempDir, options = {}) {
 	const inputFile = path.join(tempDir, `${invocation.command}-request.json`);
 	fs.writeFileSync(inputFile, `${JSON.stringify(invocation.input, null, 2)}\n`);
-	return spawnJson(command[0], [...command.slice(1), ...wpCodeboxPublicRuntimeArgs(invocation, inputFile)], {
+	return spawnJson(command[0], [...command.slice(1), ...wpCodeboxPublicRuntimeArgs(invocation, inputFile, options)], {
 		cwd: process.cwd(),
 		env: options.env || process.env,
 	});
 }
 
-function wpCodeboxPublicRuntimeArgs(invocation, inputFile) {
-	if (invocation.command === 'run-fuzz-suite' && invocation.runnerMode) {
-		return [invocation.command, `--runner-mode=${invocation.runnerMode}`, '--input-file', inputFile, '--json'];
-	}
-	return [invocation.command, '--input-file', inputFile, '--format=json'];
+function wpCodeboxPublicRuntimeArgs(invocation, inputFile, options = {}) {
+	return publicJsonArgs(invocation.command, inputFile, { ...options, runnerMode: invocation.runnerMode });
 }
 
 function wpCodeboxRunAgentTaskInvocation(request) {

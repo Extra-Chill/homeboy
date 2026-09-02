@@ -12,6 +12,7 @@ const path = require('node:path');
 const {
 	WORDPRESS_FUZZ_PLAN_SCHEMA,
 	normalizeWordPressFuzzPlan,
+	normalizeWordPressFuzzResult,
 } = require('./wordpress-fuzz-schemas');
 const { normalizeWordPressFuzzRuntimeCapabilities } = require('./wordpress-fuzz-runtime-capabilities');
 const {
@@ -59,8 +60,98 @@ function buildWordPressFuzzRunnerResult(options = {}) {
 
 async function runWordPressFuzzRunnerResult(options = {}) {
 	const context = buildWordPressFuzzRunnerContext(options);
-	const codeboxResult = await resolveCodeboxResult(context, options);
+	const codeboxResult = promoteCollectedWorkloadFuzzReport(await resolveCodeboxResult(context, options), context.env.artifactRoot);
 	return buildWordPressFuzzRunnerSummary({ ...context, codeboxResult });
+}
+
+function promoteCollectedWorkloadFuzzReport(codeboxResult = {}, artifactRoot) {
+	const root = realPathOrUndefined(artifactRoot);
+	const sanitizedResult = sanitizeArtifactSourcePaths(codeboxResult, root);
+	let report;
+	const artifacts = normalizeArray(codeboxResult.artifacts).map((artifact) => {
+		const sourcePath = nonEmptyString(artifact?.metadata?.sourcePath);
+		const safeSourcePath = root && sourcePath ? realPathOrUndefined(sourcePath) : undefined;
+		if (!report && safeSourcePath && pathIsInside(root, safeSourcePath) && artifact.role === 'fuzz_report') {
+			try {
+				const candidate = sanitizeArtifactSourcePaths(JSON.parse(fs.readFileSync(safeSourcePath, 'utf8')), root);
+				if (isPromotableWorkloadFuzzReport(candidate)) {
+					report = {
+						...candidate,
+						wordpressFuzzResult: normalizeWordPressFuzzResult({
+							schema: 'wordpress-fuzz-result/v1',
+							id: candidate.homeboy_campaign?.id || sanitizedResult.request_id,
+							plan_id: sanitizedResult.wordpress_fuzz_result?.plan_id,
+							status: candidate.status,
+							cases: candidate.cases,
+						}),
+					};
+				}
+			} catch {
+				// The normal required-artifact gates report unreadable output.
+			}
+		}
+		return sanitizeArtifactSourcePaths(artifact, root);
+	});
+	if (!report) {
+		return { ...sanitizedResult, artifacts };
+	}
+	const nestedResult = {
+		...report.wordpressFuzzResult,
+		coverage_summary: report.coverage_summary,
+	};
+	return {
+		...sanitizedResult,
+		status: nestedResult.status,
+		succeeded: nestedResult.status === 'passed',
+		cases: nestedResult.cases,
+		coverage_summary: report.coverage_summary,
+		wordpress_fuzz_result: nestedResult,
+		artifacts,
+		metadata: { ...(objectOrUndefined(sanitizedResult.metadata) || {}), collected_workload_report_schema: report.schema },
+	};
+}
+
+function isPromotableWorkloadFuzzReport(candidate) {
+	return Boolean(
+		objectOrUndefined(candidate)
+		&& Array.isArray(candidate.cases)
+		&& candidate.cases.length > 0
+		&& candidate.cases.every((entry) => objectOrUndefined(entry) && entry.schema === 'homeboy/fuzz-case/v1')
+		&& candidate.coverage_summary?.schema === 'homeboy/fuzz-coverage-summary/v1'
+	);
+}
+
+function realPathOrUndefined(value) {
+	if (!nonEmptyString(value)) {
+		return undefined;
+	}
+	try {
+		return fs.realpathSync(value);
+	} catch {
+		return undefined;
+	}
+}
+
+function sanitizeArtifactSourcePaths(value, artifactRoot) {
+	if (Array.isArray(value)) {
+		return value.map((entry) => sanitizeArtifactSourcePaths(entry, artifactRoot));
+	}
+	if (!objectOrUndefined(value)) {
+		return value;
+	}
+	const sanitized = Object.fromEntries(Object.entries(value)
+		.filter(([key]) => !['sourcePath', 'source_path'].includes(key))
+		.map(([key, entry]) => [key, sanitizeArtifactSourcePaths(entry, artifactRoot)]));
+	const sourcePath = realPathOrUndefined(value.sourcePath || value.source_path || value.metadata?.sourcePath || value.metadata?.source_path);
+	if (artifactRoot && sourcePath && pathIsInside(artifactRoot, sourcePath) && nonEmptyString(value.path)) {
+		sanitized.path = path.relative(artifactRoot, sourcePath);
+	}
+	return sanitized;
+}
+
+function pathIsInside(root, candidate) {
+	const relative = path.relative(root, candidate);
+	return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 function buildWordPressFuzzRunnerContext(options = {}) {
@@ -666,6 +757,8 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 		title: `WordPress fuzz campaign ${runId}`,
 		safety_class: deriveHomeboyFuzzSafetyClass(plan),
 		artifacts: homeboyFuzzCampaignArtifacts(codeboxResult),
+		cases: normalizeArray(codeboxResult?.wordpress_fuzz_result?.cases || codeboxResult?.cases),
+		coverage_summary: codeboxResult?.coverage_summary,
 		metadata: stripUndefined({
 			workload_id: workloadId,
 			plan_id: plan?.id,
@@ -706,6 +799,8 @@ function buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, 
 			seed,
 			max_duration_seconds: maxDuration,
 			metadata: objectOrUndefined(workload?.metadata),
+			cases: normalizeArray(codeboxResult?.wordpress_fuzz_result?.cases || codeboxResult?.cases),
+			coverage_summary: codeboxResult?.coverage_summary,
 		}),
 		result: stripUndefined({
 			provider: 'wp-codebox',
@@ -918,7 +1013,8 @@ function fuzzDispatchIdentityPassthrough({ codeboxResult = {}, runtimeTaskReques
 }
 
 function homeboyFuzzCampaignArtifacts(codeboxResult = {}) {
-	return normalizeArray(codeboxResult?.wordpress_fuzz_result?.artifacts || codeboxResult?.wordpressFuzzResult?.artifacts || codeboxResult?.artifacts)
+	const nestedArtifacts = normalizeArray(codeboxResult?.wordpress_fuzz_result?.artifacts || codeboxResult?.wordpressFuzzResult?.artifacts);
+	return (nestedArtifacts.length > 0 ? nestedArtifacts : normalizeArray(codeboxResult?.artifacts))
 		.map(homeboyFuzzCampaignArtifact)
 		.filter(Boolean);
 }
@@ -936,6 +1032,16 @@ function homeboyFuzzCampaignArtifact(artifact = {}) {
 		schema: 'homeboy/fuzz-artifact/v1',
 		id: String(id),
 		kind: String(kind),
+		artifact: artifact.path || artifact.url ? stripUndefined({
+			schema: 'homeboy/artifact-contract/v1',
+			kind: String(kind),
+			type: artifact.url ? 'url' : 'file',
+			path: artifact.path,
+			url: artifact.url,
+			role: artifact.role,
+			semantic_key: artifact.semantic_key || artifact.semanticKey,
+			sha256: artifact.sha256,
+		}) : undefined,
 		metadata: stripUndefined({
 			name: artifact.name,
 			role: artifact.role,

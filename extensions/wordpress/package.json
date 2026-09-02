@@ -204,6 +204,7 @@
     "test:wordpress-fuzz-runtime-task": "node tests/wordpress-fuzz-runtime-task.test.js",
     "test:wordpress-fuzz-runtime-workload-operations": "node tests/wordpress-fuzz-runtime-workload-operations-smoke.js",
     "test:wordpress-fuzz-runner-codebox-contract": "node tests/wordpress-fuzz-runner-codebox-contract-canary.js",
+    "test:wordpress-fuzz-nested-report-promotion": "node tests/wordpress-fuzz-nested-report-promotion-smoke.js",
     "test:wordpress-public-export-boundary": "node tests/wordpress-public-export-boundary.test.js",
     "test:wordpress-manifest-settings": "node tests/wordpress-manifest-settings-smoke.js",
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js",

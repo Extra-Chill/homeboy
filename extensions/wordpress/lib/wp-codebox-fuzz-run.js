@@ -807,6 +807,7 @@ function homeboyFuzzWorkloadRunInputFromDefinition(source = {}, options = {}) {
 		before: source.before,
 		steps,
 		after: source.after,
+		artifacts: source.artifacts,
 		metadata: stripUndefined({
 			...(objectOrUndefined(source.metadata) || {}),
 			source: 'inline',
@@ -838,6 +839,7 @@ function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
 		before: source.before,
 		steps,
 		after: source.after,
+		artifacts: source.artifacts,
 		metadata: stripUndefined({
 			...(objectOrUndefined(source.metadata) || {}),
 			source_path: filePath,
@@ -1063,6 +1065,7 @@ function wpCodeboxWordPressWorkloadRunInput(options = {}) {
 		before: normalizeArray(options.before),
 		steps: normalizeWordPressWorkloadSteps(options.steps, options),
 		after: normalizeArray(options.after),
+		artifacts: normalizeArray(options.artifacts),
 		metadata,
 	}), { packageRoot: options.packageRoot || options.package_root, sourcePath: metadata?.source_path || metadata?.sourcePath });
 }
@@ -2948,10 +2951,11 @@ function fuzzArtifactIdentity(artifact = {}) {
 	const explicitRole = artifact.role || artifact.artifact_role || artifact.artifactRole;
 	const explicitKind = artifact.kind || artifact.type;
 	const semanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey;
-	const name = artifact.name || artifact.id || artifact.key || explicitRole || explicitKind || semanticKey;
+	const name = artifact.name || artifact.id || artifact.key || artifact.metadata?.artifactId || artifact.metadata?.id || explicitRole || explicitKind || semanticKey;
+	const roleKind = ['typed-artifact', 'json'].includes(String(explicitKind || '').toLowerCase()) ? undefined : explicitKind;
 	return {
 		name,
-		role: normalizeFuzzArtifactRole(explicitRole || explicitKind || name || semanticKey || artifact.path || artifact.url || artifact.file),
+		role: normalizeFuzzArtifactRole(explicitRole || roleKind || semanticKey || name || artifact.path || artifact.url || artifact.file),
 	};
 }
 

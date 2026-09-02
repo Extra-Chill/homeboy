@@ -67,6 +67,8 @@ try {
 	assert.equal(client.identity().bin, bin);
 	assert.deepEqual(client.publicCliInvocation(), { command: process.execPath, args: [bin] });
 	assert.deepEqual(publicJsonArgs('run-fuzz-suite', '/tmp/input.json', { runnerMode: 'runtime-backed' }), ['run-fuzz-suite', '--runner-mode=runtime-backed', '--input-file', '/tmp/input.json', '--json']);
+	assert.deepEqual(publicJsonArgs('run-fuzz-suite', '/tmp/input.json', { runnerMode: 'runtime-backed', artifactRoot: '/tmp/artifacts' }), ['run-fuzz-suite', '--runner-mode=runtime-backed', '--input-file', '/tmp/input.json', '--json', '--artifacts', '/tmp/artifacts']);
+	assert.deepEqual(publicJsonArgs('run-fuzz-suite', '/tmp/input.json', { env: { artifactRoot: '/tmp/normalized-artifacts' } }), ['run-fuzz-suite', '--input-file', '/tmp/input.json', '--format=json', '--artifacts', '/tmp/normalized-artifacts']);
 	assert.deepEqual(publicArtifactApplyPreflightArgs({
 		bundlePath: '/tmp/bundle',
 		approvedFiles: ['wp-content/plugins/example/readme.txt'],
