@@ -27,8 +27,9 @@ use homeboy_lab_contract::lab::execution_envelope::{
     lab_runner_workload_from_execution_envelope, runner_execution_envelope_from_workload,
 };
 use homeboy_runner_contract::{
-    is_internal_control_env, RunnerApiSubmitRequest, RunnerMutationArtifacts,
-    RunnerResourceMetrics, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
+    is_internal_control_env, RunnerApiClaimedExecution, RunnerApiSubmitRequest,
+    RunnerMutationArtifacts, RunnerResourceMetrics, RUNNER_API_SUBMIT_REQUEST_SCHEMA,
+    RUNNER_API_V1,
 };
 
 /// Broker metadata is durable queue input. Keep command-file payloads bounded
@@ -493,6 +494,43 @@ pub struct RemoteRunnerJobClaim {
     pub workspace_claim_protocol: Option<crate::workspace_claim::WorkspaceClaimProtocol>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_owner_lease_protocol: Option<crate::workspace_claim::WorkspaceOwnerLeaseProtocol>,
+}
+
+impl RemoteRunnerJobClaim {
+    /// Project durable core claim state into the transport-neutral runner API.
+    /// The legacy core shape remains available only for the compatibility route.
+    pub fn runner_api_claimed_execution(&self) -> Result<RunnerApiClaimedExecution> {
+        Ok(RunnerApiClaimedExecution {
+            job_id: self.job.id.to_string(),
+            claim_id: self.job.claim_id.clone().ok_or_else(|| {
+                Error::internal_unexpected("claimed remote runner job is missing a claim id")
+            })?,
+            claim_expires_at_ms: self.job.claim_expires_at_ms.ok_or_else(|| {
+                Error::internal_unexpected("claimed remote runner job is missing an expiry")
+            })?,
+            envelope: self.envelope.clone(),
+            legacy_request: self
+                .request
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("serialize protocol-v1 claim projection".to_string()),
+                    )
+                })?,
+            workspace_claim_binding: self.workspace_claim_binding.clone(),
+            workspace_owner_lease: self.workspace_owner_lease.clone(),
+            execution_context: self
+                .execution_context
+                .as_ref()
+                .map(|context| context.assertion()),
+            execution_protocol: self.execution_protocol.clone(),
+            workspace_claim_protocol: self.workspace_claim_protocol.clone(),
+            workspace_owner_lease_protocol: self.workspace_owner_lease_protocol.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1423,15 +1461,8 @@ impl JobStore {
                 .next()
                 .map(|candidate| candidate.job.id)
             {
-                let (job, request, envelope, workspace_claim_binding, workspace_owner_lease) = {
-                    let stored = inner.jobs.get_mut(&job_id).expect("candidate exists");
-                    stored.job.status = JobStatus::Running;
-                    stored.job.updated_at_ms = now;
-                    stored.job.started_at_ms = Some(now);
-                    stored.job.claim_id = Some(Uuid::new_v4().to_string());
-                    stored.job.claimed_by_runner_id = Some(runner_id.to_string());
-                    stored.job.claimed_at_ms = Some(now);
-                    stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms));
+                let (request, envelope, workspace_claim_binding, workspace_owner_lease) = {
+                    let stored = inner.jobs.get(&job_id).expect("candidate exists");
                     let remote_runner = stored
                         .remote_runner
                         .as_ref()
@@ -1442,53 +1473,75 @@ impl JobStore {
                     let request = execution_protocol
                         .is_none_or(|protocol| !protocol.uses_envelope_only_claim())
                         .then(|| {
-                            let mut request = remote_runner.protocol_v1_request()?.dispatch_request();
+                            let mut request =
+                                remote_runner.protocol_v1_request()?.dispatch_request();
                             request.workspace_claim_binding = workspace_claim_binding.clone();
                             request.workspace_owner_lease = workspace_owner_lease.clone();
                             Ok::<RemoteRunnerJobRequest, Error>(request)
                         })
                         .transpose()?;
                     (
-                        stored.job.clone(),
                         request,
                         envelope,
                         workspace_claim_binding,
                         workspace_owner_lease,
                     )
                 };
-                let execution_context = match execution_protocol {
+                match execution_protocol {
                     Some(protocol) => {
-                        protocol.verify()?;
-                        Some(
-                            crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
-                                &job, &envelope,
-                            )?,
-                        )
+                        if !protocol.is_supported() {
+                            return Err(crate::runner_job_execution_context::rejected(
+                                "worker does not advertise the required execution-context protocol",
+                            ));
+                        }
                     }
                     None if envelope
                         .dispatch
                         .as_ref()
-                        .is_some_and(|dispatch| !dispatch.extension_env_providers.is_empty()) => {
+                        .is_some_and(|dispatch| !dispatch.extension_env_providers.is_empty()) =>
+                    {
                         return Err(crate::runner_job_execution_context::rejected(
                             "worker did not advertise the required execution-context protocol",
                         ));
                     }
-                    None => None,
-                };
+                    None => {}
+                }
                 if workspace_claim_binding.is_some() {
                     workspace_claim_protocol
-                        .ok_or_else(|| crate::runner_job_execution_context::rejected(
-                            "worker did not advertise the required workspace-claim protocol",
-                        ))?
+                        .ok_or_else(|| {
+                            crate::runner_job_execution_context::rejected(
+                                "worker did not advertise the required workspace-claim protocol",
+                            )
+                        })?
                         .verify()?;
                 }
                 if workspace_owner_lease.is_some() {
                     workspace_owner_lease_protocol
-                        .ok_or_else(|| crate::runner_job_execution_context::rejected(
+                        .ok_or_else(|| {
+                            crate::runner_job_execution_context::rejected(
                             "worker did not advertise the required workspace-owner-lease protocol",
-                        ))?
+                        )
+                        })?
                         .verify()?;
                 }
+                let job = {
+                    let stored = inner.jobs.get_mut(&job_id).expect("candidate exists");
+                    stored.job.status = JobStatus::Running;
+                    stored.job.updated_at_ms = now;
+                    stored.job.started_at_ms = Some(now);
+                    stored.job.claim_id = Some(Uuid::new_v4().to_string());
+                    stored.job.claimed_by_runner_id = Some(runner_id.to_string());
+                    stored.job.claimed_at_ms = Some(now);
+                    stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms));
+                    stored.job.clone()
+                };
+                let execution_context = execution_protocol
+                    .map(|_| {
+                        crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
+                            &job, &envelope,
+                        )
+                    })
+                    .transpose()?;
                 if let Some(context) = execution_context.as_ref() {
                     inner
                         .jobs
