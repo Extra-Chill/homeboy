@@ -12,6 +12,12 @@ fs.mkdirSync(bench, { recursive: true });
 const phpWorkloadPath = path.join(bench, 'rest-product-batch-import.php');
 const jsonWorkloadPath = path.join(bench, 'rest-product-batch-import.workload.json');
 const sandboxPhpWorkloadPath = '/tmp/homeboy-wp-codebox-workloads/bench/rest-product-batch-import.php';
+const executionRequest = {
+	schema: 'homeboy/fuzz-execution-request/v1',
+	id: 'nested-workload-request',
+	component: 'woocommerce',
+	metadata: { planner: { profile: 'quick' } },
+};
 
 fs.writeFileSync(phpWorkloadPath, '<?php return function (): array { return array("status" => "passed"); };\n', 'utf8');
 fs.writeFileSync(jsonWorkloadPath, `${JSON.stringify({
@@ -38,7 +44,9 @@ for (const pathRef of ['metadata.workload_path', 'workload.path', 'intent.execut
 		manifest.cases[0].intent.execute.path = jsonWorkloadPath;
 	}
 
-	const input = wpCodeboxFuzzSuiteInput({ id: `run-${pathRef}`, homeboyFuzzWorkload: manifest });
+	const input = wpCodeboxFuzzSuiteInput({ id: `run-${pathRef}`, homeboyFuzzWorkload: manifest, executionRequest });
+	assert.deepEqual(input.execution_request, executionRequest);
+	assert.deepEqual(input.cases[0].input.execution_request, executionRequest);
 	assert.deepEqual(input.cases[0].input.staged_files, [{ source: phpWorkloadPath, target: sandboxPhpWorkloadPath }]);
 	assert.deepEqual(input.cases[0].input.steps, [{ command: 'wordpress.run-workload', args: [`path=${sandboxPhpWorkloadPath}`, 'type=php'] }]);
 }
