@@ -726,6 +726,34 @@ impl WorktreeMutationProvider for NativeWorktreeProvider {
     }
 }
 
+impl NativeWorktreeProvider {
+    /// Resolve an active native workspace by its exact filesystem identity.
+    /// Paths are accepted at the CLI boundary, but provider mutations must use
+    /// the registry handle that owns the linked task worktree.
+    fn resolve_for_mutation_by_path(
+        &self,
+        path: &Path,
+        context: WorktreeMutationContext<'_>,
+    ) -> Result<WorktreeMutationLookup> {
+        let path = std::fs::canonicalize(path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        for record in worktree::list_workspace_refs()? {
+            if !matches!(record, worktree::WorkspaceRefRecord::Task(_)) {
+                continue;
+            }
+            let registered = Path::new(record.path());
+            let Ok(registered) = std::fs::canonicalize(registered) else {
+                continue;
+            };
+            if registered == path {
+                return self.resolve_for_mutation(record.handle(), context);
+            }
+        }
+        Ok(WorktreeMutationLookup::NotFound)
+    }
+}
+
 impl WorktreeProvisionProvider for NativeWorktreeProvider {
     fn admit(
         &self,
@@ -1787,6 +1815,21 @@ pub fn resolve_native_worktree_mutation_target(
     )
 }
 
+/// Resolve an active native mutation target from an exact linked-worktree path.
+/// This is intentionally native-only: configured providers retain their own
+/// path identity contract and are resolved through their configured commands.
+pub fn resolve_native_worktree_mutation_target_by_path(
+    path: &Path,
+    context: WorktreeMutationContext<'_>,
+) -> Result<Option<WorktreeMutationTarget>> {
+    Ok(
+        match NativeWorktreeProvider.resolve_for_mutation_by_path(path, context)? {
+            WorktreeMutationLookup::Found(target) => Some(target),
+            WorktreeMutationLookup::NotFound => None,
+        },
+    )
+}
+
 /// Resolve a mutation target through configured command-provider authority
 /// only. This is used when durable task evidence already selected configured
 /// ownership and native fallback would violate that binding.
@@ -2348,6 +2391,20 @@ mod tests {
                 WorktreeProviderIdentity::Native,
                 &path,
             );
+            let by_path = resolve_native_worktree_mutation_target_by_path(
+                &path,
+                WorktreeMutationContext::default(),
+            )
+            .expect("native path lookup")
+            .expect("native path is registry-owned");
+            assert_eq!(by_path.handle, "fixture@native");
+            assert_eq!(by_path.path, path);
+            assert!(resolve_native_worktree_mutation_target_by_path(
+                source.path(),
+                WorktreeMutationContext::default(),
+            )
+            .expect("primary path lookup")
+            .is_none());
             assert_provision_admission_conformance(
                 &NativeWorktreeProvider,
                 "fixture@native",

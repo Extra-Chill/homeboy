@@ -4418,6 +4418,8 @@ pub fn preflight_cook_continuation_admission_for_observation(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Vec<&'static str>> {
+    let mut options = options.clone();
+    canonicalize_native_cook_workspace(&mut options)?;
     let moving_base_continuation = record.metadata.get("cook_moving_base_recovery").is_some();
     let verification_pending_continuation = record
         .metadata
@@ -9943,6 +9945,9 @@ fn rebind_baseline_continuation_workspace(
 /// Safety remains a separate admission check so a retained dirty candidate can
 /// still prove itself against its durable promotion baseline.
 fn canonicalize_cook_provider_workspace(options: &mut CookRequest) -> Result<()> {
+    if canonicalize_native_cook_workspace(options)? {
+        return Ok(());
+    }
     let path = options
         .workspace
         .source_worktree_path
@@ -9974,6 +9979,42 @@ fn canonicalize_cook_provider_workspace(options: &mut CookRequest) -> Result<()>
     options.identity.initial_plan.metadata["cook_provision"]["workspace_identity"] =
         serde_json::to_value(identity).expect("provider identity serializes");
     Ok(())
+}
+
+fn canonicalize_native_cook_workspace(options: &mut CookRequest) -> Result<bool> {
+    let path = options
+        .workspace
+        .source_worktree_path
+        .as_deref()
+        .or_else(|| {
+            std::path::Path::new(&options.workspace.to_worktree)
+                .is_dir()
+                .then_some(std::path::Path::new(&options.workspace.to_worktree))
+        });
+    let Some(path) = path else {
+        return Ok(false);
+    };
+    if let Some(target) =
+        homeboy_core::worktree_provider::resolve_native_worktree_mutation_target_by_path(
+            path,
+            homeboy_core::worktree_provider::WorktreeMutationContext::default(),
+        )?
+    {
+        if !std::path::Path::new(&options.workspace.to_worktree).is_dir()
+            && options.workspace.to_worktree != target.handle
+        {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "Cook source path and native worktree handle identify different worktrees",
+                Some(options.workspace.to_worktree.clone()),
+                None,
+            ));
+        }
+        options.workspace.to_worktree = target.handle;
+        options.workspace.source_worktree_path = Some(target.path);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

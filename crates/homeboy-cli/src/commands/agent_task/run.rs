@@ -4406,6 +4406,19 @@ pub(crate) fn resolve_cook_destination(
         resolve_cook_base(&mut args)?;
         return Ok(args);
     }
+    if let Some(to_worktree) = args.to_worktree.as_deref() {
+        let path = Path::new(to_worktree);
+        if path.is_dir() {
+            if let Some(target) =
+                homeboy::core::worktree_provider::resolve_native_worktree_mutation_target_by_path(
+                    path,
+                    homeboy::core::worktree_provider::WorktreeMutationContext::default(),
+                )?
+            {
+                args.to_worktree = Some(target.handle);
+            }
+        }
+    }
     if args.to_worktree.is_some() {
         resolve_cook_base(&mut args)?;
         return Ok(args);
@@ -4415,10 +4428,21 @@ pub(crate) fn resolve_cook_destination(
             homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
         })?;
         let config = defaults::load_config();
-        args.to_worktree = Some(match homeboy::core::worktree_provider::resolve_configured_worktree_exact_identity_by_path_from_config(&cwd, &config)? {
-            Some(identity) => identity.handle,
-            None => cwd.display().to_string(),
-        });
+        args.to_worktree = Some(
+            if let Some(target) =
+                homeboy::core::worktree_provider::resolve_native_worktree_mutation_target_by_path(
+                    &cwd,
+                    homeboy::core::worktree_provider::WorktreeMutationContext::default(),
+                )?
+            {
+                target.handle
+            } else {
+                match homeboy::core::worktree_provider::resolve_configured_worktree_exact_identity_by_path_from_config(&cwd, &config)? {
+                    Some(identity) => identity.handle,
+                    None => cwd.display().to_string(),
+                }
+            },
+        );
         resolve_cook_base(&mut args)?;
         return Ok(args);
     }

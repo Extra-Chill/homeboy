@@ -2526,6 +2526,47 @@ fn cook_cwd_is_authoritative_when_provider_lookup_times_out() {
 }
 
 #[test]
+fn cook_cwd_uses_native_managed_handle_before_recipe_admission() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        let worktree_root = tempfile::tempdir().expect("worktree root");
+        let cwd = worktree_root.path().join("native-task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/native-cook-cwd",
+                cwd.to_str().expect("worktree path"),
+                "HEAD",
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
+        homeboy::core::worktree::record_active_for_test("fixture@native-cook-cwd", &cwd);
+
+        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "use native cwd".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+            "--repo".to_string(),
+            "fixture".to_string(),
+            "--task-url".to_string(),
+            "https://github.com/example/fixture/issues/14188".to_string(),
+            "--no-finalize".to_string(),
+        ]))
+        .expect("resolve native explicit CWD");
+        assert_eq!(args.to_worktree.as_deref(), Some("fixture@native-cook-cwd"));
+    });
+}
+
+#[test]
 fn cook_rejects_mismatched_cwd_and_destination() {
     with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary checkout");
