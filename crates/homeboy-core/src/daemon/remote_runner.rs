@@ -12,8 +12,8 @@ use crate::paths;
 use homeboy_runner_contract::{
     RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
     RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiSubmitOutcome,
-    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RUNNER_API_CLAIM_RESPONSE_SCHEMA,
-    RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1,
+    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RUNNER_API_CLAIM_REQUEST_SCHEMA,
+    RUNNER_API_CLAIM_RESPONSE_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1,
 };
 use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
@@ -736,43 +736,54 @@ fn submission_lookup(
 }
 
 fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
-    if let Some(value) = body.clone() {
-        if let Ok(request) = serde_json::from_value::<RunnerApiClaimRequest>(value) {
-            auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
-            touch_reverse_session(&request.runner_id)?;
-            let concurrency_limit = request.concurrency_limit.or_else(|| {
-                super::runner_workspace_root::runner_concurrency_limit(&request.runner_id)
-            });
-            let outcome = match job_store.claim_remote_runner_job_with_protocols(
-                &request.runner_id,
-                request.project_id.as_deref(),
-                request.lease_ms.unwrap_or(30_000),
-                concurrency_limit,
-                crate::api_jobs::RemoteRunnerClaimProtocols {
-                    execution: request.execution_protocol.as_ref(),
-                    workspace_claim: request.workspace_claim_protocol.as_ref(),
-                    workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
-                },
-            ) {
-                Ok(Some(claim)) => RunnerApiClaimOutcome::Claimed {
-                    claim: claim.runner_api_claimed_execution()?,
-                },
-                Ok(None) => RunnerApiClaimOutcome::Empty,
-                Err(error) => RunnerApiClaimOutcome::Rejected {
-                    failure: RunnerApiOperationFailure {
-                        code: RunnerApiOperationFailureCode::SubmissionRejected,
-                        message: error.message,
-                    },
-                },
-            };
-            return Ok(json!({
-                "response": RunnerApiClaimResponse {
-                    schema: RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
-                    api_version: RUNNER_API_V1,
-                    outcome,
-                },
-            }));
+    let canonical = body
+        .as_ref()
+        .is_some_and(|value| value.get("schema").is_some() || value.get("api_version").is_some());
+    if canonical {
+        let request: RunnerApiClaimRequest = parse_body(body, "Runner API claim request")?;
+        if request.schema != RUNNER_API_CLAIM_REQUEST_SCHEMA || request.api_version != RUNNER_API_V1
+        {
+            return Err(Error::validation_invalid_argument(
+                "schema",
+                "unsupported Runner API claim request",
+                Some(request.schema),
+                None,
+            ));
         }
+        auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
+        touch_reverse_session(&request.runner_id)?;
+        let concurrency_limit = request
+            .concurrency_limit
+            .or_else(|| super::runner_workspace_root::runner_concurrency_limit(&request.runner_id));
+        let outcome = match job_store.claim_remote_runner_job_with_protocols(
+            &request.runner_id,
+            request.project_id.as_deref(),
+            request.lease_ms.unwrap_or(30_000),
+            concurrency_limit,
+            crate::api_jobs::RemoteRunnerClaimProtocols {
+                execution: request.execution_protocol.as_ref(),
+                workspace_claim: request.workspace_claim_protocol.as_ref(),
+                workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
+            },
+        ) {
+            Ok(Some(claim)) => RunnerApiClaimOutcome::Claimed {
+                claim: claim.runner_api_claimed_execution()?,
+            },
+            Ok(None) => RunnerApiClaimOutcome::Empty,
+            Err(error) => RunnerApiClaimOutcome::Rejected {
+                failure: RunnerApiOperationFailure {
+                    code: RunnerApiOperationFailureCode::SubmissionRejected,
+                    message: error.message,
+                },
+            },
+        };
+        return Ok(json!({
+            "response": RunnerApiClaimResponse {
+                schema: RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                outcome,
+            },
+        }));
     }
     let request: ClaimRequest = parse_body(body, "remote runner claim request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
@@ -1839,6 +1850,52 @@ mod auth_tests {
                 .status,
             crate::api_jobs::JobStatus::Queued
         );
+    }
+
+    #[test]
+    fn canonical_claim_does_not_fall_back_to_the_legacy_adapter() {
+        let _home = HomeGuard::new();
+        for body in [
+            json!({
+                "schema": "homeboy/runner-api-claim-request/v1",
+                "runner_id": "homeboy-lab",
+            }),
+            json!({
+                "schema": "homeboy/runner-api-claim-request/v1",
+                "api_version": { "major": 2 },
+                "runner_id": "homeboy-lab",
+            }),
+        ] {
+            let store = JobStore::default();
+            let submit = route(
+                "POST",
+                "/runner/jobs",
+                Some(submit_body()),
+                &store,
+                &BrokerAuthContext::trusted_local(),
+            );
+            let job_id = submit.body["body"]["job"]["id"].as_str().expect("job id");
+
+            let response = route(
+                "POST",
+                "/runner/jobs/claim",
+                Some(body),
+                &store,
+                &BrokerAuthContext::trusted_local(),
+            );
+            assert_eq!(
+                response.status_code, 400,
+                "response body: {}",
+                response.body
+            );
+            assert_eq!(
+                store
+                    .get(Uuid::parse_str(job_id).expect("valid job id"))
+                    .expect("job remains queued")
+                    .status,
+                crate::api_jobs::JobStatus::Queued
+            );
+        }
     }
 
     #[test]
