@@ -59,6 +59,9 @@ const CLEANUP_CHILD_TERMINATION_ALLOWANCE: Duration = Duration::from_secs(5);
 const CLEANUP_CATEGORY_HEARTBEAT: Duration = Duration::from_secs(5);
 /// Time reserved for the repo-artifact category to report after its last root.
 const REPO_ARTIFACT_REPORTING_HEADROOM: Duration = Duration::from_secs(2);
+/// Time reserved for the runtime-temp category to release its cleanup lock and
+/// serialize its report after the sweep stops.
+const RUNTIME_TMP_REPORTING_HEADROOM: Duration = Duration::from_secs(2);
 const CLEANUP_CATEGORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 #[cfg(any(test, feature = "test-support"))]
 const CLEANUP_CATEGORY_FIXTURE_ENV: &str = "HOMEBOY_TEST_CLEANUP_CATEGORY_FIXTURE";
@@ -919,6 +922,7 @@ fn retained_storage_report(
             run_max_bytes: policy.runtime_run_max_bytes,
             run_max_count: policy.runtime_run_max_count,
             cursor: None,
+            deadline: None,
         })?;
     let runtime_tmp_continuation = runtime_tmp.next_cursor.as_ref().map(|cursor| {
         format!(
@@ -2363,6 +2367,10 @@ fn cleanup_inventory_with_deadline(
                         run_max_bytes: policy.runtime_run_max_bytes,
                         run_max_count: policy.runtime_run_max_count,
                         cursor: args.cursor.as_deref(),
+                        // Stop at an entry boundary while there is still time to
+                        // report, rather than being killed at the category wall
+                        // with the cleanup lock still on disk (#14221).
+                        deadline: runtime_tmp_scan_deadline(deadline),
                     },
                 )?;
                 engine::temp::present_runtime_temp_cleanup(
@@ -3729,6 +3737,20 @@ fn repo_artifact_roots(
 /// every root gets a bounded slice and stops at a worktree boundary with its
 /// progress intact. Previously each root scanned unbounded until the category
 /// wall killed the process, discarding everything it had reclaimed (#12727).
+/// Convert the aggregate's category wall into a sweep budget that expires
+/// early enough for runtime-temp to release its lock and report.
+///
+/// Reaching the category wall itself is fatal to the lock: the supervisor
+/// SIGKILLs the category child, no destructor runs, and the `.cleanup.lock`
+/// directory survives with a now-dead owner PID recorded in it (#14221).
+fn runtime_tmp_scan_deadline(deadline: Option<SystemTime>) -> Option<Instant> {
+    let remaining = deadline?
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO)
+        .saturating_sub(RUNTIME_TMP_REPORTING_HEADROOM);
+    Instant::now().checked_add(remaining)
+}
+
 fn apply_repo_artifact_scan_budget(
     roots: &mut [(&'static str, ArtifactCleanupOptions)],
     deadline: Option<SystemTime>,
