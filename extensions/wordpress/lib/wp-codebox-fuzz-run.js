@@ -244,6 +244,9 @@ const FUZZ_ARTIFACT_SEMANTIC_KEYS = {
 	normalized_fuzz_result: 'fuzz.result.normalized',
 	coverage: 'fuzz.coverage',
 };
+const FUZZ_ARTIFACT_ROLES_BY_SEMANTIC_KEY = Object.fromEntries(
+	Object.entries(FUZZ_ARTIFACT_SEMANTIC_KEYS).map(([role, semanticKey]) => [semanticKey, role])
+);
 
 const REQUIRED_WP_CODEBOX_FUZZ_CONTRACT_PATHS = [
 	'abilities.wordpressRuntime.runFuzzSuite',
@@ -2953,9 +2956,10 @@ function fuzzArtifactIdentity(artifact = {}) {
 	const semanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey;
 	const name = artifact.name || artifact.id || artifact.key || artifact.metadata?.artifactId || artifact.metadata?.id || explicitRole || explicitKind || semanticKey;
 	const roleKind = ['typed-artifact', 'json'].includes(String(explicitKind || '').toLowerCase()) ? undefined : explicitKind;
+	const semanticRole = FUZZ_ARTIFACT_ROLES_BY_SEMANTIC_KEY[semanticKey];
 	return {
 		name,
-		role: normalizeFuzzArtifactRole(explicitRole || roleKind || semanticKey || name || artifact.path || artifact.url || artifact.file),
+		role: normalizeFuzzArtifactRole(explicitRole || roleKind || semanticRole || name || semanticKey || artifact.path || artifact.url || artifact.file),
 	};
 }
 
