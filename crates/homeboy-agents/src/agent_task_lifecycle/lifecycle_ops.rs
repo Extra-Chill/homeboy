@@ -6471,17 +6471,9 @@ pub fn aggregate_source_in_store(
             None,
         )
     })?;
-    // `record.run_id` is already resolved, so these are the store's own exact
-    // reads rather than the alias-resolving `lifecycle_ops` wrappers.
-    let aggregate = lifecycle_store.read_aggregate(&record.run_id)?;
-    let raw = serde_json::to_string_pretty(&aggregate).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some(format!("serialize agent-task aggregate {}", record.run_id)),
-        )
-    })?;
-    let path = lifecycle_store.aggregate_path(&record.run_id);
-    Ok((raw, path))
+    // `record.run_id` is already resolved, so this exact read reloads the
+    // controller-owned aggregate file rather than the observation mirror.
+    lifecycle_store.aggregate_source_exact(&record.run_id)
 }
 
 pub fn record_cook_attempt_in_store(
