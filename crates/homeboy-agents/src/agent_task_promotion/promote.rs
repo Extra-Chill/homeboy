@@ -37,13 +37,15 @@ use homeboy_core::gate::HomeboyGateResult;
 use homeboy_core::{Error, Result};
 
 use super::apply::{
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspaceProvider,
-    NativePromotionWorkspaceProvider, TrustedUnpushedCandidateDestination,
+    apply_patch, verify_with_runtime_tmpdir, AgentTaskPromotionApplyRequest,
+    AgentTaskPromotionWorkspace, TrustedUnpushedCandidateDestination,
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
 };
 use super::committed_changes::{committed_changes_patch, CommittedChangesPatch};
 use super::patch::write_normalized_patch;
 pub(crate) use super::patch::{normalize_promotion_patch, validate_artifact_content};
+#[cfg(test)]
+use super::tests::FakePromotionWorkspaceProvider;
 use super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
     AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
@@ -58,6 +60,11 @@ use gate_run::PromotionGateRun;
 thread_local! {
     static GATE_SUPERVISION: RefCell<Option<Arc<crate::agent_task_gate::GateSupervision>>> = const { RefCell::new(None) };
     static PROMOTION_PROGRESS: RefCell<Option<PromotionProgressCallback>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PROMOTION_OPERATIONS: RefCell<Option<FakePromotionWorkspaceProvider>> = const { RefCell::new(None) };
 }
 
 pub type PromotionProgressCallback = Arc<dyn Fn(&PromotionProgress) -> Result<()> + Send + Sync>;
@@ -140,10 +147,8 @@ pub fn promote_with_checkpoint(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    let mut provider = NativePromotionWorkspaceProvider;
     let mut report = promote_with_provider_and_checkpoint_internal(
         options,
-        &mut provider,
         &mut checkpoint,
         &observation_store,
     )?;
@@ -164,13 +169,8 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
     observation_store: &homeboy_core::observation::ObservationStore,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
-    let mut provider = NativePromotionWorkspaceProvider;
-    let mut report = promote_with_provider_and_checkpoint_internal(
-        options,
-        &mut provider,
-        &mut checkpoint,
-        observation_store,
-    )?;
+    let mut report =
+        promote_with_provider_and_checkpoint_internal(options, &mut checkpoint, observation_store)?;
     if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
         report.provenance["lab_offload"] = json!({
             "runner_id": runner_id,
@@ -267,7 +267,6 @@ fn resume_promoted_patch_internal<'a>(
         observation_store,
         replacement_gates,
     )?;
-    let mut provider = NativePromotionWorkspaceProvider;
     // A resumed checkpoint verifies the already-applied candidate. Its base is
     // the immutable observation made before apply, not a new moving origin read.
     let verified_base = previous
@@ -307,7 +306,6 @@ fn resume_promoted_patch_internal<'a>(
     }
     let gates = run_promotion_gates(
         &options,
-        &mut provider,
         target_path,
         expected_candidate.as_ref(),
         gate_workspace,
@@ -707,7 +705,7 @@ fn verify_patch_is_present(
 // Provider-injection seam: production promotes through `promote`.
 pub(crate) fn promote_with_provider(
     options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    provider: &mut FakePromotionWorkspaceProvider,
 ) -> Result<AgentTaskPromotionReport> {
     promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
 }
@@ -716,43 +714,142 @@ pub(crate) fn promote_with_provider(
 // Checkpoint seam reached only by the promotion test shards.
 pub(super) fn promote_with_provider_and_checkpoint(
     options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    provider: &mut FakePromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
         &context.path_roots(),
     )?;
-    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, &observation_store)
+    with_test_promotion_operations(provider, || {
+        promote_with_provider_and_checkpoint_internal(options, checkpoint, &observation_store)
+    })
 }
 
 #[cfg(test)]
 pub(super) fn promote_with_provider_in_observation_store(
     options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    provider: &mut FakePromotionWorkspaceProvider,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
-    promote_with_provider_and_checkpoint_internal(
-        options,
-        provider,
-        &mut |_| Ok(()),
-        observation_store,
-    )
+    with_test_promotion_operations(provider, || {
+        promote_with_provider_and_checkpoint_internal(options, &mut |_| Ok(()), observation_store)
+    })
 }
 
 #[cfg(test)]
 pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
     options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    provider: &mut FakePromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
-    promote_with_provider_and_checkpoint_internal(options, provider, checkpoint, observation_store)
+    with_test_promotion_operations(provider, || {
+        promote_with_provider_and_checkpoint_internal(options, checkpoint, observation_store)
+    })
+}
+
+#[cfg(test)]
+fn with_test_promotion_operations<T>(
+    provider: &mut FakePromotionWorkspaceProvider,
+    operation: impl FnOnce() -> T,
+) -> T {
+    TEST_PROMOTION_OPERATIONS.with(|slot| {
+        assert!(slot.borrow().is_none(), "promotion test scopes cannot nest");
+        *slot.borrow_mut() = Some(std::mem::take(provider));
+        let result = operation();
+        *provider = slot.borrow_mut().take().expect("promotion test provider");
+        result
+    })
+}
+
+fn apply_promotion_patch(
+    request: AgentTaskPromotionApplyRequest,
+    materialized_workspace: Option<&Path>,
+) -> Result<AgentTaskPromotionWorkspace> {
+    #[cfg(test)]
+    if TEST_PROMOTION_OPERATIONS.with(|slot| slot.borrow().is_some()) {
+        return TEST_PROMOTION_OPERATIONS.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("promotion test provider")
+                .apply_patch(request)
+        });
+    }
+    apply_patch(request, materialized_workspace)
+}
+
+fn materialized_promotion_workspace() -> Result<Option<PathBuf>> {
+    materialized_promotion_workspace_in_context(
+        crate::agent_task_lifecycle::execution_runner_id().as_deref(),
+    )
+}
+
+fn materialized_promotion_workspace_in_context(runner_id: Option<&str>) -> Result<Option<PathBuf>> {
+    if runner_id.is_none_or(|runner_id| runner_id.trim().is_empty()) {
+        return Ok(None);
+    }
+    std::fs::canonicalize(std::env::current_dir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve promotion execution directory".to_string()),
+        )
+    })?)
+    .map(Some)
+    .map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve promotion execution directory".to_string()),
+        )
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "gate execution requires explicit runtime isolation inputs"
+)]
+fn verify_promotion_gate(
+    cwd: &Path,
+    index: usize,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    runtime_tmpdir: &Path,
+    gate_environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[crate::agent_task_gate::AgentTaskGatePackageArtifactRequirement],
+) -> Result<crate::agent_task_gate::AgentTaskGateReport> {
+    #[cfg(test)]
+    if TEST_PROMOTION_OPERATIONS.with(|slot| slot.borrow().is_some()) {
+        return TEST_PROMOTION_OPERATIONS.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("promotion test provider")
+                .verify_with_runtime_tmpdir(
+                    cwd,
+                    index,
+                    command,
+                    visibility,
+                    reveal_policy,
+                    runtime_tmpdir,
+                    gate_environment,
+                    package_artifacts,
+                )
+        });
+    }
+    verify_with_runtime_tmpdir(
+        cwd,
+        index,
+        command,
+        visibility,
+        reveal_policy,
+        runtime_tmpdir,
+        gate_environment,
+        package_artifacts,
+    )
 }
 
 fn promote_with_provider_and_checkpoint_internal(
     options: AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
@@ -809,7 +906,6 @@ fn promote_with_provider_and_checkpoint_internal(
         })?;
         return promote_committed_changes(
             &options,
-            provider,
             checkpoint,
             observation_store,
             &source_kind,
@@ -833,7 +929,6 @@ fn promote_with_provider_and_checkpoint_internal(
         })?;
         return promote_committed_changes(
             &options,
-            provider,
             checkpoint,
             observation_store,
             &source_kind,
@@ -861,7 +956,6 @@ fn promote_with_provider_and_checkpoint_internal(
             if let Some(committed_patch) = committed_changes_patch(&options)? {
                 return promote_committed_changes(
                     &options,
-                    provider,
                     checkpoint,
                     observation_store,
                     &source_kind,
@@ -900,7 +994,6 @@ fn promote_with_provider_and_checkpoint_internal(
         if let Some(committed_patch) = committed_changes_patch(&options)? {
             return promote_committed_changes(
                 &options,
-                provider,
                 checkpoint,
                 observation_store,
                 &source_kind,
@@ -913,14 +1006,7 @@ fn promote_with_provider_and_checkpoint_internal(
         let target =
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), worktree_path);
         let gates = if let Some(worktree_path) = worktree_path {
-            run_promotion_gates(
-                &options,
-                provider,
-                worktree_path,
-                None,
-                None,
-                observation_store,
-            )?
+            run_promotion_gates(&options, worktree_path, None, None, observation_store)?
         } else {
             PromotionGateRun::without_gates(options.dry_run)
         };
@@ -1005,6 +1091,7 @@ fn promote_with_provider_and_checkpoint_internal(
     let safety_baseline = destination_baseline
         .clone()
         .unwrap_or_else(|| candidate_patch_safety_baseline(&patch, &artifact, &patch_path));
+    let materialized_workspace = materialized_promotion_workspace()?;
 
     // Validate the declared remote base BEFORE mutating the target worktree.
     // Promotion must be atomic around base validation: a nonexistent declared
@@ -1014,6 +1101,7 @@ fn promote_with_provider_and_checkpoint_internal(
     let pre_apply_verified_base = if !options.dry_run {
         capture_declared_base_before_apply(
             &options.to_worktree,
+            materialized_workspace.as_deref(),
             None,
             Some(&safety_baseline),
             options.base_ref.as_deref(),
@@ -1037,16 +1125,19 @@ fn promote_with_provider_and_checkpoint_internal(
         let normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
         let provider_patch_path = normalized_patch_file.path().display().to_string();
         emit_promotion_progress("apply", None, Some("applying patch".to_string()));
-        let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
-            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-            to_workspace: options.to_worktree.clone(),
-            patch: Some(normalized_patch.content.clone()),
-            patch_path: provider_patch_path,
-            changed_files: changed_files.clone(),
-            gate_feedback_baseline: destination_baseline,
-            dry_run: options.dry_run,
-            trusted_unpushed_candidate_destination: None,
-        })?;
+        let target = apply_promotion_patch(
+            AgentTaskPromotionApplyRequest {
+                schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+                to_workspace: options.to_worktree.clone(),
+                patch: Some(normalized_patch.content.clone()),
+                patch_path: provider_patch_path,
+                changed_files: changed_files.clone(),
+                gate_feedback_baseline: destination_baseline,
+                dry_run: options.dry_run,
+                trusted_unpushed_candidate_destination: None,
+            },
+            materialized_workspace.as_deref(),
+        )?;
         command_evidence.extend(target.command_evidence);
         if !options.dry_run {
             applied_worktree_path = Some(target.path);
@@ -1092,7 +1183,6 @@ fn promote_with_provider_and_checkpoint_internal(
         (
             run_promotion_gates(
                 &options,
-                provider,
                 worktree_path,
                 post_apply
                     .as_ref()
@@ -1726,11 +1816,24 @@ mod declared_base_tests {
         assert_eq!(error.retryable, Some(true));
         assert_eq!(error.details["git_base_preflight"]["timeout_ms"], 100);
     }
+
+    #[test]
+    fn materialized_workspace_is_the_lab_execution_checkout() {
+        assert!(materialized_promotion_workspace_in_context(None)
+            .expect("local native promotion")
+            .is_none());
+
+        let workspace =
+            materialized_promotion_workspace_in_context(Some("runner-1")).expect("runner checkout");
+        assert_eq!(
+            workspace,
+            std::env::current_dir().and_then(std::fs::canonicalize).ok()
+        );
+    }
 }
 
 fn promote_committed_changes(
     options: &AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
     source_kind: &str,
@@ -1779,12 +1882,14 @@ fn promote_committed_changes(
                     .expect("candidate has source workspace"),
                 head: committed_patch.candidate.clone(),
             });
+    let materialized_workspace = materialized_promotion_workspace()?;
     // Keep committed-change promotion on the same atomic base-validation
     // boundary as artifact promotion: no apply or checkpoint may precede a
     // failed declared base lookup.
     let pre_apply_verified_base = if !options.dry_run {
         capture_declared_base_before_apply(
             &options.to_worktree,
+            materialized_workspace.as_deref(),
             trusted_unpushed_candidate_destination.as_ref(),
             None,
             options.base_ref.as_deref(),
@@ -1806,16 +1911,19 @@ fn promote_committed_changes(
         observation_store,
     )?;
     let mut command_evidence = Vec::new();
-    let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
-        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-        to_workspace: options.to_worktree.clone(),
-        patch: Some(normalized_patch.content.clone()),
-        patch_path: provider_patch.path().display().to_string(),
-        changed_files: normalized_patch.changed_files.clone(),
-        gate_feedback_baseline,
-        dry_run: options.dry_run,
-        trusted_unpushed_candidate_destination,
-    })?;
+    let target = apply_promotion_patch(
+        AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: options.to_worktree.clone(),
+            patch: Some(normalized_patch.content.clone()),
+            patch_path: provider_patch.path().display().to_string(),
+            changed_files: normalized_patch.changed_files.clone(),
+            gate_feedback_baseline,
+            dry_run: options.dry_run,
+            trusted_unpushed_candidate_destination,
+        },
+        materialized_workspace.as_deref(),
+    )?;
     command_evidence.extend(target.command_evidence);
     let applied_worktree_path = (!options.dry_run).then_some(target.path);
     let target = AgentTaskPromotionTarget::from_worktree(
@@ -1857,7 +1965,6 @@ fn promote_committed_changes(
         (
             run_promotion_gates(
                 options,
-                provider,
                 path,
                 post_apply
                     .as_ref()
@@ -2010,7 +2117,6 @@ pub(super) fn retain_committed_changes_artifact(
 
 fn run_promotion_gates(
     options: &AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
     gate_workspace: Option<&Path>,
@@ -2151,7 +2257,6 @@ fn run_promotion_gates(
             );
             run_promotion_gate(
                 options,
-                provider,
                 &gate_workspace,
                 index,
                 command,
@@ -2461,7 +2566,6 @@ fn git_output(path: &Path, args: &[&str]) -> Result<String> {
 
 fn run_promotion_gate(
     options: &AgentTaskPromotionOptions,
-    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     worktree_path: &Path,
     index: usize,
     command: &str,
@@ -2544,7 +2648,7 @@ fn run_promotion_gate(
             &options.gates.gate_package_artifacts,
         )
     } else {
-        provider.verify_with_runtime_tmpdir(
+        verify_promotion_gate(
             worktree_path,
             index,
             command,
@@ -2630,14 +2734,19 @@ fn candidate_patch_safety_baseline(
 /// validated without mutating the working tree (#9400).
 fn resolve_promotion_target_path(
     to_worktree: &str,
+    materialized_workspace: Option<&Path>,
     trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
     _safety_baseline: Option<&Value>,
 ) -> Result<Option<PathBuf>> {
     // Direct paths do not need provider resolution, but must participate in
     // the same pre-apply declared-base contract as provider-owned targets.
-    if Path::new(to_worktree).is_dir() {
-        let path = std::fs::canonicalize(to_worktree).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(to_worktree.to_string()))
+    if let Some(target) = materialized_workspace.or_else(|| {
+        Path::new(to_worktree)
+            .is_dir()
+            .then(|| Path::new(to_worktree))
+    }) {
+        let path = std::fs::canonicalize(target).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(target.display().to_string()))
         })?;
         if homeboy_core::git::output_allow_empty(&path, &["rev-parse", "--is-inside-work-tree"])
             .as_deref()
@@ -2676,6 +2785,7 @@ fn resolve_promotion_target_path(
 /// an opaque provider apply before Homeboy can authenticate that contract.
 fn capture_declared_base_before_apply(
     to_worktree: &str,
+    materialized_workspace: Option<&Path>,
     trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
     safety_baseline: Option<&Value>,
     base_ref: Option<&str>,
@@ -2685,6 +2795,7 @@ fn capture_declared_base_before_apply(
     }
     let target_path = resolve_promotion_target_path(
         to_worktree,
+        materialized_workspace,
         trusted_unpushed_candidate_destination,
         safety_baseline,
     )?

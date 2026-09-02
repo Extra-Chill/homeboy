@@ -83,23 +83,6 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
     let patch = temp.path().join("changes.patch");
     std::fs::write(&patch, PATCH).expect("patch");
 
-    let provider = temp.path().join("promotion-provider.sh");
-    std::fs::write(
-        &provider,
-        format!(
-            "#!/bin/sh\nset -eu\ngit -C '{}' apply '{}'\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
-            workspace.display(),
-            patch.display(),
-            workspace.display(),
-        ),
-    )
-    .expect("provider script");
-    let mut permissions = std::fs::metadata(&provider)
-        .expect("provider metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&provider, permissions).expect("provider executable");
-
     let helper = temp.path().join("bind_socket");
     // Gate toolchain preflight probes this command with `--version` in the same
     // environment the gate itself receives, so the helper must answer that probe
@@ -142,7 +125,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@socket-gate".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -153,7 +136,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
                     homeboy::agents::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: Some(provider.display().to_string()),
+            provider_command: None,
             provider_invocation: None,
         },
     )
