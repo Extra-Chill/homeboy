@@ -173,11 +173,9 @@ pub struct ReleaseExecuteArgs {
     #[arg(long, value_name = "OWNER_RUN_REF")]
     owner_run_ref: Option<String>,
 
-    /// With --recover: if the release tag exists but points at a commit behind
-    /// HEAD (e.g. config-only commits landed after tagging), move the tag to
-    /// HEAD instead of refusing. Guarded — the tagged commit must be an
-    /// ancestor of HEAD, HEAD must satisfy the version targets, and no GitHub
-    /// Release may exist for the tag.
+    /// With --recover: move a stale tag to HEAD, or recreate an unpublished
+    /// divergent tagged release on the current branch. Divergent recovery also
+    /// requires --bump <version> to name the tag Homeboy may replace.
     #[arg(long)]
     retag: bool,
 
@@ -974,6 +972,14 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
     let (skip_checks, mut skip_checks_granular) = args.resolve_skip_checks()?;
     let execution = args.execution_plan(skip_checks);
     validate_apply_boundary(&execution)?;
+    if args.retag && !args.recover {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "retag",
+            "--retag is a recovery operation and requires --recover",
+            None,
+            None,
+        ));
+    }
     let component_ids = resolve_component_ids(&args, &args.components)?;
     validate_positional_component_ids(&args, &component_ids)?;
     if args.package_only {
@@ -2023,6 +2029,21 @@ mod tests {
 
         let execution = args.execution_plan(false);
         validate_apply_boundary(&execution).expect("--apply confirms risky release mode");
+    }
+
+    #[test]
+    fn retag_requires_recover_even_when_apply_is_present() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.retag = true;
+        args.apply = true;
+
+        let err = match run_execute(args) {
+            Err(err) => err,
+            Ok(_) => panic!("retag without recover must be rejected"),
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("requires --recover"));
     }
 
     #[test]
