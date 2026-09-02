@@ -29,7 +29,6 @@ use crate::process::{
     SIGNAL_KILL, SIGNAL_TERMINATE,
 };
 
-#[cfg(target_os = "linux")]
 use super::acquire_daemon_job_admission_fence;
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
@@ -2353,9 +2352,16 @@ fn start_or_return_live_unlocked_with_startup_token(
     start_or_return_live_with_operations(
         read_status,
         try_acquire_daemon_owner_lock,
-        || stop_unlocked().map(|_| ()),
+        stop_stale_generation_for_start,
         || spawn_and_wait_for_lease(addr, startup_token),
     )
+}
+
+/// Startup cleanup can retire a stale generation, so it must not pass a Cook
+/// that has verified that generation but not submitted.
+fn stop_stale_generation_for_start() -> Result<()> {
+    let _admission_fence = acquire_daemon_job_admission_fence()?;
+    stop_unlocked().map(|_| ())
 }
 
 /// A missing lease cannot authorize replacement when another foreground daemon
