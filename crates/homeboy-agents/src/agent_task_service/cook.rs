@@ -58,8 +58,8 @@ use super::cook_pre_execution::materialize_initial_cook_attempt_with_stores;
 use super::cook_pre_execution::{
     materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores_outcome,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
-    record_pre_execution_failure, retryable_pre_execution_failure, terminal_executor_matches,
-    with_pre_execution_phase, CookExecutionPreparation,
+    provider_rotation_attempts, record_pre_execution_failure, retryable_pre_execution_failure,
+    terminal_executor_matches, with_pre_execution_phase, CookExecutionPreparation,
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
@@ -880,6 +880,17 @@ fn truncate_diagnostic_text(text: &str) -> String {
         let prefix: String = text.chars().take(LIMIT).collect();
         format!("{prefix}...[truncated]")
     }
+}
+
+/// A preceding `key: ` can make the prose redactor consume a following
+/// `token=value` as ordinary text. Redact each whitespace-delimited fragment a
+/// second time so provider-produced diagnostic prose cannot bypass it.
+fn redact_diagnostic_text(text: &str) -> String {
+    let redacted = homeboy_core::redaction::redact_string(text);
+    redacted
+        .split_inclusive(char::is_whitespace)
+        .map(homeboy_core::redaction::redact_string)
+        .collect()
 }
 
 /// The generic cook side-effect boundary the attempt loop drives its external
@@ -1851,7 +1862,7 @@ pub struct AgentTaskCookRecoveryAction {
     pub command: String,
 }
 
-/// Bounded primary cause for a provider command that failed before dispatch.
+/// Bounded primary cause for a terminal provider failure.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskCookPrimaryFailure {
     pub schema: &'static str,
@@ -1862,6 +1873,10 @@ pub struct AgentTaskCookPrimaryFailure {
     pub stderr_excerpt: String,
     pub evidence_ref: String,
     pub next_action: AgentTaskCookRecoveryAction,
+    /// The typed terminal diagnostic when provider execution, rather than
+    /// pre-execution setup, exhausted its available routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<Value>,
 }
 
 /// A bounded collection of independently durable cooks. Each cook retains the
@@ -4198,6 +4213,90 @@ fn make_provider_timeout_actionable(
                 context.next_actions.push(action);
             }
         }
+    }
+}
+
+/// Project the scheduler's already-normalized rotation evidence onto every
+/// terminal Cook surface. The aggregate remains the complete record; this is a
+/// bounded top-level explanation for the no-candidate terminal path.
+fn make_provider_rotation_actionable(
+    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
+    aggregate: &AgentTaskAggregate,
+    run_id: &str,
+) {
+    let Some((outcome, diagnostic)) = aggregate.outcomes.iter().find_map(|outcome| {
+        outcome
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.provider_rotation_exhausted")
+            .map(|diagnostic| (outcome, diagnostic))
+    }) else {
+        return;
+    };
+    let diagnostic_message = redact_diagnostic_text(&diagnostic.message);
+    let mut diagnostic_value = homeboy_core::redaction::redact_json(&serde_json::json!({
+        "class": diagnostic.class,
+        "message": diagnostic_message,
+        "data": diagnostic.data,
+    }));
+    bound_diagnostic_value(&mut diagnostic_value, 0);
+    let routes = provider_rotation_attempts(outcome)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|attempt| {
+            let model = attempt
+                .candidate_producing_model
+                .or(attempt.attempted_model)
+                .or(attempt.model)
+                .unwrap_or_else(|| "default model".to_string());
+            let classification = attempt
+                .failure_classification
+                .and_then(|classification| serde_json::to_value(classification).ok())
+                .and_then(|classification| classification.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unclassified_failure".to_string());
+            format!("{}/{}: {classification}", attempt.backend, model)
+        })
+        .collect::<Vec<_>>();
+    let routes = if routes.is_empty() {
+        truncate_diagnostic_text(&diagnostic_message)
+    } else {
+        truncate_diagnostic_text(&redact_diagnostic_text(&routes.join("; ")))
+    };
+    let budget = aggregate
+        .outcomes
+        .iter()
+        .flat_map(|outcome| &outcome.diagnostics)
+        .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
+        .map(|diagnostic| {
+            format!(
+                "; {}",
+                truncate_diagnostic_text(&redact_diagnostic_text(&diagnostic.message))
+            )
+        })
+        .unwrap_or_default();
+    report.value.terminal_phase = Some("provider".to_string());
+    report.value.terminal_failure_classification = Some("provider_rotation_exhausted".to_string());
+    report.value.stop_reason = Some(format!(
+        "provider rotation exhausted without a candidate: {routes}{budget}"
+    ));
+    report.value.primary_failure = Some(AgentTaskCookPrimaryFailure {
+        schema: "homeboy/agent-task-cook-primary-failure/v1",
+        provider_id: "provider_rotation".to_string(),
+        operation: "route_selection".to_string(),
+        phase: "provider".to_string(),
+        exit_code: 1,
+        stderr_excerpt: truncate_diagnostic_text(&diagnostic_message),
+        evidence_ref: format!("homeboy://agent-task/run/{run_id}/status"),
+        next_action: AgentTaskCookRecoveryAction {
+            action: "diagnose".to_string(),
+            command: format!("homeboy agent-task diagnose {run_id} --full"),
+        },
+        diagnostic: Some(diagnostic_value.clone()),
+    });
+    if let Some(context) = report.value.failure_context.as_mut() {
+        context.phase = "provider".to_string();
+        context.reason_code = "provider_rotation_exhausted".to_string();
+        context.diagnostic = Some(diagnostic_value);
     }
 }
 
@@ -6697,6 +6796,7 @@ fn run_cook_spine(
                 )
                 .unwrap_or(true),
             );
+            make_provider_rotation_actionable(&mut report, &aggregate, &run_id);
             if report.value.terminal_phase.is_none() {
                 if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
                     record.metadata["provider_executions_consumed"]

@@ -654,6 +654,7 @@ fn provider_primary_failure(
             action: action.to_string(),
             command,
         },
+        diagnostic: None,
     })
 }
 
